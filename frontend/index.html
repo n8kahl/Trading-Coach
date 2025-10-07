@@ -11,8 +11,78 @@
       background-color: #f5f5f5;
       color: #333;
     }
+    #chatAndWidgets {
+      display: flex;
+      gap: 1.5rem;
+      margin-top: 1.5rem;
+      flex-wrap: wrap;
+    }
     #chatContainer {
-      margin-top: 1rem;
+      flex: 1 1 520px;
+      min-width: 320px;
+    }
+    #tradeWidgets {
+      flex: 1 1 320px;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .widget-card {
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.08);
+      padding: 1rem 1.25rem;
+    }
+    .widget-card h2 {
+      margin: 0 0 0.75rem 0;
+      font-size: 1.1rem;
+    }
+    .widget-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-top: 0.75rem;
+    }
+    .widget-actions button,
+    button.secondary {
+      padding: 0.5rem 1rem;
+      font-size: 0.95rem;
+      border: none;
+      border-radius: 4px;
+      background-color: #0f766e;
+      color: white;
+      cursor: pointer;
+    }
+    .widget-actions button:hover,
+    button.secondary:hover {
+      background-color: #115e59;
+    }
+    #tradingviewContainer {
+      width: 100%;
+      min-height: 320px;
+    }
+    #tradeFeedMessages {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .feed-entry {
+      padding: 0.6rem 0.75rem;
+      border-radius: 6px;
+      background: #ecfeff;
+    }
+    .feed-entry strong {
+      margin-right: 0.35rem;
+    }
+    .feed-success {
+      background: #dcfce7;
+    }
+    .feed-error {
+      background: #fee2e2;
+    }
+    #tradeFeedMessages .placeholder {
+      color: #666;
+      margin: 0;
     }
     button {
       padding: 0.6rem 1.2rem;
@@ -29,10 +99,53 @@
   <h1>AI Trading Assistant</h1>
   <p>This demo embeds OpenAI’s ChatKit as a Web Component.  Click the button below to start a session.</p>
   <button id="startChat">Start Chat</button>
-  <div id="chatContainer"></div>
+  <section id="chatAndWidgets">
+    <div id="chatContainer"></div>
+    <aside id="tradeWidgets">
+      <div class="widget-card" id="tradeProposal">
+        <h2>Trade Proposal</h2>
+        <div class="widget-content">
+          <p><strong>Ticker:</strong> <span data-field="symbol">NVDA</span></p>
+          <p><strong>Strategy:</strong> <span data-field="strategy">Opening Range Breakout</span></p>
+          <p><strong>Entry:</strong> <span data-field="entry">Break above $465.50</span></p>
+          <p><strong>Stop:</strong> <span data-field="stop">$459.80 (ATR based)</span></p>
+          <p><strong>Target:</strong> <span data-field="target">$474.00</span></p>
+        </div>
+        <div class="widget-actions">
+          <button class="secondary" id="btnFollowTrade">Follow Trade</button>
+          <button class="secondary" id="btnTradeUpdates">Get Updates</button>
+          <button class="secondary" id="btnExplainTrade">Explain Trade</button>
+        </div>
+      </div>
+
+      <div class="widget-card" id="tradingPlan">
+        <h2>Trading Plan</h2>
+        <ol>
+          <li>Wait for NVDA to clear the opening range with volume ≥ 1.5× baseline.</li>
+          <li>Enter the 0DTE 470C contract if the five-minute candle closes above $465.50.</li>
+          <li>Size so the stop at $459.80 risks ≤ 1R; trail above VWAP after first target hits.</li>
+          <li>Scale 50% at $474, run remainder with chandelier stop (3 × ATR).</li>
+          <li>Use ChatKit to log execution notes and request adjustments mid-trade.</li>
+        </ol>
+      </div>
+
+      <div class="widget-card" id="chartWidget">
+        <h2>Live Chart</h2>
+        <div id="tradingviewContainer"></div>
+      </div>
+
+      <div class="widget-card" id="tradeFeed">
+        <h2>Trade Feed</h2>
+        <div id="tradeFeedMessages">
+          <p class="placeholder">Actions and updates will appear here.</p>
+        </div>
+      </div>
+    </aside>
+  </section>
 
   <!-- Load the ChatKit Web Component from OpenAI's CDN -->
   <script src="https://cdn.jsdelivr.net/npm/@openai/chatkit-widget@latest/dist/web.js"></script>
+  <script src="https://s3.tradingview.com/tv.js"></script>
   <!-- Local helper for initializing ChatKit -->
   <script type="module" src="./chatkit.js"></script>
 </body>

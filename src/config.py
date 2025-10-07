@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(..., env="OPENAI_API_KEY")
     workflow_id: str = Field(..., env="WORKFLOW_ID")
     chatkit_api_key: str | None = Field(None, env="CHATKIT_API_KEY")
+    chatkit_user_id: str = Field("demo-user", env="CHATKIT_USER_ID")
     db_url: str | None = Field(None, env="DB_URL")
 
     class Config:

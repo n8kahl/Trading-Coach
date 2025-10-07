@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import logging
 from typing import List, Dict, Any
 
 from fastapi import FastAPI, HTTPException
@@ -21,6 +22,7 @@ from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 
+import httpx
 import openai
 
 from .config import get_settings
@@ -29,6 +31,8 @@ from .follower import TradeFollower
 
 
 app = FastAPI(title="AI Trading Assistant API")
+
+logger = logging.getLogger(__name__)
 
 # In‑memory store of active trade followers keyed by trade ID
 followers: Dict[str, TradeFollower] = {}
@@ -71,12 +75,33 @@ async def create_chatkit_session() -> Dict[str, str]:
     """
     settings = get_settings()
     try:
-        # Use the OpenAI Python SDK to create a ChatKit session
-        session = openai.chatkit.sessions.create({
-            "workflow_id": settings.workflow_id
-        })
-        return {"client_secret": session.client_secret}
-    except Exception as e:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chatkit/sessions",
+                headers={
+                    "Authorization": f"Bearer {settings.openai_api_key}",
+                    "Content-Type": "application/json",
+                    "OpenAI-Beta": "chatkit_beta=v1",
+                },
+                json={
+                    "workflow": {
+                        "id": settings.workflow_id,
+                    },
+                    "user": settings.chatkit_user_id,
+                },
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        client_secret = data.get("client_secret")
+        if not client_secret:
+            raise HTTPException(status_code=502, detail="OpenAI response missing client_secret")
+        return {"client_secret": client_secret}
+    except httpx.HTTPStatusError as exc:
+        logger.error("ChatKit session request failed: %s", exc.response.text)
+        # Bubble up failure so the frontend can show a meaningful message.
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+    except Exception:
+        logger.exception("Failed to create ChatKit session from OpenAI")
         # Fallback: return a dummy secret in development
         return {"client_secret": "dummy-client-secret"}
 
