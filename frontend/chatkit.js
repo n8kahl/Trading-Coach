@@ -1,4 +1,7 @@
-const BACKEND_URL = window.__BACKEND_URL__ || "http://localhost:8000";
+// Initial hint for API base. We'll auto-resolve at runtime if wrong.
+const BACKEND_URL = (typeof window !== 'undefined' && window.__BACKEND_URL__ !== undefined)
+  ? window.__BACKEND_URL__
+  : '';
 
 const state = {
   widgets: [],
@@ -122,9 +125,12 @@ const setStatus = (text, options = {}) => {
   }
 };
 
+let apiBase = BACKEND_URL;
+
 const postLog = async (level, message, context = {}) => {
   try {
-    await fetch(`${BACKEND_URL}/api/debug/log`, {
+    const base = apiBase || '';
+    await fetch(`${base}/api/debug/log`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ level, message, context }),
@@ -170,6 +176,21 @@ const loadChatKitScript = async () => {
   return false;
 };
 
+const trySession = async (base) => {
+  try {
+    const res = await fetch(`${base}/api/chatkit/session`, { method: 'POST' });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`status=${res.status} ${text}`);
+    }
+    const json = await res.json();
+    return json;
+  } catch (e) {
+    await postLog('warning', 'session attempt failed', { base, err: String(e) });
+    return null;
+  }
+};
+
 const bootstrapChatKit = async () => {
   const { chatElement, reconnectButton } = selectors;
   if (!chatElement) {
@@ -192,14 +213,24 @@ const bootstrapChatKit = async () => {
       reconnectButton?.removeAttribute('disabled');
       return;
     }
-    const response = await fetch(`${BACKEND_URL}/api/chatkit/session`, {
-      method: "POST",
-    });
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(detail || `Session request failed (${response.status})`);
+    // Resolve API base: prefer same-origin '', otherwise fall back to configured hint or localhost.
+    const candidates = Array.from(new Set([
+      '',
+      BACKEND_URL || '',
+      'http://localhost:8000',
+    ]));
+    let session = null;
+    for (const base of candidates) {
+      session = await trySession(base);
+      if (session && session.client_secret) {
+        apiBase = base; // remember working base
+        break;
+      }
     }
-    const { client_secret: clientSecret, workflow_id: workflowId, user_id: userId } = await response.json();
+    if (!session || !session.client_secret) {
+      throw new Error('All session endpoints failed');
+    }
+    const { client_secret: clientSecret, workflow_id: workflowId, user_id: userId } = session;
     if (!clientSecret || typeof clientSecret !== "string") {
       throw new Error("Backend did not return a client_secret.");
     }
