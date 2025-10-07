@@ -143,10 +143,11 @@ const postLog = async (level, message, context = {}) => {
 
 const loadChatKitScript = async () => {
   const urls = [
+    // Try our same-origin proxy first (served by FastAPI)
+    `${apiBase || ''}/assets/chatkit.js`,
+    // Public CDNs
     'https://cdn.jsdelivr.net/npm/@openai/chatkit-widget@latest/dist/web.js',
-    // Fallback (may be behind Cloudflare checks in some envs)
     'https://cdn.platform.openai.com/deployments/chatkit/chatkit.js',
-    // Secondary npm CDN
     'https://unpkg.com/@openai/chatkit-widget@latest/dist/web.js',
   ];
   for (const url of urls) {
