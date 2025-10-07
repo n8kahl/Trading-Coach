@@ -146,6 +146,8 @@ const loadChatKitScript = async () => {
     'https://cdn.jsdelivr.net/npm/@openai/chatkit-widget@latest/dist/web.js',
     // Fallback (may be behind Cloudflare checks in some envs)
     'https://cdn.platform.openai.com/deployments/chatkit/chatkit.js',
+    // Secondary npm CDN
+    'https://unpkg.com/@openai/chatkit-widget@latest/dist/web.js',
   ];
   for (const url of urls) {
     await postLog('info', 'loading chatkit script', { url });
@@ -241,13 +243,19 @@ const bootstrapChatKit = async () => {
       reconnectButton?.removeAttribute("disabled");
       return;
     }
+    // Set both attribute spellings to match differing builds
     chatElement.setAttribute("client-token", clientSecret);
+    chatElement.setAttribute("client-secret", clientSecret);
     if (workflowId) {
       chatElement.setAttribute("workflow-id", workflowId);
     }
     if (userId) {
       chatElement.setAttribute("user-id", userId);
     }
+    await postLog('info', 'applied client secret to element', {
+      hasToken: Boolean(clientSecret),
+      workflowId: workflowId || null,
+    });
   } catch (error) {
     console.error("Failed to initialize ChatKit", error);
     setStatus("Connection failed", { variant: "error" });
