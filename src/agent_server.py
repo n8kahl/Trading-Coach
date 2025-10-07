@@ -28,6 +28,7 @@ import openai
 from .config import get_settings
 from .scanner import scan_market, Signal
 from .follower import TradeFollower
+from .agents_runtime import run_agent_turn
 
 
 app = FastAPI(title="AI Trading Assistant API")
@@ -58,6 +59,11 @@ class FollowRequest(BaseModel):
     # Additional parameters (ATR period, risk multiples) could be added here
 
 
+class AgentMessageRequest(BaseModel):
+    message: str
+    conversation_id: str | None = None
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     """Initialize global state on startup."""
@@ -75,6 +81,7 @@ async def create_chatkit_session() -> Dict[str, str]:
     """
     settings = get_settings()
     try:
+        user_id = settings.chatkit_user_id or f"web-user-{os.urandom(6).hex()}"
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 "https://api.openai.com/v1/chatkit/sessions",
@@ -87,7 +94,7 @@ async def create_chatkit_session() -> Dict[str, str]:
                     "workflow": {
                         "id": settings.workflow_id,
                     },
-                    "user": settings.chatkit_user_id,
+                    "user": user_id,
                 },
             )
         resp.raise_for_status()
@@ -95,7 +102,11 @@ async def create_chatkit_session() -> Dict[str, str]:
         client_secret = data.get("client_secret")
         if not client_secret:
             raise HTTPException(status_code=502, detail="OpenAI response missing client_secret")
-        return {"client_secret": client_secret}
+        return {
+            "client_secret": client_secret,
+            "workflow_id": settings.workflow_id,
+            "user_id": user_id,
+        }
     except httpx.HTTPStatusError as exc:
         logger.error("ChatKit session request failed: %s", exc.response.text)
         # Bubble up failure so the frontend can show a meaningful message.
@@ -103,7 +114,11 @@ async def create_chatkit_session() -> Dict[str, str]:
     except Exception:
         logger.exception("Failed to create ChatKit session from OpenAI")
         # Fallback: return a dummy secret in development
-        return {"client_secret": "dummy-client-secret"}
+        return {
+            "client_secret": "dummy-client-secret",
+            "workflow_id": settings.workflow_id,
+            "user_id": "demo-user",
+        }
 
 
 @app.post("/api/scan", response_model=List[Dict[str, Any]])
@@ -176,3 +191,20 @@ async def api_follow(req: FollowRequest) -> Dict[str, Any]:
         "stop": follower.stop_price,
         "target": follower.tp_price,
     }
+
+
+@app.post("/api/agent/respond")
+async def agent_respond(req: AgentMessageRequest) -> Dict[str, Any]:
+    """Proxy a message to the OpenAI Agents SDK trading assistant.
+
+    This endpoint complements ChatKit by allowing the frontend (or tools)
+    to retrieve structured responses that may include widget payloads.
+    """
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+    try:
+        result = await run_agent_turn(req.message, conversation_id=req.conversation_id)
+        return result
+    except Exception as exc:  # pragma: no cover - surface useful error detail
+        logger.exception("Agent turn failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

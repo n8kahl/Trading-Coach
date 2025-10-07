@@ -76,6 +76,7 @@ The backend exposes three primary endpoints:
 * **`/api/chatkit/session`** – Generates a ChatKit session token via the OpenAI Python SDK and returns the `client_secret`【220893600390724†screenshot】.  The ChatKit frontend uses this token to authenticate the user.
 * **`/api/scan`** – Scans the market universe for A+ setups based on the strategy library and returns a ranked list of signals.  Placeholder logic is included; you should implement the actual scanning using Polygon’s REST and WebSocket endpoints.
 * **`/api/follow/{trade_id}`** – Subscribes to a trade identified by `trade_id` and streams real‑time coaching instructions (e.g. update stops, scale out at targets).  The implementation uses an internal state machine.
+* **`/api/agent/respond`** – Proxies a user prompt to the OpenAI Agents-based trading coach (`openai-agents` SDK) and returns the model’s final output plus optional widget payloads that the frontend can render alongside ChatKit.
 
 Start the server locally using `uvicorn`:
 
@@ -87,14 +88,7 @@ Visit `http://localhost:8000/docs` for interactive Swagger documentation of the 
 
 ### 4. Open the frontend demo
 
-Open `frontend/index.html` in your browser.  This simple page embeds ChatKit as a **Web Component** using a `<script>` tag hosted by OpenAI.  When you click “Start Chat,” it fetches a session token from your backend and initializes the chat.  You can customize the styling and behaviour by editing `frontend/chatkit.js` or replacing the Web Component with a React/Next.js implementation.
-
-The official OpenAI docs describe two ways to implement ChatKit:
-
-* **Recommended integration** – Embed ChatKit in your frontend, customize its look and feel, and let OpenAI host and scale the backend from **Agent Builder**【505515402155862†screenshot】.  This approach requires a development server but greatly reduces the amount of front‑end code you write.
-* **Advanced integration** – Run ChatKit on your own infrastructure.  Use the ChatKit Python SDK to create sessions and WebSockets to build your custom chat user experience【505515402155862†screenshot】.
-
-For this starter, we follow the recommended integration via a simple Web Component.  If you want more control, the ChatKit JS library is available on [GitHub](https://github.com/openai/openai-chatkit-advanced-samples), and you can migrate to a Next.js app later.
+Serve the UI (for example `cd frontend && python -m http.server 8080`) and open `http://localhost:8080`.  The page mirrors ChatGPT: the `<openai-chatkit>` component renders the full conversation UI as soon as the backend returns a valid `client_secret`, and the “Insights & Actions” dock remains empty until the assistant emits JSON payloads such as `{ "widget": { ... } }`.  Extend `frontend/chatkit.js` if you want to introduce new widget card types or custom actions.
 
 ## Implementation overview
 
@@ -107,6 +101,7 @@ The backend consists of three high‑level modules:
 2. **Follower** – Maintains a state machine for every subscribed trade.  It monitors price movements, recalculates stop‑loss and take‑profit levels using the ATR and supertrend/Chandelier exit rules, and sends updates to the user via ChatKit (or returns them via API).  See `follower.py` for an example implementation.
 
 3. **ChatKit session endpoint** – Creates a ChatKit session using the OpenAI Python SDK.  The official docs provide a similar example using FastAPI【220893600390724†screenshot】.  We replicate that pattern here: the endpoint returns a `client_secret`, which the front‑end passes to the ChatKit component to authenticate the user.
+4. **Agents runtime** – `src/agents_runtime.py` wraps the [openai-agents](https://github.com/openai/openai-agents-python) SDK to run a dedicated Trading Coach agent.  The `/api/agent/respond` route proxies prompts to this agent and returns conversational output plus widget-ready JSON payloads so the frontend can surface trade ideas alongside ChatKit.
 
 ### Frontend integration
 
