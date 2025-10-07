@@ -65,6 +65,12 @@ class AgentMessageRequest(BaseModel):
     conversation_id: str | None = None
 
 
+class ClientLog(BaseModel):
+    level: str = "info"
+    message: str
+    context: dict | None = None
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     """Initialize global state on startup."""
@@ -209,6 +215,30 @@ async def agent_respond(req: AgentMessageRequest) -> Dict[str, Any]:
     except Exception as exc:  # pragma: no cover - surface useful error detail
         logger.exception("Agent turn failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/debug/log")
+async def debug_log(entry: ClientLog) -> Dict[str, Any]:
+    """Accept client-side debug logs and write them to server logs.
+
+    Useful on hosted environments (e.g., Railway) where browser console output
+    isn't visible in server logs. Do not send secrets in `context`.
+    """
+    lvl = (entry.level or "info").lower()
+    msg = entry.message
+    ctx = entry.context or {}
+    if lvl == "error":
+        logger.error("client: %s | ctx=%s", msg, ctx)
+    elif lvl == "warning" or lvl == "warn":
+        logger.warning("client: %s | ctx=%s", msg, ctx)
+    else:
+        logger.info("client: %s | ctx=%s", msg, ctx)
+    return {"ok": True}
+
+
+@app.get("/healthz")
+async def healthz() -> Dict[str, str]:
+    return {"status": "ok"}
 
 
 # Mount static frontend last so API routes take precedence and POSTs to /api/*

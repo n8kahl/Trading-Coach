@@ -122,20 +122,52 @@ const setStatus = (text, options = {}) => {
   }
 };
 
-const ensureWebComponent = async () => {
-  if (window.customElements?.get("openai-chatkit")) {
-    return;
+const postLog = async (level, message, context = {}) => {
+  try {
+    await fetch(`${BACKEND_URL}/api/debug/log`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level, message, context }),
+    });
+  } catch (e) {
+    // ignore network errors here
+    console.debug('[client-log-failed]', e);
   }
-  if (window.customElements?.whenDefined) {
+};
+
+const loadChatKitScript = async () => {
+  const urls = [
+    'https://cdn.jsdelivr.net/npm/@openai/chatkit-widget@latest/dist/web.js',
+    // Fallback (may be behind Cloudflare checks in some envs)
+    'https://cdn.platform.openai.com/deployments/chatkit/chatkit.js',
+  ];
+  for (const url of urls) {
+    await postLog('info', 'loading chatkit script', { url });
+    const p = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = url;
+      s.async = true;
+      s.onload = () => {
+        postLog('info', 'chatkit script load success', { url });
+        resolve();
+      };
+      s.onerror = (e) => {
+        postLog('error', 'chatkit script load error', { url });
+        reject(new Error('Script load failed'));
+      };
+      document.head.appendChild(s);
+    });
     try {
-      await window.customElements.whenDefined("openai-chatkit");
-      return;
-    } catch {
-      /* ignore */
+      await p;
+      // verify component registration
+      if (window.customElements?.get('openai-chatkit')) {
+        return true;
+      }
+    } catch (e) {
+      // try next url
     }
   }
-  // Fallback polling
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  return false;
 };
 
 const bootstrapChatKit = async () => {
@@ -149,7 +181,17 @@ const bootstrapChatKit = async () => {
   reconnectButton?.setAttribute("disabled", "true");
 
   try {
-    await ensureWebComponent();
+    const ok = await loadChatKitScript();
+    if (!ok || !window.customElements?.get('openai-chatkit')) {
+      await postLog('error', 'openai-chatkit component not registered', {
+        userAgent: navigator.userAgent,
+        origin: location.origin,
+      });
+      setStatus('Assistant script unavailable', { variant: 'error' });
+      reconnectButton?.classList.add('visible');
+      reconnectButton?.removeAttribute('disabled');
+      return;
+    }
     const response = await fetch(`${BACKEND_URL}/api/chatkit/session`, {
       method: "POST",
     });
@@ -163,6 +205,7 @@ const bootstrapChatKit = async () => {
     }
     if (clientSecret.startsWith("dummy")) {
       setStatus("Unable to authenticate (dummy token)", { variant: "error" });
+      await postLog('error', 'dummy client token received', {});
       reconnectButton?.classList.add("visible");
       reconnectButton?.removeAttribute("disabled");
       return;
@@ -191,11 +234,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
   chatElement.addEventListener("chatkit:ready", () => {
     setStatus("Online");
+    postLog('info', 'chatkit:ready');
     setTimeout(() => setStatus(""), 1500);
   });
 
   chatElement.addEventListener("chatkit:error", (event) => {
     console.error("ChatKit reported an error", event?.detail);
+    postLog('error', 'chatkit:error', { detail: event?.detail || null });
     setStatus("Assistant error", { variant: "error" });
     reconnectButton?.classList.add("visible");
     reconnectButton?.removeAttribute("disabled");
@@ -203,6 +248,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   chatElement.addEventListener("chatkit:assistant-message", (event) => {
     const detail = event.detail || {};
+    postLog('info', 'assistant-message', { keys: Object.keys(detail || {}) });
     parseWidgetBlocks(detail.message);
   });
 
