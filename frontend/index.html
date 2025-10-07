@@ -182,7 +182,12 @@
   </main>
 
   <script>
-    window.__BACKEND_URL__ = window.__BACKEND_URL__ || "http://localhost:8000";
+    // When served by FastAPI at the same origin, leave BACKEND_URL empty
+    // so the frontend uses relative /api/... paths. You can override this
+    // by setting window.__BACKEND_URL__ before this script.
+    if (!window.__BACKEND_URL__) {
+      window.__BACKEND_URL__ = "";
+    }
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@openai/chatkit-widget@latest/dist/web.js"></script>
   <script type="module" src="./chatkit.js"></script>

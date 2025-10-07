@@ -17,6 +17,7 @@ from typing import List, Dict, Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import pandas as pd
@@ -44,6 +45,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve the frontend as a static site at the root so opening
+# http://localhost:8000 (or lvh.me:8000) loads the chat UI.
+app.mount("/", StaticFiles(directory="frontend", html=True), name="static")
 
 
 class ScanRequest(BaseModel):
