@@ -15,6 +15,7 @@ import asyncio
 from typing import List, Dict, Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import pandas as pd
@@ -31,6 +32,13 @@ app = FastAPI(title="AI Trading Assistant API")
 
 # In‑memory store of active trade followers keyed by trade ID
 followers: Dict[str, TradeFollower] = {}
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class ScanRequest(BaseModel):

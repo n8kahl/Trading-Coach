@@ -9,7 +9,8 @@ hosting provider's secrets manager rather than storing them in version control.
 """
 
 from functools import lru_cache
-from pydantic import BaseSettings, Field
+from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
