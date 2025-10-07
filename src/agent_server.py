@@ -46,10 +46,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve the frontend as a static site at the root so opening
-# http://localhost:8000 (or lvh.me:8000) loads the chat UI.
-app.mount("/", StaticFiles(directory="frontend", html=True), name="static")
-
 
 class ScanRequest(BaseModel):
     tickers: List[str]
@@ -213,3 +209,8 @@ async def agent_respond(req: AgentMessageRequest) -> Dict[str, Any]:
     except Exception as exc:  # pragma: no cover - surface useful error detail
         logger.exception("Agent turn failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# Mount static frontend last so API routes take precedence and POSTs to /api/*
+# are not intercepted by the static handler (which would return 405).
+app.mount("/", StaticFiles(directory="frontend", html=True), name="static")
