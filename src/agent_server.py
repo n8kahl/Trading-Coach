@@ -15,7 +15,7 @@ import asyncio
 import logging
 from typing import List, Dict, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -239,6 +239,43 @@ async def debug_log(entry: ClientLog) -> Dict[str, Any]:
 @app.get("/healthz")
 async def healthz() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+# Cache for proxied ChatKit script to avoid repeated upstream fetches
+_CHATKIT_JS_CACHE: Dict[str, bytes] = {}
+
+
+@app.get("/assets/chatkit.js")
+async def chatkit_js_proxy() -> Response:
+    """Serve the ChatKit web component script from our origin.
+
+    Some environments block public CDNs; proxying the script avoids those
+    issues and ensures the custom element registers.
+    """
+    cached = _CHATKIT_JS_CACHE.get("content")
+    if cached:
+        return Response(cached, media_type="application/javascript")
+
+    sources = [
+        "https://cdn.jsdelivr.net/npm/@openai/chatkit-widget@latest/dist/web.js",
+        "https://cdn.platform.openai.com/deployments/chatkit/chatkit.js",
+        "https://unpkg.com/@openai/chatkit-widget@latest/dist/web.js",
+    ]
+    last_error: str | None = None
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        for url in sources:
+            try:
+                r = await client.get(url)
+                r.raise_for_status()
+                content = r.content
+                _CHATKIT_JS_CACHE["content"] = content
+                logger.info("chatkit.js proxied from %s (len=%d)", url, len(content))
+                return Response(content, media_type="application/javascript")
+            except Exception as exc:  # pragma: no cover
+                last_error = f"{type(exc).__name__}: {exc}"
+                logger.warning("failed to fetch chatkit.js from %s: %s", url, exc)
+
+    raise HTTPException(status_code=502, detail=f"Failed to fetch ChatKit script: {last_error}")
 
 
 # Mount static frontend last so API routes take precedence and POSTs to /api/*
