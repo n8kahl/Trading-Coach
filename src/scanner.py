@@ -91,6 +91,7 @@ class Signal:
     score: float
     contract: Dict[str, Any] | None = None
     features: Dict[str, Any] = field(default_factory=dict)
+    options_rules: Dict[str, Any] | None = None
 
 
 async def scan_market(tickers: List[str], market_data: Dict[str, pd.DataFrame]) -> List[Signal]:
@@ -173,6 +174,7 @@ async def scan_market(tickers: List[str], market_data: Dict[str, pd.DataFrame]) 
                             "direction_bias": direction_bias,
                             "session_phase": _session_phase(df.index[-1]) if len(df.index) else None,
                         },
+                        options_rules=strategy.options_rules,
                     )
                 )
 

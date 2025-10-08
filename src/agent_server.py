@@ -26,6 +26,7 @@ from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
 from .charts_api import build_chart_url, router as charts_router, get_candles, normalize_interval
 from .scanner import scan_market
 from .tradier import TradierNotConfiguredError, fetch_option_chain, select_tradier_contract
+from .polygon_options import fetch_polygon_option_chain, summarize_polygon_chain
 
 
 logger = logging.getLogger(__name__)
@@ -719,31 +720,48 @@ async def gpt_scan(
     style_filter = _normalize_style(universe.style)
     data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}.get(style_filter, "5")
 
+    settings = get_settings()
     market_data = await _collect_market_data(universe.tickers, timeframe=data_timeframe)
     if not market_data:
         raise HTTPException(status_code=502, detail="No market data available for the requested tickers.")
     signals = await scan_market(universe.tickers, market_data)
 
-    contract_suggestions: Dict[str, Dict[str, Any] | None] = {}
     unique_symbols = sorted({signal.symbol for signal in signals})
-    if unique_symbols:
-        settings = get_settings()
-        if not settings.tradier_token:
-            logger.info("Tradier token not configured; skipping contract suggestions.")
-        else:
-            try:
-                tasks = [select_tradier_contract(symbol) for symbol in unique_symbols]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for symbol, result in zip(unique_symbols, results):
-                    if isinstance(result, Exception):
-                        logger.warning("Tradier contract lookup failed for %s: %s", symbol, result)
-                        contract_suggestions[symbol] = None
-                    else:
-                        contract_suggestions[symbol] = result
-            except Exception as exc:  # pragma: no cover - safety net
-                logger.warning("Tradier integration error: %s", exc)
+
+    polygon_enabled = bool(settings.polygon_api_key)
+    tradier_enabled = bool(settings.tradier_token)
+
+    polygon_chains: Dict[str, pd.DataFrame] = {}
+    if unique_symbols and polygon_enabled:
+        try:
+            tasks = [fetch_polygon_option_chain(symbol) for symbol in unique_symbols]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for symbol, result in zip(unique_symbols, results):
+                if isinstance(result, Exception):
+                    logger.warning("Polygon option chain fetch failed for %s: %s", symbol, result)
+                    polygon_chains[symbol] = pd.DataFrame()
+                else:
+                    polygon_chains[symbol] = result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Polygon option chain request error: %s", exc)
+            polygon_chains.clear()
+
+    tradier_suggestions: Dict[str, Dict[str, Any] | None] = {}
+    if unique_symbols and tradier_enabled:
+        try:
+            tasks = [select_tradier_contract(symbol) for symbol in unique_symbols]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for symbol, result in zip(unique_symbols, results):
+                if isinstance(result, Exception):
+                    logger.warning("Tradier contract lookup failed for %s: %s", symbol, result)
+                    tradier_suggestions[symbol] = None
+                else:
+                    tradier_suggestions[symbol] = result
+        except Exception as exc:  # pragma: no cover - safety net
+            logger.warning("Tradier integration error: %s", exc)
 
     payload: List[Dict[str, Any]] = []
+    options_cache: Dict[tuple[str, str], Dict[str, Any] | None] = {}
     for signal in signals:
         style = _style_for_strategy(signal.strategy_id)
         if style_filter and style_filter != style:
@@ -789,6 +807,22 @@ async def gpt_scan(
         feature_payload.setdefault("atr", snapshot.get("indicators", {}).get("atr14"))
         feature_payload.setdefault("adx", snapshot.get("indicators", {}).get("adx14"))
 
+        polygon_bundle: Dict[str, Any] | None = None
+        if polygon_chains:
+            cache_key = (signal.symbol, signal.strategy_id)
+            polygon_bundle = options_cache.get(cache_key)
+            if polygon_bundle is None:
+                chain = polygon_chains.get(signal.symbol)
+                rules = signal.options_rules if isinstance(signal.options_rules, dict) else None
+                polygon_bundle = summarize_polygon_chain(chain, rules=rules, top_n=3) if chain is not None else None
+                options_cache[cache_key] = polygon_bundle
+
+        best_contract = None
+        if polygon_bundle and polygon_bundle.get("best"):
+            best_contract = polygon_bundle.get("best")
+        else:
+            best_contract = tradier_suggestions.get(signal.symbol)
+
         payload.append(
             {
                 "symbol": signal.symbol,
@@ -796,7 +830,7 @@ async def gpt_scan(
                 "strategy_id": signal.strategy_id,
                 "description": signal.description,
                 "score": signal.score,
-                "contract_suggestion": contract_suggestions.get(signal.symbol),
+                "contract_suggestion": best_contract,
                 "direction_hint": direction_hint,
                 "key_levels": key_levels,
                 "market_snapshot": snapshot,
@@ -807,6 +841,7 @@ async def gpt_scan(
                 "data": {
                     "bars": f"{base_url}/gpt/context/{signal.symbol}?interval={interval}&lookback=300"
                 },
+                **({"options": polygon_bundle} if polygon_bundle else {}),
             }
         )
 

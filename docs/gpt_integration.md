@@ -18,7 +18,86 @@ pre-baked trade levels.
     "strategy_id": "power_hour_trend",
     "description": "During the last hour of RTH…",
     "score": 0.82,
-    "contract_suggestion": { /* optional Tradier contract meta */ },
+    "contract_suggestion": {
+      "symbol": "O:AAPL251010C00260000",
+      "expiration": "2025-10-10",
+      "option_type": "call",
+      "strike": 260,
+      "bid": 2.05,
+      "ask": 2.15,
+      "mid": 2.1,
+      "spread_pct": 0.0476,
+      "delta": 0.52,
+      "open_interest": 1820,
+      "volume": 340,
+      "dte": 2,
+      "implied_volatility": 0.41
+    },
+    "options": {
+      "source": "polygon",
+      "filters_applied": true,
+      "filter_rules": {
+        "dte_range": [0, 2],
+        "delta_range": [0.45, 0.65],
+        "max_spread_pct": 0.05,
+        "min_open_interest": 500,
+        "min_volume": 250
+      },
+      "chain_size": 192,
+      "considered_size": 6,
+      "underlying": {
+        "symbol": "AAPL",
+        "price": 258.3,
+        "last_updated": "2025-10-08T19:29:58Z"
+      },
+      "best": {
+        "symbol": "O:AAPL251010C00260000",
+        "expiration": "2025-10-10",
+        "option_type": "call",
+        "strike": 260,
+        "bid": 2.05,
+        "ask": 2.15,
+        "mid": 2.1,
+        "spread_pct": 0.0476,
+        "delta": 0.52,
+        "open_interest": 1820,
+        "volume": 340,
+        "dte": 2,
+        "implied_volatility": 0.41
+      },
+      "alternatives": [
+        {
+          "symbol": "O:AAPL251010C00257500",
+          "expiration": "2025-10-10",
+          "option_type": "call",
+          "strike": 257.5,
+          "bid": 3.4,
+          "ask": 3.6,
+          "mid": 3.5,
+          "spread_pct": 0.0571,
+          "delta": 0.63,
+          "open_interest": 2410,
+          "volume": 510,
+          "dte": 2,
+          "implied_volatility": 0.39
+        },
+        {
+          "symbol": "O:AAPL251010C00262500",
+          "expiration": "2025-10-10",
+          "option_type": "call",
+          "strike": 262.5,
+          "bid": 1.41,
+          "ask": 1.49,
+          "mid": 1.45,
+          "spread_pct": 0.0552,
+          "delta": 0.43,
+          "open_interest": 980,
+          "volume": 220,
+          "dte": 2,
+          "implied_volatility": 0.42
+        }
+      ]
+    },
     "direction_hint": "long",
     "key_levels": {
       "session_high": 261.4,
@@ -99,6 +178,10 @@ pre-baked trade levels.
   and `/gpt/context` to compute your own playbook.
 - **`direction_hint` is advisory.** It reflects indicator alignment; override
   it if your analysis disagrees.
+- **`options` bundle** surfaces Polygon's filtered option chain (best contract
+  plus a few alternates) when `POLYGON_API_KEY` is configured. If Polygon is
+  unavailable the field is omitted and `contract_suggestion` may fall back to
+  Tradier metadata.
 - **`expected_move_horizon`** approximates the move that is typically achievable
   over ~30 minutes (1–2 minute bars) or ~60 minutes (5 minute bars).
 - **`data.bars`** provides a ready-made URL for deeper context.
@@ -144,6 +227,8 @@ You are a trading assistant. Always:
      session phase, and gap context.
    - Derive stop-loss and take-profit levels using those metrics. Target at
      least 0.8 R:R unless the user requests otherwise.
+   - Review option liquidity, spreads, and greeks via the `options.best`
+     bundle (Polygon) or `contract_suggestion` fallback if Polygon is absent.
    - Estimate whether the target is achievable within the expected_move_horizon.
 3. When you need deeper context, GET /gpt/context/{symbol} using the provided
    data.bars URL.
@@ -159,4 +244,3 @@ confirm levels against live price action.
 
 Feel free to tailor the tone/wording, but keep the sequencing: **scan → analyse
 metrics → compute plan → optional chart → deliver recommendation**.
-
