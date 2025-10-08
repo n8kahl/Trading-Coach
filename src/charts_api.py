@@ -320,86 +320,85 @@ def chart_html(
         }});
         const initialWidth = container.clientWidth || window.innerWidth || 1200;
         const initialHeight = container.clientHeight || window.innerHeight || 700;
-        const chart = LightweightCharts.createChart(container, {{
-          width: initialWidth,
-          height: initialHeight,
-          layout: {{
-            background: {{ type: 'Solid', color: '#0b0f14' }},
-            textColor: '#e6edf3',
-          }},
-          rightPriceScale: {{ borderColor: 'rgba(46, 51, 64, 0.6)' }},
-          timeScale: {{ borderColor: 'rgba(46, 51, 64, 0.6)' }},
-          grid: {{
-            vertLines: {{ color: 'rgba(35, 43, 60, 0.7)' }},
-            horzLines: {{ color: 'rgba(35, 43, 60, 0.7)' }},
-          }},
-          crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
-        }});
-
         if (!payload.candles.length) {{
           container.innerHTML = '<p style="padding:16px;color:#f97316;font-family:monospace;">No candle data available.</p>';
-          return;
-        }}
+        }} else {{
+          const chart = LightweightCharts.createChart(container, {{
+            width: initialWidth,
+            height: initialHeight,
+            layout: {{
+              background: {{ type: 'Solid', color: '#0b0f14' }},
+              textColor: '#e6edf3',
+            }},
+            rightPriceScale: {{ borderColor: 'rgba(46, 51, 64, 0.6)' }},
+            timeScale: {{ borderColor: 'rgba(46, 51, 64, 0.6)' }},
+            grid: {{
+              vertLines: {{ color: 'rgba(35, 43, 60, 0.7)' }},
+              horzLines: {{ color: 'rgba(35, 43, 60, 0.7)' }},
+            }},
+            crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+          }});
 
-        const resize = () => {{
-          const width = container.clientWidth || window.innerWidth || initialWidth;
-          const height = container.clientHeight || window.innerHeight || initialHeight;
-          chart.resize(width, height, false);
-        }};
-        window.addEventListener('resize', resize);
-        resize();
+          const resize = () => {{
+            const width = container.clientWidth || window.innerWidth || initialWidth;
+            const height = container.clientHeight || window.innerHeight || initialHeight;
+            chart.resize(width, height, false);
+          }};
+          window.addEventListener('resize', resize);
+          resize();
 
-        const candleSeries = chart.addCandlestickSeries({{
-          upColor: '#22c55e',
-          downColor: '#ef4444',
-          wickUpColor: '#22c55e',
-          wickDownColor: '#ef4444',
-          borderVisible: false,
-        }});
-        candleSeries.setData(payload.candles);
+          const candleSeries = chart.addCandlestickSeries({{
+            upColor: '#22c55e',
+            downColor: '#ef4444',
+            wickUpColor: '#22c55e',
+            wickDownColor: '#ef4444',
+            borderVisible: false,
+          }});
+          candleSeries.setData(payload.candles);
 
-        const volumeSeries = chart.addHistogramSeries({{
-          priceScaleId: '',
-          priceFormat: {{ type: 'volume' }},
-          priceLineVisible: false,
-          scaleMargins: {{ top: 0.8, bottom: 0 }},
-        }});
-        volumeSeries.setData(payload.volume);
-
-        const emaColors = ['#f39c12', '#00bcd4', '#9b59b6', '#cddc39', '#ff6f61'];
-        Object.entries(payload.ema_series || {{}}).forEach(([span, data], idx) => {{
-          if (!data.length) return;
-          const line = chart.addLineSeries({{
-            color: emaColors[idx % emaColors.length],
-            lineWidth: 2,
+          const volumeSeries = chart.addHistogramSeries({{
+            priceScaleId: '',
+            priceFormat: {{ type: 'volume' }},
             priceLineVisible: false,
+            scaleMargins: {{ top: 0.8, bottom: 0 }},
           }});
-          line.setData(data);
-        }});
+          volumeSeries.setData(payload.volume);
 
-        const firstTime = payload.candles[0]?.time;
-        const lastTime = payload.candles[payload.candles.length - 1]?.time;
-        (payload.levels || []).forEach(level => {{
-          if (firstTime == null || lastTime == null) return;
-          const line = chart.addLineSeries({{
-            color: level.color,
-            lineWidth: 2,
-            lastValueVisible: true,
+          const emaColors = ['#f39c12', '#00bcd4', '#9b59b6', '#cddc39', '#ff6f61'];
+          Object.entries(payload.ema_series || {{}}).forEach(([span, data], idx) => {{
+            if (!data.length) return;
+            const line = chart.addLineSeries({{
+              color: emaColors[idx % emaColors.length],
+              lineWidth: 2,
+              priceLineVisible: false,
+            }});
+            line.setData(data);
           }});
-          line.setData([
-            {{ time: firstTime, value: level.value }},
-            {{ time: lastTime, value: level.value }},
-          ]);
-        }});
 
-        chart.timeScale().fitContent();
+          const firstTime = payload.candles[0]?.time;
+          const lastTime = payload.candles[payload.candles.length - 1]?.time;
+          (payload.levels || []).forEach(level => {{
+            if (firstTime == null || lastTime == null) return;
+            const line = chart.addLineSeries({{
+              color: level.color,
+              lineWidth: 2,
+              lastValueVisible: true,
+            }});
+            line.setData([
+              {{ time: firstTime, value: level.value }},
+              {{ time: lastTime, value: level.value }},
+            ]);
+          }});
 
-        const legend = document.getElementById('legend');
-        legend.innerHTML = `
-          <h1>${{payload.symbol}} · ${{payload.interval.toUpperCase()}}</h1>
-          ${{(payload.levels || []).map(level => `<span class="badge" style="background: ${{level.color}}33">${{level.label}}: ${{level.value.toFixed(2)}}</span>`).join('')}}
-          ${{(Object.keys(payload.ema_series || {{}})).map(span => `<span class="badge">EMA${{span}}</span>`).join('')}}
-        `;
+          chart.timeScale().fitContent();
+
+          const legend = document.getElementById('legend');
+          legend.innerHTML = `
+            <h1>${{payload.symbol}} · ${{payload.interval.toUpperCase()}}</h1>
+            ${{(payload.levels || []).map(level => `<span class="badge" style="background: ${{level.color}}33">${{level.label}}: ${{level.value.toFixed(2)}}</span>`).join('')}}
+            ${{(Object.keys(payload.ema_series || {{}})).map(span => `<span class="badge">EMA${{span}}</span>`).join('')}}
+          `;
+        }}
       }}
     </script>
   </body>
