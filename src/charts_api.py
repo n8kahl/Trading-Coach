@@ -169,16 +169,20 @@ def chart_html(
     tps = parse_floats(tp)[:MAX_TPS]
     emas = parse_ints(ema)[:MAX_EMAS] or [9, 21]
 
-    price_lo, price_hi = _price_band(df)
-
-    def _clamp_or_none(val: Optional[float]) -> Optional[float]:
+    def _to_level(val: Optional[float]) -> Optional[float]:
         if val is None:
             return None
-        return round(clamp(float(val), price_lo, price_hi), 4)
+        try:
+            parsed = float(val)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return round(parsed, 4)
 
-    entry_val = _clamp_or_none(entry)
-    stop_val = _clamp_or_none(stop)
-    tp_vals = [_clamp_or_none(v) for v in tps if v is not None]
+    entry_val = _to_level(entry)
+    stop_val = _to_level(stop)
+    tp_vals = [_to_level(v) for v in tps if v is not None]
 
     candles = []
     volumes = []
@@ -392,6 +396,12 @@ def chart_html(
           }});
           candleSeries.setData(payload.candles);
 
+          const priceValues = [
+            ...payload.candles.map(candle => candle.low),
+            ...payload.candles.map(candle => candle.high),
+            ...(payload.levels || []).map(level => level.value),
+          ].filter(value => typeof value === 'number' && isFinite(value));
+
           chart.priceScale('right').applyOptions({{
             scaleMargins: {{ top: 0.1, bottom: 0.3 }},
           }});
@@ -407,6 +417,25 @@ def chart_html(
             visible: false,
           }});
           volumeSeries.setData(payload.volume);
+
+          if (priceValues.length) {{
+            const phantom = chart.addLineSeries({{
+              color: 'rgba(0,0,0,0)',
+              lineWidth: 0,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              crosshairMarkerVisible: false,
+            }});
+            const firstTime = payload.candles[0]?.time;
+            const lastTime = payload.candles[payload.candles.length - 1]?.time || firstTime;
+            const minPrice = Math.min(...priceValues);
+            const maxPrice = Math.max(...priceValues);
+            const padding = (maxPrice - minPrice) * 0.05 || 1.0;
+            phantom.setData([
+              {{ time: firstTime, value: minPrice - padding }},
+              {{ time: lastTime, value: maxPrice + padding }},
+            ]);
+          }}
 
           const emaColors = ['#f39c12', '#00bcd4', '#9b59b6', '#cddc39', '#ff6f61'];
           Object.entries(payload.ema_series || {{}}).forEach(([span, data], idx) => {{
