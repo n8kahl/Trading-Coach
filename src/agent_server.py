@@ -391,39 +391,65 @@ def _plan_trade_levels(
             level for level in [opening_range_low, prev_close, prev_low, session_low] if level and level < entry
         ]
         stop = max(stop_candidates) if stop_candidates else entry - atr_value * 1.1
-
-        target_candidates = [
-            level for level in [gap_fill, opening_range_high, session_high, prev_high] if level and level > entry
-        ]
-        target = min(target_candidates) if target_candidates else entry + atr_value * 1.8
+        risk = abs(entry - stop) or atr_value
+        target_candidates = sorted(
+            {
+                level
+                for level in [gap_fill, opening_range_high, session_high, prev_high]
+                if level and level > entry + atr_value * 0.2
+            }
+        )
+        target = None
+        min_rr = 0.8
+        for candidate in target_candidates:
+            reward = candidate - entry
+            if reward <= 0:
+                continue
+            if reward / risk >= min_rr:
+                target = candidate
+                break
+        if target is None:
+            target = entry + max(atr_value * 2.0, risk * max(min_rr, 1.0))
     else:
         stop_candidates = [
             level for level in [opening_range_high, prev_close, prev_high, session_high] if level and level > entry
         ]
         stop = min(stop_candidates) if stop_candidates else entry + atr_value * 1.1
+        risk = abs(entry - stop) or atr_value
 
-        target_candidates = [
-            level for level in [gap_fill, opening_range_low, session_low, prev_low] if level and level < entry
-        ]
-        target = max(target_candidates) if target_candidates else entry - atr_value * 1.8
+        target_candidates = sorted(
+            {
+                level
+                for level in [gap_fill, opening_range_low, session_low, prev_low]
+                if level and level < entry - atr_value * 0.2
+            },
+            reverse=True,
+        )
+        target = None
+        min_rr = 0.8
+        for candidate in target_candidates:
+            reward = entry - candidate
+            if reward <= 0:
+                continue
+            if reward / risk >= min_rr:
+                target = candidate
+                break
+        if target is None:
+            target = entry - max(atr_value * 2.0, risk * max(min_rr, 1.0))
 
     if direction == "long" and stop >= entry:
         stop = entry - atr_value
     if direction == "short" and stop <= entry:
         stop = entry + atr_value
 
-    risk = abs(entry - stop)
+    risk = abs(entry - stop) or atr_value
     reward = abs(target - entry)
     risk_reward = reward / risk if risk else 0.0
 
     if direction == "long":
-        target_secondary = target + max(atr_value * 1.2, risk if risk else atr_value)
-        if target_secondary <= target:
-            target_secondary = target + atr_value
+        target_secondary = max(target + max(atr_value, risk * 0.5), target + atr_value)
     else:
-        target_secondary = target - max(atr_value * 1.2, risk if risk else atr_value)
-        if target_secondary >= target:
-            target_secondary = target - atr_value
+        target_secondary = min(target - max(atr_value, risk * 0.5), target - atr_value)
 
     return entry, stop, target, target_secondary, atr_value, risk_reward
 # Strategy utilities ---------------------------------------------------------
