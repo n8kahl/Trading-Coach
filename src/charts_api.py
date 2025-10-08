@@ -165,6 +165,16 @@ def chart_html(
     stop_val = _to_level(stop)
     tp_vals = [_to_level(v) for v in tps if v is not None]
 
+    # Shift synthetic data so the most recent close aligns with the plan anchor.
+    anchor_candidates = [entry_val, stop_val] + tp_vals
+    anchor = next((val for val in anchor_candidates if isinstance(val, (int, float))), None)
+    if anchor is not None and not df.empty:
+        latest_close = float(df["close"].iloc[-1])
+        offset = anchor - latest_close
+        if offset:
+            for col in ("open", "high", "low", "close"):
+                df[col] = df[col] + offset
+
     candles = []
     volumes = []
     for _, row in df.iterrows():
