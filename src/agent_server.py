@@ -457,8 +457,48 @@ gpt = APIRouter(prefix="/gpt", tags=["gpt"])
 
 
 @gpt.get("/health", summary="Lightweight readiness probe")
-async def gpt_health(_: AuthedUser = Depends(require_api_key)) -> Dict[str, str]:
-    return {"status": "ok"}
+async def gpt_health(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
+    settings = get_settings()
+
+    async def _check_polygon() -> Dict[str, Any]:
+        if not settings.polygon_api_key:
+            return {"status": "missing"}
+        try:
+            sample = await _fetch_polygon_ohlcv("SPY", "5")
+            if sample is None or sample.empty:
+                return {"status": "unavailable"}
+            latest = sample.index[-1]
+            if latest.tzinfo is None:
+                latest = latest.tz_localize("UTC")
+            age_minutes = (pd.Timestamp.utcnow() - latest).total_seconds() / 60.0
+            return {"status": "ok", "latest_bar_utc": latest.isoformat(), "age_minutes": round(age_minutes, 2)}
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Polygon health check failed: %s", exc)
+            return {"status": "error", "error": str(exc)}
+
+    async def _check_tradier() -> Dict[str, Any]:
+        if not settings.tradier_token:
+            return {"status": "missing"}
+        try:
+            snapshot = await select_tradier_contract("SPY")
+            if snapshot is None:
+                return {"status": "unavailable"}
+            return {"status": "ok", "symbol": snapshot.get("symbol"), "expiration": snapshot.get("expiration")}
+        except TradierNotConfiguredError:
+            return {"status": "missing"}
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Tradier health check failed: %s", exc)
+            return {"status": "error", "error": str(exc)}
+
+    polygon_status, tradier_status = await asyncio.gather(_check_polygon(), _check_tradier())
+
+    return {
+        "status": "ok",
+        "services": {
+            "polygon": polygon_status,
+            "tradier": tradier_status,
+        },
+    }
 
 
 @gpt.post("/scan", summary="Rank trade setups across a list of tickers")
