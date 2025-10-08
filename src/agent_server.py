@@ -394,63 +394,121 @@ async def chart_page(symbol: str, entry: float, stop: float, target: float, dire
     <title>{symbol.upper()} trading plan</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
-      html, body {{ margin: 0; height: 100%; background-color: #0f172a; color: #e2e8f0; font-family: sans-serif; }}
-      #tv_container {{ height: 100vh; width: 100vw; }}
-      .legend {{ position: absolute; top: 12px; left: 12px; background: rgba(15, 23, 42, 0.7); padding: 12px 16px; border-radius: 8px; }}
-      .legend h1 {{ margin: 0 0 8px 0; font-size: 20px; }}
-      .legend p {{ margin: 4px 0; font-size: 14px; }}
+      html, body {{ margin: 0; height: 100%; background-color: #0f172a; color: #e2e8f0; font-family: 'Inter', sans-serif; }}
+      #chart {{ height: 100vh; width: 100vw; }}
+      .legend {{
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        background: rgba(15, 23, 42, 0.85);
+        padding: 14px 18px;
+        border-radius: 10px;
+        box-shadow: 0 8px 18px rgba(15, 23, 42, 0.7);
+      }}
+      .legend h1 {{ margin: 0 0 8px; font-size: 20px; font-weight: 600; }}
+      .legend p {{ margin: 4px 0; font-size: 14px; opacity: 0.9; }}
+      .tags span {{
+        display: inline-block;
+        margin-right: 6px;
+        margin-top: 6px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        background: rgba(37, 99, 235, 0.2);
+        color: #bfdbfe;
+      }}
     </style>
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
   </head>
   <body>
-    <div id="tv_container"></div>
+    <div id="chart"></div>
     <div class="legend">
       <h1>{symbol.upper()}</h1>
       <p>Direction: {direction.capitalize()}</p>
       <p>Entry: {entry:.2f}</p>
       <p>Stop: {stop:.2f}</p>
       <p>Target: {target:.2f}</p>
+      <div class="tags">
+        {''.join(f'<span>{indicator}</span>' for indicator in indicator_list) or '<span>No indicators</span>'}
+      </div>
     </div>
-    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
     <script>
       const data = {json.dumps(data)};
-      function addIndicator(chart, name) {{
-        if (name === "VWAP") {{
-          chart.createStudy("VWAP", false, false);
-        }} else if (name.startsWith("EMA")) {{
-          const length = parseInt(name.slice(3), 10) || 20;
-          chart.createStudy("Moving Average Exponential", false, false, [length]);
-        }} else if (name === "ADX") {{
-          chart.createStudy("Average Directional Index", false, false, [14]);
-        }}
-      }}
-      const widget = new TradingView.widget({{
-        autosize: true,
-        symbol: data.symbol,
-        interval: data.timeframe,
-        timezone: "Etc/UTC",
-        theme: "dark",
-        style: "1",
-        container_id: "tv_container",
-        allow_symbol_change: false,
-        hide_side_toolbar: false,
-        studies_overrides: {{}},
-        overrides: {{
-          "paneProperties.backgroundType": "solid",
-          "paneProperties.background": "#0f172a",
+      const root = document.getElementById('chart');
+      const chart = LightweightCharts.createChart(root, {{
+        layout: {{
+          background: {{ type: 'solid', color: '#0f172a' }},
+          textColor: '#94a3b8',
         }},
-        locale: "en"
+        grid: {{
+          vertLines: {{ color: 'rgba(148, 163, 184, 0.08)' }},
+          horzLines: {{ color: 'rgba(148, 163, 184, 0.08)' }},
+        }},
+        width: root.clientWidth,
+        height: root.clientHeight,
+        timeScale: {{
+          timeVisible: true,
+          secondsVisible: false,
+        }},
+        crosshair: {{
+          mode: LightweightCharts.CrosshairMode.Normal,
+        }},
       }});
-      widget.onChartReady(function() {{
-        const chart = widget.activeChart();
-        chart.setResolution(data.timeframe, function(){{}});
-        data.indicators.forEach((indicator) => addIndicator(chart, indicator));
-        const entryLine = chart.createHorizontalLine(data.entry, {{ text: "Entry {entry:.2f}", color: "#2563eb" }});
-        entryLine.setExtendLeft(true);
-        const stopLine = chart.createHorizontalLine(data.stop, {{ text: "Stop {stop:.2f}", color: "#ef4444" }});
-        stopLine.setExtendLeft(true);
-        const targetLine = chart.createHorizontalLine(data.target, {{ text: "Target {target:.2f}", color: "#22c55e" }});
-        targetLine.setExtendLeft(true);
+
+      window.addEventListener('resize', () => {{
+        chart.applyOptions({{ width: root.clientWidth, height: root.clientHeight }});
       }});
+
+      const candleSeries = chart.addCandlestickSeries({{
+        upColor: '#22c55e',
+        downColor: '#ef4444',
+        borderVisible: false,
+        wickUpColor: '#22c55e',
+        wickDownColor: '#ef4444',
+      }});
+
+      function generateCandles(basePrice, bars, stepSeconds) {{
+        const candles = [];
+        const range = Math.max(Math.abs(data.target - data.stop), basePrice * 0.02);
+        let price = basePrice;
+        const now = Math.floor(Date.now() / 1000);
+        for (let i = bars; i >= 0; i--) {{
+          const time = now - (bars - i) * stepSeconds;
+          const open = price;
+          const volatility = range * 0.05;
+          price = price + (Math.random() - 0.5) * volatility;
+          const close = price;
+          const high = Math.max(open, close) + Math.random() * volatility * 0.3;
+          const low = Math.min(open, close) - Math.random() * volatility * 0.3;
+          candles.push({{ time, open, high, low, close }});
+        }}
+        return candles;
+      }}
+
+      const step = Math.max(parseInt(data.timeframe, 10) || 5, 1);
+      const candles = generateCandles(data.entry, 160, step * 60);
+      candleSeries.setData(candles);
+
+      candleSeries.createPriceLine({{
+        price: data.entry,
+        color: '#2563eb',
+        lineWidth: 2,
+        title: `Entry {entry:.2f}`,
+      }});
+      candleSeries.createPriceLine({{
+        price: data.stop,
+        color: '#ef4444',
+        lineWidth: 2,
+        title: `Stop {stop:.2f}`,
+      }});
+      candleSeries.createPriceLine({{
+        price: data.target,
+        color: '#22c55e',
+        lineWidth: 2,
+        title: `Target {target:.2f}`,
+      }});
+
+      chart.timeScale().fitContent();
     </script>
   </body>
 </html>
