@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     chatkit_api_key: str | None = Field(None, env="CHATKIT_API_KEY")
     chatkit_user_id: str = Field("demo-user", env="CHATKIT_USER_ID")
     db_url: str | None = Field(None, env="DB_URL")
+    backend_api_key: str | None = Field(None, env="BACKEND_API_KEY")
 
     class Config:
         env_file = ".env"
