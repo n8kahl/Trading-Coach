@@ -122,7 +122,7 @@ def parse_ints(csv: Optional[str]) -> List[int]:
     return sorted(set(spans))
 
 
-def ema(series: pd.Series, span: int) -> pd.Series:
+def compute_ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
 
@@ -199,7 +199,7 @@ def chart_html(
 
     ema_series: Dict[int, List[Dict[str, float]]] = {}
     for span in emas:
-        ema_values = ema(df["close"], span)
+        ema_values = compute_ema(df["close"], span)
         ema_series[span] = [
             {"time": int(pd.Timestamp(ts).timestamp()), "value": float(val)}
             for ts, val in zip(df["time"], ema_values)
@@ -398,7 +398,7 @@ def chart_png(
     emas = parse_ints(ema)[:MAX_EMAS] or [9, 21]
 
     for span in emas:
-        df[f"EMA{span}"] = ema(df["close"], span)
+        df[f"EMA{span}"] = compute_ema(df["close"], span)
 
     df = df.copy()
     df["time_num"] = mdates.date2num(pd.to_datetime(df["time"]))
