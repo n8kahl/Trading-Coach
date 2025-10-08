@@ -649,6 +649,54 @@ def _view_for_style(style: str | None) -> str:
     return mapping.get(normalized, "fit")
 
 
+def _compute_context_enhancements(history: pd.DataFrame) -> Dict[str, Any]:
+    """Return placeholder structures for advanced context hooks."""
+    _ = history  # Placeholder until analytics are implemented
+    return {
+        "supply_zones": [],
+        "demand_zones": [],
+        "liquidity_pools": [],
+        "fvg": [],
+        "rel_strength_vs": {
+            "benchmark": "SPY",
+            "lookback_bars": 15,
+            "value": None,
+        },
+        "internals": {
+            "adv_dec": None,
+            "tick": None,
+            "sector_perf": {},
+            "index_bias": None,
+        },
+        "options_summary": {
+            "atm_iv": None,
+            "iv_rank": None,
+            "iv_pct": None,
+            "skew_25d": None,
+            "term_slope": None,
+            "spread_bps": None,
+        },
+        "liquidity_metrics": {
+            "avg_spread_bps": None,
+            "typical_slippage_bps": None,
+            "lot_size_hint": None,
+        },
+        "events": [],
+        "avwap": {
+            "from_open": None,
+            "from_prev_close": None,
+            "from_session_low": None,
+            "from_session_high": None,
+        },
+        "volume_profile": {
+            "vwap": None,
+            "vah": None,
+            "val": None,
+            "poc": None,
+        },
+    }
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -807,6 +855,8 @@ async def gpt_scan(
         feature_payload.setdefault("atr", snapshot.get("indicators", {}).get("atr14"))
         feature_payload.setdefault("adx", snapshot.get("indicators", {}).get("adx14"))
 
+        enhancements = _compute_context_enhancements(history)
+
         polygon_bundle: Dict[str, Any] | None = None
         if polygon_chains:
             cache_key = (signal.symbol, signal.strategy_id)
@@ -841,6 +891,7 @@ async def gpt_scan(
                 "data": {
                     "bars": f"{base_url}/gpt/context/{signal.symbol}?interval={interval}&lookback=300"
                 },
+                "context_overlays": enhancements,
                 **({"options": polygon_bundle} if polygon_bundle else {}),
             }
         )
@@ -905,7 +956,9 @@ async def gpt_context(
         "adx14": _series_points(adx_series),
     }
 
-    return {
+    enhancements = _compute_context_enhancements(history)
+
+    response: Dict[str, Any] = {
         "symbol": symbol.upper(),
         "interval": interval_normalized,
         "lookback": lookback,
@@ -914,6 +967,9 @@ async def gpt_context(
         "key_levels": key_levels,
         "snapshot": snapshot,
     }
+    response.update(enhancements)
+    response["context_overlays"] = enhancements
+    return response
 
 
 @gpt.get("/widgets/{kind}", summary="Generate lightweight dashboard widgets")

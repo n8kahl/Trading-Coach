@@ -167,6 +167,59 @@ pre-baked trade levels.
     },
     "data": {
       "bars": "https://host/gpt/context/AAPL?interval=1m&lookback=300"
+    },
+    "context_overlays": {
+      "supply_zones": [
+        {"low": 259.4, "high": 260.1, "timeframe": "15m", "strength": "moderate"}
+      ],
+      "demand_zones": [
+        {"low": 256.1, "high": 256.9, "timeframe": "15m", "strength": "strong"}
+      ],
+      "liquidity_pools": [
+        {"level": 259.8, "type": "equal_highs", "timeframe": "1h", "density": 0.64}
+      ],
+      "fvg": [
+        {"low": 257.6, "high": 258.0, "timeframe": "5m", "age": 7}
+      ],
+      "rel_strength_vs": {
+        "benchmark": "SPY",
+        "lookback_bars": 15,
+        "value": 1.08
+      },
+      "internals": {
+        "adv_dec": -320,
+        "tick": 420,
+        "sector_perf": {"XLK": 0.6, "XLF": -0.2},
+        "index_bias": "bullish"
+      },
+      "options_summary": {
+        "atm_iv": 0.41,
+        "iv_rank": 0.32,
+        "iv_pct": 0.46,
+        "skew_25d": -0.08,
+        "term_slope": 0.03,
+        "spread_bps": 45
+      },
+      "liquidity_metrics": {
+        "avg_spread_bps": 42,
+        "typical_slippage_bps": 18,
+        "lot_size_hint": 5
+      },
+      "events": [
+        {"type": "earnings", "time_utc": "2025-10-29T20:00:00Z", "severity": "high"}
+      ],
+      "avwap": {
+        "from_open": 258.7,
+        "from_prev_close": 257.9,
+        "from_session_low": 258.1,
+        "from_session_high": 259.6
+      },
+      "volume_profile": {
+        "vwap": 257.8,
+        "vah": 259.9,
+        "val": 256.7,
+        "poc": 258.4
+      }
     }
   }
 ]
@@ -182,6 +235,10 @@ pre-baked trade levels.
   plus a few alternates) when `POLYGON_API_KEY` is configured. If Polygon is
   unavailable the field is omitted and `contract_suggestion` may fall back to
   Tradier metadata.
+- **`context_overlays`** packages higher-timeframe zones, liquidity pools, FVGs,
+  relative strength, internals, options/volatility summaries, liquidity
+  frictions, event hooks, anchored VWAPs, and volume profile magnets. These
+  default to empty/null until analytics are wired in.
 - **`expected_move_horizon`** approximates the move that is typically achievable
   over ~30 minutes (1–2 minute bars) or ~60 minutes (5 minute bars).
 - **`data.bars`** provides a ready-made URL for deeper context.
@@ -208,7 +265,40 @@ Example response:
     "adx14": […]
   },
   "key_levels": { "session_high": 261.4, … },
-  "snapshot": { /* same structure as scan payload */ }
+  "snapshot": { /* same structure as scan payload */ },
+  "supply_zones": [],
+  "demand_zones": [],
+  "liquidity_pools": [],
+  "fvg": [],
+  "rel_strength_vs": { "benchmark": "SPY", "lookback_bars": 15, "value": null },
+  "internals": { "adv_dec": null, "tick": null, "sector_perf": {}, "index_bias": null },
+  "options_summary": {
+    "atm_iv": null,
+    "iv_rank": null,
+    "iv_pct": null,
+    "skew_25d": null,
+    "term_slope": null,
+    "spread_bps": null
+  },
+  "liquidity_metrics": {
+    "avg_spread_bps": null,
+    "typical_slippage_bps": null,
+    "lot_size_hint": null
+  },
+  "events": [],
+  "avwap": {
+    "from_open": null,
+    "from_prev_close": null,
+    "from_session_low": null,
+    "from_session_high": null
+  },
+  "volume_profile": {
+    "vwap": null,
+    "vah": null,
+    "val": null,
+    "poc": null
+  },
+  "context_overlays": { /* same as the fields above for convenience */ }
 }
 ```
 
@@ -229,6 +319,8 @@ You are a trading assistant. Always:
      least 0.8 R:R unless the user requests otherwise.
    - Review option liquidity, spreads, and greeks via the `options.best`
      bundle (Polygon) or `contract_suggestion` fallback if Polygon is absent.
+   - Inspect `context_overlays` for supply/demand zones, liquidity pools, FVGs,
+     internals, and event hooks before locking the plan.
    - Estimate whether the target is achievable within the expected_move_horizon.
 3. When you need deeper context, GET /gpt/context/{symbol} using the provided
    data.bars URL.
