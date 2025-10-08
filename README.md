@@ -1,150 +1,99 @@
-# AI‑Driven Options Trading Assistant
+# Trading Coach GPT Backend
 
-This repository contains a **plug‑and‑play starter kit** for building an AI‑powered options trading assistant.  
-It combines proven technical trading strategies, real‑time market data, and OpenAI’s AgentKit/ChatKit to deliver actionable trade ideas and step‑by‑step coaching.
+A lightweight FastAPI service that exposes trading utilities for consumption by a custom GPT (via Actions).  
+It keeps the quantitative bits—market scanning, ATR-based trade management, watchlists, and journaling—while stripping out the legacy ChatKit UI and OpenAI Agents runtime.
 
-> **Disclaimer:** This codebase and the accompanying strategy library are for educational and demonstration purposes only.  
-> They do **not** constitute financial advice or an offer to trade securities.  
-> You are solely responsible for your trading decisions and should consult a qualified financial advisor before placing any trades.
+> ⚠️ **Disclaimer:** All code and strategy examples are for educational purposes only.  
+> They are not a recommendation to trade securities. Always do your own research and consult a licensed professional.
 
-## Project structure
+## Features
+
+- **`POST /gpt/scan`** – rank tickers using the built-in strategy library (dummy OHLCV until you wire Polygon).  
+- **`POST /gpt/follow` & `GET /gpt/trades/{id}`** – manage trades with an ATR-driven follower.  
+- **`GET/POST /gpt/watchlist`** – read & update user-specific ticker lists.  
+- **`GET/POST /gpt/notes`** – lightweight daily journal.  
+- **`GET /gpt/widgets/{kind}`** – generate compact card payloads you can render as Markdown/JSON in the GPT response.  
+- Optional bearer auth (`BACKEND_API_KEY`) plus `X-User-Id` scoping; falls back to anonymous mode for quick prototyping.
+
+## Project layout
 
 ```
-trading_bot/
-├── README.md             # This file
-├── .gitignore
-├── requirements.txt       # Python dependencies
-├── src/                   # Backend Python code
-│   ├── __init__.py
-│   ├── agent_server.py    # FastAPI app exposing endpoints for scanning, following and ChatKit sessions
-│   ├── calculations.py    # Core indicator calculations (ATR, EMA, VWAP, etc.)
-│   ├── contract_selector.py # Functions for selecting option contracts based on delta/DTE/liquidity
-│   ├── config.py          # Configuration and environment variable management
-│   ├── follower.py        # Trade follower state machine for real‑time coaching
-│   ├── scanner.py         # Market scanner that looks for A+ setups
-│   ├── strategy_library.py # Declarative strategy definitions used by the scanner
-│   └── backtester.py      # Placeholder for backtesting logic (for future work)
-├── docs/
-│   └── strategies_calculations.md # Detailed description of every strategy and indicator
-├── frontend/
-│   ├── index.html         # Minimal example embedding ChatKit via a Web Component
-│   └── chatkit.js         # Helper code for initializing ChatKit on the front‑end
-└── project.zip            # Generated zip ready to upload to GitHub (see below)
+.
+├── README.md
+├── requirements.txt
+├── nixpacks.toml            # Deploys a Python-only image on Railway
+├── Procfile                 # uvicorn launch command
+└── src/
+    ├── agent_server.py      # FastAPI app (all /gpt endpoints + health checks)
+    ├── calculations.py      # Indicator helpers (EMA, ATR, VWAP, ADX, etc.)
+    ├── contract_selector.py # Option contract filters (placeholder)
+    ├── follower.py          # TradeFollower state machine
+    ├── scanner.py           # Strategy evaluation engine
+    ├── strategy_library.py  # Declarative strategy definitions
+    ├── backtester.py        # Stub for future historical analysis
+    └── config.py            # Environment settings (Polygon, backend API key)
 ```
 
-## Prerequisites
-
-1. **Python 3.10+** – Used for the backend services and indicator computations.  
-   You can install Python from [python.org](https://python.org) or via [Homebrew](https://brew.sh) on macOS.  
-2. **Node.js 18+** (optional) – Only required if you want to extend the frontend beyond the provided static example.  
-3. **OpenAI API key** – Obtainable from the [OpenAI dashboard](https://platform.openai.com/account/api-keys).  
-4. **Polygon.io API key** – Sign up for a free or paid account at [polygon.io](https://polygon.io) to access real‑time and historical market data.  
-5. **PostgreSQL database** (optional) – For storing backtest results and signals.  The starter kit runs without a database, but backtesting features expect one.
-
-## Quick start
-
-The following steps will get you up and running with a basic agent that can scan for trade setups and respond to user queries via ChatKit.  All commands assume you run them from the repository root (`trading_bot/`).
-
-### 1. Install backend dependencies
+## Getting started
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+uvicorn src.agent_server:app --reload --port 8000
 ```
 
-The `requirements.txt` file pins dependencies such as `fastapi`, `uvicorn`, `openai`, `pydantic`, and technical analysis utilities.
-
-### 2. Set environment variables
-
-Create a `.env` file in the repository root (this file is ignored by Git).  Populate it with your own API keys and configuration:
+Environment variables (recommended):
 
 ```bash
-POLYGON_API_KEY=your_polygon_key_here
-OPENAI_API_KEY=your_openai_key_here
-WORKFLOW_ID=your_agent_builder_workflow_id
-CHATKIT_API_KEY=your_chatkit_secret_key  # optional if you use advanced integration
-DB_URL=postgresql+asyncpg://user:password@localhost:5432/trading
+# .env
+POLYGON_API_KEY=pk_xxx          # not yet used, but reserved for real data
+BACKEND_API_KEY=super-secret    # omit to allow anonymous access during dev
+# Tradier sandbox (provided example values)
+TRADIER_SANDBOX_TOKEN=3QP4qlzY6acyDQujsYDp3lk15Xyj
+TRADIER_SANDBOX_ACCOUNT=VA52364852
 ```
 
-The `WORKFLOW_ID` refers to the ID of an agent workflow you have created using **Agent Builder**, OpenAI’s visual canvas for designing multi‑step agent workflows【128171747671312†screenshot】.
-
-### 3. Run the backend server
-
-The backend exposes three primary endpoints:
-
-* **`/api/chatkit/session`** – Generates a ChatKit session token via the OpenAI Python SDK and returns the `client_secret`【220893600390724†screenshot】.  The ChatKit frontend uses this token to authenticate the user.
-* **`/api/scan`** – Scans the market universe for A+ setups based on the strategy library and returns a ranked list of signals.  Placeholder logic is included; you should implement the actual scanning using Polygon’s REST and WebSocket endpoints.
-* **`/api/follow/{trade_id}`** – Subscribes to a trade identified by `trade_id` and streams real‑time coaching instructions (e.g. update stops, scale out at targets).  The implementation uses an internal state machine.
-* **`/api/agent/respond`** – Proxies a user prompt to the OpenAI Agents-based trading coach (`openai-agents` SDK) and returns the model’s final output plus optional widget payloads that the frontend can render alongside ChatKit.
-
-Start the server locally using `uvicorn`:
+Visit `http://localhost:8000/docs` for interactive Swagger docs, or call endpoints directly:
 
 ```bash
-uvicorn src.agent_server:app --reload --host 0.0.0.0 --port 8000
+curl http://localhost:8000/gpt/scan \
+  -H "Content-Type: application/json" \
+  -d '{"tickers":["AAPL","MSFT","TSLA"]}'
 ```
 
-Visit `http://localhost:8000/docs` for interactive Swagger documentation of the API.  You can test the `/api/chatkit/session` endpoint here and verify that a `client_secret` is returned.
+## Connecting to myGPT (Actions)
 
-### 4. Frontend (bundled ChatKit React)
+1. In the GPT Builder, open **Actions → Add action**.  
+2. Use the deployed base URL (e.g. `https://your-railway-domain.up.railway.app`).  
+3. Set the schema URL to `https://.../openapi.json`. FastAPI exposes an up-to-date OpenAPI doc.  
+4. Configure security:  
+   - If `BACKEND_API_KEY` is set, add a Bearer token in the Action request headers and supply an `X-User-Id` header.  
+   - Otherwise leave auth empty—the backend will accept anonymous calls and store data under `anonymous`.  
+5. Provide the GPT with short usage tips, e.g.:
 
-We now ship a bundled React front‑end (Vite) that renders ChatKit without relying on public CDNs.
+   ```
+   - Use /gpt/scan with a handful of tickers and optionally style=intraday.
+   - Call /gpt/follow after recommending a trade; read status via /gpt/trades/{trade_id}.
+   - Persist user watchlists via /gpt/watchlist and journal entries via /gpt/notes.
+   ```
 
-Build locally:
+The GPT can now reason about the user’s portfolio, recall notes, and fetch strategy-driven scans.
 
-```bash
-# from repo root
-cd web
-npm ci
-npm run build   # outputs to ../frontend_dist/
-cd ..
-uvicorn src.agent_server:app --reload --host 0.0.0.0 --port 8000
-# open http://localhost:8000
-```
+## Implementation notes
 
-On Railway, Nixpacks will run `npm ci && npm run build` if you add a root build step, or you can create a deploy hook to run `npm --prefix web ci && npm --prefix web run build` before starting the Python process. The server prefers `frontend_dist/` (bundled app) and falls back to `frontend/` if the bundle isn’t present.
-
-## Implementation overview
-
-### Backend services
-
-The backend consists of three high‑level modules:
-
-1. **Scanner** – Periodically scans the market (via Polygon) for new setups defined in `strategy_library.py`.  It computes indicators such as ATR, EMA, VWAP, and ADX using functions from `calculations.py`, filters the options chain for liquidity via `contract_selector.py`, and returns a list of candidate trades.  The scanning logic is asynchronous so that it can ingest WebSocket streams without blocking other requests.
-
-2. **Follower** – Maintains a state machine for every subscribed trade.  It monitors price movements, recalculates stop‑loss and take‑profit levels using the ATR and supertrend/Chandelier exit rules, and sends updates to the user via ChatKit (or returns them via API).  See `follower.py` for an example implementation.
-
-3. **ChatKit session endpoint** – Creates a ChatKit session using the OpenAI Python SDK.  The official docs provide a similar example using FastAPI【220893600390724†screenshot】.  We replicate that pattern here: the endpoint returns a `client_secret`, which the front‑end passes to the ChatKit component to authenticate the user.
-4. **Agents runtime** – `src/agents_runtime.py` wraps the [openai-agents](https://github.com/openai/openai-agents-python) SDK to run a dedicated Trading Coach agent.  The `/api/agent/respond` route proxies prompts to this agent and returns conversational output plus widget-ready JSON payloads so the frontend can surface trade ideas alongside ChatKit.
-
-### Frontend integration
-
-The `frontend/index.html` file demonstrates how to embed ChatKit as a Web Component.  It loads the ChatKit script from OpenAI’s CDN, fetches a session token from your backend, and mounts the ChatKit UI into a `<div>` container.  Customizing the look, feel, and prompts of the chat is as simple as editing the attributes on the `<chat-kit>` element or overriding CSS variables.  Refer to the official guide to learn more about theming and actions【430922328384056†L146-L154】.
-
-If you prefer to build a more complex interface (e.g. a dashboard with trade cards and charts), create a new Next.js app and install the `chatkit-js` library.  Then follow the steps in the ChatKit guide to set up the session endpoint, initialize the component in React, and handle events.  The relevant documentation is linked in the `docs/strategies_calculations.md` file.
+- **Mock data:** `_synth_ohlcv` in `agent_server.py` generates placeholder OHLCV. Replace it with Polygon REST/WebSocket calls once you have credentials.  
+- **Persistence:** Everything lives in in-memory dictionaries (`_WATCHLISTS`, `_NOTES`, `_TRADES`). Swap these for a real database layer before production.  
+- **Strategies:** `strategy_library.py` defines several sample setups (ORB retest, VWAP/AVWAP, etc.). Expand or tweak scoring in `scanner.py` as needed.  
+- **Trade management:** `TradeFollower` tracks ATR-based stops and trailing behaviour. The current endpoints feed it only the entry price; extend with live price/ATR data for meaningful guidance.
 
 ## Next steps
 
-The code provided here is a starting point.  To turn this into a production‑ready tool you should:
+1. Fetch real market data (Polygon aggregates into `market_data` inside `/gpt/scan`).  
+2. Persist user artefacts in Postgres or Firestore.  
+3. Harden auth (JWT, OAuth) if you expose the service publicly.  
+4. Extend the Tradier integration to respect strategy-specific filters (DTE, delta targets).  
+5. Add additional GPT-friendly endpoints (e.g. `/gpt/volatility`, `/gpt/backtest`).  
+6. Write tests for the critical logic (scanner heuristics, trade follower transitions).
 
-* Implement the scanning logic using Polygon’s WebSocket and REST APIs.  See the comments in `scanner.py` for guidance.
-* Expand the strategy library with additional setups or adjust the thresholds for your own risk tolerance.  The library is defined in a declarative format so that adding new strategies does not require touching the scanning code.
-* Connect to a database (e.g. PostgreSQL) to log trades, backtest results, and update the “A+” thresholds automatically.
-* Harden the real‑time follower with reconnection logic, concurrency handling, and message queuing.
-* Add authentication and user management if you plan to offer this as a hosted product.
-
-When you are ready to deploy, you can push this repository to GitHub and set up continuous deployment to your preferred hosting provider (e.g. Railway or Vercel).  Remember to store API keys securely using environment variables or secrets management services.
-
-## Generating the zip archive
-
-To generate a zip file that you can upload directly to GitHub, run the following command from the root of the project:
-
-```bash
-zip -r project.zip . -x "*.env" -x "project.zip"
-```
-
-The `project.zip` file is included in this repository for your convenience.  It contains the entire `trading_bot/` directory tree except for secret files.  You can upload it to GitHub using the web interface or via the `gh` CLI.
-
----
-
-If you have questions or would like help expanding this project, feel free to ask.  Happy building!
+Happy building, and trade responsibly!

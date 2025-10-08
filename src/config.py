@@ -9,20 +9,28 @@ hosting provider's secrets manager rather than storing them in version control.
 """
 
 from functools import lru_cache
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    polygon_api_key: str = Field(..., env="POLYGON_API_KEY")
-    openai_api_key: str = Field(..., env="OPENAI_API_KEY")
-    workflow_id: str = Field(..., env="WORKFLOW_ID")
-    chatkit_api_key: str | None = Field(None, env="CHATKIT_API_KEY")
-    chatkit_user_id: str = Field("demo-user", env="CHATKIT_USER_ID")
+    polygon_api_key: str | None = Field(None, env="POLYGON_API_KEY")
     db_url: str | None = Field(None, env="DB_URL")
     backend_api_key: str | None = Field(None, env="BACKEND_API_KEY")
+    tradier_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TRADIER_API_TOKEN", "TRADIER_SANDBOX_TOKEN"),
+    )
+    tradier_account_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TRADIER_ACCOUNT_ID", "TRADIER_SANDBOX_ACCOUNT"),
+    )
+    tradier_base_url: str = Field(
+        default="https://sandbox.tradier.com",
+        validation_alias=AliasChoices("TRADIER_BASE_URL", "TRADIER_SANDBOX_BASE_URL"),
+    )
 
     class Config:
         env_file = ".env"

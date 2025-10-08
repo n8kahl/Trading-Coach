@@ -1,10 +1,9 @@
 [phases.setup]
-# Ensure Node.js and Python are available for the build
-nixPkgs = ["nodejs_20", "python312", "gcc"]
+nixPkgs = ["python312", "gcc"]
 
-[phases.build]
-# Build the React front-end (if present) into frontend_dist/
-# Use npm ci when a lockfile exists; otherwise fall back to npm install
+[phases.install]
 cmds = [
-  "if [ -d web ]; then if [ -f web/package-lock.json ] || [ -f web/npm-shrinkwrap.json ]; then npm --prefix web ci; else npm --prefix web install; fi && npm --prefix web run build && rm -rf frontend_dist && cp -R web/dist frontend_dist; fi"
+  "python -m venv --copies /opt/venv",
+  ". /opt/venv/bin/activate",
+  "pip install -r requirements.txt"
 ]
