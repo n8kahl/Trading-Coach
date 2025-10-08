@@ -1,10 +1,9 @@
 [phases.setup]
-# Ensure Node.js (with npm) is available for the web/ build step on Railway
-nixPkgs = ["nodejs_20"]
+# Ensure Node.js and Python are available for the build
+nixPkgs = ["nodejs_20", "python312", "gcc"]
 
 [phases.build]
 # Build the React front‑end (if present) into frontend_dist/
 cmds = [
   "if [ -d web ]; then npm --prefix web ci && npm --prefix web run build; fi"
 ]
-
