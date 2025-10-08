@@ -84,7 +84,7 @@ class ScanUniverse(BaseModel):
     tickers: List[str] = Field(..., description="Ticker symbols to analyse")
     style: str | None = Field(
         default=None,
-        description="Optional style filter: 'scalp', 'intraday', or 'swing'.",
+        description="Optional style filter: 'scalp', 'intraday', 'swing', or 'leap'.",
     )
 
 
@@ -94,11 +94,24 @@ class ScanUniverse(BaseModel):
 
 def _style_for_strategy(strategy_id: str) -> str:
     sid = strategy_id.lower()
+    if "pmcc" in sid or "leap" in sid:
+        return "leap"
     if "orb" in sid:
         return "scalp"
     if "vwap" in sid or "inside" in sid:
         return "intraday"
     return "swing"
+
+
+def _normalize_style(style: str | None) -> str | None:
+    if style is None:
+        return None
+    normalized = style.strip().lower()
+    if not normalized:
+        return None
+    if normalized == "leaps":
+        normalized = "leap"
+    return normalized
 
 
 def _synth_ohlcv(ticker: str, bars: int = 60) -> pd.DataFrame:
@@ -411,8 +424,9 @@ def _indicators_for_strategy(strategy_id: str) -> List[str]:
 
 
 def _timeframe_for_style(style: str | None) -> str:
-    mapping = {"scalp": "1", "intraday": "5", "swing": "60"}
-    return mapping.get(style or "", "5")
+    normalized = _normalize_style(style) or ""
+    mapping = {"scalp": "1m", "intraday": "5m", "swing": "1h", "leap": "d"}
+    return mapping.get(normalized, "5m")
 
 
 # ---------------------------------------------------------------------------
@@ -436,8 +450,11 @@ async def gpt_scan(
     if not universe.tickers:
         raise HTTPException(status_code=400, detail="No tickers provided")
 
+    style_filter = _normalize_style(universe.style)
+    data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}.get(style_filter, "5")
+
     # TODO: replace with Polygon data fetch using settings.polygon_api_key.
-    market_data = await _collect_market_data(universe.tickers, timeframe="5")
+    market_data = await _collect_market_data(universe.tickers, timeframe=data_timeframe)
     signals = await scan_market(universe.tickers, market_data)
 
     contract_suggestions: Dict[str, Dict[str, Any] | None] = {}
@@ -462,7 +479,7 @@ async def gpt_scan(
     payload: List[Dict[str, Any]] = []
     for signal in signals:
         style = _style_for_strategy(signal.strategy_id)
-        if universe.style and universe.style != style:
+        if style_filter and style_filter != style:
             continue
         history = market_data[signal.symbol]
         latest_row = history.iloc[-1]

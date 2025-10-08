@@ -25,10 +25,41 @@ from fastapi.responses import HTMLResponse
 
 router = APIRouter(prefix="/charts", tags=["charts"])
 
-SUPPORTED_INTERVALS = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1h", "d": "1D"}
+INTERVAL_FREQ = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1h", "d": "1D"}
+INTERVAL_ALIASES = {
+    "1": "1m",
+    "1m": "1m",
+    "1min": "1m",
+    "5": "5m",
+    "5m": "5m",
+    "5min": "5m",
+    "15": "15m",
+    "15m": "15m",
+    "15min": "15m",
+    "60": "1h",
+    "1h": "1h",
+    "60m": "1h",
+    "1hr": "1h",
+    "h": "1h",
+    "d": "d",
+    "1d": "d",
+    "day": "d",
+    "daily": "d",
+}
 MAX_LOOKBACK = 360
 MAX_TPS = 5
 MAX_EMAS = 5
+
+
+def normalize_interval(interval: str) -> str:
+    """Return canonical interval tokens like '5m' or raise ValueError."""
+    key = (interval or "").strip().lower()
+    if not key:
+        raise ValueError("Interval is required.")
+    normalized = INTERVAL_ALIASES.get(key, key)
+    if normalized not in INTERVAL_FREQ:
+        raise ValueError(f"Unsupported interval '{interval}'")
+    return normalized
 
 
 # --------------------------------------------------------------------------- #
@@ -39,11 +70,10 @@ MAX_EMAS = 5
 def get_candles(symbol: str, interval: str, lookback: int = 300) -> pd.DataFrame:
     """Return stub candle data (replace with Polygon/DB fetch later)."""
 
-    if interval not in SUPPORTED_INTERVALS:
-        raise ValueError(f"Unsupported interval '{interval}'")
+    normalized = normalize_interval(interval)
 
     lookback = int(max(20, min(lookback, MAX_LOOKBACK)))
-    freq = SUPPORTED_INTERVALS[interval]
+    freq = INTERVAL_FREQ[normalized]
     now = pd.Timestamp.utcnow().ceil("min")
     idx = pd.date_range(end=now, periods=lookback, freq=freq)
     base = 430 + np.random.uniform(-3, 3)
@@ -115,7 +145,7 @@ def _price_band(df: pd.DataFrame) -> tuple[float, float]:
 @router.get("/html", response_class=HTMLResponse)
 def chart_html(
     symbol: str,
-    interval: str = Query("1m", pattern="^(1m|5m|15m|1h|d)$"),
+    interval: str = Query("1m"),
     entry: Optional[float] = None,
     stop: Optional[float] = None,
     tp: Optional[str] = None,
@@ -124,7 +154,8 @@ def chart_html(
     lookback: int = Query(300, ge=50, le=MAX_LOOKBACK),
 ) -> HTMLResponse:
     try:
-        df = get_candles(symbol, interval, lookback=lookback)
+        interval_normalized = normalize_interval(interval)
+        df = get_candles(symbol, interval_normalized, lookback=lookback)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -186,12 +217,12 @@ def chart_html(
 
     payload = {
         "symbol": symbol.upper(),
-        "interval": interval,
         "candles": candles,
         "volume": volumes,
         "ema_series": ema_series,
         "levels": levels,
-        "title": title or f"{symbol.upper()} {interval}",
+        "title": title or f"{symbol.upper()} {interval_normalized}",
+        "interval": interval_normalized,
     }
 
     safe_title = html.escape(payload["title"])
@@ -346,7 +377,7 @@ def chart_html(
 @router.get("/png")
 def chart_png(
     symbol: str,
-    interval: str = Query("1m", pattern="^(1m|5m|15m|1h|d)$"),
+    interval: str = Query("1m"),
     entry: Optional[float] = None,
     stop: Optional[float] = None,
     tp: Optional[str] = None,
@@ -355,7 +386,8 @@ def chart_png(
     lookback: int = Query(300, ge=50, le=MAX_LOOKBACK),
 ) -> Response:
     try:
-        df = get_candles(symbol, interval, lookback=lookback)
+        interval_normalized = normalize_interval(interval)
+        df = get_candles(symbol, interval_normalized, lookback=lookback)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -377,7 +409,7 @@ def chart_png(
         2, 1, figsize=(width, height), dpi=160, gridspec_kw={"height_ratios": [3, 1]}, sharex=True
     )
 
-    bar_width = _candle_width(interval)
+    bar_width = _candle_width(interval_normalized)
 
     for _, row in df.iterrows():
         color = "#22c55e" if row["close"] >= row["open"] else "#ef4444"
@@ -403,7 +435,7 @@ def chart_png(
     for idx, val in enumerate(tps):
         ax_price.axhline(val, color="#2ecc71", linestyle="--", linewidth=1.0, label="TP" if idx == 0 else None)
 
-    ax_price.set_title(title or f"{symbol.upper()} {interval.upper()}", fontsize=12)
+    ax_price.set_title(title or f"{symbol.upper()} {interval_normalized.upper()}", fontsize=12)
     ax_price.legend(loc="upper left", fontsize=8, ncol=3)
     ax_price.grid(alpha=0.2)
 
@@ -464,7 +496,12 @@ def build_chart_url(
     if kind not in {"html", "png"}:
         raise ValueError("kind must be 'html' or 'png'")
 
-    params: Dict[str, str] = {"symbol": symbol, "interval": interval}
+    try:
+        interval_normalized = normalize_interval(interval)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+
+    params: Dict[str, str] = {"symbol": symbol, "interval": interval_normalized}
     if entry is not None:
         params["entry"] = f"{entry:.4f}"
     if stop is not None:
