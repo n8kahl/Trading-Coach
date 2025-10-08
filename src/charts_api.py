@@ -244,6 +244,7 @@ def chart_html(
         font-family: 'Inter', 'Segoe UI', sans-serif;
       }}
       #chart-container {{
+        position: relative;
         height: 100vh;
         width: 100vw;
       }}
@@ -286,7 +287,17 @@ def chart_html(
         document.body.innerHTML = '<p style="padding:16px;color:#f87171">Failed to load chart library.</p>';
       }} else {{
         const container = document.getElementById('chart-container');
+        console.info('Chart payload', {{
+          candles: payload.candles.length,
+          volume: payload.volume.length,
+          emaSeries: Object.keys(payload.ema_series || {{}}).length,
+          levels: (payload.levels || []).length,
+        }});
+        const initialWidth = container.clientWidth || window.innerWidth || 1200;
+        const initialHeight = container.clientHeight || window.innerHeight || 700;
         const chart = LightweightCharts.createChart(container, {{
+          width: initialWidth,
+          height: initialHeight,
           layout: {{
             background: {{ type: 'Solid', color: '#0b0f14' }},
             textColor: '#e6edf3',
@@ -298,14 +309,12 @@ def chart_html(
             horzLines: {{ color: 'rgba(35, 43, 60, 0.7)' }},
           }},
           crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
-          autoSize: true,
         }});
 
         const resize = () => {{
-          chart.applyOptions({{
-            width: container.clientWidth,
-            height: container.clientHeight,
-          }});
+          const width = container.clientWidth || window.innerWidth || initialWidth;
+          const height = container.clientHeight || window.innerHeight || initialHeight;
+          chart.resize(width, height, false);
         }};
         window.addEventListener('resize', resize);
         resize();
