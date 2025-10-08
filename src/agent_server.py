@@ -490,14 +490,18 @@ async def gpt_health(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]
             return {"status": "missing"}
         try:
             snapshot = await select_tradier_contract("SPY")
-            if snapshot is None:
-                return {"status": "unavailable"}
-            return {"status": "ok", "symbol": snapshot.get("symbol"), "expiration": snapshot.get("expiration")}
         except TradierNotConfiguredError:
             return {"status": "missing"}
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Tradier health check failed: %s", exc)
             return {"status": "error", "error": str(exc)}
+        if not snapshot:
+            return {"status": "unavailable"}
+        return {
+            "status": "ok",
+            "symbol": snapshot.get("symbol"),
+            "expiration": snapshot.get("expiration"),
+        }
 
     polygon_status, tradier_status = await asyncio.gather(_check_polygon(), _check_tradier())
 
