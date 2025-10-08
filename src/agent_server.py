@@ -1,32 +1,28 @@
 """Trading Coach backend tailored for GPT Actions integrations.
 
-This service focuses on a small, well-documented HTTP surface that a custom
-GPT (via Actions) can call to reason about trade ideas, manage active trades,
-and store lightweight user data such as watchlists or journal notes.
-
-The implementation keeps the original quantitative helpers (scanner,
-trade follower, indicator utilities) so the GPT still has access to rich
-trading context, but removes anything related to hosted UIs or ChatKit.
+The service now focuses on a lean surface area that lets a custom GPT pull
+ranked setups (with richer level-aware targets) and render interactive charts
+driven by the same OHLCV data. Legacy endpoints for watchlists, notes, and
+trade-following have been removed to keep the API aligned with the coaching
+workflow.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import logging
 from typing import Any, Dict, List
-from urllib.parse import urlencode
 
+import httpx
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from fastapi.responses import HTMLResponse
 
 from .config import get_settings
-from .follower import TradeFollower
+from .calculations import atr
+from .charts_api import build_chart_url, router as charts_router
 from .scanner import scan_market
 from .tradier import select_tradier_contract
 
@@ -80,14 +76,6 @@ async def require_api_key(
 
 
 # ---------------------------------------------------------------------------
-# In-memory stores (swap with a real database when ready)
-# ---------------------------------------------------------------------------
-
-_WATCHLISTS: Dict[str, List[str]] = {}
-_NOTES: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
-_TRADES: Dict[str, Dict[str, TradeFollower]] = {}
-
-
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -98,25 +86,6 @@ class ScanUniverse(BaseModel):
         default=None,
         description="Optional style filter: 'scalp', 'intraday', or 'swing'.",
     )
-
-
-class FollowTradeIn(BaseModel):
-    symbol: str = Field(..., description="Underlying symbol, e.g. 'AAPL'")
-    direction: str = Field(..., pattern="^(long|short)$")
-    entry_price: float = Field(..., gt=0)
-    trade_id: str | None = Field(
-        default=None,
-        description="Existing trade identifier to continue following.",
-    )
-
-
-class WatchlistUpdate(BaseModel):
-    tickers: List[str]
-
-
-class NoteIn(BaseModel):
-    date: str = Field(..., description="ISO date string, e.g. 2025-10-08")
-    text: str = Field(..., description="Journal entry")
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +118,278 @@ def _synth_ohlcv(ticker: str, bars: int = 60) -> pd.DataFrame:
     )
 
 
+async def _fetch_polygon_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None:
+    """Fetch OHLCV from Polygon if `POLYGON_API_KEY` is configured.
+
+    timeframe: minutes string like '1','5','15','60' or 'D' for daily.
+    """
+    settings = get_settings()
+    api_key = settings.polygon_api_key
+    if not api_key:
+        return None
+
+    tf = (timeframe or "5").upper()
+    if tf == "D":
+        multiplier, timespan, days_back = 1, "day", 60
+    else:
+        try:
+            minutes = int(tf)
+        except ValueError:
+            minutes = 5
+        multiplier, timespan, days_back = minutes, "minute", 5
+
+    now = pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)
+    start = (pd.Timestamp.utcnow() - pd.Timedelta(days=days_back)).normalize()
+    frm = start.date().isoformat()
+    to = now.date().isoformat()
+
+    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{frm}/{to}"
+    params = {"adjusted": "true", "sort": "asc", "limit": 50000, "apiKey": api_key}
+    timeout = httpx.Timeout(8.0, connect=4.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("Polygon fetch failed for %s(%s %s): %s", symbol, multiplier, timespan, exc)
+            return None
+
+    data = resp.json()
+    results = data.get("results")
+    if not results:
+        return None
+    frame = pd.DataFrame(results)
+    # Polygon keys: t (ms), o/h/l/c, v
+    frame = frame[["t", "o", "h", "l", "c", "v"]].rename(
+        columns={"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
+    )
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
+    frame = frame.set_index("timestamp")
+    return frame.dropna()
+
+
+async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None:
+    """Fetch recent OHLCV, preferring Polygon when available, else Yahoo Finance."""
+    # Prefer Polygon
+    poly = await _fetch_polygon_ohlcv(symbol, timeframe)
+    if poly is not None and not poly.empty:
+        return poly
+    tf = timeframe or "5"
+    interval_map = {
+        "1": ("1d", "1m"),
+        "3": ("5d", "2m"),
+        "5": ("5d", "5m"),
+        "15": ("1mo", "15m"),
+        "30": ("1mo", "30m"),
+        "60": ("6mo", "60m"),
+        "120": ("1y", "2h"),
+        "240": ("2y", "4h"),
+        "D": ("1y", "1d"),
+    }
+    range_span, interval = interval_map.get(tf, ("5d", "5m"))
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {"interval": interval, "range": range_span, "includePrePost": "false"}
+
+    timeout = httpx.Timeout(6.0, connect=3.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("Yahoo Finance fetch failed for %s: %s", symbol, exc)
+            return None
+
+    payload = response.json()
+    try:
+        chart = payload["chart"]
+        if chart.get("error"):
+            raise ValueError(chart["error"])
+        result = chart["result"][0]
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        logger.warning("Unexpected Yahoo Finance payload for %s: %s", symbol, exc)
+        return None
+
+    timestamps = result.get("timestamp")
+    if not timestamps:
+        logger.warning("Yahoo Finance returned no timestamps for %s", symbol)
+        return None
+
+    quote = result["indicators"]["quote"][0]
+    o = quote.get("open")
+    h = quote.get("high")
+    l = quote.get("low")
+    c = quote.get("close")
+    v = quote.get("volume")
+    if not all([o, h, l, c, v]):
+        logger.warning("Incomplete OHLCV data for %s", symbol)
+        return None
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": [int(ts) for ts in timestamps],
+            "open": o,
+            "high": h,
+            "low": l,
+            "close": c,
+            "volume": v,
+        }
+    ).dropna()
+
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="s", utc=True)
+    frame = frame.set_index("timestamp")
+    return frame
+
+
+async def _collect_market_data(tickers: List[str], timeframe: str = "5") -> Dict[str, pd.DataFrame]:
+    """Fetch OHLCV for a list of tickers, falling back to synthetic data if needed."""
+    tasks = [_load_remote_ohlcv(ticker, timeframe) for ticker in tickers]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    market_data: Dict[str, pd.DataFrame] = {}
+
+    for ticker, result in zip(tickers, results):
+        frame: pd.DataFrame | None = None
+        if isinstance(result, Exception):
+            logger.warning("Data fetch raised for %s: %s", ticker, result)
+        elif isinstance(result, pd.DataFrame) and not result.empty:
+            frame = result
+        if frame is None:
+            frame = _synth_ohlcv(ticker)
+        market_data[ticker] = frame
+
+    return market_data
+
+
+def _resample_ohlcv(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Downsample OHLCV data to the requested timeframe (in minutes)."""
+    if frame.empty:
+        return frame
+
+    tf = (timeframe or "5").lower()
+    if tf.isdigit():
+        minutes = int(tf)
+        if minutes <= 1:
+            return frame
+        rule = f"{minutes}T"
+    elif tf in {"d", "1d", "day"}:
+        rule = "1D"
+    else:
+        return frame
+
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        frame = frame.copy()
+        frame.index = pd.to_datetime(frame.index)
+
+    resampled = (
+        frame.resample(rule)
+        .agg(
+            {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+        )
+        .dropna()
+    )
+    return resampled
+
+
+def _extract_key_levels(history: pd.DataFrame) -> Dict[str, float]:
+    """Derive intraday and higher-timeframe reference levels."""
+    if history.empty:
+        return {}
+
+    df = history.sort_index()
+    today = df.index[-1].date()
+    session_df = df[df.index.date == today]
+    prev_session_df: pd.DataFrame | None = None
+    session_dates = list(dict.fromkeys(df.index.date))
+    if len(session_dates) >= 2:
+        prev_date = session_dates[-2]
+        prev_session_df = df[df.index.date == prev_date]
+
+    opening_slice = session_df.head(min(len(session_df), 3)) if not session_df.empty else df.head(min(len(df), 3))
+    prev_row = df.iloc[-2] if len(df) > 1 else df.iloc[-1]
+    today_open = float(session_df["open"].iloc[0]) if not session_df.empty else float(df["open"].iloc[0])
+
+    levels: Dict[str, float | None] = {
+        "session_high": float(session_df["high"].max()) if not session_df.empty else float(df["high"].max()),
+        "session_low": float(session_df["low"].min()) if not session_df.empty else float(df["low"].min()),
+        "opening_range_high": float(opening_slice["high"].max()) if not opening_slice.empty else float(df["high"].iloc[0]),
+        "opening_range_low": float(opening_slice["low"].min()) if not opening_slice.empty else float(df["low"].iloc[0]),
+        "prev_close": float(prev_session_df["close"].iloc[-1]) if prev_session_df is not None and not prev_session_df.empty else float(prev_row["close"]),
+        "prev_high": float(prev_session_df["high"].max()) if prev_session_df is not None and not prev_session_df.empty else float(prev_row["high"]),
+        "prev_low": float(prev_session_df["low"].min()) if prev_session_df is not None and not prev_session_df.empty else float(prev_row["low"]),
+        "today_open": today_open,
+    }
+    if prev_session_df is not None and not prev_session_df.empty:
+        gap_fill_level = levels["prev_close"]
+        if gap_fill_level and abs(today_open - gap_fill_level) >= max(0.1, gap_fill_level * 0.001):
+            levels["gap_fill"] = gap_fill_level
+        else:
+            levels["gap_fill"] = None
+    else:
+        levels["gap_fill"] = None
+
+    return {key: round(val, 2) for key, val in levels.items() if val is not None and np.isfinite(val)}
+
+
+def _plan_trade_levels(
+    history: pd.DataFrame,
+    entry: float,
+    direction: str,
+    atr_hint: float | None,
+    key_levels: Dict[str, float],
+) -> tuple[float, float, float, float, float]:
+    """Compute stop/target that respect ATR and structural levels."""
+    atr_series = atr(history["high"], history["low"], history["close"], period=14)
+    atr_value = float(atr_hint or 0.0)
+    if not atr_series.empty and not np.isnan(atr_series.iloc[-1]):
+        atr_value = float(atr_series.iloc[-1])
+    if atr_value <= 0:
+        atr_value = max(entry * 0.01, 0.25)
+
+    session_high = key_levels.get("session_high")
+    session_low = key_levels.get("session_low")
+    opening_range_high = key_levels.get("opening_range_high")
+    opening_range_low = key_levels.get("opening_range_low")
+    prev_close = key_levels.get("prev_close")
+    prev_high = key_levels.get("prev_high")
+    prev_low = key_levels.get("prev_low")
+    gap_fill = key_levels.get("gap_fill")
+
+    if direction == "long":
+        stop_candidates = [
+            level for level in [opening_range_low, prev_close, prev_low, session_low] if level and level < entry
+        ]
+        stop = max(stop_candidates) if stop_candidates else entry - atr_value * 1.1
+
+        target_candidates = [
+            level for level in [gap_fill, opening_range_high, session_high, prev_high] if level and level > entry
+        ]
+        target = min(target_candidates) if target_candidates else entry + atr_value * 1.8
+    else:
+        stop_candidates = [
+            level for level in [opening_range_high, prev_close, prev_high, session_high] if level and level > entry
+        ]
+        stop = min(stop_candidates) if stop_candidates else entry + atr_value * 1.1
+
+        target_candidates = [
+            level for level in [gap_fill, opening_range_low, session_low, prev_low] if level and level < entry
+        ]
+        target = max(target_candidates) if target_candidates else entry - atr_value * 1.8
+
+    if direction == "long" and stop >= entry:
+        stop = entry - atr_value
+    if direction == "short" and stop <= entry:
+        stop = entry + atr_value
+
+    risk = abs(entry - stop)
+    reward = abs(target - entry)
+    risk_reward = reward / risk if risk else 0.0
+
+    return entry, stop, target, atr_value, risk_reward
 # Strategy utilities ---------------------------------------------------------
 
 def _direction_for_strategy(strategy_id: str) -> str:
@@ -156,17 +397,6 @@ def _direction_for_strategy(strategy_id: str) -> str:
     if "short" in sid or "put" in sid:
         return "short"
     return "long"
-
-
-def _suggest_levels(entry: float, atr_value: float | None, direction: str) -> tuple[float, float, float]:
-    atr = abs(float(atr_value)) if atr_value else max(entry * 0.01, 0.25)
-    if direction == "short":
-        stop = entry + atr
-        target = max(entry - 2 * atr, 0.01)
-    else:
-        stop = max(entry - atr, 0.01)
-        target = entry + 2 * atr
-    return entry, stop, target
 
 
 def _indicators_for_strategy(strategy_id: str) -> List[str]:
@@ -207,7 +437,7 @@ async def gpt_scan(
         raise HTTPException(status_code=400, detail="No tickers provided")
 
     # TODO: replace with Polygon data fetch using settings.polygon_api_key.
-    market_data = {ticker: _synth_ohlcv(ticker) for ticker in universe.tickers}
+    market_data = await _collect_market_data(universe.tickers, timeframe="5")
     signals = await scan_market(universe.tickers, market_data)
 
     contract_suggestions: Dict[str, Dict[str, Any] | None] = {}
@@ -234,22 +464,39 @@ async def gpt_scan(
         style = _style_for_strategy(signal.strategy_id)
         if universe.style and universe.style != style:
             continue
-        latest_row = market_data[signal.symbol].iloc[-1]
+        history = market_data[signal.symbol]
+        latest_row = history.iloc[-1]
         entry_price = float(latest_row["close"])
-        atr_value = signal.features.get("atr")
+        key_levels = _extract_key_levels(history)
         direction = _direction_for_strategy(signal.strategy_id)
-        entry, stop, target = _suggest_levels(entry_price, atr_value, direction)
+        entry, stop, target, atr_value, risk_reward = _plan_trade_levels(
+            history, entry_price, direction, signal.features.get("atr"), key_levels
+        )
         indicators = _indicators_for_strategy(signal.strategy_id)
-        chart_params = {
-            "entry": f"{entry:.2f}",
-            "stop": f"{stop:.2f}",
-            "target": f"{target:.2f}",
-            "direction": direction,
-            "tf": _timeframe_for_style(style),
-            "indicators": ",".join(indicators),
-        }
-        chart_url = str(request.url_for("chart_page", symbol=signal.symbol.upper()))
-        chart_url = f"{chart_url}?{urlencode(chart_params)}"
+        ema_spans = sorted(
+            {
+                int(token[3:])
+                for token in indicators
+                if token.upper().startswith("EMA") and token[3:].isdigit()
+            }
+        )
+        if not ema_spans:
+            ema_spans = [9, 21]
+
+        base_url = str(request.base_url).rstrip("/")
+        interval = _timeframe_for_style(style)
+        title = f"{signal.symbol.upper()} {signal.strategy_id}"
+        interactive_url = build_chart_url(
+            base_url,
+            "html",
+            signal.symbol.upper(),
+            entry=entry,
+            stop=stop,
+            tps=[target],
+            emas=ema_spans,
+            interval=interval,
+            title=title,
+        )
         payload.append(
             {
                 "symbol": signal.symbol,
@@ -263,86 +510,18 @@ async def gpt_scan(
                     "entry": round(entry, 2),
                     "stop": round(stop, 2),
                     "target": round(target, 2),
+                    "risk_reward": round(risk_reward, 2),
                 },
-                "chart_url": chart_url,
-                "features": signal.features,
+                "key_levels": key_levels,
+                "charts": {
+                    "interactive": interactive_url,
+                },
+                "features": {**signal.features, "atr": atr_value, "key_levels": key_levels},
             }
         )
 
     logger.info("scan universe=%s user=%s results=%d", universe.tickers, user.user_id, len(payload))
     return payload
-
-
-@gpt.post("/follow", summary="Start or resume ATR-based trade management")
-async def gpt_follow(
-    body: FollowTradeIn,
-    user: AuthedUser = Depends(require_api_key),
-) -> Dict[str, Any]:
-    store = _TRADES.setdefault(user.user_id, {})
-    trade_id = body.trade_id or f"t_{os.urandom(6).hex()}"
-
-    follower = store.get(trade_id)
-    if follower is None:
-        follower = TradeFollower(symbol=body.symbol, entry_price=body.entry_price, direction=body.direction)
-        store[trade_id] = follower
-
-    # Placeholder ATR; replace with real intraday data when available.
-    message = follower.update_from_price(body.entry_price, atr_value=1.0)
-    return {
-        "trade_id": trade_id,
-        "symbol": follower.symbol,
-        "direction": follower.direction,
-        "stop": follower.stop_price,
-        "target": follower.tp_price,
-        "message": message,
-        "state": follower.state.value,
-    }
-
-
-@gpt.get("/trades/{trade_id}", summary="Retrieve the latest trade follower state")
-async def gpt_trade_state(trade_id: str, user: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
-    follower = _TRADES.get(user.user_id, {}).get(trade_id)
-    if follower is None:
-        raise HTTPException(status_code=404, detail="Trade not found")
-    return {
-        "trade_id": trade_id,
-        "symbol": follower.symbol,
-        "direction": follower.direction,
-        "stop": follower.stop_price,
-        "target": follower.tp_price,
-        "scaled": follower.scaled,
-        "state": follower.state.value,
-    }
-
-
-@gpt.get("/watchlist", summary="Get the caller's watchlist")
-async def gpt_watchlist(user: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
-    return {"tickers": _WATCHLISTS.get(user.user_id, [])}
-
-
-@gpt.post("/watchlist", summary="Replace the caller's watchlist")
-async def gpt_update_watchlist(
-    update: WatchlistUpdate,
-    user: AuthedUser = Depends(require_api_key),
-) -> Dict[str, Any]:
-    tickers = sorted({ticker.upper() for ticker in update.tickers})
-    _WATCHLISTS[user.user_id] = tickers
-    return {"tickers": tickers}
-
-
-@gpt.get("/notes", summary="Read trading journal entries for a date")
-async def gpt_get_notes(date: str, user: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
-    entries = _NOTES.get(user.user_id, {}).get(date, [])
-    return {"date": date, "notes": entries}
-
-
-@gpt.post("/notes", summary="Append a trading journal entry")
-async def gpt_add_note(note: NoteIn, user: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
-    notebook = _NOTES.setdefault(user.user_id, {})
-    entries = notebook.setdefault(note.date, [])
-    entry = {"id": f"n_{os.urandom(6).hex()}", "text": note.text}
-    entries.append(entry)
-    return {"date": note.date, "note": entry}
 
 
 @gpt.get("/widgets/{kind}", summary="Generate lightweight dashboard widgets")
@@ -355,165 +534,18 @@ async def gpt_widget(kind: str, symbol: str | None = None, user: AuthedUser = De
             "confidence": 0.72,
             "levels": {"support": 98.4, "resistance": 102.6},
         }
-    if kind == "playbook_today":
-        watchlist = _WATCHLISTS.get(user.user_id, [])
-        return {
-            "type": "playbook_today",
-            "tickers": watchlist[:6],
-            "themes": ["trend_continuation", "mean_reversion"],
-        }
     raise HTTPException(status_code=404, detail="Unknown widget kind or missing params")
 
 
 # Register GPT endpoints with the application
 app.include_router(gpt)
+app.include_router(charts_router)
 
 
 # ---------------------------------------------------------------------------
 # Platform health endpoints
 # ---------------------------------------------------------------------------
 
-
-@app.get("/chart/{symbol}", response_class=HTMLResponse, name="chart_page")
-async def chart_page(symbol: str, entry: float, stop: float, target: float, direction: str = "long", tf: str = "5", indicators: str = "VWAP") -> HTMLResponse:
-    indicator_list = [item.strip() for item in indicators.split(",") if item.strip()]
-    data = {
-        "symbol": symbol.upper(),
-        "entry": entry,
-        "stop": stop,
-        "target": target,
-        "direction": direction,
-        "timeframe": tf,
-        "indicators": indicator_list,
-    }
-    html = f"""
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>{symbol.upper()} trading plan</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-      html, body {{ margin: 0; height: 100%; background-color: #0f172a; color: #e2e8f0; font-family: 'Inter', sans-serif; }}
-      #chart {{ height: 100vh; width: 100vw; }}
-      .legend {{
-        position: absolute;
-        top: 12px;
-        left: 12px;
-        background: rgba(15, 23, 42, 0.85);
-        padding: 14px 18px;
-        border-radius: 10px;
-        box-shadow: 0 8px 18px rgba(15, 23, 42, 0.7);
-      }}
-      .legend h1 {{ margin: 0 0 8px; font-size: 20px; font-weight: 600; }}
-      .legend p {{ margin: 4px 0; font-size: 14px; opacity: 0.9; }}
-      .tags span {{
-        display: inline-block;
-        margin-right: 6px;
-        margin-top: 6px;
-        padding: 4px 10px;
-        border-radius: 999px;
-        font-size: 12px;
-        background: rgba(37, 99, 235, 0.2);
-        color: #bfdbfe;
-      }}
-    </style>
-    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
-  </head>
-  <body>
-    <div id="chart"></div>
-    <div class="legend">
-      <h1>{symbol.upper()}</h1>
-      <p>Direction: {direction.capitalize()}</p>
-      <p>Entry: {entry:.2f}</p>
-      <p>Stop: {stop:.2f}</p>
-      <p>Target: {target:.2f}</p>
-      <div class="tags">
-        {''.join(f'<span>{indicator}</span>' for indicator in indicator_list) or '<span>No indicators</span>'}
-      </div>
-    </div>
-    <script>
-      const data = {json.dumps(data)};
-      const root = document.getElementById('chart');
-      const chart = LightweightCharts.createChart(root, {{
-        layout: {{
-          background: {{ type: 'solid', color: '#0f172a' }},
-          textColor: '#94a3b8',
-        }},
-        grid: {{
-          vertLines: {{ color: 'rgba(148, 163, 184, 0.08)' }},
-          horzLines: {{ color: 'rgba(148, 163, 184, 0.08)' }},
-        }},
-        width: root.clientWidth,
-        height: root.clientHeight,
-        timeScale: {{
-          timeVisible: true,
-          secondsVisible: false,
-        }},
-        crosshair: {{
-          mode: LightweightCharts.CrosshairMode.Normal,
-        }},
-      }});
-
-      window.addEventListener('resize', () => {{
-        chart.applyOptions({{ width: root.clientWidth, height: root.clientHeight }});
-      }});
-
-      const candleSeries = chart.addCandlestickSeries({{
-        upColor: '#22c55e',
-        downColor: '#ef4444',
-        borderVisible: false,
-        wickUpColor: '#22c55e',
-        wickDownColor: '#ef4444',
-      }});
-
-      function generateCandles(basePrice, bars, stepSeconds) {{
-        const candles = [];
-        const range = Math.max(Math.abs(data.target - data.stop), basePrice * 0.02);
-        let price = basePrice;
-        const now = Math.floor(Date.now() / 1000);
-        for (let i = bars; i >= 0; i--) {{
-          const time = now - (bars - i) * stepSeconds;
-          const open = price;
-          const volatility = range * 0.05;
-          price = price + (Math.random() - 0.5) * volatility;
-          const close = price;
-          const high = Math.max(open, close) + Math.random() * volatility * 0.3;
-          const low = Math.min(open, close) - Math.random() * volatility * 0.3;
-          candles.push({{ time, open, high, low, close }});
-        }}
-        return candles;
-      }}
-
-      const step = Math.max(parseInt(data.timeframe, 10) || 5, 1);
-      const candles = generateCandles(data.entry, 160, step * 60);
-      candleSeries.setData(candles);
-
-      candleSeries.createPriceLine({{
-        price: data.entry,
-        color: '#2563eb',
-        lineWidth: 2,
-        title: `Entry {entry:.2f}`,
-      }});
-      candleSeries.createPriceLine({{
-        price: data.stop,
-        color: '#ef4444',
-        lineWidth: 2,
-        title: `Stop {stop:.2f}`,
-      }});
-      candleSeries.createPriceLine({{
-        price: data.target,
-        color: '#22c55e',
-        lineWidth: 2,
-        title: `Target {target:.2f}`,
-      }});
-
-      chart.timeScale().fitContent();
-    </script>
-  </body>
-</html>
-"""
-    return HTMLResponse(content=html)
 
 @app.get("/healthz", summary="Readiness probe used by Railway")
 async def healthz() -> Dict[str, str]:
@@ -527,10 +559,9 @@ async def root() -> Dict[str, Any]:
         "description": "Backend endpoints intended for a custom GPT Action.",
         "routes": {
             "scan": "/gpt/scan",
-            "follow": "/gpt/follow",
-            "trade_state": "/gpt/trades/{trade_id}",
-            "watchlist": "/gpt/watchlist",
-            "notes": "/gpt/notes",
             "widgets": "/gpt/widgets/{kind}",
+            "charts_html": "/charts/html",
+            "charts_png": "/charts/png",
+            "health": "/healthz",
         },
     }

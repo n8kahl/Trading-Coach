@@ -10,3 +10,6 @@ cmds = [
 
 [phases.build]
 cmds = ["echo skipping frontend build"]
+
+[start]
+cmd = "python -m src.start_server"

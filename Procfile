@@ -1,1 +1,1 @@
-web: sh -c 'uvicorn src.agent_server:app --host 0.0.0.0 --port ${PORT:-8000}'
+web: python -m src.start_server
