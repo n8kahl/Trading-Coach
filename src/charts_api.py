@@ -1,26 +1,17 @@
-"""Chart rendering endpoints for interactive HTML and static PNG outputs."""
+"""Chart rendering endpoints for interactive HTML outputs."""
 
 from __future__ import annotations
 
 import html
-import io
 import json
 import math
-from datetime import timedelta
 from typing import Dict, Iterable, List, Optional, Sequence
 from urllib.parse import urlencode
 
 import numpy as np
 import pandas as pd
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.dates as mdates  # noqa: E402
-import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.patches import Rectangle  # noqa: E402
-
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 router = APIRouter(prefix="/charts", tags=["charts"])
@@ -124,17 +115,6 @@ def parse_ints(csv: Optional[str]) -> List[int]:
 
 def compute_ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
-
-
-def clamp(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, value))
-
-
-def _price_band(df: pd.DataFrame) -> tuple[float, float]:
-    lo = float(df["low"].min())
-    hi = float(df["high"].max())
-    span = max(hi - lo, max(abs(lo), abs(hi)) * 0.02 or 1.0)
-    return lo - span * 0.5, hi + span * 0.5
 
 
 # --------------------------------------------------------------------------- #
@@ -496,31 +476,31 @@ def chart_html(
             if (['fit', 'all', 'auto', 'full'].includes(normalized)) {{
               return {{ ...VIEW_MAP.fit, key: normalized, baseKey: 'fit' }};
             }}
-            let match = normalized.match(/^bars:(\d+)$/);
+            let match = normalized.match(/^bars:(\\d+)$/);
             if (match) {{
               const bars = Math.max(1, parseInt(match[1], 10));
               return {{ key: `bars:${{bars}}`, bars, baseKey: null }};
             }}
-            match = normalized.match(/^(\d+)([smhd])$/);
+            match = normalized.match(/^(\\d+)([smhd])$/);
             if (match) {{
               const value = parseInt(match[1], 10);
               const unit = match[2];
               const factor = unit === 's' ? 1 : unit === 'm' ? 60 : unit === 'h' ? 3600 : 86400;
               return {{ key: normalized, seconds: value * factor, baseKey: null }};
             }}
-            match = normalized.match(/^seconds:(\d+)$/);
+            match = normalized.match(/^seconds:(\\d+)$/);
             if (match) {{
               return {{ key: normalized, seconds: parseInt(match[1], 10), baseKey: null }};
             }}
-            match = normalized.match(/^minutes:(\d+)$/);
+            match = normalized.match(/^minutes:(\\d+)$/);
             if (match) {{
               return {{ key: normalized, seconds: parseInt(match[1], 10) * 60, baseKey: null }};
             }}
-            match = normalized.match(/^hours:(\d+)$/);
+            match = normalized.match(/^hours:(\\d+)$/);
             if (match) {{
               return {{ key: normalized, seconds: parseInt(match[1], 10) * 3600, baseKey: null }};
             }}
-            match = normalized.match(/^days:(\d+)$/);
+            match = normalized.match(/^days:(\\d+)$/);
             if (match) {{
               return {{ key: normalized, seconds: parseInt(match[1], 10) * 86400, baseKey: null }};
             }}
@@ -685,109 +665,6 @@ def chart_html(
 </html>
 """
     return HTMLResponse(content=html_doc)
-
-
-# --------------------------------------------------------------------------- #
-# Static PNG renderer
-# --------------------------------------------------------------------------- #
-
-
-@router.get("/png")
-def chart_png(
-    symbol: str,
-    interval: str = Query("1m"),
-    entry: Optional[float] = None,
-    stop: Optional[float] = None,
-    tp: Optional[str] = None,
-    ema: Optional[str] = "9,21",
-    title: Optional[str] = None,
-    lookback: int = Query(300, ge=50, le=MAX_LOOKBACK),
-) -> Response:
-    try:
-        interval_normalized = normalize_interval(interval)
-        df = get_candles(symbol, interval_normalized, lookback=lookback)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if df.empty:
-        raise HTTPException(status_code=500, detail="No candle data available.")
-
-    tps = parse_floats(tp)[:MAX_TPS]
-    emas = parse_ints(ema)[:MAX_EMAS] or [9, 21]
-
-    for span in emas:
-        df[f"EMA{span}"] = compute_ema(df["close"], span)
-
-    df = df.copy()
-    df["time_num"] = mdates.date2num(pd.to_datetime(df["time"]))
-
-    width = 12
-    height = 6
-    fig, (ax_price, ax_vol) = plt.subplots(
-        2, 1, figsize=(width, height), dpi=160, gridspec_kw={"height_ratios": [3, 1]}, sharex=True
-    )
-
-    bar_width = _candle_width(interval_normalized)
-
-    for _, row in df.iterrows():
-        color = "#22c55e" if row["close"] >= row["open"] else "#ef4444"
-        ax_price.plot([row["time_num"], row["time_num"]], [row["low"], row["high"]], color=color, linewidth=1.0)
-        rect = Rectangle(
-            (row["time_num"] - bar_width / 2),
-            min(row["open"], row["close"]),
-            bar_width,
-            abs(row["close"] - row["open"]) or bar_width / 10,
-            facecolor=color,
-            edgecolor=color,
-            linewidth=0.6,
-        )
-        ax_price.add_patch(rect)
-
-    for span in emas:
-        ax_price.plot(df["time_num"], df[f"EMA{span}"], linewidth=1.2, label=f"EMA{span}")
-
-    if entry is not None:
-        ax_price.axhline(entry, color="#e5e54b", linestyle="--", linewidth=1.2, label="Entry")
-    if stop is not None:
-        ax_price.axhline(stop, color="#e74c3c", linestyle="--", linewidth=1.2, label="Stop")
-    for idx, val in enumerate(tps):
-        ax_price.axhline(val, color="#2ecc71", linestyle="--", linewidth=1.0, label="TP" if idx == 0 else None)
-
-    ax_price.set_title(title or f"{symbol.upper()} {interval_normalized.upper()}", fontsize=12)
-    ax_price.legend(loc="upper left", fontsize=8, ncol=3)
-    ax_price.grid(alpha=0.2)
-
-    ax_vol.bar(df["time_num"], df["volume"], width=bar_width, color="#3e9cff", alpha=0.7)
-    ax_vol.set_ylabel("Volume")
-    ax_vol.grid(alpha=0.15)
-
-    ax_vol.xaxis_date()
-    ax_vol.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M"))
-    plt.setp(ax_vol.xaxis.get_majorticklabels(), rotation=30, ha="right", fontsize=8)
-
-    plt.tight_layout()
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", bbox_inches="tight")
-    plt.close(fig)
-    buffer.seek(0)
-
-    headers = {"Cache-Control": "public, max-age=60"}
-    return Response(content=buffer.getvalue(), media_type="image/png", headers=headers)
-
-
-def _candle_width(interval: str) -> float:
-    """Return matplotlib-friendly candle width based on interval."""
-    if interval == "1m":
-        return 1 / (24 * 60) * 0.9
-    if interval == "5m":
-        return 5 / (24 * 60) * 0.9
-    if interval == "15m":
-        return 15 / (24 * 60) * 0.9
-    if interval == "1h":
-        return 1 / 24 * 0.9
-    if interval == "d":
-        return 1.0 * 0.8
-    return 1 / (24 * 60) * 0.9
 
 
 # --------------------------------------------------------------------------- #
