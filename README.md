@@ -8,7 +8,7 @@ It keeps the quantitative bits—market scanning, ATR-based trade management, wa
 
 ## Features
 
-- **`POST /gpt/scan`** – rank tickers using the built-in strategy library (dummy OHLCV until you wire Polygon).  
+- **`POST /gpt/scan`** – rank tickers using the built-in strategy library backed by live Polygon/Yahoo OHLCV.  
 - **`POST /gpt/follow` & `GET /gpt/trades/{id}`** – manage trades with an ATR-driven follower.  
 - **`GET/POST /gpt/watchlist`** – read & update user-specific ticker lists.  
 - **`GET/POST /gpt/notes`** – lightweight daily journal.  
