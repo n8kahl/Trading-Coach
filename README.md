@@ -82,7 +82,7 @@ The GPT can now reason about the user’s portfolio, recall notes, and fetch str
 
 ## Implementation notes
 
-- **Mock data:** `_synth_ohlcv` in `agent_server.py` generates placeholder OHLCV. Replace it with Polygon REST/WebSocket calls once you have credentials.  
+- **Market data:** `/gpt/scan` and `/charts` pull Polygon aggregates with a Yahoo fallback. Provide credentials before production use.  
 - **Persistence:** Everything lives in in-memory dictionaries (`_WATCHLISTS`, `_NOTES`, `_TRADES`). Swap these for a real database layer before production.  
 - **Strategies:** `strategy_library.py` defines several sample setups (ORB retest, VWAP/AVWAP, etc.). Expand or tweak scoring in `scanner.py` as needed.  
 - **Trade management:** `TradeFollower` tracks ATR-based stops and trailing behaviour. The current endpoints feed it only the entry price; extend with live price/ATR data for meaningful guidance.

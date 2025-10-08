@@ -228,6 +228,7 @@ def chart_html(
     entry: Optional[float] = None,
     stop: Optional[float] = None,
     tp: Optional[str] = None,
+    tp2: Optional[str] = None,
     ema: Optional[str] = "9,21",
     title: Optional[str] = None,
     lookback: int = Query(300, ge=50, le=MAX_LOOKBACK),
@@ -246,7 +247,12 @@ def chart_html(
     if df.empty:
         raise HTTPException(status_code=500, detail="No candle data available.")
 
-    tps = parse_floats(tp)[:MAX_TPS]
+    tp_primary = parse_floats(tp)[:MAX_TPS]
+    tp_secondary = parse_floats(tp2)[:MAX_TPS]
+    tps = tp_primary or []
+    if tp_secondary:
+        tps.extend(tp_secondary)
+    tps = tps[:MAX_TPS]
     emas = parse_ints(ema)[:MAX_EMAS] or [9, 21]
 
     def _to_level(val: Optional[float]) -> Optional[float]:
@@ -474,6 +480,7 @@ def chart_html(
         if (!payload.candles.length) {{
           container.innerHTML = '<p style="padding:16px;color:#f97316;font-family:monospace;">No candle data available.</p>';
         }} else {{
+          const isIntraday = ['1m', '5m', '15m', '1h'].includes(payload.interval);
           const chart = LightweightCharts.createChart(container, {{
             width: initialWidth,
             height: initialHeight,
@@ -482,7 +489,13 @@ def chart_html(
               textColor: '#e6edf3',
             }},
             rightPriceScale: {{ borderColor: 'rgba(46, 51, 64, 0.6)' }},
-            timeScale: {{ borderColor: 'rgba(46, 51, 64, 0.6)' }},
+            timeScale: {{
+              borderColor: 'rgba(46, 51, 64, 0.6)',
+              timeVisible: true,
+              secondsVisible: isIntraday && payload.interval !== '1h',
+              fixRightEdge: false,
+              rightOffset: 2,
+            }},
             grid: {{
               vertLines: {{ color: 'rgba(35, 43, 60, 0.7)' }},
               horzLines: {{ color: 'rgba(35, 43, 60, 0.7)' }},
@@ -529,6 +542,44 @@ def chart_html(
           }});
           volumeSeries.setData(payload.volume);
 
+          const addVWAP = candleData => {{
+            if (!candleData.length) return;
+            let volSum = 0;
+            let priceVolSum = 0;
+            const vwapPoints = [];
+            candleData.forEach(candle => {{
+              const volPoint = payload.volume.find(v => v.time === candle.time);
+              const vol = volPoint ? Number(volPoint.value) : 0;
+              const typicalPrice = (candle.high + candle.low + candle.close) / 3;
+              volSum += vol;
+              priceVolSum += typicalPrice * vol;
+              if (volSum > 0) {{
+                vwapPoints.push({{ time: candle.time, value: priceVolSum / volSum }});
+              }}
+            }});
+            if (!vwapPoints.length) return;
+            const vwapSeries = chart.addLineSeries({{
+              color: '#f97316',
+              lineWidth: 2,
+              lineStyle: LightweightCharts.LineStyle.Solid,
+              priceLineVisible: true,
+              lastValueVisible: true,
+            }});
+            vwapSeries.setData(vwapPoints);
+            const lastVWAP = vwapPoints[vwapPoints.length - 1];
+            if (lastVWAP) {{
+              vwapSeries.createPriceLine({{
+                price: lastVWAP.value,
+                color: '#f97316',
+                lineWidth: 1,
+                axisLabelVisible: true,
+                title: 'VWAP',
+              }});
+            }}
+          }};
+
+          addVWAP(payload.candles);
+
           const firstTime = payload.candles[0]?.time;
           const lastTime = payload.candles[payload.candles.length - 1]?.time ?? firstTime;
           const totalBars = payload.candles.length;
@@ -537,17 +588,20 @@ def chart_html(
             const minPrice = Math.min(...priceValues);
             const maxPrice = Math.max(...priceValues);
             const padding = (maxPrice - minPrice) * 0.05 || 1.0;
-            const phantom = chart.addLineSeries({{
-              color: 'rgba(0,0,0,0)',
-              lineWidth: 0,
-              priceLineVisible: false,
-              lastValueVisible: false,
-              crosshairMarkerVisible: false,
+            chart.priceScale('right').applyOptions({{
+              autoScale: true,
+              scaleMargins: {{ top: 0.1, bottom: 0.3 }},
             }});
-            phantom.setData([
-              {{ time: firstTime, value: minPrice - padding }},
-              {{ time: lastTime, value: maxPrice + padding }},
-            ]);
+            candleSeries.applyOptions({{
+              autoscaleInfoProvider: () => {{
+                return {{
+                  priceRange: {{
+                    minValue: minPrice - padding,
+                    maxValue: maxPrice + padding,
+                  }},
+                }};
+              }},
+            }});
           }}
 
           const toolbar = document.getElementById('chart-toolbar');
@@ -709,16 +763,30 @@ def chart_html(
             }}
           }});
 
-          (payload.levels || []).forEach(level => {{
-            candleSeries.createPriceLine({{
-              price: level.value,
-              color: level.color,
-              lineWidth: 2,
-              lineStyle: LightweightCharts.LineStyle.Solid,
-              axisLabelVisible: true,
-              title: level.label,
+          if (firstTime != null && lastTime != null) {{
+            (payload.levels || []).forEach(level => {{
+              if (typeof level.value !== 'number' || !isFinite(level.value)) return;
+              const levelSeries = chart.addLineSeries({{
+                color: level.color,
+                lineWidth: 2,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                crosshairMarkerVisible: false,
+              }});
+              levelSeries.setData([
+                {{ time: firstTime, value: level.value }},
+                {{ time: lastTime, value: level.value }},
+              ]);
+              levelSeries.createPriceLine({{
+                price: level.value,
+                color: level.color,
+                lineWidth: 2,
+                lineStyle: LightweightCharts.LineStyle.Solid,
+                axisLabelVisible: true,
+                title: level.label,
+              }});
             }});
-          }});
+          }}
 
           chart.timeScale().fitContent();
 
@@ -746,9 +814,10 @@ def chart_html(
           const levelBadges = (payload.levels || []).map(level => `
             <span class="badge" style="background:${{level.color}}22;color:${{level.color}}">${{level.label}}</span>
           `).join('');
-          const indicatorBadges = Object.keys(payload.ema_series || {{}}).map(span => `
-            <span class="badge">EMA${{span}}</span>
-          `).join('');
+          const indicatorBadges = [
+            ...Object.keys(payload.ema_series || {{}}).map(span => `<span class="badge">EMA${{span}}</span>`),
+            '<span class="badge">VWAP</span>',
+          ].join('');
           legend.innerHTML = `
             <h1>${{payload.symbol}} · ${{payload.interval.toUpperCase()}}</h1>
             ${{strategyLabel ? `<p>${{strategyLabel}}</p>` : ''}}

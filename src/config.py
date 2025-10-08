@@ -10,11 +10,13 @@ hosting provider's secrets manager rather than storing them in version control.
 
 from functools import lru_cache
 from pydantic import AliasChoices, Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="allow")
 
     polygon_api_key: str | None = Field(None, env="POLYGON_API_KEY")
     db_url: str | None = Field(None, env="DB_URL")
@@ -31,11 +33,6 @@ class Settings(BaseSettings):
         default="https://sandbox.tradier.com",
         validation_alias=AliasChoices("TRADIER_BASE_URL", "TRADIER_SANDBOX_BASE_URL"),
     )
-
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-
 
 @lru_cache()
 def get_settings() -> Settings:
