@@ -12,18 +12,18 @@ from __future__ import annotations
 import asyncio
 import math
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .config import get_settings
-from .calculations import atr
-from .charts_api import build_chart_url, router as charts_router
+from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
+from .charts_api import build_chart_url, router as charts_router, get_candles, normalize_interval
 from .scanner import scan_market
 from .tradier import TradierNotConfiguredError, fetch_option_chain, select_tradier_contract
 
@@ -95,6 +95,12 @@ class ScanUniverse(BaseModel):
 
 def _style_for_strategy(strategy_id: str) -> str:
     sid = strategy_id.lower()
+    if "power" in sid:
+        return "scalp"
+    if "gap" in sid:
+        return "scalp"
+    if "midday" in sid:
+        return "intraday"
     if "pmcc" in sid or "leap" in sid:
         return "leap"
     if "orb" in sid:
@@ -112,6 +118,8 @@ def _normalize_style(style: str | None) -> str | None:
         return None
     if normalized == "leaps":
         normalized = "leap"
+    if normalized in {"power_hour", "powerhour", "power-hour", "power hour"}:
+        normalized = "scalp"
     return normalized
 
 
@@ -361,97 +369,247 @@ def _extract_key_levels(history: pd.DataFrame) -> Dict[str, float]:
 
     return {key: round(val, 2) for key, val in levels.items() if val is not None and np.isfinite(val)}
 
-
-def _plan_trade_levels(
-    history: pd.DataFrame,
-    entry: float,
-    direction: str,
-    atr_hint: float | None,
-    key_levels: Dict[str, float],
-) -> tuple[float, float, float, float, float, float]:
-    """Compute stop/target that respect ATR and structural levels."""
-    atr_series = atr(history["high"], history["low"], history["close"], period=14)
-    atr_value = float(atr_hint or 0.0)
-    if not atr_series.empty and not np.isnan(atr_series.iloc[-1]):
-        atr_value = float(atr_series.iloc[-1])
-    if atr_value <= 0:
-        atr_value = max(entry * 0.01, 0.25)
-
-    session_high = key_levels.get("session_high")
-    session_low = key_levels.get("session_low")
-    opening_range_high = key_levels.get("opening_range_high")
-    opening_range_low = key_levels.get("opening_range_low")
-    prev_close = key_levels.get("prev_close")
-    prev_high = key_levels.get("prev_high")
-    prev_low = key_levels.get("prev_low")
-    gap_fill = key_levels.get("gap_fill")
-
-    if direction == "long":
-        stop_candidates = [
-            level for level in [opening_range_low, prev_close, prev_low, session_low] if level and level < entry
-        ]
-        stop = max(stop_candidates) if stop_candidates else entry - atr_value * 1.1
-        risk = abs(entry - stop) or atr_value
-        target_candidates = sorted(
-            {
-                level
-                for level in [gap_fill, opening_range_high, session_high, prev_high]
-                if level and level > entry + atr_value * 0.2
-            }
-        )
-        target = None
-        min_rr = 0.8
-        for candidate in target_candidates:
-            reward = candidate - entry
-            if reward <= 0:
-                continue
-            if reward / risk >= min_rr:
-                target = candidate
-                break
-        if target is None:
-            target = entry + max(atr_value * 2.0, risk * max(min_rr, 1.0))
+def _infer_bar_interval(history: pd.DataFrame) -> int:
+    """Return approximate bar interval in minutes based on timestamp spacing."""
+    idx = history.index
+    if len(idx) < 2:
+        return 1
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC")
     else:
-        stop_candidates = [
-            level for level in [opening_range_high, prev_close, prev_high, session_high] if level and level > entry
-        ]
-        stop = min(stop_candidates) if stop_candidates else entry + atr_value * 1.1
-        risk = abs(entry - stop) or atr_value
+        idx = idx.tz_convert("UTC")
+    deltas = idx.to_series().diff().dropna()
+    if deltas.empty:
+        return 1
+    median_seconds = deltas.dt.total_seconds().median()
+    if not np.isfinite(median_seconds) or median_seconds <= 0:
+        return 1
+    return max(1, int(round(median_seconds / 60.0)))
 
-        target_candidates = sorted(
-            {
-                level
-                for level in [gap_fill, opening_range_low, session_low, prev_low]
-                if level and level < entry - atr_value * 0.2
-            },
-            reverse=True,
-        )
-        target = None
-        min_rr = 0.8
-        for candidate in target_candidates:
-            reward = entry - candidate
-            if reward <= 0:
-                continue
-            if reward / risk >= min_rr:
-                target = candidate
-                break
-        if target is None:
-            target = entry - max(atr_value * 2.0, risk * max(min_rr, 1.0))
 
-    if direction == "long" and stop >= entry:
-        stop = entry - atr_value
-    if direction == "short" and stop <= entry:
-        stop = entry + atr_value
-
-    risk = abs(entry - stop) or atr_value
-    reward = abs(target - entry)
-    risk_reward = reward / risk if risk else 0.0
-
-    if direction == "long":
-        target_secondary = max(target + max(atr_value, risk * 0.5), target + atr_value)
+def _session_phase(ts: pd.Timestamp) -> str:
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
     else:
-        target_secondary = min(target - max(atr_value, risk * 0.5), target - atr_value)
+        ts = ts.tz_convert("UTC")
+    et = ts.tz_convert("America/New_York")
+    h, m = et.hour, et.minute
+    wd = et.weekday()
+    if wd >= 5:
+        return "off"
+    if h < 9 or (h == 9 and m < 30):
+        return "premarket"
+    if h == 9 and 30 <= m < 60:
+        return "open_drive"
+    if h == 10 or (h == 11 and m < 30):
+        return "morning"
+    if (h == 11 and m >= 30) or (12 <= h < 14):
+        return "midday"
+    if h == 14:
+        return "afternoon"
+    if h == 15:
+        return "power_hour"
+    if h >= 16:
+        return "postmarket"
+    return "other"
 
-    return entry, stop, target, target_secondary, atr_value, risk_reward
+
+def _minutes_until_close(ts: pd.Timestamp) -> int:
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    et = ts.tz_convert("America/New_York")
+    close = et.replace(hour=16, minute=0, second=0, microsecond=0)
+    delta = close - et
+    minutes = int(delta.total_seconds() // 60)
+    return max(minutes, 0)
+
+
+def _safe_number(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return None
+        return float(value)
+    if isinstance(value, (np.floating, np.integer)):
+        val = float(value)
+        if math.isnan(val) or math.isinf(val):
+            return None
+        return val
+    return None
+
+
+def _build_market_snapshot(history: pd.DataFrame, key_levels: Dict[str, float]) -> Dict[str, Any]:
+    df = history.sort_index().tail(600)
+    latest = df.iloc[-1]
+    ts = df.index[-1]
+    if ts.tzinfo is None:
+        ts_utc = ts.tz_localize("UTC")
+    else:
+        ts_utc = ts.tz_convert("UTC")
+
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+    volume = df["volume"] if "volume" in df.columns else pd.Series(dtype=float)
+
+    atr_series = atr(high, low, close, period=14)
+    atr_value = float(atr_series.iloc[-1]) if not atr_series.empty else float("nan")
+
+    ema9_val = ema(close, 9).iloc[-1] if len(close) >= 9 else float("nan")
+    ema20_val = ema(close, 20).iloc[-1] if len(close) >= 20 else float("nan")
+    ema50_val = ema(close, 50).iloc[-1] if len(close) >= 50 else float("nan")
+    adx14_series = adx(high, low, close, 14)
+    adx14_val = float(adx14_series.iloc[-1]) if not adx14_series.empty else float("nan")
+    vwap_series = vwap(close, volume) if not volume.empty else pd.Series(dtype=float)
+    vwap_val = float(vwap_series.iloc[-1]) if not vwap_series.empty else float("nan")
+
+    bb_upper, bb_lower = bollinger_bands(close, period=20, width=2.0)
+    kc_upper, kc_lower = keltner_channels(close, high, low, period=20, atr_factor=1.5)
+    bb_width = None
+    kc_width = None
+    in_squeeze = None
+    if not bb_upper.empty and not bb_lower.empty:
+        upper = float(bb_upper.iloc[-1])
+        lower = float(bb_lower.iloc[-1])
+        if np.isfinite(upper) and np.isfinite(lower):
+            bb_width = upper - lower
+    if not kc_upper.empty and not kc_lower.empty:
+        upper = float(kc_upper.iloc[-1])
+        lower = float(kc_lower.iloc[-1])
+        if np.isfinite(upper) and np.isfinite(lower):
+            kc_width = upper - lower
+    if bb_width is not None and kc_width is not None and np.isfinite(bb_width) and np.isfinite(kc_width):
+        in_squeeze = bb_width < kc_width
+
+    prev_close_series = close.shift(1)
+    true_range = pd.concat(
+        [
+            (high - low).abs(),
+            (high - prev_close_series).abs(),
+            (low - prev_close_series).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    tr_median = float(true_range.tail(20).median()) if not true_range.empty else float("nan")
+
+    bar_interval = _infer_bar_interval(df)
+    horizon_minutes = 30 if bar_interval <= 2 else 60
+    horizon_bars = max(1, int(horizon_minutes / max(bar_interval, 1)))
+    expected_move = None
+    if np.isfinite(tr_median):
+        expected_move = tr_median * horizon_bars
+
+    prev_close_level = key_levels.get("prev_close")
+    gap_points = None
+    gap_percent = None
+    gap_direction = None
+    if prev_close_level:
+        gap_points = float(latest["close"]) - float(prev_close_level)
+        if prev_close_level:
+            gap_percent = (gap_points / float(prev_close_level)) * 100.0
+        if gap_points > 0:
+            gap_direction = "up"
+        elif gap_points < 0:
+            gap_direction = "down"
+        else:
+            gap_direction = "flat"
+
+    if np.isfinite(ema9_val) and np.isfinite(ema20_val) and np.isfinite(ema50_val):
+        if ema9_val > ema20_val > ema50_val:
+            ema_stack = "bullish"
+        elif ema9_val < ema20_val < ema50_val:
+            ema_stack = "bearish"
+        else:
+            ema_stack = "mixed"
+    else:
+        ema_stack = "unknown"
+
+    session_phase = _session_phase(ts)
+    minutes_to_close = _minutes_until_close(ts)
+
+    recent_closes = [float(val) for val in close.tail(10).tolist()]
+    recent_returns = []
+    if len(recent_closes) >= 2:
+        recent_returns = [round(recent_closes[i] - recent_closes[i - 1], 4) for i in range(1, len(recent_closes))]
+
+    snapshot = {
+        "timestamp_utc": ts_utc.isoformat(),
+        "price": {
+            "open": float(latest["open"]),
+            "high": float(latest["high"]),
+            "low": float(latest["low"]),
+            "close": float(latest["close"]),
+            "volume": float(latest.get("volume", 0.0)),
+        },
+        "indicators": {
+            "ema9": _safe_number(ema9_val),
+            "ema20": _safe_number(ema20_val),
+            "ema50": _safe_number(ema50_val),
+            "vwap": _safe_number(vwap_val),
+            "atr14": _safe_number(atr_value),
+            "adx14": _safe_number(adx14_val),
+        },
+        "volatility": {
+            "true_range_median": _safe_number(tr_median),
+            "bollinger_width": _safe_number(bb_width),
+            "keltner_width": _safe_number(kc_width),
+            "in_squeeze": in_squeeze,
+            "expected_move_horizon": _safe_number(expected_move),
+        },
+        "levels": key_levels,
+        "session": {
+            "phase": session_phase,
+            "minutes_to_close": minutes_to_close,
+            "bar_interval_minutes": bar_interval,
+        },
+        "trend": {
+            "ema_stack": ema_stack,
+            "direction_hint": None,
+        },
+        "gap": {
+            "points": _safe_number(gap_points),
+            "percent": _safe_number(gap_percent),
+            "direction": gap_direction,
+        },
+        "recent": {
+            "closes": recent_closes,
+            "close_deltas": recent_returns,
+        },
+    }
+    return snapshot
+
+
+def _serialize_features(features: Dict[str, Any]) -> Dict[str, Any]:
+    serialized: Dict[str, Any] = {}
+    for key, value in features.items():
+        if isinstance(value, (np.floating, np.integer)):
+            serialized[key] = float(value)
+        elif isinstance(value, (float, int, str, bool)) or value is None:
+            serialized[key] = value
+        else:
+            try:
+                serialized[key] = float(value)
+            except (TypeError, ValueError):
+                serialized[key] = str(value)
+    return serialized
+
+
+def _series_points(series: pd.Series, limit: int = 200) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    if series is None:
+        return points
+    tail = series.dropna().tail(limit)
+    for ts, val in tail.items():
+        stamp = pd.Timestamp(ts)
+        if stamp.tzinfo is None:
+            stamp = stamp.tz_localize("UTC")
+        else:
+            stamp = stamp.tz_convert("UTC")
+        points.append({"time": stamp.isoformat(), "value": float(val)})
+    return points
 # Strategy utilities ---------------------------------------------------------
 
 def _direction_for_strategy(strategy_id: str) -> str:
@@ -466,6 +624,12 @@ def _indicators_for_strategy(strategy_id: str) -> List[str]:
     if "vwap" in sid:
         return ["VWAP", "EMA9", "EMA20"]
     if "orb" in sid:
+        return ["VWAP", "EMA9", "EMA20"]
+    if "power" in sid:
+        return ["VWAP", "EMA9", "EMA20", "EMA50"]
+    if "gap" in sid:
+        return ["VWAP", "EMA9", "EMA20"]
+    if "midday" in sid:
         return ["VWAP", "EMA9", "EMA20"]
     if "adx" in sid:
         return ["VWAP", "ADX"]
@@ -482,6 +646,8 @@ def _view_for_style(style: str | None) -> str:
     normalized = _normalize_style(style) or ""
     mapping = {"scalp": "30m", "intraday": "1d", "swing": "5d", "leap": "fit"}
     return mapping.get(normalized, "fit")
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -586,10 +752,15 @@ async def gpt_scan(
         latest_row = history.iloc[-1]
         entry_price = float(latest_row["close"])
         key_levels = _extract_key_levels(history)
-        direction = _direction_for_strategy(signal.strategy_id)
-        entry, stop, target, target_secondary, atr_value, risk_reward = _plan_trade_levels(
-            history, entry_price, direction, signal.features.get("atr"), key_levels
-        )
+        # Strategy direction inference hint (AI will make the final decision)
+        direction_hint = signal.features.get("direction_bias")
+        if direction_hint not in {"long", "short"}:
+            direction_hint = _direction_for_strategy(signal.strategy_id)
+
+        snapshot = _build_market_snapshot(history, key_levels)
+        snapshot.setdefault("trend", {})["direction_hint"] = direction_hint
+        snapshot.setdefault("price", {})["entry_reference"] = entry_price
+
         indicators = _indicators_for_strategy(signal.strategy_id)
         ema_spans = sorted(
             {
@@ -608,20 +779,16 @@ async def gpt_scan(
             base_url,
             "html",
             signal.symbol.upper(),
-            entry=entry,
-            stop=stop,
-            tps=[target, target_secondary],
             emas=ema_spans,
             interval=interval,
             title=title,
-            renderer_params={
-                "direction": direction,
-                "strategy": signal.strategy_id,
-                "atr": f"{atr_value:.2f}",
-                "risk_reward": f"{risk_reward:.2f}",
-            },
+            renderer_params={"strategy": signal.strategy_id},
             view=_view_for_style(style),
         )
+        feature_payload = _serialize_features(signal.features)
+        feature_payload.setdefault("atr", snapshot.get("indicators", {}).get("atr14"))
+        feature_payload.setdefault("adx", snapshot.get("indicators", {}).get("adx14"))
+
         payload.append(
             {
                 "symbol": signal.symbol,
@@ -630,24 +797,88 @@ async def gpt_scan(
                 "description": signal.description,
                 "score": signal.score,
                 "contract_suggestion": contract_suggestions.get(signal.symbol),
-                "direction": direction,
-        "levels": {
-            "entry": round(entry, 2),
-            "stop": round(stop, 2),
-            "target": round(target, 2),
-            "target_secondary": round(target_secondary, 2),
-            "risk_reward": round(risk_reward, 2),
-        },
+                "direction_hint": direction_hint,
                 "key_levels": key_levels,
+                "market_snapshot": snapshot,
                 "charts": {
                     "interactive": interactive_url,
                 },
-                "features": {**signal.features, "atr": atr_value, "key_levels": key_levels},
+                "features": feature_payload,
+                "data": {
+                    "bars": f"{base_url}/gpt/context/{signal.symbol}?interval={interval}&lookback=300"
+                },
             }
         )
 
     logger.info("scan universe=%s user=%s results=%d", universe.tickers, user.user_id, len(payload))
     return payload
+
+
+@gpt.get("/context/{symbol}", summary="Return recent market context for a ticker")
+async def gpt_context(
+    symbol: str,
+    interval: str = Query("1m"),
+    lookback: int = Query(300, ge=50, le=1000),
+    user: AuthedUser = Depends(require_api_key),
+) -> Dict[str, Any]:
+    try:
+        interval_normalized = normalize_interval(interval)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    frame = get_candles(symbol, interval_normalized, lookback=lookback)
+    if frame.empty:
+        raise HTTPException(status_code=502, detail=f"No market data available for {symbol.upper()} ({interval_normalized}).")
+
+    df = frame.copy()
+    df["time"] = pd.to_datetime(df["time"], utc=True)
+    history = df.set_index("time")
+    key_levels = _extract_key_levels(history)
+    snapshot = _build_market_snapshot(history, key_levels)
+
+    bars = []
+    for _, row in df.iterrows():
+        ts = pd.Timestamp(row["time"])
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        bars.append(
+            {
+                "time": ts.isoformat(),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": _safe_number(row.get("volume")) or 0.0,
+            }
+        )
+
+    ema9_series = ema(history["close"], 9) if len(history) >= 9 else pd.Series(dtype=float)
+    ema20_series = ema(history["close"], 20) if len(history) >= 20 else pd.Series(dtype=float)
+    ema50_series = ema(history["close"], 50) if len(history) >= 50 else pd.Series(dtype=float)
+    vwap_series = vwap(history["close"], history["volume"])
+    atr_series = atr(history["high"], history["low"], history["close"], 14)
+    adx_series = adx(history["high"], history["low"], history["close"], 14)
+
+    indicators = {
+        "ema9": _series_points(ema9_series),
+        "ema20": _series_points(ema20_series),
+        "ema50": _series_points(ema50_series),
+        "vwap": _series_points(vwap_series),
+        "atr14": _series_points(atr_series),
+        "adx14": _series_points(adx_series),
+    }
+
+    return {
+        "symbol": symbol.upper(),
+        "interval": interval_normalized,
+        "lookback": lookback,
+        "bars": bars,
+        "indicators": indicators,
+        "key_levels": key_levels,
+        "snapshot": snapshot,
+    }
 
 
 @gpt.get("/widgets/{kind}", summary="Generate lightweight dashboard widgets")
@@ -685,6 +916,7 @@ async def root() -> Dict[str, Any]:
         "description": "Backend endpoints intended for a custom GPT Action.",
         "routes": {
             "scan": "/gpt/scan",
+            "context": "/gpt/context/{symbol}",
             "widgets": "/gpt/widgets/{kind}",
             "charts_html": "/charts/html",
             "charts_png": "/charts/png",

@@ -10,11 +10,10 @@ It keeps the quantitative bits—market scanning, ATR-based trade management, wa
 
 ## Features
 
-- **`POST /gpt/scan`** – rank tickers using the built-in strategy library backed by live Polygon/Yahoo OHLCV.  
-- **`POST /gpt/follow` & `GET /gpt/trades/{id}`** – manage trades with an ATR-driven follower.  
-- **`GET/POST /gpt/watchlist`** – read & update user-specific ticker lists.  
-- **`GET/POST /gpt/notes`** – lightweight daily journal.  
-- **`GET /gpt/widgets/{kind}`** – generate compact card payloads you can render as Markdown/JSON in the GPT response.  
+- **`POST /gpt/scan`** – ranks tickers per strategy and returns enriched market snapshots (levels, indicators, volatility).  
+- **`GET /gpt/context/{symbol}`** – delivers recent OHLCV bars plus indicator series for custom analysis.  
+- **`GET /charts/html` / `/charts/png`** – render interactive or static charts with optional AI-supplied levels.  
+- **`GET /gpt/widgets/{kind}`** – generate lightweight dashboard cards.  
 - Optional bearer auth (`BACKEND_API_KEY`) plus `X-User-Id` scoping; falls back to anonymous mode for quick prototyping.
 
 ## Project layout
@@ -75,19 +74,19 @@ curl http://localhost:8000/gpt/scan \
 5. Provide the GPT with short usage tips, e.g.:
 
    ```
-   - Use /gpt/scan with a handful of tickers and optionally style=intraday.
-   - Call /gpt/follow after recommending a trade; read status via /gpt/trades/{trade_id}.
-   - Persist user watchlists via /gpt/watchlist and journal entries via /gpt/notes.
+   - Start with /gpt/scan to pull market snapshots for the requested tickers.
+   - Use /gpt/context/{symbol} for the latest bars if you need to compute custom indicators.
+   - Render charts via /charts/html only after you have decided on entry/stop/targets.
    ```
 
 The GPT can now reason about the user’s portfolio, recall notes, and fetch strategy-driven scans.
 
 ## Implementation notes
 
-- **Market data:** `/gpt/scan` and `/charts` pull Polygon aggregates with a Yahoo fallback. Provide credentials before production use.  
-- **Persistence:** Everything lives in in-memory dictionaries (`_WATCHLISTS`, `_NOTES`, `_TRADES`). Swap these for a real database layer before production.  
-- **Strategies:** `strategy_library.py` defines several sample setups (ORB retest, VWAP/AVWAP, etc.). Expand or tweak scoring in `scanner.py` as needed.  
-- **Trade management:** `TradeFollower` tracks ATR-based stops and trailing behaviour. The current endpoints feed it only the entry price; extend with live price/ATR data for meaningful guidance.
+- **Market data:** `/gpt/scan`, `/gpt/context`, and `/charts` pull Polygon aggregates with a Yahoo fallback. Provide credentials before production use.  
+- **Data-first flow:** The server returns metrics (levels, ATR/ADX, squeeze state) but leaves trade construction to your GPT agent. See `docs/gpt_integration.md` for schema details and a prompt template.  
+- **Strategies:** `strategy_library.py` defines several sample setups (ORB retest, gap fill open, midday mean reversion, etc.). Expand or tweak scoring in `scanner.py` as needed.  
+- **State:** Results are ephemeral—if you need persistence, add your own storage layer for watchlists, notes, or trade journals.
 
 ## Next steps
 

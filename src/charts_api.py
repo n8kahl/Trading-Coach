@@ -268,6 +268,7 @@ def chart_html(
     atr: Optional[float] = Query(None),
     risk_reward: Optional[float] = Query(None),
     view: Optional[str] = Query("fit"),
+    notes: Optional[str] = Query(None),
 ) -> HTMLResponse:
     try:
         interval_normalized = normalize_interval(interval)
@@ -348,6 +349,7 @@ def chart_html(
         "strategy": strategy,
         "atr": float(atr) if atr is not None else None,
         "risk_reward": float(risk_reward) if risk_reward is not None else None,
+        "notes": notes or None,
     }
 
     payload = {
@@ -849,6 +851,7 @@ def chart_html(
             ...Object.keys(payload.ema_series || {{}}).map(span => `<span class="badge">EMA${{span}}</span>`),
             '<span class="badge">VWAP</span>',
           ].join('');
+          const notesBlock = plan.notes ? `<div class="badge-group" style="opacity:0.85">${{plan.notes}}</div>` : '';
           legend.innerHTML = `
             <h1>${{payload.symbol}} · ${{payload.interval.toUpperCase()}}</h1>
             ${{strategyLabel ? `<p>${{strategyLabel}}</p>` : ''}}
@@ -856,6 +859,7 @@ def chart_html(
             <div class="badge-group">
               ${{levelBadges}}${{indicatorBadges}}
             </div>
+            ${{notesBlock}}
           `;
         }}
       }}

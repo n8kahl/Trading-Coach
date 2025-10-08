@@ -83,6 +83,38 @@ def load_strategies() -> List[Strategy]:
         )
     )
 
+    # Power Hour – last hour of RTH (3–4pm ET)
+    strategies.append(
+        Strategy(
+            id="power_hour_trend",
+            name="Power Hour Trend Continuation",
+            category="intraday",
+            description=(
+                "During the last hour of regular trading (3–4pm ET), favor continuation in the "
+                "prevailing intraday trend when price holds above/below VWAP and short EMAs are "
+                "stacked. Look for an expansion out of the afternoon range with rising ADX."
+            ),
+            triggers=[
+                "Time window: 3–4pm ET (Power Hour)",
+                "Price holds above (long) or below (short) session VWAP",
+                "EMA(9) > EMA(20) > EMA(50) for long; reversed for short",
+                "ADX(14) rising and > 18",
+            ],
+            options_rules={
+                "dte_range": [0, 2],
+                "delta_range": [0.45, 0.65],
+                "max_spread_pct": 0.05,
+                "min_open_interest": 500,
+                "min_volume": 250,
+            },
+            stops_tp=(
+                "Stop under/over the afternoon range or last swing. Initial target 0.8–1.2× ATR, "
+                "secondary target at session high/low or prior day high/low if within reach."
+            ),
+            win_rate_target=0.57,
+        )
+    )
+
     strategies.append(
         Strategy(
             id="vwap_avwap",
@@ -110,6 +142,65 @@ def load_strategies() -> List[Strategy]:
                 "1.0–1.5× ATR.  Scale 50% at 1× ATR and trail the rest."
             ),
             win_rate_target=0.56,
+        )
+    )
+
+    # Gap Fill at Market Open
+    strategies.append(
+        Strategy(
+            id="gap_fill_open",
+            name="Gap Fill at Open",
+            category="scalp",
+            description=(
+                "In the first 15–30 minutes after the open, play toward prior close when an overnight "
+                "gap fails to hold. Look for a move back into the prior day’s range, VWAP cross, and "
+                "volume confirmation."
+            ),
+            triggers=[
+                "Time window: 9:30–10:00 ET",
+                "Overnight gap ≥ 0.3–0.5× ATR(14) or ≥ 0.3%",
+                "Reversion flow toward prior close; VWAP cross in the fill direction",
+            ],
+            options_rules={
+                "dte_range": [0, 2],
+                "delta_range": [0.45, 0.65],
+                "max_spread_pct": 0.06,
+                "min_open_interest": 300,
+                "min_volume": 200,
+            },
+            stops_tp=(
+                "Stop beyond the morning swing/OR boundary against the fill. Targets: prior close, then prior day VWAP or range midpoint."
+            ),
+            win_rate_target=0.55,
+        )
+    )
+
+    # Midday mean reversion when trend is weak
+    strategies.append(
+        Strategy(
+            id="midday_mean_revert",
+            name="Midday VWAP Mean Reversion",
+            category="intraday",
+            description=(
+                "During the midday chop (≈11:30–14:00 ET), fade extensions away from VWAP when trend "
+                "strength (ADX) is weak and ranges compress."
+            ),
+            triggers=[
+                "Time window: ≈11:30–14:00 ET",
+                "ADX(14) < 15 and contracting",
+                "Price stretches > 0.6× ATR from VWAP and stalls",
+            ],
+            options_rules={
+                "dte_range": [0, 2],
+                "delta_range": [0.35, 0.55],
+                "max_spread_pct": 0.06,
+                "min_open_interest": 300,
+                "min_volume": 200,
+            },
+            stops_tp=(
+                "Stop beyond the extension swing; target VWAP, then opposite band if range persists."
+            ),
+            win_rate_target=0.53,
         )
     )
 
