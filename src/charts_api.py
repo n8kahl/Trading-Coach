@@ -356,11 +356,19 @@ def chart_html(
           }});
           candleSeries.setData(payload.candles);
 
+          chart.priceScale('right').applyOptions({{
+            scaleMargins: {{ top: 0.1, bottom: 0.3 }},
+          }});
+
           const volumeSeries = chart.addHistogramSeries({{
-            priceScaleId: '',
+            priceScaleId: 'volume',
             priceFormat: {{ type: 'volume' }},
             priceLineVisible: false,
+            lastValueVisible: false,
+          }});
+          chart.priceScale('volume').applyOptions({{
             scaleMargins: {{ top: 0.8, bottom: 0 }},
+            visible: false,
           }});
           volumeSeries.setData(payload.volume);
 
