@@ -5,5 +5,5 @@ nixPkgs = ["nodejs_20", "python312", "gcc"]
 [phases.build]
 # Build the React front‑end (if present) into frontend_dist/
 cmds = [
-  "if [ -d web ]; then npm --prefix web ci && npm --prefix web run build; fi"
+  "if [ -d web ]; then if [ -f web/package-lock.json ]; then npm --prefix web ci; else npm --prefix web install; fi && npm --prefix web run build; fi"
 ]
