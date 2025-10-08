@@ -1,5 +1,7 @@
 # Trading Coach GPT Backend
 
+A quick note: latest deploy refresh triggered on 2025-10-08 15:15 UTC.
+
 A lightweight FastAPI service that exposes trading utilities for consumption by a custom GPT (via Actions).  
 It keeps the quantitative bits—market scanning, ATR-based trade management, watchlists, and journaling—while stripping out the legacy ChatKit UI and OpenAI Agents runtime.
 
