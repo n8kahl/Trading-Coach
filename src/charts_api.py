@@ -152,6 +152,10 @@ def chart_html(
     ema: Optional[str] = "9,21",
     title: Optional[str] = None,
     lookback: int = Query(300, ge=50, le=MAX_LOOKBACK),
+    direction: Optional[str] = Query(None),
+    strategy: Optional[str] = Query(None),
+    atr: Optional[float] = Query(None),
+    risk_reward: Optional[float] = Query(None),
 ) -> HTMLResponse:
     try:
         interval_normalized = normalize_interval(interval)
@@ -215,6 +219,16 @@ def chart_html(
         if val is not None:
             levels.append({"value": val, "label": f"TP{idx+1}", "color": "#2ecc71"})
 
+    plan_info = {
+        "entry": entry_val,
+        "stop": stop_val,
+        "tps": tp_vals,
+        "direction": (direction or "").lower() or None,
+        "strategy": strategy,
+        "atr": float(atr) if atr is not None else None,
+        "risk_reward": float(risk_reward) if risk_reward is not None else None,
+    }
+
     payload = {
         "symbol": symbol.upper(),
         "candles": candles,
@@ -223,6 +237,7 @@ def chart_html(
         "levels": levels,
         "title": title or f"{symbol.upper()} {interval_normalized}",
         "interval": interval_normalized,
+        "plan": plan_info,
     }
 
     safe_title = html.escape(payload["title"])
@@ -268,6 +283,27 @@ def chart_html(
         margin: 4px 0;
         font-size: 13px;
         opacity: 0.85;
+      }}
+      .legend .plan-grid {{
+        margin-top: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 12px;
+      }}
+      .legend .plan-grid span {{
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+      }}
+      .legend .plan-grid .label {{
+        opacity: 0.7;
+        font-weight: 600;
+      }}
+      .badge-group {{
+        margin-top: 10px;
+        display: flex;
+        flex-wrap: wrap;
       }}
       .badge {{
         display: inline-block;
@@ -375,36 +411,79 @@ def chart_html(
           const emaColors = ['#f39c12', '#00bcd4', '#9b59b6', '#cddc39', '#ff6f61'];
           Object.entries(payload.ema_series || {{}}).forEach(([span, data], idx) => {{
             if (!data.length) return;
+            const color = emaColors[idx % emaColors.length];
             const line = chart.addLineSeries({{
-              color: emaColors[idx % emaColors.length],
+              color,
               lineWidth: 2,
               priceLineVisible: false,
             }});
             line.setData(data);
+            line.applyOptions({{
+              lastValueVisible: true,
+              priceLineVisible: true,
+              priceLineColor: color,
+              priceLineWidth: 1,
+            }});
+            const lastPoint = data[data.length - 1];
+            if (lastPoint) {{
+              line.createPriceLine({{
+                price: lastPoint.value,
+                color,
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                axisLabelVisible: true,
+                title: `EMA${{span}}`,
+              }});
+            }}
           }});
 
-          const firstTime = payload.candles[0]?.time;
-          const lastTime = payload.candles[payload.candles.length - 1]?.time;
           (payload.levels || []).forEach(level => {{
-            if (firstTime == null || lastTime == null) return;
-            const line = chart.addLineSeries({{
+            candleSeries.createPriceLine({{
+              price: level.value,
               color: level.color,
               lineWidth: 2,
-              lastValueVisible: true,
+              lineStyle: LightweightCharts.LineStyle.Solid,
+              axisLabelVisible: true,
+              title: level.label,
             }});
-            line.setData([
-              {{ time: firstTime, value: level.value }},
-              {{ time: lastTime, value: level.value }},
-            ]);
           }});
 
           chart.timeScale().fitContent();
 
           const legend = document.getElementById('legend');
+          const plan = payload.plan || {{}};
+          const formatPrice = value => (typeof value === 'number' && isFinite(value) ? value.toFixed(2) : '—');
+          const planRows = [];
+          if (typeof plan.entry === 'number') planRows.push(['Entry', formatPrice(plan.entry)]);
+          if (typeof plan.stop === 'number') planRows.push(['Stop', formatPrice(plan.stop)]);
+          (plan.tps || []).forEach((val, idx) => {{
+            if (typeof val === 'number' && isFinite(val)) {{
+              planRows.push([`TP${{idx + 1}}`, formatPrice(val)]);
+            }}
+          }});
+          if (typeof plan.atr === 'number' && isFinite(plan.atr)) {{
+            planRows.push(['ATR(14)', Number(plan.atr).toFixed(2)]);
+          }}
+          if (typeof plan.risk_reward === 'number' && isFinite(plan.risk_reward)) {{
+            planRows.push(['R:R', Number(plan.risk_reward).toFixed(2)]);
+          }}
+          const strategyLabel = [plan.direction, plan.strategy]
+            .filter(Boolean)
+            .map(token => String(token).toUpperCase())
+            .join(' · ');
+          const levelBadges = (payload.levels || []).map(level => `
+            <span class="badge" style="background:${{level.color}}22;color:${{level.color}}">${{level.label}}</span>
+          `).join('');
+          const indicatorBadges = Object.keys(payload.ema_series || {{}}).map(span => `
+            <span class="badge">EMA${{span}}</span>
+          `).join('');
           legend.innerHTML = `
             <h1>${{payload.symbol}} · ${{payload.interval.toUpperCase()}}</h1>
-            ${{(payload.levels || []).map(level => `<span class="badge" style="background: ${{level.color}}33">${{level.label}}: ${{level.value.toFixed(2)}}</span>`).join('')}}
-            ${{(Object.keys(payload.ema_series || {{}})).map(span => `<span class="badge">EMA${{span}}</span>`).join('')}}
+            ${{strategyLabel ? `<p>${{strategyLabel}}</p>` : ''}}
+            ${{planRows.length ? `<div class="plan-grid">${{planRows.map(([label, value]) => `<span><strong class="label">${{label}}</strong><span>${{value}}</span></span>`).join('')}}</div>` : ''}}
+            <div class="badge-group">
+              ${{levelBadges}}${{indicatorBadges}}
+            </div>
           `;
         }}
       }}

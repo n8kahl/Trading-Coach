@@ -513,6 +513,12 @@ async def gpt_scan(
             emas=ema_spans,
             interval=interval,
             title=title,
+            renderer_params={
+                "direction": direction,
+                "strategy": signal.strategy_id,
+                "atr": f"{atr_value:.2f}",
+                "risk_reward": f"{risk_reward:.2f}",
+            },
         )
         payload.append(
             {
