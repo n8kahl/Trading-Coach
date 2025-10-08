@@ -25,7 +25,7 @@ from .config import get_settings
 from .calculations import atr
 from .charts_api import build_chart_url, router as charts_router
 from .scanner import scan_market
-from .tradier import select_tradier_contract
+from .tradier import TradierNotConfiguredError, select_tradier_contract
 
 
 logger = logging.getLogger(__name__)
@@ -368,7 +368,7 @@ def _plan_trade_levels(
     direction: str,
     atr_hint: float | None,
     key_levels: Dict[str, float],
-) -> tuple[float, float, float, float, float]:
+) -> tuple[float, float, float, float, float, float]:
     """Compute stop/target that respect ATR and structural levels."""
     atr_series = atr(history["high"], history["low"], history["close"], period=14)
     atr_value = float(atr_hint or 0.0)
@@ -416,7 +416,16 @@ def _plan_trade_levels(
     reward = abs(target - entry)
     risk_reward = reward / risk if risk else 0.0
 
-    return entry, stop, target, atr_value, risk_reward
+    if direction == "long":
+        target_secondary = target + max(atr_value * 1.2, risk if risk else atr_value)
+        if target_secondary <= target:
+            target_secondary = target + atr_value
+    else:
+        target_secondary = target - max(atr_value * 1.2, risk if risk else atr_value)
+        if target_secondary >= target:
+            target_secondary = target - atr_value
+
+    return entry, stop, target, target_secondary, atr_value, risk_reward
 # Strategy utilities ---------------------------------------------------------
 
 def _direction_for_strategy(strategy_id: str) -> str:
@@ -547,7 +556,7 @@ async def gpt_scan(
         entry_price = float(latest_row["close"])
         key_levels = _extract_key_levels(history)
         direction = _direction_for_strategy(signal.strategy_id)
-        entry, stop, target, atr_value, risk_reward = _plan_trade_levels(
+        entry, stop, target, target_secondary, atr_value, risk_reward = _plan_trade_levels(
             history, entry_price, direction, signal.features.get("atr"), key_levels
         )
         indicators = _indicators_for_strategy(signal.strategy_id)
@@ -570,7 +579,7 @@ async def gpt_scan(
             signal.symbol.upper(),
             entry=entry,
             stop=stop,
-            tps=[target],
+            tps=[target, target_secondary],
             emas=ema_spans,
             interval=interval,
             title=title,
@@ -591,12 +600,13 @@ async def gpt_scan(
                 "score": signal.score,
                 "contract_suggestion": contract_suggestions.get(signal.symbol),
                 "direction": direction,
-                "levels": {
-                    "entry": round(entry, 2),
-                    "stop": round(stop, 2),
-                    "target": round(target, 2),
-                    "risk_reward": round(risk_reward, 2),
-                },
+        "levels": {
+            "entry": round(entry, 2),
+            "stop": round(stop, 2),
+            "target": round(target, 2),
+            "target_secondary": round(target_secondary, 2),
+            "risk_reward": round(risk_reward, 2),
+        },
                 "key_levels": key_levels,
                 "charts": {
                     "interactive": interactive_url,
