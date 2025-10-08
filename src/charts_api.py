@@ -237,6 +237,9 @@ def chart_html(
       :root {{
         color-scheme: dark;
       }}
+      html, body {{
+        height: 100%;
+      }}
       body {{
         margin: 0;
         background: #0b0f14;
@@ -276,12 +279,34 @@ def chart_html(
         background: rgba(255, 255, 255, 0.08);
       }}
     </style>
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
   </head>
   <body>
     <div id="chart-container"></div>
     <div class="legend" id="legend"></div>
     <script>
+      window.addEventListener('error', (event) => {{
+        const existing = document.querySelector('.chart-error');
+        if (existing) return;
+        const div = document.createElement('div');
+        div.className = 'chart-error';
+        Object.assign(div.style, {{
+          position: 'fixed',
+          bottom: '16px',
+          right: '16px',
+          background: 'rgba(239, 68, 68, 0.92)',
+          color: '#fff',
+          padding: '10px 14px',
+          borderRadius: '8px',
+          fontFamily: 'monospace',
+          fontSize: '12px',
+          maxWidth: '320px',
+          zIndex: '1000',
+        }});
+        div.textContent = 'Chart error: ' + (event?.message || 'Unknown');
+        document.body.appendChild(div);
+      }}, {{ once: true }});
+
       const payload = {json.dumps(payload)};
       if (!window.LightweightCharts) {{
         document.body.innerHTML = '<p style="padding:16px;color:#f87171">Failed to load chart library.</p>';
@@ -310,6 +335,11 @@ def chart_html(
           }},
           crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
         }});
+
+        if (!payload.candles.length) {{
+          container.innerHTML = '<p style="padding:16px;color:#f97316;font-family:monospace;">No candle data available.</p>';
+          return;
+        }}
 
         const resize = () => {{
           const width = container.clientWidth || window.innerWidth || initialWidth;
