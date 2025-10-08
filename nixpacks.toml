@@ -3,7 +3,23 @@
 nixPkgs = ["nodejs_20", "python312", "gcc"]
 
 [phases.build]
-# Build the React front‑end (if present) into frontend_dist/
+# Build the React front-end (if present) into frontend_dist/
+# Use npm ci when a lockfile exists; otherwise fall back to npm install
+commands = [
+  "if [ -d web ]; then \
+     if [ -f web/package-lock.json ] || [ -f web/npm-shrinkwrap.json ]; then \
+       npm --prefix web ci; \
+     else \
+       npm --prefix web install; \
+     fi && npm --prefix web run build && rm -rf frontend_dist && cp -R web/dist frontend_dist; \
+   fi"
+]
 cmds = [
-  "if [ -d web ]; then if [ -f web/package-lock.json ]; then npm --prefix web ci; else npm --prefix web install; fi && npm --prefix web run build; fi"
+  "if [ -d web ]; then \
+     if [ -f web/package-lock.json ] || [ -f web/npm-shrinkwrap.json ]; then \
+       npm --prefix web ci; \
+     else \
+       npm --prefix web install; \
+     fi && npm --prefix web run build && rm -rf frontend_dist && cp -R web/dist frontend_dist; \
+   fi"
 ]
