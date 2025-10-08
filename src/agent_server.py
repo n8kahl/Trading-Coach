@@ -96,30 +96,34 @@ async def require_api_key(
 ) -> AuthedUser:
     """Validate Bearer API key and extract the caller's user id.
 
-    - Expects `Authorization: Bearer <BACKEND_API_KEY>`
-    - Requires `X-User-Id` for per-user scoping (replace with OAuth in prod)
+    When BACKEND_API_KEY is configured we enforce it; otherwise we operate in
+    development mode and allow unauthenticated access (useful for quick GPT
+    prototyping on Railway).
+
+    - If BACKEND_API_KEY is set, expect `Authorization: Bearer <BACKEND_API_KEY>`
+      and optionally `X-User-Id` for per-user scoping.
+    - If BACKEND_API_KEY is missing, allow the request and derive a user id from
+      `X-User-Id` (defaulting to "anonymous").
     """
     settings = get_settings()
     expected = settings.backend_api_key
-    if not expected:
-        # If not configured, fail closed so Actions must be configured properly
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="BACKEND_API_KEY not configured",
-        )
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
-    token = authorization.split(" ", 1)[1]
-    if token != expected:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token")
-    if not x_user_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing X-User-Id header")
-    return AuthedUser(user_id=x_user_id)
+    if expected:
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+        token = authorization.split(" ", 1)[1]
+        if token != expected:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token")
+        user_id = x_user_id or "anonymous"
+        return AuthedUser(user_id=user_id)
+
+    # No backend API key configured: fall back to permissive mode.
+    user_id = x_user_id or "anonymous"
+    return AuthedUser(user_id=user_id)
 
 
 # ---- GPT facade router ------------------------------------------------------
 
-gpt = APIRouter(prefix="/gpt", tags=["gpt"], dependencies=[Depends(require_api_key)])
+gpt = APIRouter(prefix="/gpt", tags=["gpt"])
 
 
 class GPTScanRequest(BaseModel):
@@ -176,6 +180,11 @@ async def gpt_scan(req: GPTScanRequest, user: AuthedUser = Depends(require_api_k
             }
         )
     return items
+
+
+@gpt.get("/health")
+async def gpt_health(user: AuthedUser = Depends(require_api_key)) -> Dict[str, str]:
+    return {"status": "ok"}
 
 
 class GPTFollowRequest(BaseModel):
