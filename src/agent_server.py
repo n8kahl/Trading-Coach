@@ -429,6 +429,12 @@ def _timeframe_for_style(style: str | None) -> str:
     return mapping.get(normalized, "5m")
 
 
+def _view_for_style(style: str | None) -> str:
+    normalized = _normalize_style(style) or ""
+    mapping = {"scalp": "30m", "intraday": "1d", "swing": "5d", "leap": "fit"}
+    return mapping.get(normalized, "fit")
+
+
 # ---------------------------------------------------------------------------
 # GPT router
 # ---------------------------------------------------------------------------
@@ -519,6 +525,7 @@ async def gpt_scan(
                 "atr": f"{atr_value:.2f}",
                 "risk_reward": f"{risk_reward:.2f}",
             },
+            view=_view_for_style(style),
         )
         payload.append(
             {

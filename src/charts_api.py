@@ -156,6 +156,7 @@ def chart_html(
     strategy: Optional[str] = Query(None),
     atr: Optional[float] = Query(None),
     risk_reward: Optional[float] = Query(None),
+    view: Optional[str] = Query("fit"),
 ) -> HTMLResponse:
     try:
         interval_normalized = normalize_interval(interval)
@@ -242,6 +243,7 @@ def chart_html(
         "title": title or f"{symbol.upper()} {interval_normalized}",
         "interval": interval_normalized,
         "plan": plan_info,
+        "view": (view or "fit").lower(),
     }
 
     safe_title = html.escape(payload["title"])
@@ -264,11 +266,12 @@ def chart_html(
         background: #0b0f14;
         color: #e6edf3;
         font-family: 'Inter', 'Segoe UI', sans-serif;
+        position: relative;
+        overflow: hidden;
       }}
       #chart-container {{
-        position: relative;
-        height: 100vh;
-        width: 100vw;
+        position: absolute;
+        inset: 0;
       }}
       .legend {{
         position: absolute;
@@ -278,6 +281,8 @@ def chart_html(
         padding: 14px 16px;
         border-radius: 12px;
         box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+        z-index: 20;
+        max-width: min(320px, 30vw);
       }}
       .legend h1 {{
         margin: 0 0 8px;
@@ -318,12 +323,39 @@ def chart_html(
         margin-top: 4px;
         background: rgba(255, 255, 255, 0.08);
       }}
+      #chart-toolbar {{
+        position: absolute;
+        top: 16px;
+        right: 16px;
+        display: flex;
+        gap: 8px;
+        z-index: 20;
+      }}
+      #chart-toolbar button {{
+        background: rgba(15, 23, 42, 0.85);
+        color: #e6edf3;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        border-radius: 999px;
+        padding: 6px 12px;
+        font-size: 12px;
+        cursor: pointer;
+        transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+      }}
+      #chart-toolbar button:hover {{
+        background: rgba(37, 99, 235, 0.6);
+      }}
+      #chart-toolbar button.active {{
+        background: rgba(59, 130, 246, 0.9);
+        border-color: rgba(191, 219, 254, 0.9);
+        color: #fff;
+      }}
     </style>
     <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
   </head>
   <body>
     <div id="chart-container"></div>
     <div class="legend" id="legend"></div>
+    <div id="chart-toolbar"></div>
     <script>
       window.addEventListener('error', (event) => {{
         const existing = document.querySelector('.chart-error');
@@ -417,6 +449,138 @@ def chart_html(
             visible: false,
           }});
           volumeSeries.setData(payload.volume);
+
+          const firstTime = payload.candles[0]?.time;
+          const lastTime = payload.candles[payload.candles.length - 1]?.time ?? firstTime;
+          const totalBars = payload.candles.length;
+
+          if (priceValues.length && firstTime != null && lastTime != null) {{
+            const minPrice = Math.min(...priceValues);
+            const maxPrice = Math.max(...priceValues);
+            const padding = (maxPrice - minPrice) * 0.05 || 1.0;
+            const phantom = chart.addLineSeries({{
+              color: 'rgba(0,0,0,0)',
+              lineWidth: 0,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              crosshairMarkerVisible: false,
+            }});
+            phantom.setData([
+              {{ time: firstTime, value: minPrice - padding }},
+              {{ time: lastTime, value: maxPrice + padding }},
+            ]);
+          }}
+
+          const toolbar = document.getElementById('chart-toolbar');
+          const VIEW_PRESETS = [
+            {{ key: '30m', label: '30m', seconds: 30 * 60 }},
+            {{ key: '1h', label: '1H', seconds: 60 * 60 }},
+            {{ key: '4h', label: '4H', seconds: 4 * 60 * 60 }},
+            {{ key: '1d', label: '1D', seconds: 24 * 60 * 60 }},
+            {{ key: '5d', label: '5D', seconds: 5 * 24 * 60 * 60 }},
+            {{ key: 'fit', label: 'All', type: 'fit' }},
+          ];
+          const VIEW_MAP = Object.fromEntries(VIEW_PRESETS.map(preset => [preset.key, preset]));
+          const viewButtons = [];
+
+          const setActiveButton = key => {{
+            viewButtons.forEach(button => {{
+              button.classList.toggle('active', button.dataset.key === key);
+            }});
+          }};
+
+          const resolveView = token => {{
+            const normalized = (token || '').trim().toLowerCase();
+            if (!normalized) return {{ ...VIEW_MAP.fit, key: 'fit', baseKey: 'fit' }};
+            if (VIEW_MAP[normalized]) return {{ ...VIEW_MAP[normalized], key: normalized, baseKey: normalized }};
+            if (['fit', 'all', 'auto', 'full'].includes(normalized)) {{
+              return {{ ...VIEW_MAP.fit, key: normalized, baseKey: 'fit' }};
+            }}
+            let match = normalized.match(/^bars:(\d+)$/);
+            if (match) {{
+              const bars = Math.max(1, parseInt(match[1], 10));
+              return {{ key: `bars:${{bars}}`, bars, baseKey: null }};
+            }}
+            match = normalized.match(/^(\d+)([smhd])$/);
+            if (match) {{
+              const value = parseInt(match[1], 10);
+              const unit = match[2];
+              const factor = unit === 's' ? 1 : unit === 'm' ? 60 : unit === 'h' ? 3600 : 86400;
+              return {{ key: normalized, seconds: value * factor, baseKey: null }};
+            }}
+            match = normalized.match(/^seconds:(\d+)$/);
+            if (match) {{
+              return {{ key: normalized, seconds: parseInt(match[1], 10), baseKey: null }};
+            }}
+            match = normalized.match(/^minutes:(\d+)$/);
+            if (match) {{
+              return {{ key: normalized, seconds: parseInt(match[1], 10) * 60, baseKey: null }};
+            }}
+            match = normalized.match(/^hours:(\d+)$/);
+            if (match) {{
+              return {{ key: normalized, seconds: parseInt(match[1], 10) * 3600, baseKey: null }};
+            }}
+            match = normalized.match(/^days:(\d+)$/);
+            if (match) {{
+              return {{ key: normalized, seconds: parseInt(match[1], 10) * 86400, baseKey: null }};
+            }}
+            return {{ ...VIEW_MAP.fit, key: 'fit', baseKey: 'fit' }};
+          }};
+
+          const applyView = token => {{
+            const preset = resolveView(token);
+            if (!preset) return;
+            if (preset.baseKey) {{
+              setActiveButton(preset.baseKey);
+            }} else {{
+              setActiveButton(null);
+            }}
+
+            if (preset.type === 'fit' || !lastTime || !isFinite(lastTime)) {{
+              chart.timeScale().fitContent();
+              return;
+            }}
+
+            if (preset.seconds && preset.seconds > 0) {{
+              const from = Math.max(firstTime ?? lastTime - preset.seconds, lastTime - preset.seconds);
+              const to = lastTime;
+              chart.timeScale().setVisibleRange({{ from, to }});
+              return;
+            }}
+
+            if (preset.bars && totalBars > 0) {{
+              const lastIndex = totalBars - 1;
+              const fromIndex = Math.max(0, lastIndex - preset.bars + 1);
+              chart.timeScale().setVisibleLogicalRange({{
+                from: fromIndex - 0.5,
+                to: lastIndex + 0.1,
+              }});
+              return;
+            }}
+
+            chart.timeScale().fitContent();
+          }};
+
+          if (toolbar) {{
+            VIEW_PRESETS.forEach(preset => {{
+              const button = document.createElement('button');
+              button.type = 'button';
+              button.dataset.key = preset.key;
+              button.textContent = preset.label;
+              button.addEventListener('click', () => applyView(preset.key));
+              toolbar.appendChild(button);
+              viewButtons.push(button);
+            }});
+          }}
+
+          const initialView = payload.view || 'fit';
+          applyView(initialView);
+
+          const observerTarget = document.body || container;
+          if (window.ResizeObserver && observerTarget) {{
+            const resizeObserver = new ResizeObserver(() => resize());
+            resizeObserver.observe(observerTarget);
+          }}
 
           if (priceValues.length) {{
             const phantom = chart.addLineSeries({{
@@ -644,6 +808,7 @@ def build_chart_url(
     title: Optional[str] = None,
     renderer_params: Optional[Dict[str, str]] = None,
     lookback: Optional[int] = None,
+    view: Optional[str] = None,
 ) -> str:
     """Construct a URL for the chart endpoints with proper encoding."""
 
@@ -668,6 +833,8 @@ def build_chart_url(
         params["title"] = title
     if lookback:
         params["lookback"] = str(int(lookback))
+    if view:
+        params["view"] = view
     if renderer_params:
         params.update(renderer_params)
 
