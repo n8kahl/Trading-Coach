@@ -40,7 +40,7 @@ INTERVAL_ALIASES = {
     "day": "d",
     "daily": "d",
 }
-MAX_LOOKBACK = 360
+MAX_LOOKBACK = 1200
 MAX_TPS = 5
 MAX_EMAS = 5
 
@@ -61,17 +61,33 @@ def normalize_interval(interval: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _polygon_range_params(interval: str, lookback: int) -> tuple[int, str, int]:
-    """Return multiplier, timespan, and lookback days for the Polygon aggs API."""
+def _polygon_range_params(interval: str, lookback: int, session_padding: int = 2) -> tuple[int, str, pd.Timestamp, pd.Timestamp]:
+    """Calculate Polygon aggs request parameters covering the desired lookback.
+
+    Returns multiplier, timespan, start timestamp, end timestamp.
+    """
+    interval = interval.lower()
     if interval == "d":
-        return 1, "day", max(lookback + 5, 7)
-    if interval.endswith("h"):
-        hours = int(interval.rstrip("h"))
-        return hours, "hour", max(math.ceil((lookback * hours) / 12), 3)
-    if interval.endswith("m"):
-        minutes = int(interval.rstrip("m"))
-        return minutes, "minute", max(math.ceil((lookback * minutes) / (60 * 4)), 2)
-    raise ValueError(f"Unsupported interval '{interval}' for Polygon aggregation.")
+        multiplier, timespan = 1, "day"
+        days_back = max(lookback + session_padding, 10)
+    elif interval.endswith("h"):
+        hours = max(int(interval.rstrip("h")), 1)
+        multiplier, timespan = hours, "hour"
+        total_hours = lookback * hours
+        days_back = max(math.ceil(total_hours / 12) + session_padding, 5)
+    elif interval.endswith("m"):
+        minutes = max(int(interval.rstrip("m")), 1)
+        multiplier, timespan = minutes, "minute"
+        total_minutes = lookback * minutes
+        # cover at least `lookback` bars plus two extra days to handle gaps
+        days_back = max(math.ceil(total_minutes / (60 * 6)) + session_padding, 3)
+    else:
+        raise ValueError(f"Unsupported interval '{interval}' for Polygon aggregation.")
+
+    now = pd.Timestamp.utcnow()
+    end = now + pd.Timedelta(minutes=multiplier)
+    start = now - pd.Timedelta(days=days_back)
+    return multiplier, timespan, start.normalize(), end.normalize() + pd.Timedelta(days=1)
 
 
 def _fetch_polygon_candles(symbol: str, interval: str, lookback: int) -> pd.DataFrame | None:
@@ -81,14 +97,12 @@ def _fetch_polygon_candles(symbol: str, interval: str, lookback: int) -> pd.Data
     if not api_key:
         return None
 
-    multiplier, timespan, days_back = _polygon_range_params(interval, lookback)
-    end = pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)
-    start = (pd.Timestamp.utcnow() - pd.Timedelta(days=days_back)).normalize()
+    multiplier, timespan, start, end = _polygon_range_params(interval, lookback)
     url = f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{start.date()}/{end.date()}"
     params = {
         "adjusted": "true",
-        "sort": "asc",
-        "limit": max(lookback * 2, 500),
+        "sort": "desc",
+        "limit": max(lookback, 500),
         "apiKey": api_key,
     }
     try:
@@ -109,6 +123,7 @@ def _fetch_polygon_candles(symbol: str, interval: str, lookback: int) -> pd.Data
     frame = frame.rename(columns={"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
     frame = frame.set_index("timestamp").sort_index()
+    frame = frame.tail(lookback)
     return frame
 
 
@@ -160,13 +175,29 @@ def _fetch_yahoo_candles(symbol: str, interval: str) -> pd.DataFrame | None:
     return frame
 
 
+def _is_stale(frame: pd.DataFrame, interval: str) -> bool:
+    """Return True if the latest candle timestamp is older than expected for the interval."""
+    if frame.empty:
+        return True
+    last_ts = frame.index[-1]
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.tz_localize("UTC")
+    else:
+        last_ts = last_ts.tz_convert("UTC")
+    now = pd.Timestamp.utcnow()
+    age = now - last_ts
+    if interval in {"1m", "5m", "15m", "1h"}:
+        return age > pd.Timedelta(hours=36)
+    return age > pd.Timedelta(days=10)
+
+
 def get_candles(symbol: str, interval: str, lookback: int = 300) -> pd.DataFrame:
     """Return live OHLCV candles sourced from Polygon.io or Yahoo Finance."""
     normalized = normalize_interval(interval)
     lookback = int(max(20, min(lookback, MAX_LOOKBACK)))
 
     frame = _fetch_polygon_candles(symbol, normalized, lookback)
-    if frame is None:
+    if frame is None or _is_stale(frame, normalized):
         frame = _fetch_yahoo_candles(symbol, normalized)
     if frame is None or frame.empty:
         raise HTTPException(status_code=502, detail=f"No market data available for {symbol.upper()} ({normalized}).")

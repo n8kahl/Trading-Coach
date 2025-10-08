@@ -10,6 +10,7 @@ workflow.
 from __future__ import annotations
 
 import asyncio
+import math
 import logging
 from typing import Any, Dict, List
 
@@ -126,21 +127,30 @@ async def _fetch_polygon_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | No
 
     tf = (timeframe or "5").upper()
     if tf == "D":
-        multiplier, timespan, days_back = 1, "day", 60
+        multiplier, timespan = 1, "day"
+        days_back = 120
     else:
         try:
             minutes = int(tf)
         except ValueError:
             minutes = 5
-        multiplier, timespan, days_back = minutes, "minute", 5
+        multiplier, timespan = minutes, "minute"
+        total_minutes = max(minutes * 500, minutes * 5)
+        days_back = max(math.ceil(total_minutes / (60 * 6)) + 2, 5)
 
-    now = pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)
-    start = (pd.Timestamp.utcnow() - pd.Timedelta(days=days_back)).normalize()
-    frm = start.date().isoformat()
-    to = now.date().isoformat()
+    now = pd.Timestamp.utcnow()
+    end = now + pd.Timedelta(minutes=multiplier)
+    start = now - pd.Timedelta(days=days_back)
+    frm = start.normalize().date().isoformat()
+    to = (end.normalize() + pd.Timedelta(days=1)).date().isoformat()
 
     url = f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{frm}/{to}"
-    params = {"adjusted": "true", "sort": "asc", "limit": 50000, "apiKey": api_key}
+    params = {
+        "adjusted": "true",
+        "sort": "desc",
+        "limit": 5000,
+        "apiKey": api_key,
+    }
     timeout = httpx.Timeout(8.0, connect=4.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
@@ -160,16 +170,36 @@ async def _fetch_polygon_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | No
         columns={"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
     )
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
-    frame = frame.set_index("timestamp")
+    frame = frame.set_index("timestamp").sort_index()
     return frame.dropna()
+
+
+def _is_stale_frame(frame: pd.DataFrame, timeframe: str) -> bool:
+    if frame.empty:
+        return True
+    last_ts = frame.index[-1]
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.tz_localize("UTC")
+    else:
+        last_ts = last_ts.tz_convert("UTC")
+    now = pd.Timestamp.utcnow()
+    age = now - last_ts
+    tf = (timeframe or "5").lower()
+    if tf.isdigit():
+        return age > pd.Timedelta(hours=36)
+    if tf in {"d", "1d", "day"}:
+        return age > pd.Timedelta(days=10)
+    return age > pd.Timedelta(days=10)
 
 
 async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None:
     """Fetch recent OHLCV, preferring Polygon when available, else Yahoo Finance."""
     # Prefer Polygon
     poly = await _fetch_polygon_ohlcv(symbol, timeframe)
-    if poly is not None and not poly.empty:
+    if poly is not None and not poly.empty and not _is_stale_frame(poly, timeframe):
         return poly
+    if poly is not None and not poly.empty:
+        logger.warning("Polygon data is stale for %s; attempting Yahoo fallback.", symbol)
     tf = timeframe or "5"
     interval_map = {
         "1": ("1d", "1m"),
