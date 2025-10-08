@@ -86,9 +86,23 @@ uvicorn src.agent_server:app --reload --host 0.0.0.0 --port 8000
 
 Visit `http://localhost:8000/docs` for interactive Swagger documentation of the API.  You can test the `/api/chatkit/session` endpoint here and verify that a `client_secret` is returned.
 
-### 4. Open the frontend demo
+### 4. Frontend (bundled ChatKit React)
 
-Serve the UI (for example `cd frontend && python -m http.server 8080`) and open `http://localhost:8080`.  The page mirrors ChatGPT: the `<openai-chatkit>` component renders the full conversation UI as soon as the backend returns a valid `client_secret`, and the “Insights & Actions” dock remains empty until the assistant emits JSON payloads such as `{ "widget": { ... } }`.  Extend `frontend/chatkit.js` if you want to introduce new widget card types or custom actions.
+We now ship a bundled React front‑end (Vite) that renders ChatKit without relying on public CDNs.
+
+Build locally:
+
+```bash
+# from repo root
+cd web
+npm ci
+npm run build   # outputs to ../frontend_dist/
+cd ..
+uvicorn src.agent_server:app --reload --host 0.0.0.0 --port 8000
+# open http://localhost:8000
+```
+
+On Railway, Nixpacks will run `npm ci && npm run build` if you add a root build step, or you can create a deploy hook to run `npm --prefix web ci && npm --prefix web run build` before starting the Python process. The server prefers `frontend_dist/` (bundled app) and falls back to `frontend/` if the bundle isn’t present.
 
 ## Implementation overview
 

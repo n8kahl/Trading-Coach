@@ -18,6 +18,7 @@ from typing import List, Dict, Any
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from pydantic import BaseModel
 
 import pandas as pd
@@ -280,4 +281,8 @@ async def chatkit_js_proxy() -> Response:
 
 # Mount static frontend last so API routes take precedence and POSTs to /api/*
 # are not intercepted by the static handler (which would return 405).
-app.mount("/", StaticFiles(directory="frontend", html=True), name="static")
+# Prefer the built React app in `frontend_dist/` if present, otherwise fall back
+# to the legacy static demo in `frontend/`.
+dist_dir = Path("frontend_dist")
+static_root = "frontend_dist" if dist_dir.is_dir() else "frontend"
+app.mount("/", StaticFiles(directory=static_root, html=True), name="static")
