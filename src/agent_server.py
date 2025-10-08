@@ -25,7 +25,7 @@ from .config import get_settings
 from .calculations import atr
 from .charts_api import build_chart_url, router as charts_router
 from .scanner import scan_market
-from .tradier import TradierNotConfiguredError, select_tradier_contract
+from .tradier import TradierNotConfiguredError, fetch_option_chain, select_tradier_contract
 
 
 logger = logging.getLogger(__name__)
@@ -489,18 +489,19 @@ async def gpt_health(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]
         if not settings.tradier_token:
             return {"status": "missing"}
         try:
-            snapshot = await select_tradier_contract("SPY")
+            chain = await fetch_option_chain("SPY")
         except TradierNotConfiguredError:
             return {"status": "missing"}
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Tradier health check failed: %s", exc)
             return {"status": "error", "error": str(exc)}
-        if not snapshot:
+        if chain is None or chain.empty:
             return {"status": "unavailable"}
+        sample = chain.iloc[0].to_dict()
         return {
             "status": "ok",
-            "symbol": snapshot.get("symbol"),
-            "expiration": snapshot.get("expiration"),
+            "symbol": sample.get("symbol"),
+            "expiration": sample.get("expiration_date"),
         }
 
     polygon_status, tradier_status = await asyncio.gather(_check_polygon(), _check_tradier())
