@@ -40,7 +40,7 @@ INTERVAL_ALIASES = {
     "day": "d",
     "daily": "d",
 }
-MAX_LOOKBACK = 1200
+MAX_LOOKBACK = 2400
 MAX_TPS = 5
 MAX_EMAS = 5
 
@@ -262,7 +262,7 @@ def chart_html(
     tp2: Optional[str] = None,
     ema: Optional[str] = "9,21",
     title: Optional[str] = None,
-    lookback: int = Query(300, ge=50, le=MAX_LOOKBACK),
+    lookback: int = Query(600, ge=50, le=MAX_LOOKBACK),
     direction: Optional[str] = Query(None),
     strategy: Optional[str] = Query(None),
     atr: Optional[float] = Query(None),
@@ -590,7 +590,7 @@ def chart_html(
             }});
             if (!vwapPoints.length) return;
             const vwapSeries = chart.addLineSeries({{
-              color: '#f97316',
+              color: '#ffffff',
               lineWidth: 2,
               lineStyle: LightweightCharts.LineStyle.Solid,
               priceLineVisible: true,
@@ -601,7 +601,7 @@ def chart_html(
             if (lastVWAP) {{
               vwapSeries.createPriceLine({{
                 price: lastVWAP.value,
-                color: '#f97316',
+                color: '#ffffff',
                 lineWidth: 1,
                 axisLabelVisible: true,
                 title: 'VWAP',

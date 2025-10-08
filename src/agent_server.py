@@ -464,7 +464,7 @@ def _direction_for_strategy(strategy_id: str) -> str:
 def _indicators_for_strategy(strategy_id: str) -> List[str]:
     sid = strategy_id.lower()
     if "vwap" in sid:
-        return ["VWAP", "EMA20"]
+        return ["VWAP", "EMA9", "EMA20"]
     if "orb" in sid:
         return ["VWAP", "EMA9", "EMA20"]
     if "adx" in sid:
