@@ -114,23 +114,6 @@ def _normalize_style(style: str | None) -> str | None:
     return normalized
 
 
-def _synth_ohlcv(ticker: str, bars: int = 60) -> pd.DataFrame:
-    """Temporary data source until Polygon integration is wired up."""
-    idx = pd.date_range(end=pd.Timestamp.utcnow(), periods=bars, freq="T")
-    base = 100 + np.random.rand() * 25
-    prices = base + np.cumsum(np.random.randn(bars))
-    return pd.DataFrame(
-        {
-            "open": prices,
-            "high": prices + np.random.rand(bars),
-            "low": prices - np.random.rand(bars),
-            "close": prices,
-            "volume": np.random.randint(1_000, 5_000, size=bars),
-        },
-        index=idx,
-    )
-
-
 async def _fetch_polygon_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None:
     """Fetch OHLCV from Polygon if `POLYGON_API_KEY` is configured.
 
@@ -254,7 +237,7 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
 
 
 async def _collect_market_data(tickers: List[str], timeframe: str = "5") -> Dict[str, pd.DataFrame]:
-    """Fetch OHLCV for a list of tickers, falling back to synthetic data if needed."""
+    """Fetch OHLCV for a list of tickers from Polygon or Yahoo Finance."""
     tasks = [_load_remote_ohlcv(ticker, timeframe) for ticker in tickers]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     market_data: Dict[str, pd.DataFrame] = {}
@@ -266,7 +249,8 @@ async def _collect_market_data(tickers: List[str], timeframe: str = "5") -> Dict
         elif isinstance(result, pd.DataFrame) and not result.empty:
             frame = result
         if frame is None:
-            frame = _synth_ohlcv(ticker)
+            logger.warning("No market data available for %s", ticker)
+            continue
         market_data[ticker] = frame
 
     return market_data
@@ -459,8 +443,9 @@ async def gpt_scan(
     style_filter = _normalize_style(universe.style)
     data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}.get(style_filter, "5")
 
-    # TODO: replace with Polygon data fetch using settings.polygon_api_key.
     market_data = await _collect_market_data(universe.tickers, timeframe=data_timeframe)
+    if not market_data:
+        raise HTTPException(status_code=502, detail="No market data available for the requested tickers.")
     signals = await scan_market(universe.tickers, market_data)
 
     contract_suggestions: Dict[str, Dict[str, Any] | None] = {}

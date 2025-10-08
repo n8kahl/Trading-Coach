@@ -8,11 +8,14 @@ import math
 from typing import Dict, Iterable, List, Optional, Sequence
 from urllib.parse import urlencode
 
-import numpy as np
 import pandas as pd
+
+import httpx
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
+
+from .config import get_settings
 
 router = APIRouter(prefix="/charts", tags=["charts"])
 
@@ -58,27 +61,123 @@ def normalize_interval(interval: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _polygon_range_params(interval: str, lookback: int) -> tuple[int, str, int]:
+    """Return multiplier, timespan, and lookback days for the Polygon aggs API."""
+    if interval == "d":
+        return 1, "day", max(lookback + 5, 7)
+    if interval.endswith("h"):
+        hours = int(interval.rstrip("h"))
+        return hours, "hour", max(math.ceil((lookback * hours) / 12), 3)
+    if interval.endswith("m"):
+        minutes = int(interval.rstrip("m"))
+        return minutes, "minute", max(math.ceil((lookback * minutes) / (60 * 4)), 2)
+    raise ValueError(f"Unsupported interval '{interval}' for Polygon aggregation.")
+
+
+def _fetch_polygon_candles(symbol: str, interval: str, lookback: int) -> pd.DataFrame | None:
+    """Fetch candles from Polygon.io; return None if credentials missing or no data."""
+    settings = get_settings()
+    api_key = settings.polygon_api_key
+    if not api_key:
+        return None
+
+    multiplier, timespan, days_back = _polygon_range_params(interval, lookback)
+    end = pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)
+    start = (pd.Timestamp.utcnow() - pd.Timedelta(days=days_back)).normalize()
+    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{start.date()}/{end.date()}"
+    params = {
+        "adjusted": "true",
+        "sort": "asc",
+        "limit": max(lookback * 2, 500),
+        "apiKey": api_key,
+    }
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+    except httpx.HTTPError:
+        return None
+
+    payload = resp.json()
+    results = payload.get("results") or []
+    if not results:
+        return None
+
+    frame = pd.DataFrame(results)
+    if frame.empty:
+        return None
+    frame = frame.rename(columns={"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
+    frame = frame.set_index("timestamp").sort_index()
+    return frame
+
+
+def _fetch_yahoo_candles(symbol: str, interval: str) -> pd.DataFrame | None:
+    """Fetch candles from Yahoo Finance as a secondary live data source."""
+    interval_map = {
+        "1m": ("5d", "1m"),
+        "5m": ("5d", "5m"),
+        "15m": ("1mo", "15m"),
+        "1h": ("3mo", "60m"),
+        "d": ("1y", "1d"),
+    }
+    range_span, yahoo_interval = interval_map.get(interval, ("5d", "5m"))
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol.upper()}"
+    params = {"interval": yahoo_interval, "range": range_span, "includePrePost": "false"}
+    try:
+        with httpx.Client(timeout=6.0) as client:
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+    except httpx.HTTPError:
+        return None
+
+    payload = resp.json()
+    try:
+        chart = payload["chart"]
+        if chart.get("error"):
+            return None
+        result = chart["result"][0]
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+    timestamps = result.get("timestamp")
+    if not timestamps:
+        return None
+    quote = result["indicators"]["quote"][0]
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(timestamps, unit="s", utc=True),
+            "open": quote.get("open"),
+            "high": quote.get("high"),
+            "low": quote.get("low"),
+            "close": quote.get("close"),
+            "volume": quote.get("volume"),
+        }
+    ).dropna()
+    if frame.empty:
+        return None
+    frame = frame.set_index("timestamp").sort_index()
+    return frame
+
+
 def get_candles(symbol: str, interval: str, lookback: int = 300) -> pd.DataFrame:
-    """Return stub candle data (replace with Polygon/DB fetch later)."""
-
+    """Return live OHLCV candles sourced from Polygon.io or Yahoo Finance."""
     normalized = normalize_interval(interval)
-
     lookback = int(max(20, min(lookback, MAX_LOOKBACK)))
-    freq = INTERVAL_FREQ[normalized]
-    now = pd.Timestamp.utcnow().ceil("min")
-    idx = pd.date_range(end=now, periods=lookback, freq=freq)
-    base = 430 + np.random.uniform(-3, 3)
-    random_walk = np.cumsum(np.random.normal(0, 0.25, size=lookback))
-    prices = base + random_walk
-    high = prices + np.random.uniform(0.05, 0.35, size=lookback)
-    low = prices - np.random.uniform(0.05, 0.35, size=lookback)
-    open_ = prices + np.random.uniform(-0.15, 0.15, size=lookback)
-    close = prices + np.random.uniform(-0.15, 0.15, size=lookback)
-    volume = np.random.randint(100_000, 600_000, size=lookback)
-    df = pd.DataFrame(
-        {"time": idx, "open": open_, "high": high, "low": low, "close": close, "volume": volume}
-    )
-    return df
+
+    frame = _fetch_polygon_candles(symbol, normalized, lookback)
+    if frame is None:
+        frame = _fetch_yahoo_candles(symbol, normalized)
+    if frame is None or frame.empty:
+        raise HTTPException(status_code=502, detail=f"No market data available for {symbol.upper()} ({normalized}).")
+
+    frame = frame.sort_index().tail(lookback)
+    frame = frame.reset_index().rename(columns={"timestamp": "time"})
+    expected_cols = {"time", "open", "high", "low", "close", "volume"}
+    missing = expected_cols - set(frame.columns)
+    if missing:
+        raise HTTPException(status_code=502, detail=f"Incomplete market data for {symbol.upper()}: missing {missing}")
+    return frame
 
 
 def parse_floats(csv: Optional[str]) -> List[float]:
@@ -164,16 +263,6 @@ def chart_html(
     entry_val = _to_level(entry)
     stop_val = _to_level(stop)
     tp_vals = [_to_level(v) for v in tps if v is not None]
-
-    # Shift synthetic data so the most recent close aligns with the plan anchor.
-    anchor_candidates = [entry_val, stop_val] + tp_vals
-    anchor = next((val for val in anchor_candidates if isinstance(val, (int, float))), None)
-    if anchor is not None and not df.empty:
-        latest_close = float(df["close"].iloc[-1])
-        offset = anchor - latest_close
-        if offset:
-            for col in ("open", "high", "low", "close"):
-                df[col] = df[col] + offset
 
     candles = []
     volumes = []
