@@ -9,4 +9,4 @@ cmds = [
 ]
 
 [phases.build]
-cmds = []
+cmds = ["echo skipping frontend build"]
