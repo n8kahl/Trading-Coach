@@ -46,6 +46,7 @@
   const showVWAP = params.get("vwap") !== "0";
   const extraStudies = parseListParam(params.get("studies"));
   const range = params.get("range");
+  const keyLevels = parseFloatList(params.get("levels"));
 
   const plan = {
     entry: params.get("entry"),
@@ -273,13 +274,14 @@
         vwapSeries.setData(computeVWAP(bars));
       }
 
-      const addPriceLine = (price, title, color) => {
+      const addPriceLine = (price, title, color, lineStyle) => {
         const level = parseFloat(price);
         if (!Number.isFinite(level)) return;
         candleSeries.createPriceLine({
           price: level,
           color,
           lineWidth: 2,
+          lineStyle: lineStyle ?? LightweightCharts.LineStyle.Solid,
           axisLabelVisible: true,
           title,
         });
@@ -288,6 +290,22 @@
       if (plan.entry) addPriceLine(plan.entry, "Entry", "#facc15");
       if (plan.stop) addPriceLine(plan.stop, "Stop", "#ef4444");
       plan.tps.forEach((value, idx) => addPriceLine(value, `TP${idx + 1}`, "#22c55e"));
+      keyLevels.forEach((value) => addPriceLine(value, "Key", "#facc15", LightweightCharts.LineStyle.Dotted));
+
+      const levelValues = [
+        ...(plan.entry ? [parseFloat(plan.entry)] : []),
+        ...(plan.stop ? [parseFloat(plan.stop)] : []),
+        ...plan.tps,
+        ...keyLevels,
+      ].filter((v) => Number.isFinite(v));
+
+      if (levelValues.length) {
+        const dataMin = Math.min(...bars.map((b) => b.low));
+        const dataMax = Math.max(...bars.map((b) => b.high));
+        const minValue = Math.min(dataMin, ...levelValues);
+        const maxValue = Math.max(dataMax, ...levelValues);
+        candleSeries.setAutoscaleInfoProvider(() => ({ priceRange: { minValue, maxValue } }));
+      }
 
       chart.timeScale().fitContent();
       updateLegend();
