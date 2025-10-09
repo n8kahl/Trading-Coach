@@ -174,7 +174,7 @@ pre-baked trade levels.
       "atr": "1.9200",
       "vwap": "1",
       "theme": "dark",
-      "levels": "259.50,257.20"
+      "levels": "259.40,255.90,258.70,257.30,259.80,254.60,257.90"
       }
     },
     "data": {
@@ -252,8 +252,9 @@ pre-baked trade levels.
   stop, and targets to `POST /gpt/chart-url` whenever you need a canonical link.
   The viewer accepts TradingView resolutions (`1`, `3`, `5`, `15`, `30`, `60`,
   `120`, `240`, `1D`); minute/hours strings like `1m` and `1h` are also
-  normalized automatically. Include `levels` when you want dotted key levels
-  rendered on the chart (e.g. major support/resistance).
+  normalized automatically. Key levels extracted from the response are included
+  automatically in `levels` so the chart renders dotted reference lines for
+  session/previous highs and lows.
 - **`context_overlays`** packages higher-timeframe zones, liquidity pools, FVGs,
   relative strength, internals, options/volatility summaries, liquidity
   frictions, event hooks, anchored VWAPs, and volume profile magnets. These
@@ -368,7 +369,7 @@ Example response:
       "title": "AAPL 1m",
       "vwap": "1",
       "theme": "dark",
-      "levels": "259.50,257.20"
+      "levels": "259.40,255.90,258.70,257.30,259.80,254.60,257.90"
     }
   },
   "context_overlays": { /* same as the fields above for convenience */ }

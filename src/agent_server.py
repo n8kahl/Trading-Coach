@@ -759,6 +759,27 @@ def _price_scale_for(price: float | None) -> int:
     return int(10 ** decimals)
 
 
+def _extract_levels_for_chart(key_levels: Dict[str, float]) -> List[str]:
+    order = [
+        "session_high",
+        "session_low",
+        "opening_range_high",
+        "opening_range_low",
+        "prev_high",
+        "prev_low",
+        "prev_close",
+        "gap_fill",
+    ]
+    levels: List[str] = []
+    for key in order:
+        value = key_levels.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            levels.append(f"{float(value):.2f}")
+    return levels
+
+
 tv_api = APIRouter(prefix="/tv-api", tags=["tv"])
 
 
@@ -1055,6 +1076,9 @@ async def gpt_scan(
             "vwap": "1",
             "theme": "dark",
         }
+        level_tokens = _extract_levels_for_chart(key_levels)
+        if level_tokens:
+            chart_query["levels"] = ",".join(level_tokens)
         chart_query["strategy"] = signal.strategy_id
         if direction_hint:
             chart_query["direction"] = direction_hint
@@ -1248,6 +1272,8 @@ async def gpt_context(
     response["context_overlays"] = enhancements
     if polygon_bundle:
         response["options"] = polygon_bundle
+    level_tokens = _extract_levels_for_chart(key_levels)
+
     chart_params = {
         "symbol": symbol.upper(),
         "interval": interval_normalized,
@@ -1257,6 +1283,8 @@ async def gpt_context(
         "vwap": "1",
         "theme": "dark",
     }
+    if level_tokens:
+        chart_params["levels"] = ",".join(level_tokens)
     response["charts"] = {"params": {key: str(value) for key, value in chart_params.items()}}
     return response
 
