@@ -65,21 +65,34 @@
     if (plan.stop) rows.push(["Stop", plan.stop]);
     plan.tps.forEach((value, idx) => rows.push([`TP${idx + 1}`, value.toFixed(2)]));
     if (plan.atr) rows.push(["ATR", plan.atr]);
+    const indicatorTokens = [];
+    if (emaInputs.length) indicatorTokens.push(`EMA(${emaInputs.join("/")})`);
+    if (showVWAP) indicatorTokens.push("VWAP");
+    indicatorTokens.push(`Resolution ${resolution}`);
+    rows.push(["Indicators", indicatorTokens.join(" · ")]);
 
     const header =
+      [symbol.toUpperCase(), resolution.toUpperCase()]
+        .filter(Boolean)
+        .join(" · ");
+    const subHeader =
       [plan.strategy, plan.direction ? plan.direction.toUpperCase() : ""]
         .filter(Boolean)
-        .join(" · ") || "Trade Plan";
+        .join(" · ");
 
-    if (!rows.length && !plan.notes && header === "Trade Plan") {
+    if (!rows.length && !plan.notes && !subHeader) {
       legendEl.classList.remove("visible");
       legendEl.innerHTML = "";
       return;
     }
 
-    const detailRows = rows.map(([label, value]) => `<dt>${label}</dt><dd>${value}</dd>`).join("");
+    const detailRows = rows
+      .filter(([, value]) => value)
+      .map(([label, value]) => `<dt>${label}</dt><dd>${value}</dd>`)
+      .join("");
     const notes = plan.notes ? `<div class="notes">${plan.notes}</div>` : "";
-    legendEl.innerHTML = `<h2>${header}</h2><dl>${detailRows}</dl>${notes}`;
+    const sub = subHeader ? `<p style="margin:4px 0 12px;opacity:0.75;">${subHeader}</p>` : "";
+    legendEl.innerHTML = `<h2>${header}</h2>${sub}<dl>${detailRows}</dl>${notes}`;
     legendEl.classList.add("visible");
   };
 
