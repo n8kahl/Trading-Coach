@@ -160,21 +160,40 @@ pre-baked trade levels.
       "ema20": 257.7,
       "ema50": 256.9,
       "vwap": 257.8,
-      "direction_bias": "long"
+      "direction_bias": "long",
+      "plan_entry": 258.6,
+      "plan_stop": 257.2,
+      "plan_targets": [259.5, 260.4],
+      "plan_confidence": 0.74,
+      "plan_risk_reward": 1.63,
+      "plan_notes": "VWAP hold + range break alignment"
+    },
+    "plan": {
+      "direction": "long",
+      "entry": 258.6,
+      "stop": 257.2,
+      "targets": [259.5, 260.4],
+      "confidence": 0.74,
+      "risk_reward": 1.63,
+      "atr": 1.92,
+      "notes": "VWAP hold + range break alignment"
     },
     "charts": {
       "params": {
         "symbol": "AAPL",
         "interval": "1",
-      "ema": "9,20,50",
-      "view": "30m",
-      "title": "AAPL power_hour_trend",
-      "strategy": "power_hour_trend",
-      "direction": "long",
-      "atr": "1.9200",
-      "vwap": "1",
-      "theme": "dark",
-      "levels": "259.40,255.90,258.70,257.30,259.80,254.60,257.90"
+        "ema": "9,20,50",
+        "view": "30m",
+        "title": "AAPL power_hour_trend",
+        "strategy": "power_hour_trend",
+        "direction": "long",
+        "entry": "258.60",
+        "stop": "257.20",
+        "tp": "259.50,260.40",
+        "atr": "1.9200",
+        "vwap": "1",
+        "theme": "dark",
+        "levels": "259.40,255.90,258.70,257.30,259.80,254.60,257.90"
       }
     },
     "data": {
@@ -239,8 +258,10 @@ pre-baked trade levels.
 
 ### Key points for the agent
 
-- **No server-generated stops/targets.** Use `market_snapshot`, `key_levels`,
-  and `/gpt/context` to compute your own playbook.
+- **Each signal ships with a fully calculated plan.** The `plan` payload (and
+  mirrored `plan_*` feature fields) includes direction, entry, stop, two
+  targets, confidence, risk:reward, ATR reference, and notes derived from the
+  live data check.
 - **`direction_hint` is advisory.** It reflects indicator alignment; override
   it if your analysis disagrees.
 - **`options` bundle** surfaces Polygon's filtered option chain (best contract

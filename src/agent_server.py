@@ -656,6 +656,19 @@ def _serialize_features(features: Dict[str, Any]) -> Dict[str, Any]:
     for key, value in features.items():
         if isinstance(value, (np.floating, np.integer)):
             serialized[key] = float(value)
+        elif isinstance(value, (list, tuple)):
+            flattened: List[Any] = []
+            numeric = True
+            for item in value:
+                if isinstance(item, (np.floating, np.integer, float, int)):
+                    flattened.append(float(item))
+                else:
+                    numeric = False
+                    break
+            if numeric:
+                serialized[key] = flattened
+            else:
+                serialized[key] = list(value)
         elif isinstance(value, (float, int, str, bool)) or value is None:
             serialized[key] = value
         else:
@@ -1120,6 +1133,17 @@ async def gpt_scan(
             "vwap": "1",
             "theme": "dark",
         }
+        plan_payload: Dict[str, Any] | None = None
+        if signal.plan is not None:
+            plan_payload = signal.plan.as_dict()
+            chart_query["entry"] = f"{signal.plan.entry:.2f}"
+            chart_query["stop"] = f"{signal.plan.stop:.2f}"
+            chart_query["tp"] = ",".join(f"{target:.2f}" for target in signal.plan.targets)
+            chart_query.setdefault("direction", signal.plan.direction)
+            if signal.plan.atr and "atr" not in chart_query:
+                chart_query["atr"] = f"{float(signal.plan.atr):.4f}"
+            if signal.plan.notes:
+                chart_query["notes"] = signal.plan.notes
         level_tokens = _extract_levels_for_chart(key_levels)
         if level_tokens:
             chart_query["levels"] = ",".join(level_tokens)
@@ -1133,6 +1157,10 @@ async def gpt_scan(
         feature_payload = _serialize_features(signal.features)
         feature_payload.setdefault("atr", snapshot.get("indicators", {}).get("atr14"))
         feature_payload.setdefault("adx", snapshot.get("indicators", {}).get("adx14"))
+        if signal.plan is not None:
+            plan_dict = signal.plan.as_dict()
+            for key, value in plan_dict.items():
+                feature_payload[f"plan_{key}"] = value
 
         chain = polygon_chains.get(signal.symbol)
         enhancements = compute_context_overlays(
@@ -1174,6 +1202,7 @@ async def gpt_scan(
                     "params": chart_query,
                 },
                 "features": feature_payload,
+                **({"plan": plan_payload} if plan_payload else {}),
                 "data": {
                     "bars": f"{base_url}/gpt/context/{signal.symbol}?interval={interval}&lookback=300"
                 },

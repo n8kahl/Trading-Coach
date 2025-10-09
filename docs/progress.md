@@ -14,6 +14,10 @@ Last updated: 2025-10-08
   - Normalizes tokens: `5m→5`, `1h→60`, `1d→1D`; uppercases symbols while preserving exchange prefixes (`NASDAQ:TSLA`).
   - Accepts `levels` (comma floats) for dotted key lines on the chart.
 
+- Real strategy scanner
+  - `/gpt/scan` now evaluates each strategy with fully grounded calculations (OR retests, VWAP clusters, gap metrics, anchored VWAPs) and publishes a real plan payload (`entry/stop/targets/confidence`).
+  - Confidence scores equal the weighted condition hit-rate; no placeholder heuristics remain.
+
 - New `/tv` viewer
   - Serves TradingView Advanced Chart UI if `charting_library/` exists; otherwise falls back to Lightweight Charts.
   - Fallback features:
