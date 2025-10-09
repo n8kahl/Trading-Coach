@@ -255,6 +255,11 @@ pre-baked trade levels.
   normalized automatically. Key levels extracted from the response are included
   automatically in `levels` so the chart renders dotted reference lines for
   session/previous highs and lows.
+- **Plan rescaling.** The viewer defaults to `scale_plan=auto`, which rescales
+  entry/stop/targets/levels to the latest close when the plan was built on a
+  different price basis (splits, stale snapshots, etc.). Add `scale_plan=off`
+  to disable, or supply an explicit multiplier (e.g., `scale_plan=0.5`) when
+  you know the adjustment factor.
 - **`context_overlays`** packages higher-timeframe zones, liquidity pools, FVGs,
   relative strength, internals, options/volatility summaries, liquidity
   frictions, event hooks, anchored VWAPs, and volume profile magnets. These

@@ -22,6 +22,7 @@ Last updated: 2025-10-08
     - Labeled Entry/Stop/TP lines using axis labels
     - Dotted yellow reference lines from `levels=`
     - Robust autoscale: ensures all plan lines and levels are included even when far from current prices
+    - Plan rescale: defaults to `scale_plan=auto` so entry/stop/targets adjust to the latest close when the plan was created in a different price regime (disable with `scale_plan=off`, manual factor supported)
     - On‑screen debug when `debug=1` (shows data request + bar count)
 
 - Datafeed for `/tv` – `/tv-api/*`
@@ -32,7 +33,7 @@ Last updated: 2025-10-08
 
 ## Known behaviors / caveats
 
-- Plans from a different price regime (e.g., pre/post split or stale context) will plot correctly but may sit far from current price. Autoscale keeps them visible, but they will appear away from the current candles.
+- Plans from a different price regime (e.g., pre/post split or stale context) will auto-rescale by default. If you disable it (`scale_plan=off`) or the heuristic rejects the adjustment (drift <2% or ratio outside 0.05–20×), the plan lines may still sit away from current candles.
 - TradingView bundle isn’t deployed yet – `/tv/charting_library/charting_library.js` 404 is expected. The fallback renderer handles everything for now.
 - Dotted key levels are auto‑included in `charts.params.levels` when links are produced by `/gpt/scan` or `/gpt/context`. Hand‑typed links must add `levels=` manually.
 
@@ -40,11 +41,9 @@ Last updated: 2025-10-08
 
 1. Plan focus zoom (client only)
    - New query: `focus=plan`. Center/zoom vertically around min/max of {entry, stop, tps, levels} with a pad (e.g., 1.5× ATR or 0.8%).
-2. Plan rescale (client only)
-   - New query: `scale_plan=auto|<float>`. Auto = `last_close/entry` when sensible; otherwise respects an explicit factor. Useful when a plan was computed on a different basis.
-3. TV labels + studies (when Advanced bundle arrives)
+2. TV labels + studies (when Advanced bundle arrives)
    - Add native study IDs and labels using `createStudy`/`createShape` and study titles.
-4. Optional debug API echo
+3. Optional debug API echo
    - `debug=1` could surface the resolved timeframe and last close directly in the banner for faster checks.
 
 ## Testing notes
@@ -73,4 +72,3 @@ Last updated: 2025-10-08
 ---
 
 Owner handoff: continue from the “Proposed improvements” list. The highest impact for UX is `focus=plan` so the plan band fills the viewport even when the underlying has moved.
-

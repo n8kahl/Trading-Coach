@@ -39,6 +39,12 @@
       .map((item) => parseFloat(item))
       .filter((num) => Number.isFinite(num));
 
+  const parseNumber = (value) => {
+    if (value === null || value === undefined || value === "") return null;
+    const num = Number.parseFloat(value);
+    return Number.isFinite(num) ? num : null;
+  };
+
   const symbol = params.get("symbol") || "AAPL";
   const resolution = normalizeResolution(params.get("interval") || "1");
   const theme = params.get("theme") === "light" ? "light" : "dark";
@@ -46,17 +52,32 @@
   const showVWAP = params.get("vwap") !== "0";
   const extraStudies = parseListParam(params.get("studies"));
   const range = params.get("range");
-  const keyLevels = parseFloatList(params.get("levels"));
+  const keyLevelsRaw = parseFloatList(params.get("levels"));
+  let keyLevels = keyLevelsRaw.slice();
   const debug = params.get("debug") === "1";
+  const scalePlanParam = (params.get("scale_plan") || "").trim();
 
   const plan = {
-    entry: params.get("entry"),
-    stop: params.get("stop"),
+    entry: parseNumber(params.get("entry")),
+    stop: parseNumber(params.get("stop")),
     tps: parseFloatList(params.get("tp")),
     direction: params.get("direction"),
     strategy: params.get("strategy"),
-    atr: params.get("atr"),
+    atr: parseNumber(params.get("atr")),
     notes: params.get("notes"),
+  };
+  const planOriginal = {
+    entry: Number.isFinite(plan.entry) ? plan.entry : null,
+    stop: Number.isFinite(plan.stop) ? plan.stop : null,
+    tps: plan.tps.slice(),
+    atr: Number.isFinite(plan.atr) ? plan.atr : null,
+  };
+  let planScale = {
+    mode: null,
+    factor: 1,
+    applied: false,
+    reference: null,
+    lastClose: null,
   };
 
   const legendEl = document.getElementById("plan_legend");
@@ -67,12 +88,39 @@
     debugEl.textContent += (debugEl.textContent ? "\n" : "") + msg;
   };
 
+  const formatPlanValue = (raw, scaled, decimals = 2) => {
+    if (!Number.isFinite(scaled)) return null;
+    if (planScale.applied && Number.isFinite(raw)) {
+      const tolerance = Math.max(Math.pow(10, -decimals) * 0.5, Math.abs(raw) * 0.0005);
+      if (Math.abs(raw - scaled) > tolerance) {
+        return `${raw.toFixed(decimals)} → ${scaled.toFixed(decimals)}`;
+      }
+    }
+    return scaled.toFixed(decimals);
+  };
+
   const updateLegend = () => {
     const rows = [];
-    if (plan.entry) rows.push(["Entry", plan.entry]);
-    if (plan.stop) rows.push(["Stop", plan.stop]);
-    plan.tps.forEach((value, idx) => rows.push([`TP${idx + 1}`, value.toFixed(2)]));
-    if (plan.atr) rows.push(["ATR", plan.atr]);
+    const entryText = formatPlanValue(planOriginal.entry, plan.entry);
+    if (entryText) rows.push(["Entry", entryText]);
+    const stopText = formatPlanValue(planOriginal.stop, plan.stop);
+    if (stopText) rows.push(["Stop", stopText]);
+    plan.tps.forEach((value, idx) => {
+      const raw = planOriginal.tps[idx];
+      const formatted = formatPlanValue(raw, value);
+      if (formatted) rows.push([`TP${idx + 1}`, formatted]);
+    });
+    const atrText = formatPlanValue(planOriginal.atr, plan.atr, 4);
+    if (atrText) rows.push(["ATR", atrText]);
+    if (planScale.applied) {
+      let scaleLabel = `${planScale.factor.toFixed(4)}×`;
+      if (planScale.mode === "auto" && Number.isFinite(planScale.reference) && Number.isFinite(planScale.lastClose)) {
+        scaleLabel += ` (${planScale.reference.toFixed(2)}→${planScale.lastClose.toFixed(2)})`;
+      } else if (planScale.mode === "auto") {
+        scaleLabel += " (auto)";
+      }
+      rows.push(["Scale", scaleLabel]);
+    }
     const indicatorTokens = [];
     if (emaInputs.length) indicatorTokens.push(`EMA(${emaInputs.join("/")})`);
     if (showVWAP) indicatorTokens.push("VWAP");
@@ -106,6 +154,107 @@
 
   const baseUrl = `${window.location.protocol}//${window.location.host}`;
   const datafeed = window.TradingCoachDataFeed ? new window.TradingCoachDataFeed(baseUrl) : null;
+  const resetPlanToOriginal = () => {
+    plan.entry = Number.isFinite(planOriginal.entry) ? planOriginal.entry : null;
+    plan.stop = Number.isFinite(planOriginal.stop) ? planOriginal.stop : null;
+    plan.tps = planOriginal.tps.slice();
+    plan.atr = Number.isFinite(planOriginal.atr) ? planOriginal.atr : null;
+    keyLevels = keyLevelsRaw.slice();
+  };
+
+  const applyPlanScale = (scaleInfo) => {
+    resetPlanToOriginal();
+    if (!scaleInfo || !scaleInfo.applied || !Number.isFinite(scaleInfo.factor) || scaleInfo.factor <= 0) {
+      planScale = {
+        mode: null,
+        factor: 1,
+        applied: false,
+        reference: null,
+        lastClose: null,
+      };
+      return;
+    }
+
+    planScale = {
+      mode: scaleInfo.mode || null,
+      factor: scaleInfo.factor,
+      applied: true,
+      reference: Number.isFinite(scaleInfo.reference) ? scaleInfo.reference : null,
+      lastClose: Number.isFinite(scaleInfo.lastClose) ? scaleInfo.lastClose : null,
+    };
+
+    const scaleValue = (value) => {
+      if (!Number.isFinite(value)) return null;
+      const scaled = value * planScale.factor;
+      return Number.isFinite(scaled) ? scaled : null;
+    };
+
+    plan.entry = scaleValue(planOriginal.entry);
+    plan.stop = scaleValue(planOriginal.stop);
+    plan.tps = planOriginal.tps.map((value) => scaleValue(value));
+    plan.atr = scaleValue(planOriginal.atr);
+    keyLevels = keyLevelsRaw.map((value) => scaleValue(value)).filter((value) => Number.isFinite(value));
+  };
+
+  const evaluateScalePlan = (mode, lastClose, { autoWhenEmpty = false } = {}) => {
+    let normalized = (mode || "").trim().toLowerCase();
+    if (!normalized && autoWhenEmpty) {
+      normalized = "auto";
+    }
+    if (!normalized) {
+      return { applied: false, factor: 1 };
+    }
+    if (["off", "none", "false", "0"].includes(normalized)) {
+      return { applied: false, factor: 1, mode: "off" };
+    }
+    if (normalized === "auto") {
+      if (!Number.isFinite(lastClose)) {
+        return { applied: false, factor: 1 };
+      }
+      const candidates = [
+        planOriginal.entry,
+        planOriginal.stop,
+        ...planOriginal.tps,
+        ...keyLevelsRaw,
+      ].filter((value) => Number.isFinite(value) && value > 0);
+      const reference = candidates.length ? candidates[0] : null;
+      if (!Number.isFinite(reference) || reference <= 0) {
+        return { applied: false, factor: 1 };
+      }
+      const factor = lastClose / reference;
+      if (!Number.isFinite(factor) || factor <= 0) {
+        return { applied: false, factor: 1 };
+      }
+      const drift = Math.abs(1 - factor);
+      if (drift < 0.02 || factor < 0.05 || factor > 20) {
+        return { applied: false, factor: 1 };
+      }
+      return {
+        applied: true,
+        factor,
+        mode: "auto",
+        reference,
+        lastClose,
+      };
+    }
+    const explicit = Number.parseFloat(normalized);
+    if (Number.isFinite(explicit) && explicit > 0 && Math.abs(1 - explicit) > 0.0001) {
+      return {
+        applied: true,
+        factor: explicit,
+        mode: "manual",
+      };
+    }
+    return { applied: false, factor: 1 };
+  };
+
+  // Apply explicit numeric scaling immediately so legend + labels match.
+  const initialScaleInfo = evaluateScalePlan(scalePlanParam, null, { autoWhenEmpty: false });
+  if (initialScaleInfo.applied && initialScaleInfo.mode === "manual") {
+    applyPlanScale(initialScaleInfo);
+  } else {
+    applyPlanScale({ applied: false, factor: 1 });
+  }
 
   const setVisibleRange = (chart) => {
     if (!range) return;
@@ -172,9 +321,11 @@
         if (study) chart.createStudy(study, false, false);
       });
 
-      if (plan.entry) drawLevel(chart, plan.entry, "Entry", "#facc15");
-      if (plan.stop) drawLevel(chart, plan.stop, "Stop", "#ef4444");
-      plan.tps.forEach((value, idx) => drawLevel(chart, value, `TP${idx + 1}`, "#22c55e"));
+      if (Number.isFinite(plan.entry)) drawLevel(chart, plan.entry, "Entry", "#facc15");
+      if (Number.isFinite(plan.stop)) drawLevel(chart, plan.stop, "Stop", "#ef4444");
+      plan.tps.forEach((value, idx) => {
+        if (Number.isFinite(value)) drawLevel(chart, value, `TP${idx + 1}`, "#22c55e");
+      });
 
       updateLegend();
     });
@@ -288,6 +439,17 @@
       }));
       volumeSeries.setData(volData);
 
+      const lastClose = bars.length ? bars[bars.length - 1].close : null;
+      const allowAutoDefault = scalePlanParam === "";
+      const scaleInfo = evaluateScalePlan(scalePlanParam, lastClose, { autoWhenEmpty: allowAutoDefault });
+      if (scaleInfo.applied) {
+        const label = scaleInfo.mode === "auto" && allowAutoDefault ? "auto*default" : scaleInfo.mode;
+        dbg(`scale_plan applied mode=${label} factor=${scaleInfo.factor.toFixed(4)}`);
+      } else if (scalePlanParam) {
+        dbg(`scale_plan skipped mode=${scalePlanParam}`);
+      }
+      applyPlanScale(scaleInfo);
+
       emaInputs.slice(0, 4).forEach((length, index) => {
         const emaSeries = chart.addLineSeries({
           color: ["#93c5fd", "#f97316", "#a855f7", "#14b8a6"][index % 4],
@@ -317,15 +479,17 @@
         });
       };
 
-      if (plan.entry) addPriceLine(plan.entry, "Entry", "#facc15");
-      if (plan.stop) addPriceLine(plan.stop, "Stop", "#ef4444");
-      plan.tps.forEach((value, idx) => addPriceLine(value, `TP${idx + 1}`, "#22c55e"));
+      if (Number.isFinite(plan.entry)) addPriceLine(plan.entry, "Entry", "#facc15");
+      if (Number.isFinite(plan.stop)) addPriceLine(plan.stop, "Stop", "#ef4444");
+      plan.tps.forEach((value, idx) => {
+        if (Number.isFinite(value)) addPriceLine(value, `TP${idx + 1}`, "#22c55e");
+      });
       keyLevels.forEach((value) => addPriceLine(value, "Key", "#facc15", LightweightCharts.LineStyle.Dotted));
 
       const levelValues = [
-        ...(plan.entry ? [parseFloat(plan.entry)] : []),
-        ...(plan.stop ? [parseFloat(plan.stop)] : []),
-        ...plan.tps,
+        ...(Number.isFinite(plan.entry) ? [plan.entry] : []),
+        ...(Number.isFinite(plan.stop) ? [plan.stop] : []),
+        ...plan.tps.filter((value) => Number.isFinite(value)),
         ...keyLevels,
       ].filter((v) => Number.isFinite(v));
 

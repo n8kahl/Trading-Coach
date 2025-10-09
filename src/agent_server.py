@@ -57,6 +57,7 @@ ALLOWED_CHART_KEYS = {
     "direction",
     "atr",
     "title",
+    "scale_plan",
 }
 
 
