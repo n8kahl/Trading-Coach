@@ -27,6 +27,7 @@ from .charts_api import build_chart_url, router as charts_router, get_candles, n
 from .scanner import scan_market
 from .tradier import TradierNotConfiguredError, fetch_option_chain, select_tradier_contract
 from .polygon_options import fetch_polygon_option_chain, summarize_polygon_chain
+from .context_overlays import compute_context_overlays
 
 
 logger = logging.getLogger(__name__)
@@ -649,54 +650,6 @@ def _view_for_style(style: str | None) -> str:
     return mapping.get(normalized, "fit")
 
 
-def _compute_context_enhancements(history: pd.DataFrame) -> Dict[str, Any]:
-    """Return placeholder structures for advanced context hooks."""
-    _ = history  # Placeholder until analytics are implemented
-    return {
-        "supply_zones": [],
-        "demand_zones": [],
-        "liquidity_pools": [],
-        "fvg": [],
-        "rel_strength_vs": {
-            "benchmark": "SPY",
-            "lookback_bars": 15,
-            "value": None,
-        },
-        "internals": {
-            "adv_dec": None,
-            "tick": None,
-            "sector_perf": {},
-            "index_bias": None,
-        },
-        "options_summary": {
-            "atm_iv": None,
-            "iv_rank": None,
-            "iv_pct": None,
-            "skew_25d": None,
-            "term_slope": None,
-            "spread_bps": None,
-        },
-        "liquidity_metrics": {
-            "avg_spread_bps": None,
-            "typical_slippage_bps": None,
-            "lot_size_hint": None,
-        },
-        "events": [],
-        "avwap": {
-            "from_open": None,
-            "from_prev_close": None,
-            "from_session_low": None,
-            "from_session_high": None,
-        },
-        "volume_profile": {
-            "vwap": None,
-            "vah": None,
-            "val": None,
-            "poc": None,
-        },
-    }
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +732,15 @@ async def gpt_scan(
     polygon_enabled = bool(settings.polygon_api_key)
     tradier_enabled = bool(settings.tradier_token)
 
+    benchmark_symbol = "SPY"
+    benchmark_history: pd.DataFrame | None = market_data.get(benchmark_symbol)
+    if benchmark_history is None:
+        try:
+            benchmark_history = await _load_remote_ohlcv(benchmark_symbol, data_timeframe)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Benchmark data fetch failed for %s: %s", benchmark_symbol, exc)
+            benchmark_history = None
+
     polygon_chains: Dict[str, pd.DataFrame] = {}
     if unique_symbols and polygon_enabled:
         try:
@@ -855,7 +817,14 @@ async def gpt_scan(
         feature_payload.setdefault("atr", snapshot.get("indicators", {}).get("atr14"))
         feature_payload.setdefault("adx", snapshot.get("indicators", {}).get("adx14"))
 
-        enhancements = _compute_context_enhancements(history)
+        chain = polygon_chains.get(signal.symbol)
+        enhancements = compute_context_overlays(
+            history,
+            symbol=signal.symbol,
+            interval=interval,
+            benchmark_history=benchmark_history,
+            options_chain=chain,
+        )
 
         polygon_bundle: Dict[str, Any] | None = None
         if polygon_chains:
@@ -956,7 +925,31 @@ async def gpt_context(
         "adx14": _series_points(adx_series),
     }
 
-    enhancements = _compute_context_enhancements(history)
+    benchmark_history: pd.DataFrame | None = None
+    if symbol.upper() != "SPY":
+        try:
+            bench_frame = get_candles("SPY", interval_normalized, lookback=lookback)
+            bench_frame = bench_frame.copy()
+            bench_frame["time"] = pd.to_datetime(bench_frame["time"], utc=True)
+            benchmark_history = bench_frame.set_index("time")
+        except HTTPException:
+            benchmark_history = None
+
+    chain_df: pd.DataFrame | None = None
+    polygon_bundle: Dict[str, Any] | None = None
+    settings = get_settings()
+    if settings.polygon_api_key:
+        chain_df = await fetch_polygon_option_chain(symbol)
+        if chain_df is not None and not chain_df.empty:
+            polygon_bundle = summarize_polygon_chain(chain_df, rules=None, top_n=3)
+
+    enhancements = compute_context_overlays(
+        history,
+        symbol=symbol.upper(),
+        interval=interval_normalized,
+        benchmark_history=benchmark_history,
+        options_chain=chain_df,
+    )
 
     response: Dict[str, Any] = {
         "symbol": symbol.upper(),
@@ -969,6 +962,8 @@ async def gpt_context(
     }
     response.update(enhancements)
     response["context_overlays"] = enhancements
+    if polygon_bundle:
+        response["options"] = polygon_bundle
     return response
 
 

@@ -194,16 +194,16 @@ pre-baked trade levels.
       },
       "options_summary": {
         "atm_iv": 0.41,
-        "iv_rank": 0.32,
-        "iv_pct": 0.46,
+        "iv_rank": null,
+        "iv_pct": null,
         "skew_25d": -0.08,
         "term_slope": 0.03,
         "spread_bps": 45
       },
       "liquidity_metrics": {
-        "avg_spread_bps": 42,
-        "typical_slippage_bps": 18,
-        "lot_size_hint": 5
+        "avg_spread_bps": 45,
+        "typical_slippage_bps": 22.5,
+        "lot_size_hint": null
       },
       "events": [
         {"type": "earnings", "time_utc": "2025-10-29T20:00:00Z", "severity": "high"}
@@ -239,6 +239,9 @@ pre-baked trade levels.
   relative strength, internals, options/volatility summaries, liquidity
   frictions, event hooks, anchored VWAPs, and volume profile magnets. These
   default to empty/null until analytics are wired in.
+- **Volatility ranks/percentiles** need historical IV data. Until a volatility
+  history store is connected those specific fields stay null even when other
+  option metrics are populated.
 - **`expected_move_horizon`** approximates the move that is typically achievable
   over ~30 minutes (1–2 minute bars) or ~60 minutes (5 minute bars).
 - **`data.bars`** provides a ready-made URL for deeper context.
@@ -298,6 +301,7 @@ Example response:
     "val": null,
     "poc": null
   },
+  "options": { /* populated when Polygon chains are available, same structure as scan */ },
   "context_overlays": { /* same as the fields above for convenience */ }
 }
 ```
