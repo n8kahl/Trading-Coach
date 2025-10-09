@@ -723,6 +723,13 @@ def _resolution_to_timeframe(resolution: str) -> str | None:
     token = (resolution or "").strip().upper()
     if not token:
         return None
+    if token.endswith("M") and token[:-1].isdigit():
+        return token[:-1]
+    if token.endswith("H") and token[:-1].isdigit():
+        try:
+            return str(int(token[:-1]) * 60)
+        except Exception:
+            return None
     if token.endswith("D"):
         return "D"
     if token.isdigit():
