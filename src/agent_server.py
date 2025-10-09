@@ -45,6 +45,7 @@ ALLOWED_CHART_KEYS = {
     "range",
     "theme",
     "studies",
+    "levels",
     "entry",
     "stop",
     "tp",

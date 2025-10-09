@@ -173,7 +173,8 @@ pre-baked trade levels.
       "direction": "long",
       "atr": "1.9200",
       "vwap": "1",
-      "theme": "dark"
+      "theme": "dark",
+      "levels": "259.50,257.20"
       }
     },
     "data": {
@@ -365,7 +366,8 @@ Example response:
       "view": "fit",
       "title": "AAPL 1m",
       "vwap": "1",
-      "theme": "dark"
+      "theme": "dark",
+      "levels": "259.50,257.20"
     }
   },
   "context_overlays": { /* same as the fields above for convenience */ }
