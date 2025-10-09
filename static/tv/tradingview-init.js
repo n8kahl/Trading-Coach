@@ -228,7 +228,8 @@
       },
       crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
       timeScale: { borderColor: theme === "light" ? "#d1d5db" : "#1f2933" },
-      rightPriceScale: { borderColor: theme === "light" ? "#d1d5db" : "#1f2933" },
+      rightPriceScale: { borderColor: theme === "light" ? "#d1d5db" : "#1f2933", scaleMargins: { top: 0.08, bottom: 0.25 } },
+      leftPriceScale: { visible: true, borderColor: theme === "light" ? "#d1d5db" : "#1f2933", scaleMargins: { top: 0.8, bottom: 0.02 } },
     });
 
     const candleSeries = chart.addCandlestickSeries({
@@ -238,6 +239,14 @@
       borderDownColor: "#ef4444",
       wickUpColor: "#22c55e",
       wickDownColor: "#ef4444",
+    });
+
+    // Volume histogram overlay on left scale
+    const volumeSeries = chart.addHistogramSeries({
+      priceScaleId: 'left',
+      priceFormat: { type: 'volume' },
+      color: theme === 'light' ? '#94a3b8' : '#334155',
+      base: 0,
     });
 
     try {
@@ -261,26 +270,37 @@
         volume: payload.v[idx] || 0,
       }));
 
-      candleSeries.setData(
+      const candleData =
         bars.map((bar) => ({
           time: Math.floor(bar.time / 1000),
           open: bar.open,
           high: bar.high,
           low: bar.low,
           close: bar.close,
-        }))
-      );
+        }));
+      candleSeries.setData(candleData);
+
+      // Map volume with up/down colors
+      const volData = bars.map((bar) => ({
+        time: Math.floor(bar.time / 1000),
+        value: bar.volume || 0,
+        color: bar.close >= bar.open ? '#22c55e88' : '#ef444488',
+      }));
+      volumeSeries.setData(volData);
 
       emaInputs.slice(0, 4).forEach((length, index) => {
         const emaSeries = chart.addLineSeries({
           color: ["#93c5fd", "#f97316", "#a855f7", "#14b8a6"][index % 4],
           lineWidth: 2,
+          lastValueVisible: true,
+          priceLineVisible: false,
+          crosshairMarkerVisible: false,
         });
         emaSeries.setData(computeEMA(bars, length));
       });
 
       if (showVWAP) {
-        const vwapSeries = chart.addLineSeries({ color: "#facc15", lineWidth: 2 });
+        const vwapSeries = chart.addLineSeries({ color: "#facc15", lineWidth: 2, lastValueVisible: true, priceLineVisible: false, crosshairMarkerVisible: false });
         vwapSeries.setData(computeVWAP(bars));
       }
 
