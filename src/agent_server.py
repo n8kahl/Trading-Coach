@@ -788,8 +788,18 @@ async def tv_bars(
         raise HTTPException(status_code=400, detail=f"Unsupported resolution {resolution}")
 
     history = await _load_remote_ohlcv(symbol, timeframe)
+    # Resiliency: if intraday is unavailable for this symbol, try a coarser TF
     if history is None or history.empty:
-        return {"s": "no_data"}
+        alt_tf = None
+        if timeframe not in {"D", "1D"}:
+            alt_tf = "15"  # 15-minute fallback
+        if alt_tf:
+            history = await _load_remote_ohlcv(symbol, alt_tf)
+        if history is None or history.empty:
+            # Last resort: show daily so the chart isn't blank
+            history = await _load_remote_ohlcv(symbol, "D")
+        if history is None or history.empty:
+            return {"s": "no_data"}
 
     history = history.sort_index()
     start_ts = pd.to_datetime(from_, unit="s", utc=True)
