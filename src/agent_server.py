@@ -796,11 +796,13 @@ async def tv_bars(
     window = history.loc[(history.index >= start_ts) & (history.index <= end_ts)]
 
     if window.empty:
-        earlier = history[history.index < start_ts]
-        if earlier.empty:
-            return {"s": "no_data"}
-        next_time = int(earlier.index[-1].timestamp())
-        return {"s": "no_data", "nextTime": next_time}
+        window = history.tail(min(len(history), 600))
+        if window.empty:
+            earlier = history[history.index < start_ts]
+            if earlier.empty:
+                return {"s": "no_data"}
+            next_time = int(earlier.index[-1].timestamp())
+            return {"s": "no_data", "nextTime": next_time}
 
     volume_values = [float(val) for val in window["volume"].tolist()] if "volume" in window.columns else [0.0] * len(window)
 
