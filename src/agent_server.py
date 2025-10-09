@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pydantic import ConfigDict
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 
 from .config import get_settings
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
@@ -59,6 +59,10 @@ class ChartParams(BaseModel):
     interval: str
 
     model_config = ConfigDict(extra="allow")
+
+
+class ChartLinks(BaseModel):
+    interactive: str
 
 
 app = FastAPI(
@@ -902,8 +906,8 @@ async def gpt_scan(
     return payload
 
 
-@gpt.post("/chart-url", summary="Build a canonical chart URL from params")
-async def gpt_chart_url(payload: ChartParams, request: Request) -> Dict[str, Any]:
+@gpt.post("/chart-url", summary="Build a canonical chart URL from params", response_model=ChartLinks)
+async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     settings = get_settings()
 
     base_url = (settings.chart_base_url or str(request.base_url)).rstrip("/")
@@ -925,9 +929,9 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> Dict[str, Any
     if "symbol" not in query or "interval" not in query:
         raise HTTPException(status_code=400, detail="Required: symbol, interval")
 
-    encoded = urlencode(query, doseq=False, safe=",")
+    encoded = urlencode(query, doseq=False, safe=",", quote_via=quote)
     url = f"{base_url}/charts/html?{encoded}" if encoded else f"{base_url}/charts/html"
-    return {"interactive": url}
+    return ChartLinks(interactive=url)
 
 
 @gpt.get("/context/{symbol}", summary="Return recent market context for a ticker")
