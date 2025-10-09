@@ -165,7 +165,7 @@ pre-baked trade levels.
     "charts": {
       "params": {
         "symbol": "AAPL",
-        "interval": "1m",
+        "interval": "1",
       "ema": "9,20,50",
       "view": "30m",
       "title": "AAPL power_hour_trend",
@@ -249,6 +249,9 @@ pre-baked trade levels.
 - **`charts.params`** exposes the exact query used to render charts (EMA stack,
   view, strategy, direction, ATR). Send those along with your computed entry,
   stop, and targets to `POST /gpt/chart-url` whenever you need a canonical link.
+  The viewer accepts TradingView resolutions (`1`, `3`, `5`, `15`, `30`, `60`,
+  `120`, `240`, `1D`); minute/hours strings like `1m` and `1h` are also
+  normalized automatically.
 - **`context_overlays`** packages higher-timeframe zones, liquidity pools, FVGs,
   relative strength, internals, options/volatility summaries, liquidity
   frictions, event hooks, anchored VWAPs, and volume profile magnets. These
@@ -270,12 +273,16 @@ plan fields.
 > fully qualified TradingView page (e.g. `https://your-app.up.railway.app/tv`).
 > The `/gpt/chart-url` endpoint appends query parameters to that URL.
 
+If the TradingView Advanced Charting Library isn't available on the server yet,
+the `/tv` page automatically falls back to the open-source Lightweight Charts
+renderer (candlesticks, EMA overlays, VWAP approximation, and plan lines).
+
 ```bash
 curl -s -X POST https://host/gpt/chart-url \
   -H "content-type: application/json" \
   -d '{
         "symbol":"AAPL",
-        "interval":"1m",
+        "interval":"1",
         "ema":"9,20,50",
         "view":"30m",
         "entry":"258.40",
@@ -301,7 +308,7 @@ Example response:
 ```jsonc
 {
   "symbol": "AAPL",
-  "interval": "1m",
+  "interval": "1",
   "lookback": 300,
   "bars": [
     {"time": "2025-10-08T14:02:00+00:00", "open": 257.4, "high": 257.6, "low": 257.2, "close": 257.5, "volume": 820000},
@@ -353,7 +360,7 @@ Example response:
   "charts": {
     "params": {
       "symbol": "AAPL",
-      "interval": "1m",
+      "interval": "1",
       "ema": "9,20,50",
       "view": "fit",
       "title": "AAPL 1m",
@@ -380,11 +387,11 @@ You are a trading assistant. Always:
      session phase, and gap context.
    - Derive stop-loss and take-profit levels using those metrics. Target at
      least 0.8 R:R unless the user requests otherwise.
-   - Review option liquidity, spreads, and greeks via the `options.best`
-     bundle (Polygon) or `contract_suggestion` fallback if Polygon is absent.
-   - Inspect `context_overlays` for supply/demand zones, liquidity pools, FVGs,
-     internals, and event hooks before locking the plan.
-   - Estimate whether the target is achievable within the expected_move_horizon.
+  - Review option liquidity, spreads, and greeks via the `options.best`
+    bundle (Polygon) or `contract_suggestion` fallback if Polygon is absent.
+  - Inspect `context_overlays` for supply/demand zones, liquidity pools, FVGs,
+    internals, and event hooks before locking the plan.
+  - Estimate whether the target is achievable within the expected_move_horizon.
 3. When you need deeper context, GET /gpt/context/{symbol} using the provided
    data.bars URL.
 4. Present the play with entry, stop, PT1/PT2, holding expectations, and a

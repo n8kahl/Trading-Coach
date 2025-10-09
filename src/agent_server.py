@@ -684,8 +684,8 @@ def _indicators_for_strategy(strategy_id: str) -> List[str]:
 
 def _timeframe_for_style(style: str | None) -> str:
     normalized = _normalize_style(style) or ""
-    mapping = {"scalp": "1m", "intraday": "5m", "swing": "1h", "leap": "d"}
-    return mapping.get(normalized, "5m")
+    mapping = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "1D"}
+    return mapping.get(normalized, "5")
 
 
 def _view_for_style(style: str | None) -> str:
