@@ -166,12 +166,14 @@ pre-baked trade levels.
       "params": {
         "symbol": "AAPL",
         "interval": "1m",
-        "ema": "9,20,50",
-        "view": "30m",
-        "title": "AAPL power_hour_trend",
-        "strategy": "power_hour_trend",
-        "direction": "long",
-        "atr": "1.9200"
+      "ema": "9,20,50",
+      "view": "30m",
+      "title": "AAPL power_hour_trend",
+      "strategy": "power_hour_trend",
+      "direction": "long",
+      "atr": "1.9200",
+      "vwap": "1",
+      "theme": "dark"
       }
     },
     "data": {
@@ -264,6 +266,10 @@ Use this helper whenever you need a shareable chart link. Provide the baseline
 `charts.params` from the scan/context response and append your computed trade
 plan fields.
 
+> **Deployment note:** Set the `BASE_URL` environment variable on Railway to the
+> fully qualified TradingView page (e.g. `https://your-app.up.railway.app/tv`).
+> The `/gpt/chart-url` endpoint appends query parameters to that URL.
+
 ```bash
 curl -s -X POST https://host/gpt/chart-url \
   -H "content-type: application/json" \
@@ -282,7 +288,7 @@ curl -s -X POST https://host/gpt/chart-url \
 Response:
 
 ```json
-{"interactive":"https://host/charts/html?symbol=AAPL&interval=1m&ema=9%2C20%2C50&view=30m&entry=258.40&stop=257.80&tp=259.60%2C260.10&notes=Breakout+plan"}
+{"interactive":"https://host/tv?symbol=AAPL&interval=1m&ema=9%2C20%2C50&view=30m&entry=258.40&stop=257.80&tp=259.60%2C260.10&notes=Breakout+plan"}
 ```
 
 If required parameters (`symbol`, `interval`) are missing you will receive a 400
@@ -350,7 +356,9 @@ Example response:
       "interval": "1m",
       "ema": "9,20,50",
       "view": "fit",
-      "title": "AAPL 1m"
+      "title": "AAPL 1m",
+      "vwap": "1",
+      "theme": "dark"
     }
   },
   "context_overlays": { /* same as the fields above for convenience */ }

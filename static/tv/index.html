@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trading Coach – Advanced Chart</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body,
+      html {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+        background: #0b0f14;
+        font-family: "Inter", "Segoe UI", sans-serif;
+        color: #e6edf3;
+      }
+      #tv_chart_container {
+        height: 100%;
+        width: 100%;
+      }
+      .plan-legend {
+        position: fixed;
+        top: 20px;
+        left: 20px;
+        padding: 16px 20px;
+        background: rgba(12, 16, 22, 0.9);
+        border-radius: 12px;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.45);
+        max-width: 320px;
+        backdrop-filter: blur(10px);
+        display: none;
+      }
+      .plan-legend.visible {
+        display: block;
+      }
+      .plan-legend h2 {
+        font-size: 16px;
+        margin: 0 0 8px;
+      }
+      .plan-legend dl {
+        margin: 0;
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 6px 12px;
+        font-size: 13px;
+      }
+      .plan-legend dt {
+        opacity: 0.72;
+      }
+      .plan-legend .notes {
+        margin-top: 12px;
+        font-size: 12px;
+        opacity: 0.8;
+        line-height: 1.4;
+      }
+    </style>
+    <script src="charting_library/charting_library.js"></script>
+  </head>
+  <body>
+    <div id="tv_chart_container"></div>
+    <aside id="plan_legend" class="plan-legend"></aside>
+    <script src="tv-datafeed.js"></script>
+    <script src="tradingview-init.js"></script>
+  </body>
+</html>

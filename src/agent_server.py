@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import math
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -19,6 +20,7 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from pydantic import ConfigDict
 from urllib.parse import urlencode, quote
@@ -40,6 +42,9 @@ ALLOWED_CHART_KEYS = {
     "view",
     "ema",
     "vwap",
+    "range",
+    "theme",
+    "studies",
     "entry",
     "stop",
     "tp",
@@ -77,6 +82,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+STATIC_ROOT = (Path(__file__).resolve().parent.parent / "static").resolve()
+TV_STATIC_DIR = STATIC_ROOT / "tv"
+if TV_STATIC_DIR.exists():
+    app.mount("/tv", StaticFiles(directory=str(TV_STATIC_DIR), html=True), name="tv")
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +694,125 @@ def _view_for_style(style: str | None) -> str:
     return mapping.get(normalized, "fit")
 
 
+TV_SUPPORTED_RESOLUTIONS = ["1", "3", "5", "15", "30", "60", "120", "240", "1D"]
+
+
+def _resolution_to_timeframe(resolution: str) -> str | None:
+    token = (resolution or "").strip().upper()
+    if not token:
+        return None
+    if token.endswith("D"):
+        return "D"
+    if token.isdigit():
+        return token
+    return None
+
+
+def _resolution_to_minutes(resolution: str) -> int:
+    token = (resolution or "").strip().upper()
+    if token.endswith("D"):
+        days = int("".join(ch for ch in token if ch.isdigit()) or "1")
+        return days * 24 * 60
+    if token.isdigit():
+        return int(token)
+    return 1
+
+
+def _price_scale_for(price: float | None) -> int:
+    if price is None or not math.isfinite(price) or price <= 0:
+        return 100
+    text = f"{price:.6f}".rstrip("0")
+    if "." in text:
+        decimals = len(text.split(".")[1])
+    else:
+        decimals = 0
+    decimals = max(0, min(decimals, 6))
+    return int(10 ** decimals)
+
+
+tv_api = APIRouter(prefix="/tv-api", tags=["tv"])
+
+
+@tv_api.get("/config")
+async def tv_config() -> Dict[str, Any]:
+    return {
+        "supports_search": True,
+        "supports_group_request": False,
+        "supports_marks": False,
+        "supports_timescale_marks": False,
+        "supports_time": True,
+        "supported_resolutions": TV_SUPPORTED_RESOLUTIONS,
+        "exchanges": [{"value": "", "name": "TradingCoach", "desc": "Trading Coach"}],
+        "symbols_types": [{"name": "All", "value": "all"}],
+    }
+
+
+@tv_api.get("/symbols")
+async def tv_symbol(symbol: str = Query(..., alias="symbol")) -> Dict[str, Any]:
+    settings = get_settings()
+    timeframe = "1"
+    history = await _load_remote_ohlcv(symbol, timeframe)
+    last_price = None
+    if history is not None and not history.empty:
+        last_price = float(history["close"].iloc[-1])
+
+    return {
+        "name": symbol.upper(),
+        "ticker": symbol.upper(),
+        "description": symbol.upper(),
+        "type": "stock",
+        "session": "0930-1600",
+        "timezone": "America/New_York",
+        "exchange": "CUSTOM",
+        "minmov": 1,
+        "pricescale": _price_scale_for(last_price),
+        "has_intraday": True,
+        "has_no_volume": False,
+        "has_weekly_and_monthly": True,
+        "supported_resolutions": TV_SUPPORTED_RESOLUTIONS,
+        "volume_precision": 0,
+        "data_status": "streaming" if settings.polygon_api_key else "endofday",
+    }
+
+
+@tv_api.get("/bars")
+async def tv_bars(
+    symbol: str = Query(...),
+    resolution: str = Query(...),
+    from_: int = Query(..., alias="from"),
+    to: int = Query(...),
+) -> Dict[str, Any]:
+    timeframe = _resolution_to_timeframe(resolution)
+    if timeframe is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported resolution {resolution}")
+
+    history = await _load_remote_ohlcv(symbol, timeframe)
+    if history is None or history.empty:
+        return {"s": "no_data"}
+
+    history = history.sort_index()
+    start_ts = pd.to_datetime(from_, unit="s", utc=True)
+    end_ts = pd.to_datetime(to, unit="s", utc=True)
+    window = history.loc[(history.index >= start_ts) & (history.index <= end_ts)]
+
+    if window.empty:
+        earlier = history[history.index < start_ts]
+        if earlier.empty:
+            return {"s": "no_data"}
+        next_time = int(earlier.index[-1].timestamp())
+        return {"s": "no_data", "nextTime": next_time}
+
+    volume_values = [float(val) for val in window["volume"].tolist()] if "volume" in window.columns else [0.0] * len(window)
+
+    return {
+        "s": "ok",
+        "t": [int(ts.timestamp()) for ts in window.index],
+        "o": [round(float(val), 6) for val in window["open"].tolist()],
+        "h": [round(float(val), 6) for val in window["high"].tolist()],
+        "l": [round(float(val), 6) for val in window["low"].tolist()],
+        "c": [round(float(val), 6) for val in window["close"].tolist()],
+        "v": volume_values,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -842,6 +972,8 @@ async def gpt_scan(
             "ema": ",".join(str(span) for span in ema_spans),
             "view": _view_for_style(style),
             "title": title,
+            "vwap": "1",
+            "theme": "dark",
         }
         chart_query["strategy"] = signal.strategy_id
         if direction_hint:
@@ -911,6 +1043,8 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     settings = get_settings()
 
     base_url = (settings.chart_base_url or str(request.base_url)).rstrip("/")
+    if not base_url.lower().endswith("/tv"):
+        base_url = f"{base_url}/tv"
     if not base_url:
         raise HTTPException(status_code=500, detail="Base URL is not configured")
 
@@ -930,7 +1064,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
         raise HTTPException(status_code=400, detail="Required: symbol, interval")
 
     encoded = urlencode(query, doseq=False, safe=",", quote_via=quote)
-    url = f"{base_url}/charts/html?{encoded}" if encoded else f"{base_url}/charts/html"
+    url = f"{base_url}?{encoded}" if encoded else base_url
     return ChartLinks(interactive=url)
 
 
@@ -1035,6 +1169,8 @@ async def gpt_context(
         "ema": "9,20,50",
         "view": "fit",
         "title": f"{symbol.upper()} {interval_normalized}",
+        "vwap": "1",
+        "theme": "dark",
     }
     response["charts"] = {"params": {key: str(value) for key, value in chart_params.items()}}
     return response
@@ -1054,6 +1190,7 @@ async def gpt_widget(kind: str, symbol: str | None = None, user: AuthedUser = De
 
 
 # Register GPT endpoints with the application
+app.include_router(tv_api)
 app.include_router(gpt)
 app.include_router(charts_router)
 

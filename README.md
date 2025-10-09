@@ -12,7 +12,8 @@ It keeps the quantitative bits—market scanning, ATR-based trade management, wa
 
 - **`POST /gpt/scan`** – ranks tickers per strategy and returns enriched market snapshots (levels, indicators, volatility).  
 - **`GET /gpt/context/{symbol}`** – delivers recent OHLCV bars plus indicator series for custom analysis.  
-- **`GET /charts/html` / `/charts/png`** – render interactive or static charts with optional AI-supplied levels.  
+- **`GET /tv`** – serves the TradingView Advanced Chart experience; use `POST /gpt/chart-url` to generate shareable links with AI-supplied levels.  
+  **`GET /charts/html` / `/charts/png`** remain available for the legacy static renderer.
 - **`GET /gpt/widgets/{kind}`** – generate lightweight dashboard cards.  
 - Optional bearer auth (`BACKEND_API_KEY`) plus `X-User-Id` scoping; falls back to anonymous mode for quick prototyping.
 
@@ -76,7 +77,7 @@ curl http://localhost:8000/gpt/scan \
    ```
    - Start with /gpt/scan to pull market snapshots for the requested tickers.
    - Use /gpt/context/{symbol} for the latest bars if you need to compute custom indicators.
-   - Render charts via /charts/html only after you have decided on entry/stop/targets.
+   - Render charts by calling /gpt/chart-url with charts.params plus your entry/stop/targets; open the returned /tv link to view the plan.
    ```
 
 The GPT can now reason about the user’s portfolio, recall notes, and fetch strategy-driven scans.
