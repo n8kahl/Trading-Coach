@@ -829,17 +829,19 @@ async def tv_symbol(symbol: str = Query(..., alias="symbol")) -> Dict[str, Any]:
 async def tv_bars(
     symbol: str = Query(...),
     resolution: str = Query(...),
-    from_: int = Query(..., alias="from"),
-    to: int = Query(...),
+    from_: Optional[int] = Query(None, alias="from"),
+    to: Optional[int] = Query(None),
+    range_: Optional[str] = Query(None, alias="range"),
 ) -> Dict[str, Any]:
     timeframe = _resolution_to_timeframe(resolution)
     logger.info(
-        "tv-api/bars request symbol=%s resolution=%s -> timeframe=%s window=%s-%s",
+        "tv-api/bars request symbol=%s resolution=%s -> timeframe=%s window=%s-%s range=%s",
         symbol,
         resolution,
         timeframe,
         from_,
         to,
+        range_,
     )
     if timeframe is None:
         raise HTTPException(status_code=400, detail=f"Unsupported resolution {resolution}")
@@ -868,8 +870,49 @@ async def tv_bars(
             return {"s": "no_data"}
 
     history = history.sort_index()
-    start_ts = pd.to_datetime(from_, unit="s", utc=True)
-    end_ts = pd.to_datetime(to, unit="s", utc=True)
+    # Compute window: allow unix seconds or milliseconds; allow missing values with range fallback
+    now_sec = int(pd.Timestamp.utcnow().timestamp())
+
+    def _to_seconds(val: Optional[int]) -> Optional[int]:
+        if val is None:
+            return None
+        # Heuristic: treat 13-digit as ms
+        if val > 10_000_000_000:
+            return int(val / 1000)
+        return int(val)
+
+    start_s = _to_seconds(from_)
+    end_s = _to_seconds(to)
+
+    def _range_to_span(res: str, token: Optional[str]) -> int:
+        # Accept e.g., 5D, 3D, 1W, 1M; default 5D
+        if not token:
+            token = "5D"
+        t = token.strip().upper()
+        try:
+            if t.endswith("D"):
+                days = int(t[:-1] or "1")
+                return days * 24 * 60 * 60
+            if t.endswith("W"):
+                weeks = int(t[:-1] or "1")
+                return weeks * 7 * 24 * 60 * 60
+            if t.endswith("M"):
+                months = int(t[:-1] or "1")
+                return months * 30 * 24 * 60 * 60
+        except Exception:
+            pass
+        # Fallback to ~600 bars worth of time
+        minutes = _resolution_to_minutes(resolution) if resolution else 5
+        return max(600 * minutes * 60, 24 * 60 * 60)
+
+    if end_s is None:
+        end_s = now_sec
+    if start_s is None:
+        span = _range_to_span(resolution, range_)
+        start_s = end_s - span
+
+    start_ts = pd.to_datetime(start_s, unit="s", utc=True)
+    end_ts = pd.to_datetime(end_s, unit="s", utc=True)
     window = history.loc[(history.index >= start_ts) & (history.index <= end_ts)]
 
     if window.empty:
