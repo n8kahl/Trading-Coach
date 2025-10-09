@@ -28,19 +28,22 @@ def _latest_session(frame: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame | N
     if frame.empty:
         return frame, None
     et_index = frame.index.tz_convert(TZ_ET)
-    session_dates = pd.Series(et_index.date)
+    session_dates = pd.Series(et_index.date, index=frame.index)
     if session_dates.empty:
         return frame, None
 
     last_date = session_dates.iloc[-1]
-    session_mask = session_dates == last_date
-    session_df = frame.loc[session_mask]
+    session_mask = session_dates.eq(last_date).astype(bool).to_numpy()
+    session_df = frame.iloc[session_mask]
 
     prev_df: pd.DataFrame | None = None
     if session_dates.nunique() >= 2:
-        prev_date = session_dates.iloc[session_dates.ne(last_date).to_numpy().nonzero()[0][-1]]
-        prev_mask = session_dates == prev_date
-        prev_df = frame.loc[prev_mask]
+        unique_dates = session_dates.unique()
+        prev_candidates = [d for d in unique_dates if d != last_date]
+        if prev_candidates:
+            prev_date = prev_candidates[-1]
+            prev_mask = session_dates.eq(prev_date).astype(bool).to_numpy()
+            prev_df = frame.iloc[prev_mask]
 
     return session_df if not session_df.empty else frame.tail(240), prev_df
 

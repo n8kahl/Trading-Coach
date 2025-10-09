@@ -34,6 +34,10 @@ def filter_chain(chain: pd.DataFrame, rules: Dict[str, object]) -> pd.DataFrame:
         A filtered DataFrame containing only contracts that satisfy the rules.
     """
     df = chain.copy()
+    numeric_cols = ["delta", "dte", "spread_pct", "open_interest", "volume"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     dte_low, dte_high = rules.get("dte_range", (0, 365))
     delta_low, delta_high = rules.get("delta_range", (0.0, 1.0))
     max_spread = rules.get("max_spread_pct", 1.0)
@@ -71,8 +75,12 @@ def pick_best_contract(filtered_chain: pd.DataFrame, prefer_delta: float | None 
     if filtered_chain.empty:
         return None
     df = filtered_chain.copy().reset_index(drop=True)
-    if prefer_delta is not None:
-        df["delta_score"] = (df["delta"].abs() - prefer_delta).abs()
+    if "delta" in df.columns:
+        df["delta"] = pd.to_numeric(df["delta"], errors="coerce")
+    if "spread_pct" in df.columns:
+        df["spread_pct"] = pd.to_numeric(df["spread_pct"], errors="coerce")
+    if prefer_delta is not None and "delta" in df.columns:
+        df["delta_score"] = (df["delta"].abs() - abs(prefer_delta)).abs().fillna(999.0)
         df = df.sort_values(by=["delta_score", "spread_pct", "dte"])
     else:
         df = df.sort_values(by=["spread_pct", "dte", "volume"], ascending=[True, True, False])
