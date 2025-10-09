@@ -314,7 +314,30 @@
         const dataMax = Math.max(...bars.map((b) => b.high));
         const minValue = Math.min(dataMin, ...levelValues);
         const maxValue = Math.max(dataMax, ...levelValues);
-        candleSeries.setAutoscaleInfoProvider(() => ({ priceRange: { minValue, maxValue } }));
+        const hasAutoScale = typeof candleSeries.setAutoscaleInfoProvider === "function";
+        if (hasAutoScale) {
+          try {
+            candleSeries.setAutoscaleInfoProvider(() => ({ priceRange: { minValue, maxValue } }));
+          } catch (e) {
+            dbg(`autoscale provider not available: ${e?.message || e}`);
+          }
+        }
+        if (!hasAutoScale) {
+          // Fallback: add a transparent helper series with min/max so autoscale includes levels
+          const helper = chart.addLineSeries({
+            color: theme === "light" ? "#00000000" : "#00000000",
+            lineWidth: 1,
+            lastValueVisible: false,
+            priceLineVisible: false,
+            crosshairMarkerVisible: false,
+          });
+          const firstTs = Math.floor(bars[0].time / 1000);
+          const lastTs = Math.floor(bars[bars.length - 1].time / 1000);
+          helper.setData([
+            { time: firstTs, value: minValue },
+            { time: lastTs, value: maxValue },
+          ]);
+        }
       }
 
       chart.timeScale().fitContent();
@@ -322,6 +345,18 @@
     } catch (err) {
       console.error("[tv] Lightweight fallback failed", err);
       dbg(`error: ${err?.message || err}`);
+      // If we have bars but something failed after fetch, still try to render baseline chart
+      try {
+        if (typeof bars !== "undefined" && Array.isArray(bars) && bars.length) {
+          const failsafe = document.getElementById("tv_chart_container");
+          failsafe.innerHTML = "";
+          const chart = LightweightCharts.createChart(failsafe, { layout: { background: { type: "solid", color: theme === "light" ? "#ffffff" : "#0b0f14" }, textColor: theme === "light" ? "#1b2733" : "#e6edf3" } });
+          const cs = chart.addCandlestickSeries();
+          cs.setData(bars.map((b) => ({ time: Math.floor(b.time / 1000), open: b.open, high: b.high, low: b.low, close: b.close })));
+          chart.timeScale().fitContent();
+          return;
+        }
+      } catch {}
       container.innerHTML = "<p style=\"padding:24px;text-align:center;\">No market data available.</p>";
     }
 
