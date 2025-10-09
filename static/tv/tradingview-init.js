@@ -47,6 +47,7 @@
   const extraStudies = parseListParam(params.get("studies"));
   const range = params.get("range");
   const keyLevels = parseFloatList(params.get("levels"));
+  const debug = params.get("debug") === "1";
 
   const plan = {
     entry: params.get("entry"),
@@ -59,6 +60,12 @@
   };
 
   const legendEl = document.getElementById("plan_legend");
+  const debugEl = document.getElementById("debug_banner");
+  const dbg = (msg) => {
+    if (!debug) return;
+    debugEl.style.display = "block";
+    debugEl.textContent += (debugEl.textContent ? "\n" : "") + msg;
+  };
 
   const updateLegend = () => {
     const rows = [];
@@ -235,11 +242,14 @@
 
     try {
       const now = Math.floor(Date.now() / 1000);
-      const span = resolutionToSeconds(normalizeResolution(range)) || resolutionToSeconds(resolution) * 500;
+      const resNorm = normalizeResolution(range) || resolution;
+      const span = resolutionToSeconds(resNorm) || resolutionToSeconds(resolution) * 500;
       const from = now - span;
       const qs = new URLSearchParams({ symbol, resolution, from: String(from), to: String(now) }).toString();
+      dbg(`request: /tv-api/bars?${qs}`);
       const response = await fetch(`${baseUrl}/tv-api/bars?${qs}`);
       const payload = await response.json();
+      dbg(`response: status=${payload.s} bars=${(payload.t||[]).length}`);
       if (payload.s !== "ok") throw new Error("No data");
 
       const bars = payload.t.map((time, idx) => ({
@@ -311,6 +321,7 @@
       updateLegend();
     } catch (err) {
       console.error("[tv] Lightweight fallback failed", err);
+      dbg(`error: ${err?.message || err}`);
       container.innerHTML = "<p style=\"padding:24px;text-align:center;\">No market data available.</p>";
     }
 

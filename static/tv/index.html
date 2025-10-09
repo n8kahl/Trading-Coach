@@ -57,6 +57,20 @@
         opacity: 0.8;
         line-height: 1.4;
       }
+      .debug-banner {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        max-width: 70%;
+        font-size: 12px;
+        line-height: 1.4;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: rgba(255, 196, 44, 0.12);
+        color: #ffcc66;
+        display: none;
+        white-space: pre-wrap;
+      }
     </style>
     <script src="charting_library/charting_library.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
@@ -64,6 +78,7 @@
   <body>
     <div id="tv_chart_container"></div>
     <aside id="plan_legend" class="plan-legend"></aside>
+    <div id="debug_banner" class="debug-banner"></div>
     <script src="tv-datafeed.js"></script>
     <script src="lightweight-renderer.js"></script>
     <script src="tradingview-init.js"></script>
