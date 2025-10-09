@@ -33,6 +33,7 @@ class Settings(BaseSettings):
         default="https://sandbox.tradier.com",
         validation_alias=AliasChoices("TRADIER_BASE_URL", "TRADIER_SANDBOX_BASE_URL"),
     )
+    chart_base_url: str | None = Field(None, env="BASE_URL")
 
 @lru_cache()
 def get_settings() -> Settings:

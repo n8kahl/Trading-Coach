@@ -163,7 +163,16 @@ pre-baked trade levels.
       "direction_bias": "long"
     },
     "charts": {
-      "interactive": "https://host/charts/html?symbol=AAPL&interval=1m&ema=9,20,50&strategy=power_hour_trend"
+      "params": {
+        "symbol": "AAPL",
+        "interval": "1m",
+        "ema": "9,20,50",
+        "view": "30m",
+        "title": "AAPL power_hour_trend",
+        "strategy": "power_hour_trend",
+        "direction": "long",
+        "atr": "1.9200"
+      }
     },
     "data": {
       "bars": "https://host/gpt/context/AAPL?interval=1m&lookback=300"
@@ -235,6 +244,9 @@ pre-baked trade levels.
   plus a few alternates) when `POLYGON_API_KEY` is configured. If Polygon is
   unavailable the field is omitted and `contract_suggestion` may fall back to
   Tradier metadata.
+- **`charts.params`** exposes the exact query used to render charts (EMA stack,
+  view, strategy, direction, ATR). Send those along with your computed entry,
+  stop, and targets to `POST /gpt/chart-url` whenever you need a canonical link.
 - **`context_overlays`** packages higher-timeframe zones, liquidity pools, FVGs,
   relative strength, internals, options/volatility summaries, liquidity
   frictions, event hooks, anchored VWAPs, and volume profile magnets. These
@@ -245,6 +257,36 @@ pre-baked trade levels.
 - **`expected_move_horizon`** approximates the move that is typically achievable
   over ~30 minutes (1–2 minute bars) or ~60 minutes (5 minute bars).
 - **`data.bars`** provides a ready-made URL for deeper context.
+
+## `/gpt/chart-url`
+
+Use this helper whenever you need a shareable chart link. Provide the baseline
+`charts.params` from the scan/context response and append your computed trade
+plan fields.
+
+```bash
+curl -s -X POST https://host/gpt/chart-url \
+  -H "content-type: application/json" \
+  -d '{
+        "symbol":"AAPL",
+        "interval":"1m",
+        "ema":"9,20,50",
+        "view":"30m",
+        "entry":"258.40",
+        "stop":"257.80",
+        "tp":"259.60,260.10",
+        "notes":"Breakout plan"
+      }'
+```
+
+Response:
+
+```json
+{"interactive":"https://host/charts/html?symbol=AAPL&interval=1m&ema=9%2C20%2C50&view=30m&entry=258.40&stop=257.80&tp=259.60%2C260.10&notes=Breakout+plan"}
+```
+
+If required parameters (`symbol`, `interval`) are missing you will receive a 400
+error with a human-readable message.
 
 ## `/gpt/context/{symbol}`
 
@@ -302,6 +344,15 @@ Example response:
     "poc": null
   },
   "options": { /* populated when Polygon chains are available, same structure as scan */ },
+  "charts": {
+    "params": {
+      "symbol": "AAPL",
+      "interval": "1m",
+      "ema": "9,20,50",
+      "view": "fit",
+      "title": "AAPL 1m"
+    }
+  },
   "context_overlays": { /* same as the fields above for convenience */ }
 }
 ```
@@ -330,8 +381,8 @@ You are a trading assistant. Always:
    data.bars URL.
 4. Present the play with entry, stop, PT1/PT2, holding expectations, and a
    rationale. Mention the metrics you used.
-5. If you want to render a chart, call /charts/html and pass your chosen entry
-   and targets as query parameters.
+5. When you need a chart link, call POST /gpt/chart-url with charts.params plus
+   your chosen entry/stop/targets, then share the returned URL.
 6. Re-check setup validity whenever the timestamp or session phase changes.
 
 Never invent fills or executions. Always remind the user to manage risk and

@@ -20,10 +20,12 @@ import pandas as pd
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from pydantic import ConfigDict
+from urllib.parse import urlencode
 
 from .config import get_settings
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
-from .charts_api import build_chart_url, router as charts_router, get_candles, normalize_interval
+from .charts_api import router as charts_router, get_candles, normalize_interval
 from .scanner import scan_market
 from .tradier import TradierNotConfiguredError, fetch_option_chain, select_tradier_contract
 from .polygon_options import fetch_polygon_option_chain, summarize_polygon_chain
@@ -31,6 +33,33 @@ from .context_overlays import compute_context_overlays
 
 
 logger = logging.getLogger(__name__)
+
+ALLOWED_CHART_KEYS = {
+    "symbol",
+    "interval",
+    "view",
+    "ema",
+    "vwap",
+    "entry",
+    "stop",
+    "tp",
+    "t1",
+    "t2",
+    "t3",
+    "notes",
+    "strategy",
+    "direction",
+    "atr",
+    "title",
+}
+
+
+class ChartParams(BaseModel):
+    symbol: str
+    interval: str
+
+    model_config = ConfigDict(extra="allow")
+
 
 app = FastAPI(
     title="Trading Coach GPT Backend",
@@ -803,16 +832,20 @@ async def gpt_scan(
         base_url = str(request.base_url).rstrip("/")
         interval = _timeframe_for_style(style)
         title = f"{signal.symbol.upper()} {signal.strategy_id}"
-        interactive_url = build_chart_url(
-            base_url,
-            "html",
-            signal.symbol.upper(),
-            emas=ema_spans,
-            interval=interval,
-            title=title,
-            renderer_params={"strategy": signal.strategy_id},
-            view=_view_for_style(style),
-        )
+        chart_query: Dict[str, Any] = {
+            "symbol": signal.symbol.upper(),
+            "interval": interval,
+            "ema": ",".join(str(span) for span in ema_spans),
+            "view": _view_for_style(style),
+            "title": title,
+        }
+        chart_query["strategy"] = signal.strategy_id
+        if direction_hint:
+            chart_query["direction"] = direction_hint
+        atr_hint = snapshot.get("indicators", {}).get("atr14")
+        if isinstance(atr_hint, (int, float)) and math.isfinite(atr_hint):
+            chart_query["atr"] = f"{float(atr_hint):.4f}"
+        chart_query = {key: str(value) for key, value in chart_query.items() if value is not None}
         feature_payload = _serialize_features(signal.features)
         feature_payload.setdefault("atr", snapshot.get("indicators", {}).get("atr14"))
         feature_payload.setdefault("adx", snapshot.get("indicators", {}).get("adx14"))
@@ -854,7 +887,7 @@ async def gpt_scan(
                 "key_levels": key_levels,
                 "market_snapshot": snapshot,
                 "charts": {
-                    "interactive": interactive_url,
+                    "params": chart_query,
                 },
                 "features": feature_payload,
                 "data": {
@@ -867,6 +900,34 @@ async def gpt_scan(
 
     logger.info("scan universe=%s user=%s results=%d", universe.tickers, user.user_id, len(payload))
     return payload
+
+
+@gpt.post("/chart-url", summary="Build a canonical chart URL from params")
+async def gpt_chart_url(payload: ChartParams, request: Request) -> Dict[str, Any]:
+    settings = get_settings()
+
+    base_url = (settings.chart_base_url or str(request.base_url)).rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=500, detail="Base URL is not configured")
+
+    data: Dict[str, Any] = dict(payload.model_extra or {})
+    data["symbol"] = payload.symbol
+    data["interval"] = payload.interval
+
+    query: Dict[str, str] = {}
+    for key, value in data.items():
+        if key not in ALLOWED_CHART_KEYS or value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            value = ",".join(str(item) for item in value if item is not None)
+        query[key] = str(value)
+
+    if "symbol" not in query or "interval" not in query:
+        raise HTTPException(status_code=400, detail="Required: symbol, interval")
+
+    encoded = urlencode(query, doseq=False, safe=",")
+    url = f"{base_url}/charts/html?{encoded}" if encoded else f"{base_url}/charts/html"
+    return {"interactive": url}
 
 
 @gpt.get("/context/{symbol}", summary="Return recent market context for a ticker")
@@ -964,6 +1025,14 @@ async def gpt_context(
     response["context_overlays"] = enhancements
     if polygon_bundle:
         response["options"] = polygon_bundle
+    chart_params = {
+        "symbol": symbol.upper(),
+        "interval": interval_normalized,
+        "ema": "9,20,50",
+        "view": "fit",
+        "title": f"{symbol.upper()} {interval_normalized}",
+    }
+    response["charts"] = {"params": {key: str(value) for key, value in chart_params.items()}}
     return response
 
 
