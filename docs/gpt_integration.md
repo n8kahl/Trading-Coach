@@ -252,7 +252,8 @@ pre-baked trade levels.
   stop, and targets to `POST /gpt/chart-url` whenever you need a canonical link.
   The viewer accepts TradingView resolutions (`1`, `3`, `5`, `15`, `30`, `60`,
   `120`, `240`, `1D`); minute/hours strings like `1m` and `1h` are also
-  normalized automatically.
+  normalized automatically. Include `levels` when you want dotted key levels
+  rendered on the chart (e.g. major support/resistance).
 - **`context_overlays`** packages higher-timeframe zones, liquidity pools, FVGs,
   relative strength, internals, options/volatility summaries, liquidity
   frictions, event hooks, anchored VWAPs, and volume profile magnets. These
@@ -389,17 +390,17 @@ You are a trading assistant. Always:
      session phase, and gap context.
    - Derive stop-loss and take-profit levels using those metrics. Target at
      least 0.8 R:R unless the user requests otherwise.
-  - Review option liquidity, spreads, and greeks via the `options.best`
-    bundle (Polygon) or `contract_suggestion` fallback if Polygon is absent.
-  - Inspect `context_overlays` for supply/demand zones, liquidity pools, FVGs,
-    internals, and event hooks before locking the plan.
-  - Estimate whether the target is achievable within the expected_move_horizon.
+   - Review option liquidity, spreads, and greeks via the `options.best`
+     bundle (Polygon) or `contract_suggestion` fallback if Polygon is absent.
+   - Inspect `context_overlays` for supply/demand zones, liquidity pools, FVGs,
+     internals, and event hooks before locking the plan.
+   - Estimate whether the target is achievable within the expected_move_horizon.
 3. When you need deeper context, GET /gpt/context/{symbol} using the provided
    data.bars URL.
 4. Present the play with entry, stop, PT1/PT2, holding expectations, and a
    rationale. Mention the metrics you used.
 5. When you need a chart link, call POST /gpt/chart-url with charts.params plus
-   your chosen entry/stop/targets, then share the returned URL.
+   your chosen entry/stop/targets and any key `levels`, then share the returned URL.
 6. Re-check setup validity whenever the timestamp or session phase changes.
 
 Never invent fills or executions. Always remind the user to manage risk and

@@ -60,6 +60,27 @@ ALLOWED_CHART_KEYS = {
 }
 
 
+def _normalize_chart_symbol(value: str) -> str:
+    token = (value or "").strip()
+    if ":" in token:
+        return token
+    return token.upper()
+
+
+def _normalize_chart_interval(value: str) -> str:
+    token = (value or "").strip().lower()
+    if not token:
+        return "1"
+    if token.endswith("m"):
+        return str(int(token.rstrip("m") or "1"))
+    if token.endswith("h"):
+        hours = int(token.rstrip("h") or "1")
+        return str(hours * 60)
+    if token in {"d", "1d"}:
+        return "1D"
+    return token.upper()
+
+
 class ChartParams(BaseModel):
     symbol: str
     interval: str
@@ -1062,8 +1083,8 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
         raise HTTPException(status_code=500, detail="Base URL is not configured")
 
     data: Dict[str, Any] = dict(payload.model_extra or {})
-    data["symbol"] = payload.symbol
-    data["interval"] = payload.interval
+    data["symbol"] = _normalize_chart_symbol(payload.symbol)
+    data["interval"] = _normalize_chart_interval(payload.interval)
 
     query: Dict[str, str] = {}
     for key, value in data.items():
@@ -1072,6 +1093,11 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
         if isinstance(value, (list, tuple)):
             value = ",".join(str(item) for item in value if item is not None)
         query[key] = str(value)
+
+    if "interval" in query:
+        query["interval"] = _normalize_chart_interval(query["interval"])
+    if "symbol" in query:
+        query["symbol"] = _normalize_chart_symbol(query["symbol"])
 
     if "symbol" not in query or "interval" not in query:
         raise HTTPException(status_code=400, detail="Required: symbol, interval")
