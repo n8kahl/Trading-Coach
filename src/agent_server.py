@@ -812,10 +812,19 @@ async def tv_bars(
     to: int = Query(...),
 ) -> Dict[str, Any]:
     timeframe = _resolution_to_timeframe(resolution)
+    logger.info(
+        "tv-api/bars request symbol=%s resolution=%s -> timeframe=%s window=%s-%s",
+        symbol,
+        resolution,
+        timeframe,
+        from_,
+        to,
+    )
     if timeframe is None:
         raise HTTPException(status_code=400, detail=f"Unsupported resolution {resolution}")
 
     history = await _load_remote_ohlcv(symbol, timeframe)
+    src_tf = timeframe
     # Resiliency: if intraday is unavailable for this symbol, try a coarser TF
     if history is None or history.empty:
         alt_tf = None
@@ -823,10 +832,18 @@ async def tv_bars(
             alt_tf = "15"  # 15-minute fallback
         if alt_tf:
             history = await _load_remote_ohlcv(symbol, alt_tf)
+            src_tf = alt_tf
         if history is None or history.empty:
             # Last resort: show daily so the chart isn't blank
             history = await _load_remote_ohlcv(symbol, "D")
+            src_tf = "D"
         if history is None or history.empty:
+            logger.warning(
+                "tv-api/bars no data for symbol=%s resolution=%s tried_tf=%s",
+                symbol,
+                resolution,
+                timeframe,
+            )
             return {"s": "no_data"}
 
     history = history.sort_index()
@@ -835,17 +852,27 @@ async def tv_bars(
     window = history.loc[(history.index >= start_ts) & (history.index <= end_ts)]
 
     if window.empty:
+        logger.info(
+            "tv-api/bars empty window for symbol=%s src_tf=%s; returning tail",
+            symbol,
+            src_tf,
+        )
         window = history.tail(min(len(history), 600))
         if window.empty:
             earlier = history[history.index < start_ts]
             if earlier.empty:
+                logger.warning(
+                    "tv-api/bars no earlier data for symbol=%s src_tf=%s",
+                    symbol,
+                    src_tf,
+                )
                 return {"s": "no_data"}
             next_time = int(earlier.index[-1].timestamp())
             return {"s": "no_data", "nextTime": next_time}
 
     volume_values = [float(val) for val in window["volume"].tolist()] if "volume" in window.columns else [0.0] * len(window)
 
-    return {
+    payload = {
         "s": "ok",
         "t": [int(ts.timestamp()) for ts in window.index],
         "o": [round(float(val), 6) for val in window["open"].tolist()],
@@ -854,6 +881,18 @@ async def tv_bars(
         "c": [round(float(val), 6) for val in window["close"].tolist()],
         "v": volume_values,
     }
+    try:
+        logger.info(
+            "tv-api/bars OK symbol=%s src_tf=%s bars=%d window=%s-%s",
+            symbol,
+            src_tf,
+            len(payload["t"]),
+            start_ts,
+            end_ts,
+        )
+    except Exception:
+        pass
+    return payload
 
 
 # ---------------------------------------------------------------------------
