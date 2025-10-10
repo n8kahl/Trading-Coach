@@ -4,6 +4,17 @@ This backend now serves raw market context so that your GPT agent can make the
 final trading decisions (entries, stops, targets, position sizing). The server
 focuses on data prep; the agent performs the higher-level reasoning.
 
+## Production Endpoint
+
+- API host (production): `https://trading-coach-production.up.railway.app`
+- Charts base (production): `https://trading-coach-production.up.railway.app/tv`
+- Use `POST /gpt/chart-url` and render the returned `interactive` URL verbatim.
+- Health: `GET /healthz`
+- Quick checks:
+  - `curl -sS https://trading-coach-production.up.railway.app/openapi.json | jq '.paths | keys'`
+  - `curl -sS -X POST https://trading-coach-production.up.railway.app/gpt/scan -H 'content-type: application/json' -d '{"tickers":["AAPL"],"style":"intraday"}'`
+
+
 ## `/gpt/scan`
 
 `POST /gpt/scan` accepts the same payload as before (`tickers` plus an optional
@@ -339,6 +350,35 @@ Response:
 
 If required parameters (`symbol`, `interval`) are missing you will receive a 400
 error with a human-readable message.
+
+### Client-side URL validation (optional but recommended)
+
+If you render the returned link in a client, you can enforce a canonical base
+to avoid accidental redirects or stale hosts. Example (TypeScript/JavaScript):
+
+```ts
+// After calling POST /gpt/chart-url
+const url: string = resp.interactive;
+
+try {
+  const u = new URL(url);
+  if (
+    u.protocol !== 'https:' ||
+    u.hostname !== 'trading-coach-production.up.railway.app' ||
+    u.pathname !== '/tv'
+  ) {
+    throw new Error('Non-canonical chart URL');
+  }
+  // ✅ safe to render
+  showLink('📈 Chart: View Interactive Setup', url);
+} catch (e) {
+  showText('📈 Chart: unavailable (URL failed validation; ask me to retry)');
+}
+```
+
+If you later switch to the lightweight renderer, update the pathname check to
+`'/charts/html'` and consider keeping the allowed host/domain in a config
+variable instead of hardcoding it.
 
 ## `/gpt/contracts`
 

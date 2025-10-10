@@ -29,6 +29,7 @@ from urllib.parse import urlencode, quote
 from .config import get_settings
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
 from .charts_api import router as charts_router, get_candles, normalize_interval
+from .gpt_sentiment import router as gpt_sentiment_router
 from .scanner import scan_market
 from .tradier import (
     TradierNotConfiguredError,
@@ -2463,6 +2464,7 @@ async def gpt_widget(kind: str, symbol: str | None = None, user: AuthedUser = De
 app.include_router(tv_api)
 app.include_router(gpt)
 app.include_router(charts_router)
+app.include_router(gpt_sentiment_router)
 
 
 # ---------------------------------------------------------------------------
