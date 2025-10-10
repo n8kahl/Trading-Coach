@@ -62,6 +62,13 @@ uvicorn src.agent_server:app --reload --port 8000
 # Optional sidecar for sentiment/events/earnings
 # Recommended: run via the src.* module path
 uvicorn src.enrich_service:app --reload --port 8081
+
+On Railway, do not pass "$PORT" directly to uvicorn (the runner may not expand
+it). Use the starter modules that read PORT from the environment:
+
+- Main API: `python -m src.start_server`
+- Enrichment sidecar: `python -m src.start_enrich`
+- Finnhub sidecar: `python -m src.start_finnhub_sidecar`
 ```
 
 Environment variables (read via Pydantic):
