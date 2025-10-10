@@ -2293,8 +2293,15 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
                 if not has_confluence:
                     raise HTTPException(status_code=422, detail={"error": "TP1 too close; fails ATR gate"})
 
-    # Build URL for /charts/html (not /tv)
-    base = f"{str(request.base_url).rstrip('/')}/charts/html"
+    # Build base URL
+    # If `BASE_URL`/`CHART_BASE_URL` is configured, use it verbatim.
+    # Otherwise default to the local charts HTML renderer.
+    settings = get_settings()
+    configured_base = (settings.chart_base_url or "").strip()
+    if configured_base:
+        base = configured_base.rstrip("/")
+    else:
+        base = f"{str(request.base_url).rstrip('/')}/charts/html"
 
     # Assemble query with normalized fields
     data["symbol"] = _normalize_chart_symbol(raw_symbol)

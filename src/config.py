@@ -33,7 +33,10 @@ class Settings(BaseSettings):
         default="https://sandbox.tradier.com",
         validation_alias=AliasChoices("TRADIER_BASE_URL", "TRADIER_SANDBOX_BASE_URL"),
     )
-    chart_base_url: str | None = Field(None, env="BASE_URL")
+    chart_base_url: str | None = Field(
+        None,
+        validation_alias=AliasChoices("BASE_URL", "CHART_BASE_URL"),
+    )
     enrichment_service_url: str | None = Field(
         default="http://localhost:8081",
         env="ENRICH_SERVICE_URL",
