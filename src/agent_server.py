@@ -10,6 +10,7 @@ workflow.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import logging
 import time
@@ -26,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
 from urllib.parse import urlencode, quote
+from fastapi.responses import StreamingResponse
 
 from .config import get_settings
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
@@ -257,6 +259,11 @@ class IdeaStoreResponse(BaseModel):
     idea_url: str
 
 
+class StreamPushRequest(BaseModel):
+    symbol: str
+    event: Dict[str, Any]
+
+
 class MultiContextRequest(BaseModel):
     symbol: str
     intervals: List[str] = Field(
@@ -394,6 +401,21 @@ async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
         versions.append(snapshot)
 
 
+async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
+    async with _STREAM_LOCK:
+        queues = list(_STREAM_SUBSCRIBERS.get(symbol, []))
+    payload = json.dumps({"symbol": symbol, "event": event})
+    for queue in queues:
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            queue.put_nowait(payload)
+
+
 async def _get_idea_snapshot(plan_id: str, version: Optional[int] = None) -> Dict[str, Any]:
     async with _IDEA_LOCK:
         versions = _IDEA_STORE.get(plan_id)
@@ -406,6 +428,74 @@ async def _get_idea_snapshot(plan_id: str, version: Optional[int] = None) -> Dic
             if plan.get("version") == version:
                 return snap
         raise HTTPException(status_code=404, detail="Plan version not found")
+
+
+async def _stream_generator(symbol: str) -> Any:
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+    async with _STREAM_LOCK:
+        _STREAM_SUBSCRIBERS.setdefault(symbol, []).append(queue)
+    try:
+        while True:
+            data = await queue.get()
+            yield f"data: {data}\n\n"
+    except asyncio.CancelledError:
+        raise
+    finally:
+        async with _STREAM_LOCK:
+            subscribers = _STREAM_SUBSCRIBERS.get(symbol, [])
+            if queue in subscribers:
+                subscribers.remove(queue)
+            if not subscribers:
+                _STREAM_SUBSCRIBERS.pop(symbol, None)
+
+
+async def _simulate_generator(symbol: str, params: Dict[str, Any]) -> Any:
+    lookback = max(int(params.get("minutes", 30)), 5)
+    try:
+        bars = get_candles(symbol, "1", lookback=lookback)
+    except Exception as exc:
+        yield f"data: {json.dumps({"error": str(exc)})}\n\n"
+        return
+    if bars.empty:
+        yield f"data: {json.dumps({"error": "No data"})}\n\n"
+        return
+    entry = float(params.get("entry"))
+    stop = float(params.get("stop"))
+    tp1 = float(params.get("tp1"))
+    tp2 = params.get("tp2")
+    direction = params.get("direction", "long")
+    state = "AWAIT_TRIGGER"
+    for _, row in bars.iterrows():
+        price = float(row["close"])
+        event = {
+            "type": "bar",
+            "state": state,
+            "price": price,
+            "time": row["time"],
+        }
+        if state == "AWAIT_TRIGGER":
+            if (direction == "long" and price >= entry) or (direction == "short" and price <= entry):
+                state = "IN_TRADE"
+                event["coaching"] = "Trigger crossed — manage fills"
+        elif state == "IN_TRADE":
+            if (direction == "long" and price >= tp1) or (direction == "short" and price <= tp1):
+                state = "MANAGE"
+                event["coaching"] = "TP1 hit — scale and trail to BE"
+            elif (direction == "long" and price <= stop) or (direction == "short" and price >= stop):
+                state = "EXITED"
+                event["coaching"] = "Stopped out"
+        elif state == "MANAGE":
+            if tp2 and ((direction == "long" and price >= float(tp2)) or (direction == "short" and price <= float(tp2))):
+                state = "EXITED"
+                event["coaching"] = "TP2 hit — flat"
+            elif (direction == "long" and price <= entry) or (direction == "short" and price >= entry):
+                state = "EXITED"
+                event["coaching"] = "Back to entry — flat"
+        elif state == "EXITED":
+            event["coaching"] = "Trade complete"
+        yield f"data: {json.dumps(event)}\n\n"
+        await asyncio.sleep(0.15)
+
 
 
 async def _fetch_polygon_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None:
@@ -1260,6 +1350,8 @@ _MULTI_CONTEXT_CACHE: Dict[Tuple[str, str, int], Tuple[float, Dict[str, Any]]] =
 # Idea snapshot store (in-memory)
 _IDEA_STORE: Dict[str, List[Dict[str, Any]]] = {}
 _IDEA_LOCK = asyncio.Lock()
+_STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
+_STREAM_LOCK = asyncio.Lock()
 _IV_METRICS_CACHE_TTL = 120.0
 _IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
@@ -2092,6 +2184,50 @@ async def get_latest_idea(plan_id: str) -> Dict[str, Any]:
 @app.get("/idea/{plan_id}/{version}")
 async def get_idea_version(plan_id: str, version: int) -> Dict[str, Any]:
     return await _get_idea_snapshot(plan_id, version=version)
+
+
+@app.get("/stream/market")
+async def stream_market(symbol: str = Query(..., min_length=1)) -> StreamingResponse:
+    async def event_generator():
+        async for chunk in _stream_generator(symbol.upper()):
+            yield chunk
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/internal/stream/push", include_in_schema=False, tags=["internal"])
+async def internal_stream_push(payload: StreamPushRequest) -> Dict[str, str]:
+    symbol = (payload.symbol or "").upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+    await _publish_stream_event(symbol, payload.event or {})
+    return {"status": "ok"}
+
+
+@app.get("/simulate")
+async def simulate_trade(
+    symbol: str = Query(..., min_length=1),
+    minutes: int = Query(30, ge=5, le=300),
+    entry: float = Query(...),
+    stop: float = Query(...),
+    tp1: float = Query(...),
+    tp2: float | None = Query(None),
+    direction: str = Query(..., regex="^(long|short)$"),
+) -> StreamingResponse:
+    params = {
+        "minutes": minutes,
+        "entry": entry,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
+        "direction": direction,
+    }
+
+    async def playback():
+        async for chunk in _simulate_generator(symbol.upper(), params):
+            yield chunk
+
+    return StreamingResponse(playback(), media_type="text/event-stream")
 
 
 @gpt.post("/multi-context", summary="Return multi-interval context with vol metrics")
