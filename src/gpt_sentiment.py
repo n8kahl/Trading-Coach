@@ -13,11 +13,16 @@ import html
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
+import pandas as pd
+
+# Import local market data helpers
+from .charts_api import get_candles
+from .calculations import ema, atr
 
 try:
     from dateutil import parser as dtp  # type: ignore
@@ -55,6 +60,7 @@ class SentimentResponse(BaseModel):
     risks: List[str] = []
     quotes: List[str] = []
     raw_excerpt: str | None = None
+    tickers_detail: List[Dict[str, Any]] | None = None
 
 
 _CACHE: Dict[str, Any] = {"data": None, "ts": 0.0, "key": None}
@@ -72,6 +78,71 @@ DEFAULT_HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+
+def _ema_stack_label(e9: Optional[float], e20: Optional[float], e50: Optional[float]) -> Optional[str]:
+    try:
+        if e9 is None or e20 is None or e50 is None:
+            return None
+        if e9 > e20 > e50:
+            return "bullish"
+        if e9 < e20 < e50:
+            return "bearish"
+        return "mixed"
+    except Exception:
+        return None
+
+
+def _analyze_ticker(symbol: str) -> Dict[str, Any]:
+    """Compute a lightweight snapshot for a ticker (robust to data failures)."""
+    out: Dict[str, Any] = {"symbol": symbol}
+    try:
+        intr = get_candles(symbol, "15m", lookback=200)
+        if intr is None or intr.empty:
+            raise RuntimeError("no intraday data")
+        df = intr.copy()
+        df["time"] = pd.to_datetime(df["time"], utc=True)
+        df = df.set_index("time").sort_index()
+        price = float(df["close"].iloc[-1])
+        lo = float(df["low"].tail(50).min()) if len(df) >= 2 else None
+        hi = float(df["high"].tail(50).max()) if len(df) >= 2 else None
+        e9s = ema(df["close"], 9)
+        e20s = ema(df["close"], 20)
+        e50s = ema(df["close"], 50)
+        e9 = float(e9s.iloc[-1]) if len(e9s) else None
+        e20 = float(e20s.iloc[-1]) if len(e20s) else None
+        e50 = float(e50s.iloc[-1]) if len(e50s) else None
+        atrs = atr(df["high"], df["low"], df["close"], 14)
+        atr14 = float(atrs.iloc[-1]) if len(atrs) else None
+        out.update(
+            {
+                "price": price,
+                "range_low": lo,
+                "range_high": hi,
+                "ema9": e9,
+                "ema20": e20,
+                "ema50": e50,
+                "ema_stack": _ema_stack_label(e9, e20, e50),
+                "atr14": atr14,
+            }
+        )
+    except Exception:
+        # leave partial
+        pass
+
+    # Daily change pct if available
+    try:
+        daily = get_candles(symbol, "d", lookback=3)
+        if daily is not None and not daily.empty and len(daily) >= 2:
+            prev = float(daily["close"].iloc[-2])
+            last = float(daily["close"].iloc[-1])
+            if prev:
+                out["change_pct"] = (last / prev) - 1.0
+                out.setdefault("price", last)
+    except Exception:
+        pass
+
+    return out
 
 
 async def _resolve_channel_id(client: httpx.AsyncClient, handle: str) -> str:
@@ -243,6 +314,14 @@ async def gpt_sentiment(
             key_levels = _extract_levels(text_blob)
             lbl, score = _pick_sentiment(text_blob)
 
+            # Per-ticker lightweight analysis (best-effort)
+            details: List[Dict[str, Any]] = []
+            for t in tickers[:5]:
+                try:
+                    details.append(_analyze_ticker(t))
+                except Exception:
+                    continue
+
             quotes: List[str] = []
             risks: List[str] = []
             for line in re.split(r"[\n\.]+", transcript)[:15]:
@@ -272,6 +351,7 @@ async def gpt_sentiment(
                 risks=risks[:5],
                 quotes=quotes[:3],
                 raw_excerpt=transcript[:500] if transcript else "",
+                tickers_detail=details or None,
             )
 
             _CACHE["data"], _CACHE["ts"], _CACHE["key"] = resp, now, key
