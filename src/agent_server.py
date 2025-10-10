@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
@@ -143,6 +144,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 
 STATIC_ROOT = (Path(__file__).resolve().parent.parent / "static").resolve()
