@@ -1619,6 +1619,20 @@ async def gpt_scan(
             "theme": "dark",
         }
         plan_payload: Dict[str, Any] | None = None
+        enhancements: Dict[str, Any] | None = None
+        chain = polygon_chains.get(signal.symbol)
+        try:
+            enhancements = compute_context_overlays(
+                history,
+                symbol=signal.symbol,
+                interval=interval,
+                benchmark_history=benchmark_history,
+                options_chain=chain,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("compute_context_overlays failed for %s: %s", signal.symbol, exc)
+            enhancements = {}
+
         if signal.plan is not None:
             plan_payload = signal.plan.as_dict()
             chart_query["entry"] = f"{signal.plan.entry:.2f}"
@@ -1629,7 +1643,7 @@ async def gpt_scan(
                 chart_query["atr"] = f"{float(signal.plan.atr):.4f}"
             if signal.plan.notes:
                 chart_query["notes"] = signal.plan.notes
-        overlay_params = _encode_overlay_params(enhancements)
+        overlay_params = _encode_overlay_params(enhancements or {})
         for key, value in overlay_params.items():
             chart_query[key] = value
         level_tokens = _extract_levels_for_chart(key_levels)
@@ -1649,15 +1663,6 @@ async def gpt_scan(
             plan_dict = signal.plan.as_dict()
             for key, value in plan_dict.items():
                 feature_payload[f"plan_{key}"] = value
-
-        chain = polygon_chains.get(signal.symbol)
-        enhancements = compute_context_overlays(
-            history,
-            symbol=signal.symbol,
-            interval=interval,
-            benchmark_history=benchmark_history,
-            options_chain=chain,
-        )
 
         polygon_bundle: Dict[str, Any] | None = None
         if polygon_chains:
