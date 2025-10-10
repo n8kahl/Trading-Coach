@@ -594,6 +594,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "notes": "Watch plan: market closed; review before open.",
         "view": "1d",
     }
+    chart_params["title"] = _format_chart_title(symbol, "long", "watch_plan")
     chart_links = None
     try:
         chart_links = await gpt_chart_url(ChartParams(**chart_params), request)
@@ -647,7 +648,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "volatility_regime": snapshot.get("volatility"),
         "htf": htf,
         "data_quality": data_quality,
-        "chart_url": chart_links.interactive if chart_links else None,
+        "chart_url": chart_url_value,
         "options": None,
         "why_this_works": ["Watch-only plan generated during market closure."],
         "invalidation": ["Price gaps beyond stop on open"],
