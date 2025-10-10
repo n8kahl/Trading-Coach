@@ -1181,7 +1181,8 @@ async def _compute_iv_metrics(symbol: str) -> Dict[str, Any]:
                 candidates["strike_diff"] = (candidates["strike"] - price_ref).abs()
             else:
                 candidates["strike_diff"] = 0.0
-            candidates["abs_delta"] = candidates.get("delta", np.nan).abs()
+            delta_series = pd.to_numeric(candidates.get("delta"), errors="coerce")
+            candidates["abs_delta"] = delta_series.abs()
             candidates = candidates.dropna(subset=["abs_delta", "dte"])
             candidates = candidates[(candidates["dte"].astype(float) >= 15) & (candidates["dte"].astype(float) <= 60)]
             if not candidates.empty:
