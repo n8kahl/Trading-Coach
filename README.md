@@ -33,6 +33,7 @@ Authentication is optional. Set `BACKEND_API_KEY` to require Bearer tokens; incl
 ├── requirements.txt
 ├── nixpacks.toml            # Railway build config
 ├── Procfile                 # uvicorn launch command
+├── enrich_service.py        # Finnhub enrichment sidecar (sentiment/events/earnings)
 ├── docs/
 │   ├── gpt_integration.md   # API schemas + GPT usage guide
 │   └── progress.md          # Change log, roadmap, operational notes
@@ -58,6 +59,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn src.agent_server:app --reload --port 8000
+# Optional sidecar for sentiment/events/earnings
+# Recommended: run via the src.* module path
+uvicorn src.enrich_service:app --reload --port 8081
 ```
 
 Environment variables (read via Pydantic):
@@ -67,6 +71,8 @@ Environment variables (read via Pydantic):
 POLYGON_API_KEY=pk_your_key              # Required for premium Polygon data (optional)
 BACKEND_API_KEY=super-secret             # Omit for anonymous access during dev
 BASE_URL=https://<your-app>.up.railway.app/tv
+FINNHUB_API_KEY=your_finnhub_key         # Required for enrich_service.py
+ENRICH_SERVICE_URL=http://localhost:8081 # Override if deploying enrichment elsewhere
 
 # Tradier (sandbox defaults shown)
 TRADIER_SANDBOX_TOKEN=XXXXXXXXXXXX

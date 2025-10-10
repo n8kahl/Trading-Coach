@@ -481,18 +481,7 @@ defaults to 300 bars when omitted.
 ```jsonc
 {
   "symbol": "AAPL",
-  "iv_metrics": {
-    "timestamp": "2025-10-08T19:40:05.123456Z",
-    "iv_atm": 0.37,
-    "iv_rank": 62.4,
-    "iv_percentile": 68.5,
-    "hv20": 0.29,
-    "hv60": 0.32,
-    "hv120": 0.34,
-    "hv20_percentile": 54.1,
-    "iv_to_hv_ratio": 1.28
-  },
-  "intervals": [
+  "contexts": [
     {
       "interval": "1",
       "requested": "1m",
@@ -510,85 +499,46 @@ defaults to 300 bars when omitted.
       }
     },
     { "interval": "60", "requested": "1h", … }
-  ]
+  ],
+  "volatility_regime": {
+    "timestamp": "2025-10-08T19:40:05.123456Z",
+    "iv_atm": 0.37,
+    "iv_rank": 62.4,
+    "iv_percentile": 68.5,
+    "hv_20": 0.29,
+    "hv_60": 0.32,
+    "hv_120": 0.34,
+    "hv_20_percentile": 54.1,
+    "iv_to_hv_ratio": 1.28,
+    "skew_25d": -0.08
+  },
+  "sentiment": {
+    "symbol_sentiment": 0.14,
+    "news_count_24h": 12,
+    "news_bias_24h": 0.08,
+    "headline_risk": "normal"
+  },
+  "events": {
+    "next_fomc_minutes": 4320,
+    "next_cpi_minutes": 120,
+    "next_nfp_minutes": null,
+    "within_event_window": true,
+    "label": "watch"
+  },
+  "earnings": {
+    "next_earnings_at": "2025-10-28T20:00:00+00:00",
+    "dte_to_earnings": 19.0,
+    "pre_or_post": "post",
+    "earnings_flag": "near"
+  }
 }
 ```
 
 Intervals pulled from cache include `"cached": true`. IV metrics fall back to
 `null` when the chain/price data is unavailable.
-
-Example response:
-
-```jsonc
-{
-  "symbol": "AAPL",
-  "interval": "1",
-  "lookback": 300,
-  "bars": [
-    {"time": "2025-10-08T14:02:00+00:00", "open": 257.4, "high": 257.6, "low": 257.2, "close": 257.5, "volume": 820000},
-    …
-  ],
-  "indicators": {
-    "ema9": [{"time": "2025-10-08T14:02:00+00:00", "value": 257.48}, …],
-    "ema20": […],
-    "ema50": […],
-    "vwap": […],
-    "atr14": […],
-    "adx14": […]
-  },
-  "key_levels": { "session_high": 261.4, … },
-  "snapshot": { /* same structure as scan payload */ },
-  "supply_zones": [],
-  "demand_zones": [],
-  "liquidity_pools": [],
-  "fvg": [],
-  "rel_strength_vs": { "benchmark": "SPY", "lookback_bars": 15, "value": null },
-  "internals": { "adv_dec": null, "tick": null, "sector_perf": {}, "index_bias": null },
-  "options_summary": {
-    "atm_iv": null,
-    "iv_rank": null,
-    "iv_pct": null,
-    "skew_25d": null,
-    "term_slope": null,
-    "spread_bps": null
-  },
-  "liquidity_metrics": {
-    "avg_spread_bps": null,
-    "typical_slippage_bps": null,
-    "lot_size_hint": null
-  },
-  "events": [],
-  "avwap": {
-    "from_open": null,
-    "from_prev_close": null,
-    "from_session_low": null,
-    "from_session_high": null
-  },
-  "volume_profile": {
-    "vwap": null,
-    "vah": null,
-    "val": null,
-    "poc": null
-  },
-  "options": { /* populated when Polygon chains are available, same structure as scan */ },
-  "charts": {
-    "params": {
-      "symbol": "AAPL",
-      "interval": "1",
-      "ema": "9,20,50",
-      "view": "fit",
-      "title": "AAPL 1m",
-      "vwap": "1",
-      "theme": "dark",
-      "levels": "259.40,255.90,258.70,257.30,259.80,254.60,257.90"
-    }
-  },
-  "context_overlays": { /* same as the fields above for convenience */ }
-}
-```
-
-Use this when you need raw bars for custom indicator calculations, measuring
-momentum, or validating expected time-to-target.
+`sentiment`, `events`, and `earnings` are populated when the enrichment sidecar
+(`enrich_service.py`) is running with a valid `FINNHUB_API_KEY`. They are `null`
+when the sidecar is disabled or the upstream APIs fail temporarily.
 
 ## Suggested GPT system prompt
 

@@ -219,11 +219,48 @@ class MultiContextResponse(BaseModel):
     symbol: str
     contexts: List[Dict[str, Any]]
     volatility_regime: Dict[str, Any]
+    sentiment: Dict[str, Any] | None = None
+    events: Dict[str, Any] | None = None
+    earnings: Dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
+
+
+async def _fetch_context_enrichment(symbol: str) -> Dict[str, Any] | None:
+    """Fetch sentiment/event/earnings enrichment data when the sidecar is configured."""
+
+    try:
+        settings = get_settings()
+        base_url = getattr(settings, "enrichment_service_url", None) or ""
+    except Exception:
+        base_url = ""
+
+    base_url = base_url.strip()
+    if not base_url:
+        return None
+
+    url = f"{base_url.rstrip('/')}/enrich/{quote(symbol)}"
+    timeout = httpx.Timeout(5.0, connect=2.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            resp = await client.get(url)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("context enrichment fetch failed for %s: %s", symbol, exc)
+            return None
+        except Exception as exc:  # pragma: no cover - network errors
+            logger.warning("context enrichment fetch error for %s: %s", symbol, exc)
+            return None
+
+    try:
+        return resp.json()
+    except ValueError:
+        logger.warning("context enrichment returned invalid JSON for %s", symbol)
+        return None
+
 
 def _style_for_strategy(strategy_id: str) -> str:
     sid = strategy_id.lower()
@@ -1759,7 +1796,19 @@ async def gpt_multi_context(
         "timestamp": iv_metrics.get("timestamp"),
         "skew_25d": iv_metrics.get("skew_25d"),
     }
-    return MultiContextResponse(symbol=symbol, contexts=contexts, volatility_regime=volatility_regime)
+    enrichment = await _fetch_context_enrichment(symbol)
+    sentiment = (enrichment or {}).get("sentiment")
+    events = (enrichment or {}).get("events")
+    earnings = (enrichment or {}).get("earnings")
+
+    return MultiContextResponse(
+        symbol=symbol,
+        contexts=contexts,
+        volatility_regime=volatility_regime,
+        sentiment=sentiment,
+        events=events,
+        earnings=earnings,
+    )
 
 
 def _infer_contract_side(side: str | None, bias: str | None) -> str | None:

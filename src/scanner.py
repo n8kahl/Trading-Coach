@@ -62,6 +62,71 @@ class Signal:
     plan: Plan | None = None
 
 
+def rr(entry: float, stop: float, tp: float, bias: str) -> float:
+    risk = (entry - stop) if bias == "long" else (stop - entry)
+    reward = (tp - entry) if bias == "long" else (entry - tp)
+    if risk <= 0:
+        return 0.0
+    return max(0.0, reward / risk)
+
+
+def _within_expected_move(entry: float, tp: float, em: Optional[float], prefer_cap: bool) -> bool:
+    if not prefer_cap or em is None or not math.isfinite(em):
+        return True
+    return abs(tp - entry) <= em
+
+
+def snap_targets_with_rr(
+    *,
+    entry: float,
+    stop: float,
+    bias: str,
+    tp_raws: List[float],
+    htf_levels: List[float],
+    min_rr: float,
+    em: Optional[float],
+    prefer_em_cap: bool,
+    snap_window_atr: float = 0.30,
+    atr: Optional[float] = None,
+) -> List[float]:
+    window = (atr or 0.0) * snap_window_atr
+    levels_sorted = sorted({float(level) for level in htf_levels if math.isfinite(level)})
+    tps_final: List[float] = []
+
+    for tp_raw in tp_raws:
+        if not math.isfinite(tp_raw):
+            continue
+        candidate: Optional[float] = None
+        if levels_sorted and atr:
+            nearest = min(levels_sorted, key=lambda lvl: abs(lvl - tp_raw))
+            if abs(nearest - tp_raw) <= window:
+                candidate = nearest
+
+        for tp_try in ([candidate] if candidate is not None else []) + [tp_raw]:
+            if tp_try is None or not math.isfinite(tp_try):
+                continue
+            if not _within_expected_move(entry, tp_try, em, prefer_em_cap):
+                continue
+            if rr(entry, stop, tp_try, bias) >= min_rr:
+                tps_final.append(tp_try)
+                break
+
+    tps_final = sorted(set(tps_final), reverse=(bias == "short"))
+    return tps_final[:2]
+
+
+def _strategy_min_rr(strategy_id: str) -> float:
+    default = 1.2
+    mapping = {
+        "orb_retest": 1.3,
+        "power_hour_trend": 1.4,
+        "vwap_avwap": 1.3,
+        "gap_fill_open": 1.5,
+        "midday_mean_revert": 1.25,
+    }
+    return mapping.get(strategy_id.lower(), default)
+
+
 def _ensure_datetime_index(frame: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(frame.index, pd.DatetimeIndex):
         frame = frame.copy()
@@ -227,7 +292,47 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
         "minutes_vector": minutes_vector,
         "timestamp": frame.index[-1],
         "session_phase": _session_phase(frame.index[-1]),
+        "htf_levels": _collect_htf_levels(session_df, prev_session_df, latest),
     }
+
+
+def _collect_htf_levels(session: pd.DataFrame, prev_session: pd.DataFrame | None, latest: pd.Series) -> List[float]:
+    levels: List[float] = []
+    try:
+        if session is not None and not session.empty:
+            levels.extend(
+                [
+                    float(session["high"].max()),
+                    float(session["low"].min()),
+                    float(session["close"].iloc[-1]),
+                ]
+            )
+            head_slice = session.head(3)
+            if not head_slice.empty:
+                levels.extend(
+                    [
+                        float(head_slice["high"].max()),
+                        float(head_slice["low"].min()),
+                    ]
+                )
+        if prev_session is not None and not prev_session.empty:
+            levels.extend(
+                [
+                    float(prev_session["high"].max()),
+                    float(prev_session["low"].min()),
+                    float(prev_session["close"].iloc[-1]),
+                ]
+            )
+        vwap_val = latest.get("vwap")
+        if math.isfinite(vwap_val):
+            levels.append(float(vwap_val))
+        ema50_val = latest.get("ema50")
+        if math.isfinite(ema50_val):
+            levels.append(float(ema50_val))
+    except Exception:
+        pass
+    clean = [lvl for lvl in levels if math.isfinite(lvl)]
+    return sorted(set(clean))
 
 
 def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> Signal | None:
@@ -273,11 +378,24 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
         stop = retest_low - tolerance * 0.5
         target_primary = max(float(recent_slice["high"].max()), entry + atr_value)
         target_secondary = entry + atr_value * 1.5
+        targets = snap_targets_with_rr(
+            entry=entry,
+            stop=stop,
+            bias="long",
+            tp_raws=[target_primary, target_secondary],
+            htf_levels=ctx.get("htf_levels", []),
+            min_rr=_strategy_min_rr(strategy.id),
+            em=None,
+            prefer_em_cap=True,
+            atr=atr_value,
+        )
+        if not targets:
+            return None
         plan = _build_plan(
             "long",
             entry,
             stop,
-            [target_primary, target_secondary],
+            targets,
             atr_value=atr_value,
             notes=f"Reclaimed OR high {or_high:.2f}; retest low {retest_low:.2f}",
             conditions=[ema_stack_long, adx_strong, volume_ok],
@@ -290,11 +408,24 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
         stop = retest_high + tolerance * 0.5
         target_primary = min(float(recent_slice["low"].min()), entry - atr_value)
         target_secondary = entry - atr_value * 1.5
+        targets = snap_targets_with_rr(
+            entry=entry,
+            stop=stop,
+            bias="short",
+            tp_raws=[target_primary, target_secondary],
+            htf_levels=ctx.get("htf_levels", []),
+            min_rr=_strategy_min_rr(strategy.id),
+            em=None,
+            prefer_em_cap=True,
+            atr=atr_value,
+        )
+        if not targets:
+            return None
         plan = _build_plan(
             "short",
             entry,
             stop,
-            [target_primary, target_secondary],
+            targets,
             atr_value=atr_value,
             notes=f"Rejected OR low {or_low:.2f}; retest high {retest_high:.2f}",
             conditions=[ema_stack_short, adx_strong, volume_ok],
@@ -365,11 +496,24 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
         stop = min(range_low, float(session["low"].tail(10).min())) - atr_value * 0.25
         target_primary = entry + atr_value
         target_secondary = max(range_high + atr_value * 0.8, entry + atr_value * 1.6)
+        targets = snap_targets_with_rr(
+            entry=entry,
+            stop=stop,
+            bias="long",
+            tp_raws=[target_primary, target_secondary],
+            htf_levels=ctx.get("htf_levels", []),
+            min_rr=_strategy_min_rr(strategy.id),
+            em=None,
+            prefer_em_cap=True,
+            atr=atr_value,
+        )
+        if not targets:
+            return None
         plan = _build_plan(
             "long",
             entry,
             stop,
-            [target_primary, target_secondary],
+            targets,
             atr_value=atr_value,
             notes=f"VWAP support {ctx['vwap']:.2f}; afternoon range high {range_high:.2f}",
             conditions=[adx_strong, volume_ok, breakout_long],
@@ -379,11 +523,24 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
         stop = max(range_high, float(session["high"].tail(10).max())) + atr_value * 0.25
         target_primary = entry - atr_value
         target_secondary = min(range_low - atr_value * 0.8, entry - atr_value * 1.6)
+        targets = snap_targets_with_rr(
+            entry=entry,
+            stop=stop,
+            bias="short",
+            tp_raws=[target_primary, target_secondary],
+            htf_levels=ctx.get("htf_levels", []),
+            min_rr=_strategy_min_rr(strategy.id),
+            em=None,
+            prefer_em_cap=True,
+            atr=atr_value,
+        )
+        if not targets:
+            return None
         plan = _build_plan(
             "short",
             entry,
             stop,
-            [target_primary, target_secondary],
+            targets,
             atr_value=atr_value,
             notes=f"VWAP resistance {ctx['vwap']:.2f}; afternoon range low {range_low:.2f}",
             conditions=[adx_strong, volume_ok, breakout_short],
@@ -461,11 +618,24 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
         stop = min(cluster_mean, np.min(anchored_values)) - tolerance
         target_primary = entry + atr_value * 1.1
         target_secondary = entry + atr_value * 1.8
+        targets = snap_targets_with_rr(
+            entry=entry,
+            stop=stop,
+            bias="long",
+            tp_raws=[target_primary, target_secondary],
+            htf_levels=ctx.get("htf_levels", []),
+            min_rr=_strategy_min_rr(strategy.id),
+            em=None,
+            prefer_em_cap=True,
+            atr=atr_value,
+        )
+        if not targets:
+            return None
         plan = _build_plan(
             "long",
             entry,
             stop,
-            [target_primary, target_secondary],
+            targets,
             atr_value=atr_value,
             notes=f"Above VWAP cluster (~{cluster_mean:.2f}); spread {cluster_spread:.2f}",
             conditions=[cluster_tight, adx_ok],
@@ -475,11 +645,24 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
         stop = max(cluster_mean, np.max(anchored_values)) + tolerance
         target_primary = entry - atr_value * 1.1
         target_secondary = entry - atr_value * 1.8
+        targets = snap_targets_with_rr(
+            entry=entry,
+            stop=stop,
+            bias="short",
+            tp_raws=[target_primary, target_secondary],
+            htf_levels=ctx.get("htf_levels", []),
+            min_rr=_strategy_min_rr(strategy.id),
+            em=None,
+            prefer_em_cap=True,
+            atr=atr_value,
+        )
+        if not targets:
+            return None
         plan = _build_plan(
             "short",
             entry,
             stop,
-            [target_primary, target_secondary],
+            targets,
             atr_value=atr_value,
             notes=f"Below VWAP cluster (~{cluster_mean:.2f}); spread {cluster_spread:.2f}",
             conditions=[cluster_tight, adx_ok],

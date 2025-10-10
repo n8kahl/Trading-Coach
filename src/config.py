@@ -34,6 +34,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TRADIER_BASE_URL", "TRADIER_SANDBOX_BASE_URL"),
     )
     chart_base_url: str | None = Field(None, env="BASE_URL")
+    enrichment_service_url: str | None = Field(
+        default="http://localhost:8081",
+        env="ENRICH_SERVICE_URL",
+    )
 
 @lru_cache()
 def get_settings() -> Settings:

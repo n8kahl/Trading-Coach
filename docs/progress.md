@@ -13,6 +13,7 @@ This document captures what is live, where the sharp edges are, and the near-ter
 
 - **Scanning & plans**
   - `/gpt/scan` evaluates strategies with real indicators (anchored VWAPs, ATR, EMA stacks, breakout checks) and emits a complete plan payload (`entry`, `stop`, targets array, confidence, R:R, overlays).
+  - Target snapping enforces strategy-specific minimum risk:reward and avoids micro take-profits by snapping only to higher-timeframe levels that preserve the R:R threshold (or dropping the target).
   - `/gpt/context/{symbol}` streams the latest interval bars and indicator series for ad‑hoc reasoning.
   - `/gpt/multi-context` bundles several intervals into one response and appends a volatility regime block (ATM IV, IV rank/percentile, HV20/60/120, IV↔HV ratio). Results are cached for 30 s.
 
