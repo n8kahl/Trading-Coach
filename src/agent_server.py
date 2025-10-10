@@ -1185,12 +1185,12 @@ async def _compute_iv_metrics(symbol: str) -> Dict[str, Any]:
             candidates = candidates.dropna(subset=["abs_delta", "dte"])
             candidates = candidates[(candidates["dte"].astype(float) >= 15) & (candidates["dte"].astype(float) <= 60)]
             if not candidates.empty:
-            candidates = candidates.sort_values(by=["strike_diff", "abs_delta"])
-            for _, row in candidates.iterrows():
-                iv_val = row.get("iv") or row.get("implied_volatility")
-                if isinstance(iv_val, (int, float)) and math.isfinite(iv_val) and iv_val > 0:
-                    atm_iv = float(iv_val) * 100.0
-                    break
+                candidates = candidates.sort_values(by=["strike_diff", "abs_delta"])
+                for _, row in candidates.iterrows():
+                    iv_val = row.get("iv") or row.get("implied_volatility")
+                    if isinstance(iv_val, (int, float)) and math.isfinite(iv_val) and iv_val > 0:
+                        atm_iv = float(iv_val) * 100.0
+                        break
     if atm_iv is not None:
         metrics["iv_atm"] = round(atm_iv, 2)
         if hv_series is not None and hv_series.size:
@@ -1199,11 +1199,11 @@ async def _compute_iv_metrics(symbol: str) -> Dict[str, Any]:
             if hv_max > hv_min:
                 metrics["iv_rank"] = round(_norm(atm_iv, hv_min, hv_max) * 100.0, 2)
                 percentile = _percentile(hv_series, atm_iv)
-                metrics["iv_percentile"] = round((percentile / 100.0) if percentile is not None else None, 4)
+                if percentile is not None:
+                    metrics["iv_percentile"] = round(percentile / 100.0, 4)
             hv20_val = metrics.get("hv_20")
             if hv20_val:
-                if hv20_val:
-                    metrics["iv_to_hv_ratio"] = round(atm_iv / hv20_val, 4)
+                metrics["iv_to_hv_ratio"] = round(atm_iv / hv20_val, 4)
 
     _IV_METRICS_CACHE[key] = (now, dict(metrics))
     return metrics
