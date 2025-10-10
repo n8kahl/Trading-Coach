@@ -583,6 +583,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "earnings_present": True,
     }
 
+    key_levels = context.get("key_levels") or {}
     chart_params = {
         "symbol": symbol,
         "interval": "15m",
@@ -593,7 +594,13 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "tp": ",".join(str(t) for t in plan_block["targets"]),
         "notes": "Watch plan: market closed; review before open.",
         "view": "1d",
+        "ema": "9,20,50",
+        "vwap": "1",
+        "atr": f"{atr:.4f}" if atr else None,
     }
+    level_tokens = _extract_levels_for_chart(key_levels)
+    if level_tokens:
+        chart_params["levels"] = ",".join(level_tokens)
     chart_params["title"] = _format_chart_title(symbol, "long", "watch_plan")
     chart_links = None
     try:
