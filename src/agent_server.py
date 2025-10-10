@@ -456,6 +456,153 @@ async def _stream_generator(symbol: str) -> Any:
                 _STREAM_SUBSCRIBERS.pop(symbol, None)
 
 
+async def _build_watch_plan(symbol: str, style: Optional[str], request: Request) -> PlanResponse | None:
+    try:
+        context = await _build_interval_context(symbol, "15", 200)
+    except Exception:
+        return None
+    snapshot = context.get("snapshot") or {}
+    indicators = snapshot.get("indicators") or {}
+    atr = float(indicators.get("atr14") or 0.0)
+    price_info = snapshot.get("price") or {}
+    entry = float(price_info.get("close") or 0.0)
+    if entry <= 0:
+        return None
+    decimals = 2
+    stop_multiple = 0.5
+    tp1_multiple = 0.6
+    tp2_multiple = 0.9
+    stop = entry - atr * stop_multiple if atr else entry * 0.998
+    tp1 = entry + atr * tp1_multiple if atr else entry * 1.002
+    tp2 = entry + atr * tp2_multiple if atr else entry * 1.004
+    rr = (tp1 - entry) / (entry - stop) if entry != stop else 0.0
+
+    plan_id = uuid.uuid4().hex[:10]
+    version = 1
+    idea_url = _build_idea_url(request, plan_id, version)
+
+    plan_block = {
+        "direction": "long",
+        "entry": round(entry, decimals),
+        "stop": round(stop, decimals),
+        "targets": [round(tp1, decimals), round(tp2, decimals)],
+        "confidence": 0.32,
+        "risk_reward": round(rr, 2),
+        "notes": "Watch plan: market closed; awaiting next session trigger.",
+        "warnings": ["Market closed — treat as next-session watch plan"],
+        "atr": round(atr, 4) if atr else None,
+    }
+
+    calc_notes = {
+        "atr14": indicators.get("atr14"),
+        "stop_multiple": stop_multiple,
+        "em_cap_applied": False,
+        "rr_inputs": {
+            "entry": plan_block["entry"],
+            "stop": plan_block["stop"],
+            "tp1": plan_block["targets"][0],
+        },
+        "reasons": {
+            "tp1": ["Structural baseline"],
+            "context": ["Generated during closed session"],
+        },
+    }
+
+    htf = {
+        "bias": (snapshot.get("trend") or {}).get("ema_stack") or "neutral",
+        "snapped_targets": [],
+    }
+    data_quality = {
+        "series_present": bool(context.get("bars")),
+        "iv_present": False,
+        "earnings_present": True,
+    }
+
+    chart_params = {
+        "symbol": symbol,
+        "interval": "15m",
+        "direction": "long",
+        "strategy": "watch_plan",
+        "entry": plan_block["entry"],
+        "stop": plan_block["stop"],
+        "tp": ",".join(str(t) for t in plan_block["targets"]),
+        "notes": "Watch plan: market closed; review before open.",
+        "view": "1d",
+    }
+    chart_links = None
+    try:
+        chart_links = await gpt_chart_url(ChartParams(**chart_params), request)
+    except Exception:
+        chart_links = None
+
+    features = {
+        "plan_entry": plan_block["entry"],
+        "plan_stop": plan_block["stop"],
+        "plan_targets": plan_block["targets"],
+        "plan_confidence": plan_block["confidence"],
+        "plan_risk_reward": plan_block["risk_reward"],
+        "plan_notes": plan_block["notes"],
+        "plan_warnings": plan_block["warnings"],
+    }
+
+    summary = {
+        "confluence_score": 0.0,
+        "frames_used": [context.get("interval")],
+        "trend_notes": {"primary": htf["bias"]},
+        "expected_move_horizon": snapshot.get("volatility", {}).get("expected_move_horizon"),
+    }
+
+    snapshot = {
+        "plan": {
+            "plan_id": plan_id,
+            "version": version,
+            "symbol": symbol,
+            "style": style or "intraday",
+            "bias": plan_block["direction"],
+            "setup": "watch_plan",
+            "entry": plan_block["entry"],
+            "stop": plan_block["stop"],
+            "targets": plan_block["targets"],
+            "rr_to_t1": plan_block["risk_reward"],
+            "confidence": plan_block["confidence"],
+            "decimals": decimals,
+            "charts_params": chart_params,
+            "idea_url": idea_url,
+            "warnings": plan_block["warnings"],
+        },
+        "summary": summary,
+        "volatility_regime": snapshot.get("volatility"),
+        "htf": htf,
+        "data_quality": data_quality,
+        "chart_url": chart_links.interactive if chart_links else None,
+        "options": None,
+        "why_this_works": ["Watch-only plan generated during market closure."],
+        "invalidation": ["Price gaps beyond stop on open"],
+        "risk_note": "Market closed; re-validate levels pre-open.",
+    }
+    await _store_idea_snapshot(plan_id, snapshot)
+
+    return PlanResponse(
+        plan_id=plan_id,
+        version=version,
+        idea_url=idea_url,
+        warnings=plan_block["warnings"],
+        symbol=symbol,
+        style=style or "intraday",
+        plan=plan_block,
+        charts={"params": chart_params},
+        key_levels=context.get("key_levels"),
+        market_snapshot=context.get("snapshot"),
+        features=features,
+        options=None,
+        calc_notes=calc_notes,
+        htf=htf,
+        decimals=decimals,
+        data_quality=data_quality,
+        debug={"mode": "watch_plan"},
+    )
+
+
 async def _simulate_generator(symbol: str, params: Dict[str, Any]) -> Any:
     lookback = max(int(params.get("minutes", 30)), 5)
     try:
@@ -1985,6 +2132,9 @@ async def gpt_plan(
     universe = ScanUniverse(tickers=[symbol], style=request_payload.style)
     results = await gpt_scan(universe, request, user)
     if not results:
+        fallback = await _build_watch_plan(symbol, request_payload.style, request)
+        if fallback:
+            return fallback
         raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
 
