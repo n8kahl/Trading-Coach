@@ -14,6 +14,41 @@ focuses on data prep; the agent performs the higher-level reasoning.
   - `curl -sS https://trading-coach-production.up.railway.app/openapi.json | jq '.paths | keys'`
   - `curl -sS -X POST https://trading-coach-production.up.railway.app/gpt/scan -H 'content-type: application/json' -d '{"tickers":["AAPL"],"style":"intraday"}'`
 
+---
+
+## Production Snapshot (Frozen)
+
+This section captures the exact surface area and behaviors considered “production ready” prior to the next significant change. Treat this as the last known‑good integration point.
+
+- Timestamp (UTC): 2025-10-10
+- Branch: `feature/ai-driven-planning`
+
+What’s included
+- `/gpt/plan`
+  - Returns: `plan`, `charts`, `key_levels`, `market_snapshot`, `features`, `options`
+  - Provenance: `calc_notes` (atr14, rr_inputs, em_cap_applied), `htf` (bias, snapped_targets), `debug.tp1` (when structural TP1 is used)
+- `/gpt/multi-context`
+  - Request: `include_series` (default false), `intervals` (aka `frames`)
+  - Response: `contexts` (series trimmed when gated), `summary` (frames_used, confluence_score, trend_notes, volatility_regime+label, expected_move_horizon, nearby_levels), `decimals`, `data_quality`
+- `/gpt/contracts`
+  - Response adds `table` rows with: `label`, `dte`, `strike`, `price`, `bid`, `ask`, `delta`, `theta`, `iv`, `spread_pct`, `oi`, `liquidity_score`
+- `/gpt/chart-url`
+  - Server‑side validator: required fields, monotonic geometry, R:R gates, ATR distance w/ confluence override, whitelisted interval/view, percent‑encoding of notes/levels/strategy; BASE_URL respected verbatim; returns `/tv` link
+- `/gpt/sentiment`
+  - Latest‑video sentiment + `tickers_detail` (price, change_pct, 15m EMA stack, ATR, range), robust to transcript issues; always JSON (204/502/503 on errors)
+
+Planner internals
+- Structural TP1 selector (both long and short): candidate generation (ORB/prior H/L, VWAP/EMAs, VAH/VAL/POC, Fib projections), style‑aware scoring, EM/ATR/ratio/R:R constraints, with graceful fallback to HTF snapper.
+- EM capping is applied during target snapping using expected_move_horizon.
+- Geometry guardrail ensures ordered targets and appends a warning note when adjustments were required.
+
+Client guidance
+- Use `contracts.table` to render compact options; always show `bid`, `ask`, and `price`.
+- Use `plan.calc_notes` and `plan.htf.snapped_targets` in explanations; the model should not recompute these locally.
+- For charts, always call `POST /gpt/chart-url` and validate the returned URL before rendering.
+
+This snapshot is the “last production point” before the upcoming significant change. Future updates may alter schemas and behaviors; use this section to maintain compatibility with current GPT prompts and tooling.
+
 
 ## `/gpt/scan`
 
