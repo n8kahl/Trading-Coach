@@ -12,6 +12,7 @@ export default function ConfluencePanel({ idea }: ConfluencePanelProps) {
   const vol = idea.volatility_regime;
   const snapped = idea.htf?.snapped_targets ?? [];
   const plan = idea.plan;
+  const offlineBasis = idea.offline_basis;
 
   return (
     <Card>
@@ -108,6 +109,14 @@ export default function ConfluencePanel({ idea }: ConfluencePanelProps) {
                 <li key={warning}>{warning}</li>
               ))}
             </ul>
+          )}
+          {offlineBasis && (
+            <div className="rounded-md border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-primary">
+              <p className="font-semibold uppercase tracking-wide">Offline basis</p>
+              <p>HTF snapshot: {offlineBasis.htf_snapshot_time ?? "—"}</p>
+              <p>Vol regime: {offlineBasis.volatility_regime ?? "—"}</p>
+              <p>Expected move horizon: {offlineBasis.expected_move_days ?? "—"} days</p>
+            </div>
           )}
         </section>
       </CardContent>

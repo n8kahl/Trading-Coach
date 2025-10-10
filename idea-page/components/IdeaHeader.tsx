@@ -23,6 +23,7 @@ export default function IdeaHeader({ idea, isRefreshing }: IdeaHeaderProps) {
     undefined;
   const timestamp = formatDateTime(timestampRaw ?? new Date().toISOString());
   const snappedTargets = htf?.snapped_targets ?? [];
+  const planningContext = idea.planning_context ?? plan.planning_context ?? null;
 
   const biasVariant = plan.bias === "long" ? "success" : "destructive";
 
@@ -70,6 +71,11 @@ export default function IdeaHeader({ idea, isRefreshing }: IdeaHeaderProps) {
               <span className="uppercase tracking-wide">Style: {plan.style}</span>
             </div>
           </div>
+          {planningContext === "offline" && (
+            <div className="rounded-md border border-amber-400/60 bg-amber-500/15 px-3 py-2 text-xs font-medium text-amber-700">
+              ⚠️ Offline Planning Mode — Market Closed; HTF &amp; Volatility data from last valid session.
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="secondary" onClick={copyLevels}>
               Copy Levels

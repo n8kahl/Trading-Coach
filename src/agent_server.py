@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode, quote, urlsplit, urlunsplit, parse_qsl
 from fastapi.responses import StreamingResponse
 
 from .config import get_settings
@@ -229,6 +229,8 @@ class PlanResponse(BaseModel):
     version: int | None = None
     idea_url: str | None = None
     warnings: List[str] | None = None
+    planning_context: str | None = None
+    offline_basis: Dict[str, Any] | None = None
     symbol: str
     style: str | None = None
     bias: str | None = None
@@ -373,6 +375,32 @@ def _normalize_style(style: str | None) -> str | None:
     if normalized in {"power_hour", "powerhour", "power-hour", "power hour"}:
         normalized = "scalp"
     return normalized
+
+
+def _append_query_params(url: str, extra: Dict[str, str]) -> str:
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return url
+    existing = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    existing.update({k: v for k, v in extra.items() if v is not None})
+    new_query = urlencode(existing, doseq=True)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
+
+
+async def _gather_offline_basis(symbol: str) -> Dict[str, Any]:
+    try:
+        daily_context = await _build_interval_context(symbol, "d", 260)
+    except Exception:
+        return {}
+    snapshot = (daily_context or {}).get("snapshot") or {}
+    volatility = snapshot.get("volatility") or {}
+    basis = {
+        "htf_snapshot_time": snapshot.get("timestamp_utc"),
+        "volatility_regime": volatility.get("regime_label"),
+        "expected_move_days": 5,
+    }
+    return {k: v for k, v in basis.items() if v is not None}
 
 
 def _build_idea_url(request: Request, plan_id: str, version: int) -> str:
@@ -2315,12 +2343,17 @@ async def gpt_plan(
     symbol = (request_payload.symbol or "").strip().upper()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
+    offline_mode = False
+    offline_param = request.query_params.get("offline")
+    if offline_param is not None:
+        offline_mode = offline_param.strip().lower() in {"1", "true", "yes", "on"}
     logger.info(
         "gpt_plan received",
         extra={
             "symbol": symbol,
             "style": request_payload.style,
             "user_id": getattr(user, "user_id", None),
+            "offline": offline_mode,
         },
     )
     universe = ScanUniverse(tickers=[symbol], style=request_payload.style)
@@ -2402,8 +2435,12 @@ async def gpt_plan(
 
     charts_payload: Dict[str, Any] = {}
     if chart_params_payload:
+        if offline_mode:
+            chart_params_payload.setdefault("offline_mode", "true")
         charts_payload["params"] = chart_params_payload
     if chart_url_value:
+        if offline_mode:
+            chart_url_value = _append_query_params(chart_url_value, {"offline_mode": "true"})
         charts_payload["interactive"] = chart_url_value
     elif chart_params_payload and {"direction", "entry", "stop", "tp"}.issubset(chart_params_payload.keys()):
         fallback_chart_url = _build_tv_chart_url(request, chart_params_payload)
@@ -2504,6 +2541,14 @@ async def gpt_plan(
         "earnings_present": True,
     }
     plan_warnings: List[str] = first.get("warnings") or plan.get("warnings") or []
+    planning_context_value: str | None = None
+    offline_basis: Dict[str, Any] | None = None
+    if offline_mode:
+        planning_context_value = "offline"
+        offline_basis = await _gather_offline_basis(symbol)
+        offline_notice = "Offline Planning Mode — Market Closed; using last valid HTF data."
+        if offline_notice not in plan_warnings:
+            plan_warnings.append(offline_notice)
 
     price_close = snapshot.get("price", {}).get("close")
     decimals_value = 2
@@ -2590,6 +2635,8 @@ async def gpt_plan(
         version=version,
         idea_url=idea_url,
         warnings=plan_warnings or None,
+        planning_context=planning_context_value,
+        offline_basis=offline_basis,
         symbol=first.get("symbol"),
         style=first.get("style"),
         bias=bias_output,

@@ -277,7 +277,14 @@ paths:
    * Prefer `contracts.table` (top 3–6) for output.
    * Never rank/filter by budget unless user requests.
 
+### 🌙 Offline Planning Mode
+
+* If user requests a plan while the market is closed (night/weekend/“offline”), call `POST /gpt/plan` with `offline=true`.
+* Label plan title with a ⚠️ prefix and include the note: “⚠️ Offline Planning Mode — Market Closed; HTF & Volatility data from last valid session.”
+* Do **not** downgrade confidence; use the HTF confluence as returned.
+* Chart URLs must include `offline_mode=true`; if unavailable, show the usual fallback card.
+* Always copy the server warning and risk note that the plan was generated offline.
+
 ### 📊 TopLiquidity100 (fallback)
 
 …
-

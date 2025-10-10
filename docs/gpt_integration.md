@@ -12,9 +12,20 @@ focuses on data prep; the agent performs the higher-level reasoning.
 - Health: `GET /healthz`
 - Quick checks:
   - `curl -sS https://trading-coach-production.up.railway.app/openapi.json | jq '.paths | keys'`
-  - `curl -sS -X POST https://trading-coach-production.up.railway.app/gpt/scan -H 'content-type: application/json' -d '{"tickers":["AAPL"],"style":"intraday"}'`
+- `curl -sS -X POST https://trading-coach-production.up.railway.app/gpt/scan -H 'content-type: application/json' -d '{"tickers":["AAPL"],"style":"intraday"}'`
 
 ---
+
+## Offline Planning Mode
+
+- `POST /gpt/plan?symbol=TSLA&style=swing&offline=true`
+- Works outside RTH using last HTF snapshots (4h/1D) and a 5-day expected move horizon.
+- Response extras when `offline=true`:
+  - `planning_context: "offline"`
+  - `offline_basis`: `{ htf_snapshot_time, volatility_regime, expected_move_days }`
+  - `warnings` includes `Offline Planning Mode — Market Closed; using last valid HTF data.`
+  - Chart URLs gain `offline_mode=true` query param (watermark rendered client-side).
+- Prefer enabling only when the user explicitly asks for night / weekend plans.
 
 ## Production Snapshot (Frozen)
 
