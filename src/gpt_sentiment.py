@@ -64,10 +64,19 @@ YOUTUBE_USER_URL = "https://www.youtube.com/@{handle}"
 YOUTUBE_RSS = "https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
 YOUTUBE_WATCH = "https://www.youtube.com/watch?v={vid}"
 
+# Default headers to reduce upstream blocks
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
 
 async def _resolve_channel_id(client: httpx.AsyncClient, handle: str) -> str:
     url = YOUTUBE_USER_URL.format(handle=handle.lstrip("@"))
-    r = await client.get(url, timeout=20)
+    r = await client.get(url, headers=DEFAULT_HEADERS, timeout=20)
     r.raise_for_status()
     m = re.search(r"channel/(UC[\w-]{20,})", r.text)
     if not m:
@@ -148,16 +157,29 @@ async def _fetch_transcript(video_id: str) -> str:
     if not _DEPS_OK:
         return ""
     try:
-        parts = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])  # type: ignore
-        text = " ".join([p.get("text", "") for p in parts])
+        parts: List[Dict[str, Any]] | None = None
+        # Preferred robust flow: list → find → fetch
+        try:
+            transcripts = YouTubeTranscriptApi.list_transcripts(video_id)  # type: ignore
+            transcript = transcripts.find_transcript(["en", "en-US", "en-GB"])  # type: ignore
+            parts = transcript.fetch()  # type: ignore
+        except Exception:
+            # Fallback to direct helper if available in the installed version
+            try:
+                parts = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])  # type: ignore
+            except Exception:
+                parts = None
+        if not parts:
+            return ""
+        text = " ".join([str(p.get("text", "")) for p in parts])
         return text[:2000]
-    except (TranscriptsDisabled, NoTranscriptFound):  # type: ignore
+    except Exception:  # pragma: no cover - defensive
         return ""
 
 
 async def _get_latest_video(client: httpx.AsyncClient, channel_id: str) -> Dict[str, Any] | None:
     rss = YOUTUBE_RSS.format(cid=channel_id)
-    r = await client.get(rss, timeout=20)
+    r = await client.get(rss, headers=DEFAULT_HEADERS, timeout=20)
     r.raise_for_status()
     entries = re.findall(r"<entry>(.*?)</entry>", r.text, re.S)
     best: Dict[str, Any] | None = None
@@ -193,15 +215,23 @@ async def gpt_sentiment(
     if not force and _CACHE["data"] and _CACHE["key"] == key and (now - float(_CACHE["ts"])) < _TTL:
         return _CACHE["data"]
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        channel_id = await _resolve_channel_id(client, channel)
-        latest = await _get_latest_video(client, channel_id)
+    async with httpx.AsyncClient(follow_redirects=True, headers=DEFAULT_HEADERS, timeout=20) as client:
+        try:
+            channel_id = await _resolve_channel_id(client, channel)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"YouTube handle fetch error: {exc}")
+        latest = None
+        try:
+            latest = await _get_latest_video(client, channel_id)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"YouTube RSS error: {exc}")
         if not latest:
             raise HTTPException(status_code=204, detail="No recent videos")
         cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
         if latest["published_at"].astimezone(timezone.utc) < cutoff:
             raise HTTPException(status_code=204, detail="No recent video in window")
 
+        # Transcript is optional; failures yield empty string
         transcript = await _fetch_transcript(latest["video_id"])  # optional
         text_blob = f"{latest['title']}\n{transcript}"
         tickers = _extract_tickers(text_blob)
@@ -241,4 +271,3 @@ async def gpt_sentiment(
 
         _CACHE["data"], _CACHE["ts"], _CACHE["key"] = resp, now, key
         return resp
-
