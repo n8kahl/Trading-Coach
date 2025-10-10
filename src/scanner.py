@@ -186,23 +186,46 @@ def _build_plan(
 ) -> Plan | None:
     if not math.isfinite(entry) or not math.isfinite(stop):
         return None
-    clean_targets = [float(t) for t in targets if math.isfinite(t)]
+    # Clean and geometry-guard targets
+    original_targets = [float(t) for t in targets if math.isfinite(t)]
+    clean_targets = list(original_targets)
+    geometry_reordered = False
+    if direction == "long":
+        ordered = sorted(clean_targets)
+        if ordered != clean_targets:
+            geometry_reordered = True
+        clean_targets = ordered
+    else:
+        ordered = sorted(clean_targets, reverse=True)
+        if ordered != clean_targets:
+            geometry_reordered = True
+        clean_targets = ordered
     if not clean_targets:
         return None
+    # Geometry checks
+    geometry_ok = True
     if direction == "long":
         if stop >= entry:
-            return None
+            geometry_ok = False
         risk = entry - stop
         reward = clean_targets[0] - entry
     else:
         if stop <= entry:
-            return None
+            geometry_ok = False
         risk = stop - entry
         reward = entry - clean_targets[0]
     if risk <= 0 or reward <= 0:
         return None
     risk_reward = reward / risk
     confidence = _score_conditions(conditions)
+    # Append guardrail warning to notes if geometry was reordered or invalid
+    guard_note = None
+    if geometry_reordered or not geometry_ok:
+        guard_note = "Geometry check: targets reordered or watch plan recommended"
+    final_notes = notes
+    if guard_note:
+        final_notes = (notes + " | " + guard_note) if notes else guard_note
+
     return Plan(
         direction=direction,
         entry=float(entry),
@@ -210,7 +233,7 @@ def _build_plan(
         targets=clean_targets,
         confidence=float(confidence),
         risk_reward=float(round(risk_reward, 3)),
-        notes=notes,
+        notes=final_notes,
         atr=float(atr_value) if atr_value is not None and math.isfinite(atr_value) else None,
     )
 
