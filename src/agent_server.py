@@ -2124,18 +2124,136 @@ async def gpt_contracts(
 
 @gpt.post("/chart-url", summary="Build a canonical chart URL from params", response_model=ChartLinks)
 async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
-    settings = get_settings()
+    """Validate and return a canonical charts/html URL.
 
-    base_url = (settings.chart_base_url or str(request.base_url)).rstrip("/")
-    if not base_url.lower().endswith("/tv"):
-        base_url = f"{base_url}/tv"
-    if not base_url:
-        raise HTTPException(status_code=500, detail="Base URL is not configured")
+    Validation rules:
+    - Required fields: symbol, interval, direction, entry, stop, tp
+    - Monotonic order by direction
+    - R:R gate (1.5 for index intraday; else 1.2)
+    - Min TP distance if ATR provided (0.3×ATR intraday; 0.6×ATR swing), unless confluence label at TP exists
+    - Whitelist interval and view tokens
+    - Percent-encode free-text fields (levels, notes, strategy)
+    """
 
+    # Collect raw data, preserving extras
     data: Dict[str, Any] = dict(payload.model_extra or {})
-    data["symbol"] = _normalize_chart_symbol(payload.symbol)
-    data["interval"] = _normalize_chart_interval(payload.interval)
+    raw_symbol = str(payload.symbol or "").strip()
+    raw_interval = str(payload.interval or "").strip()
+    direction = (str(data.get("direction") or "").strip().lower())
+    entry = data.get("entry")
+    stop = data.get("stop")
+    tp_csv = data.get("tp")
 
+    # 1) Required fields
+    def _missing(field: str):
+        raise HTTPException(status_code=422, detail={"error": f"missing field {field}"})
+
+    if not raw_symbol:
+        _missing("symbol")
+    if not raw_interval:
+        _missing("interval")
+    if not direction:
+        _missing("direction")
+    if entry is None:
+        _missing("entry")
+    if stop is None:
+        _missing("stop")
+    if not tp_csv:
+        _missing("tp")
+
+    try:
+        entry_f = float(entry)
+        stop_f = float(stop)
+        tp1_f = float(str(tp_csv).split(",")[0].strip())
+    except Exception:
+        raise HTTPException(status_code=422, detail={"error": "entry/stop/tp must be numeric"})
+
+    # 6) Whitelist interval + view
+    # Use charts_api.normalize_interval for canonical tokens: {'1m','5m','15m','1h','d'}
+    try:
+        interval_norm = normalize_interval(raw_interval)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": str(exc)})
+
+    allowed_intervals = {"1m", "5m", "15m", "1h", "d"}
+    if interval_norm not in allowed_intervals:
+        raise HTTPException(status_code=422, detail={"error": f"interval '{raw_interval}' not allowed"})
+
+    view = str(data.get("view") or "6M").strip()
+    allowed_views = {"1d", "5d", "1M", "3M", "6M", "1Y"}
+    if view not in allowed_views:
+        # default to 6M if out of set
+        view = "6M"
+    data["view"] = view
+
+    # 2) Monotonic order
+    if direction == "long":
+        if not (stop_f < entry_f < tp1_f):
+            raise HTTPException(status_code=422, detail={"error": "order invalid for long (stop < entry < TP1)"})
+    elif direction == "short":
+        if not (stop_f > entry_f > tp1_f):
+            raise HTTPException(status_code=422, detail={"error": "order invalid for short (stop > entry > TP1)"})
+    else:
+        raise HTTPException(status_code=422, detail={"error": "direction must be 'long' or 'short'"})
+
+    # 3) R:R gate
+    def _rr(e: float, s: float, t: float, d: str) -> float:
+        risk = (e - s) if d == "long" else (s - e)
+        reward = (t - e) if d == "long" else (e - t)
+        if risk <= 0:
+            return 0.0
+        return reward / risk
+
+    is_index = raw_symbol.upper() in {"SPY", "QQQ", "IWM"}
+    is_intraday = interval_norm in {"1m", "5m", "15m"}
+    min_rr = 1.5 if is_index and is_intraday else 1.2
+    rr_val = _rr(entry_f, stop_f, tp1_f, direction)
+    if rr_val < min_rr:
+        raise HTTPException(status_code=422, detail={"error": f"R:R {rr_val:.2f} < {min_rr:.1f}"})
+
+    # 4) Min TP distance if ATR provided
+    atr_val = data.get("atr14") or data.get("atr")
+    if atr_val is not None:
+        try:
+            atr_f = float(atr_val)
+        except Exception:
+            atr_f = None
+        if atr_f and atr_f > 0:
+            k = 0.3 if interval_norm in {"1m", "5m", "15m", "1h"} else 0.6
+            min_tp = entry_f + k * atr_f if direction == "long" else entry_f - k * atr_f
+            ok = (tp1_f >= min_tp) if direction == "long" else (tp1_f <= min_tp)
+            if not ok:
+                # allow if confluence label exists at TP price in `levels` as price|label;...
+                levels = str(data.get("levels") or "")
+                has_confluence = False
+                if levels:
+                    for chunk in levels.split(";"):
+                        parts = [p.strip() for p in chunk.split("|")]
+                        if not parts:
+                            continue
+                        try:
+                            price = float(parts[0])
+                        except Exception:
+                            continue
+                        if len(parts) >= 2 and abs(price - tp1_f) <= max(1e-4, 0.01):
+                            has_confluence = True
+                            break
+                if not has_confluence:
+                    raise HTTPException(status_code=422, detail={"error": "TP1 too close; fails ATR gate"})
+
+    # Build URL for /charts/html (not /tv)
+    base = f"{str(request.base_url).rstrip('/')}/charts/html"
+
+    # Assemble query with normalized fields
+    data["symbol"] = _normalize_chart_symbol(raw_symbol)
+    # For charts/html we prefer canonical interval tokens (1m/5m/15m/1h/d)
+    data["interval"] = interval_norm
+    data["direction"] = direction
+    data["entry"] = f"{entry_f:.2f}"
+    data["stop"] = f"{stop_f:.2f}"
+    data["tp"] = str(tp_csv)
+
+    # Whitelist keys and encode
     query: Dict[str, str] = {}
     for key, value in data.items():
         if key not in ALLOWED_CHART_KEYS or value is None:
@@ -2144,16 +2262,16 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
             value = ",".join(str(item) for item in value if item is not None)
         query[key] = str(value)
 
-    if "interval" in query:
-        query["interval"] = _normalize_chart_interval(query["interval"])
-    if "symbol" in query:
-        query["symbol"] = _normalize_chart_symbol(query["symbol"])
-
-    if "symbol" not in query or "interval" not in query:
-        raise HTTPException(status_code=400, detail="Required: symbol, interval")
+    # Percent-encode strategy/levels/notes explicitly
+    if "strategy" in query:
+        query["strategy"] = quote(query["strategy"], safe="|;:,.+-_() ")
+    if "levels" in data and data.get("levels"):
+        query["levels"] = quote(str(data["levels"]), safe="|;:,.+-_() ")
+    if "notes" in data and data.get("notes"):
+        query["notes"] = quote(str(data["notes"])[:140], safe="|;:,.+-_() ")
 
     encoded = urlencode(query, doseq=False, safe=",", quote_via=quote)
-    url = f"{base_url}?{encoded}" if encoded else base_url
+    url = f"{base}?{encoded}" if encoded else base
     return ChartLinks(interactive=url)
 
 
