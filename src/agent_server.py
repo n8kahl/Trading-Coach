@@ -24,7 +24,6 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
@@ -145,7 +144,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 
 STATIC_ROOT = (Path(__file__).resolve().parent.parent / "static").resolve()
@@ -378,10 +376,40 @@ def _normalize_style(style: str | None) -> str | None:
 
 
 def _build_idea_url(request: Request, plan_id: str, version: int) -> str:
-    try:
-        base = request.url_for("get_latest_idea", plan_id=plan_id)
-    except Exception:
-        base = f"{str(request.base_url).rstrip('/')}/idea/{plan_id}"
+    headers = request.headers
+    scheme = None
+    host = None
+
+    forwarded_proto = headers.get("x-forwarded-proto")
+    if forwarded_proto:
+        scheme = forwarded_proto.split(",")[0].strip()
+
+    forwarded_host = headers.get("x-forwarded-host")
+    if forwarded_host:
+        host = forwarded_host.split(",")[0].strip()
+
+    forwarded_header = headers.get("forwarded")
+    if forwarded_header:
+        first_token = forwarded_header.split(",", 1)[0]
+        for part in first_token.split(";"):
+            name, _, value = part.partition("=")
+            if not value:
+                continue
+            name = name.strip().lower()
+            value = value.strip().strip('"')
+            if name == "proto" and not scheme:
+                scheme = value
+            elif name == "host" and not host:
+                host = value
+
+    if not scheme:
+        scheme = request.url.scheme or "https"
+
+    if not host:
+        host = headers.get("host") or request.url.netloc
+
+    path = f"/idea/{plan_id}"
+    base = f"{scheme}://{host}{path}" if host else f"{str(request.base_url).rstrip('/')}{path}"
     return f"{base}?v={version}"
 
 
