@@ -276,6 +276,31 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
     atr_value = float(latest["atr14"]) if math.isfinite(latest["atr14"]) else math.nan
     volume_median = float(session_df["volume"].tail(40).median()) if not session_df.empty else math.nan
     minutes_vector = _minutes_from_midnight(session_df.index) if not session_df.empty else np.array([], dtype=int)
+    # Expected move horizon (approx): median true range × bars over a short horizon
+    expected_move_horizon = None
+    try:
+        df = frame.copy()
+        close = df["close"]
+        high = df["high"]
+        low = df["low"]
+        prev_close = close.shift(1)
+        tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        tr_med = float(tr.tail(20).median()) if not tr.empty else float("nan")
+        # infer bar interval in minutes
+        try:
+            idx = df.index
+            if len(idx) >= 2:
+                delta_min = (idx[-1] - idx[-2]).total_seconds() / 60.0
+            else:
+                delta_min = 5.0
+        except Exception:
+            delta_min = 5.0
+        horizon_minutes = 30 if delta_min <= 2.0 else 60
+        horizon_bars = max(1, int(horizon_minutes / max(delta_min, 1.0)))
+        if math.isfinite(tr_med):
+            expected_move_horizon = tr_med * horizon_bars
+    except Exception:
+        expected_move_horizon = None
     return {
         "frame": frame,
         "session": session_df,
@@ -293,6 +318,7 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
         "timestamp": frame.index[-1],
         "session_phase": _session_phase(frame.index[-1]),
         "htf_levels": _collect_htf_levels(session_df, prev_session_df, latest),
+        "expected_move_horizon": expected_move_horizon,
     }
 
 
@@ -385,7 +411,7 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
             tp_raws=[target_primary, target_secondary],
             htf_levels=ctx.get("htf_levels", []),
             min_rr=_strategy_min_rr(strategy.id),
-            em=None,
+            em=ctx.get("expected_move_horizon"),
             prefer_em_cap=True,
             atr=atr_value,
         )
@@ -415,7 +441,7 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
             tp_raws=[target_primary, target_secondary],
             htf_levels=ctx.get("htf_levels", []),
             min_rr=_strategy_min_rr(strategy.id),
-            em=None,
+            em=ctx.get("expected_move_horizon"),
             prefer_em_cap=True,
             atr=atr_value,
         )
@@ -503,7 +529,7 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
             tp_raws=[target_primary, target_secondary],
             htf_levels=ctx.get("htf_levels", []),
             min_rr=_strategy_min_rr(strategy.id),
-            em=None,
+            em=ctx.get("expected_move_horizon"),
             prefer_em_cap=True,
             atr=atr_value,
         )
@@ -530,7 +556,7 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
             tp_raws=[target_primary, target_secondary],
             htf_levels=ctx.get("htf_levels", []),
             min_rr=_strategy_min_rr(strategy.id),
-            em=None,
+            em=ctx.get("expected_move_horizon"),
             prefer_em_cap=True,
             atr=atr_value,
         )
@@ -625,7 +651,7 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
             tp_raws=[target_primary, target_secondary],
             htf_levels=ctx.get("htf_levels", []),
             min_rr=_strategy_min_rr(strategy.id),
-            em=None,
+            em=ctx.get("expected_move_horizon"),
             prefer_em_cap=True,
             atr=atr_value,
         )
@@ -652,7 +678,7 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
             tp_raws=[target_primary, target_secondary],
             htf_levels=ctx.get("htf_levels", []),
             min_rr=_strategy_min_rr(strategy.id),
-            em=None,
+            em=ctx.get("expected_move_horizon"),
             prefer_em_cap=True,
             atr=atr_value,
         )

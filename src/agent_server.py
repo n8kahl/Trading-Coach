@@ -1799,6 +1799,7 @@ async def gpt_plan(
     charts = (first.get("charts") or {}).get("params") or {}
     snapshot = first.get("market_snapshot") or {}
     indicators = (snapshot.get("indicators") or {})
+    volatility = (snapshot.get("volatility") or {})
     rr_inputs = None
     try:
         entry = float(plan.get("entry")) if plan.get("entry") is not None else float(charts.get("entry"))
@@ -1812,12 +1813,39 @@ async def gpt_plan(
     calc_notes = {
         "atr14": indicators.get("atr14"),
         "stop_multiple": None,
-        "em_cap_applied": False,
+        "em_cap_applied": bool((volatility.get("expected_move_horizon") if isinstance(volatility, dict) else None)),
         **({"rr_inputs": rr_inputs} if rr_inputs else {}),
     }
+    # Infer snapped_targets by comparing target prices to nearby labelled levels
+    snapped_names: List[str] = []
+    try:
+        targets_list = plan.get("targets") or []
+        if not targets_list and charts.get("tp"):
+            targets_list = [float(x.strip()) for x in str(charts.get("tp")).split(",") if x.strip()]
+        atr_val = float(indicators.get("atr14") or 0.0)
+        window = max(atr_val * 0.30, 0.0)
+        levels_dict = first.get("key_levels") or {}
+        # build name->value list
+        named = [(name, float(val)) for name, val in levels_dict.items() if isinstance(val, (int, float))]
+        for tp in targets_list[:2]:
+            try:
+                tp_f = float(tp)
+            except Exception:
+                continue
+            nearest = None
+            best_name = None
+            for name, val in named:
+                if nearest is None or abs(val - tp_f) < abs(nearest - tp_f):
+                    nearest = val
+                    best_name = name
+            if nearest is not None and abs(nearest - tp_f) <= window and best_name:
+                snapped_names.append(best_name)
+    except Exception:
+        snapped_names = []
+
     htf = {
         "bias": ((snapshot.get("trend") or {}).get("ema_stack") or "unknown"),
-        "snapped_targets": [],
+        "snapped_targets": snapped_names,
     }
     data_quality = {
         "series_present": True,
