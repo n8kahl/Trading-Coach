@@ -1708,8 +1708,12 @@ async def gpt_scan(
             chart_query.setdefault("direction", signal.plan.direction)
             if signal.plan.atr and "atr" not in chart_query:
                 chart_query["atr"] = f"{float(signal.plan.atr):.4f}"
-            if signal.plan.notes:
-                chart_query["notes"] = signal.plan.notes
+            # Always include a notes field for chart URLs, even if brief
+            notes_text = (signal.plan.notes or "").strip()
+            if not notes_text:
+                # fallback: concise phrase using strategy + direction
+                notes_text = f"{signal.strategy_id} ({direction_hint or signal.plan.direction})"
+            chart_query["notes"] = notes_text[:140]
         overlay_params = _encode_overlay_params(enhancements or {})
         for key, value in overlay_params.items():
             chart_query[key] = value
@@ -2384,20 +2388,22 @@ async def gpt_contracts(
     for row in best[:6]:
         try:
             label = row.get("label") or row.get("symbol") or ""
-            table_rows.append(
-                {
-                    "label": label,
-                    "dte": row.get("dte"),
-                    "strike": row.get("strike"),
-                    "delta": row.get("delta"),
-                    "theta": row.get("theta"),
-                    "iv": row.get("implied_volatility") or row.get("iv"),
-                    "price": row.get("mid") or row.get("mark") or row.get("price"),
-                    "spread_pct": row.get("spread_pct"),
-                    "oi": row.get("open_interest") or row.get("oi"),
-                    "liquidity_score": row.get("tradeability") or row.get("liquidity_score"),
-                }
-            )
+            # Preserve a compact, ordered shape: label, dte, strike, price, bid, ask, delta, theta, iv, spread_pct, oi, liquidity_score
+            price_val = row.get("price") or row.get("mid") or row.get("mark")
+            table_rows.append({
+                "label": label,
+                "dte": row.get("dte"),
+                "strike": row.get("strike"),
+                "price": price_val,
+                "bid": row.get("bid"),
+                "ask": row.get("ask"),
+                "delta": row.get("delta"),
+                "theta": row.get("theta"),
+                "iv": row.get("implied_volatility") or row.get("iv"),
+                "spread_pct": row.get("spread_pct"),
+                "oi": row.get("open_interest") or row.get("oi"),
+                "liquidity_score": row.get("tradeability") or row.get("liquidity_score"),
+            })
         except Exception:
             continue
 
