@@ -1182,6 +1182,8 @@ async def _compute_iv_metrics(symbol: str) -> Dict[str, Any]:
             else:
                 candidates["strike_diff"] = 0.0
             delta_series = pd.to_numeric(candidates.get("delta"), errors="coerce")
+            if delta_series is None:
+                delta_series = pd.Series(dtype=float)
             candidates["abs_delta"] = delta_series.abs()
             candidates = candidates.dropna(subset=["abs_delta", "dte"])
             candidates = candidates[(candidates["dte"].astype(float) >= 15) & (candidates["dte"].astype(float) <= 60)]
