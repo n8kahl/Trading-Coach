@@ -231,6 +231,7 @@ class PlanResponse(BaseModel):
     htf: Dict[str, Any] | None = None
     decimals: int | None = None
     data_quality: Dict[str, Any] | None = None
+    debug: Dict[str, Any] | None = None
 
 
 class MultiContextRequest(BaseModel):
@@ -1898,6 +1899,16 @@ async def gpt_plan(
         "earnings_present": True,
     }
 
+    # Debug info: include any structural TP1 notes from features
+    debug_payload = {}
+    try:
+        feats = first.get("features") or {}
+        tp1_dbg = feats.get("tp1_struct_debug")
+        if tp1_dbg:
+            debug_payload["tp1"] = tp1_dbg
+    except Exception:
+        debug_payload = {}
+
     return PlanResponse(
         symbol=first.get("symbol"),
         style=first.get("style"),
@@ -1914,6 +1925,7 @@ async def gpt_plan(
         htf=htf,
         decimals=2,
         data_quality=data_quality,
+        debug=debug_payload or None,
     )
 
 

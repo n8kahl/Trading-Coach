@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from .strategy_library import Strategy, load_strategies
+from .context_overlays import _volume_profile
 from .calculations import atr, ema, vwap, adx
 
 TZ_ET = "America/New_York"
@@ -324,6 +325,58 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
             expected_move_horizon = tr_med * horizon_bars
     except Exception:
         expected_move_horizon = None
+    # Key levels (session OR + previous session H/L/C)
+    key_levels: Dict[str, float] = {}
+    try:
+        if not session_df.empty:
+            # Opening range (first 15 minutes)
+            mins = _minutes_from_midnight(session_df.index)
+            mask_or = (mins >= RTH_START_MINUTE) & (mins < RTH_START_MINUTE + 15)
+            if mask_or.any():
+                or_slice = session_df.iloc[mask_or]
+                key_levels["opening_range_high"] = float(or_slice["high"].max())
+                key_levels["opening_range_low"] = float(or_slice["low"].min())
+            key_levels["session_high"] = float(session_df["high"].max())
+            key_levels["session_low"] = float(session_df["low"].min())
+        if prev_session_df is not None and not prev_session_df.empty:
+            key_levels["prev_high"] = float(prev_session_df["high"].max())
+            key_levels["prev_low"] = float(prev_session_df["low"].min())
+            key_levels["prev_close"] = float(prev_session_df["close"].iloc[-1])
+    except Exception:
+        key_levels = {}
+
+    # Volume profile (session)
+    vol_profile = {}
+    try:
+        if not session_df.empty:
+            vol_profile = _volume_profile(session_df)
+    except Exception:
+        vol_profile = {}
+
+    # Fib anchors (up/down) from recent swing window (last 50 bars)
+    fib_up: Dict[str, float] = {}
+    fib_down: Dict[str, float] = {}
+    try:
+        window = frame.tail(50)
+        rng_low = float(window["low"].min())
+        rng_high = float(window["high"].max())
+        span = max(0.0, rng_high - rng_low)
+        if span > 0:
+            # Upward projections from high
+            fib_up = {
+                "FIB1.0": round(rng_high, 4),
+                "FIB1.272": round(rng_high + 0.272 * span, 4),
+                "FIB1.618": round(rng_high + 0.618 * span, 4),
+            }
+            # Downward projections from low
+            fib_down = {
+                "FIB1.0": round(rng_low, 4),
+                "FIB1.272": round(rng_low - 0.272 * span, 4),
+                "FIB1.618": round(rng_low - 0.618 * span, 4),
+            }
+    except Exception:
+        fib_up, fib_down = {}, {}
+
     return {
         "frame": frame,
         "session": session_df,
@@ -342,7 +395,234 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
         "session_phase": _session_phase(frame.index[-1]),
         "htf_levels": _collect_htf_levels(session_df, prev_session_df, latest),
         "expected_move_horizon": expected_move_horizon,
+        "key": key_levels,
+        "vol_profile": vol_profile,
+        "fib_up": fib_up,
+        "fib_down": fib_down,
     }
+
+
+# Trade-style presets for TP1 selection
+_TP1_RULES: Dict[str, Dict[str, Any]] = {
+    "scalp":    {"minATR": 0.25, "maxHorizon": 0.5, "ratioTP2": (0.25, 0.45), "weights": {"vwap": 0.4,  "orb": 0.3,  "priorHL": 0.2, "volProfile": 0.2, "fib": 0.1, "microPivot": 0.3}},
+    "intraday": {"minATR": 0.35, "maxHorizon": 0.8, "ratioTP2": (0.35, 0.60), "weights": {"vwap": 0.35, "orb": 0.35, "priorHL": 0.25, "volProfile": 0.35, "fib": 0.2, "microPivot": 0.15}},
+    "swing":    {"minATR": 0.50, "maxHorizon": 1.0, "ratioTP2": (0.40, 0.65), "weights": {"vwap": 0.15, "orb": 0.15, "priorHL": 0.35, "volProfile": 0.45, "fib": 0.35, "microPivot": 0.05}},
+    "leaps":    {"minATR": 0.60, "maxHorizon": 1.0, "ratioTP2": (0.40, 0.70), "weights": {"vwap": 0.05, "orb": 0.05, "priorHL": 0.35, "volProfile": 0.45, "fib": 0.45, "microPivot": 0.00}},
+}
+
+
+def _style_for_strategy_id(strategy_id: str) -> str:
+    sid = (strategy_id or "").lower()
+    if "power" in sid or "orb" in sid or "gap" in sid:
+        return "intraday"
+    if "midday" in sid:
+        return "intraday"
+    return "intraday"
+
+
+def _build_tp_candidates_long(entry: float, ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
+    c: List[Dict[str, Any]] = []
+    key = ctx.get("key") or {}
+    # Session structure
+    for name, tag in (("prev_high", "PRIOR_HIGH"), ("opening_range_high", "ORB_HIGH")):
+        val = key.get(name)
+        if isinstance(val, (int, float)) and val > entry:
+            c.append({"level": float(val), "tag": tag})
+    # Volume Profile
+    vp = ctx.get("vol_profile") or {}
+    for lab, key in [("POC", "poc"), ("VAH", "vah"), ("VAL", "val")]:
+        val = vp.get(key)
+        if isinstance(val, (int, float)) and val > entry:
+            c.append({"level": float(val), "tag": lab})
+    # VWAP / EMAs
+    v = ctx.get("vwap")
+    if isinstance(v, (int, float)) and v > entry:
+        c.append({"level": float(v), "tag": "VWAP"})
+    for k in ("ema9", "ema20", "ema50"):
+        val = ctx.get(k)
+        if isinstance(val, (int, float)) and val > entry:
+            c.append({"level": float(val), "tag": k.upper()})
+    # Fib projections up
+    fib_up = ctx.get("fib_up") or {}
+    for tag, val in fib_up.items():
+        if isinstance(val, (int, float)) and val > entry:
+            c.append({"level": float(val), "tag": str(tag).upper()})
+    # Dedupe by level within 1 cent
+    seen: set[float] = set()
+    uniq: List[Dict[str, Any]] = []
+    for item in sorted(c, key=lambda x: x["level"]):
+        keyf = round(item["level"], 2)
+        if keyf in seen:
+            continue
+        seen.add(keyf)
+        uniq.append(item)
+    return uniq
+
+
+def _build_tp_candidates_short(entry: float, ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
+    c: List[Dict[str, Any]] = []
+    key = ctx.get("key") or {}
+    # Session structure below entry
+    for name, tag in (("prev_low", "PRIOR_LOW"), ("opening_range_low", "ORB_LOW")):
+        val = key.get(name)
+        if isinstance(val, (int, float)) and val < entry:
+            c.append({"level": float(val), "tag": tag})
+    # Volume profile
+    vp = ctx.get("vol_profile") or {}
+    for lab, k in [("POC", "poc"), ("VAL", "val"), ("VAH", "vah")]:
+        val = vp.get(k)
+        if isinstance(val, (int, float)) and val < entry:
+            c.append({"level": float(val), "tag": lab})
+    # VWAP/EMAs
+    v = ctx.get("vwap")
+    if isinstance(v, (int, float)) and v < entry:
+        c.append({"level": float(v), "tag": "VWAP"})
+    for k in ("ema9", "ema20", "ema50"):
+        val = ctx.get(k)
+        if isinstance(val, (int, float)) and val < entry:
+            c.append({"level": float(val), "tag": k.upper()})
+    # Fib projections down
+    fib_down = ctx.get("fib_down") or {}
+    for tag, val in fib_down.items():
+        if isinstance(val, (int, float)) and val < entry:
+            c.append({"level": float(val), "tag": str(tag).upper()})
+    # Dedupe
+    seen: set[float] = set()
+    uniq: List[Dict[str, Any]] = []
+    for item in sorted(c, key=lambda x: x["level"], reverse=True):
+        keyf = round(item["level"], 2)
+        if keyf in seen:
+            continue
+        seen.add(keyf)
+        uniq.append(item)
+    return uniq
+
+
+def _score_tp_candidate_long(level: Dict[str, Any], style: str, entry: float, stop: float, tp2: float, ctx: Dict[str, Any], min_rr: float) -> Optional[float]:
+    rules = _TP1_RULES.get(style, _TP1_RULES["intraday"])
+    w = rules["weights"]
+    s = 0.0
+    tag = (level.get("tag") or "").upper()
+    if tag == "VWAP":
+        s += w.get("vwap", 0)
+    if tag in {"ORB_HIGH"}:
+        s += w.get("orb", 0)
+    if tag in {"PRIOR_HIGH"}:
+        s += w.get("priorHL", 0)
+    if tag in {"EMA9", "EMA20", "EMA50"}:
+        s += w.get("microPivot", 0)
+    if tag in {"POC", "VAH", "VAL"}:
+        s += w.get("volProfile", 0)
+    if tag.startswith("FIB"):
+        s += w.get("fib", 0)
+    # MTF alignment proxy: EMA stack bullish → +0.1
+    try:
+        latest_bull = ctx.get("ema9") > ctx.get("ema20") > ctx.get("ema50")
+        if latest_bull:
+            s += 0.1
+    except Exception:
+        pass
+    # Distance checks
+    atr = ctx.get("atr") or 0.0
+    min_atr = rules["minATR"] * float(atr or 0.0)
+    dist = float(level.get("level") or 0.0) - entry
+    if dist < max(0.0, min_atr):
+        return None
+    # EM cap
+    em = ctx.get("expected_move_horizon")
+    if isinstance(em, (int, float)) and dist > float(em) * float(rules.get("maxHorizon", 1.0)):
+        return None
+    # Ratio vs TP2
+    span_tp2 = tp2 - entry
+    if span_tp2 <= 0:
+        return None
+    ratio = dist / span_tp2
+    rmin, rmax = rules["ratioTP2"]
+    if not (rmin <= ratio <= rmax):
+        return None
+    # R:R
+    risk = entry - stop
+    if risk <= 0:
+        return None
+    rr_to_tp1 = dist / risk
+    if rr_to_tp1 < float(min_rr):
+        return None
+    return round(float(s), 4)
+
+
+def _score_tp_candidate_short(level: Dict[str, Any], style: str, entry: float, stop: float, tp2: float, ctx: Dict[str, Any], min_rr: float) -> Optional[float]:
+    rules = _TP1_RULES.get(style, _TP1_RULES["intraday"])
+    w = rules["weights"]
+    s = 0.0
+    tag = (level.get("tag") or "").upper()
+    if tag == "VWAP":
+        s += w.get("vwap", 0)
+    if tag in {"ORB_LOW"}:
+        s += w.get("orb", 0)
+    if tag in {"PRIOR_LOW"}:
+        s += w.get("priorHL", 0)
+    if tag in {"EMA9", "EMA20", "EMA50"}:
+        s += w.get("microPivot", 0)
+    if tag in {"POC", "VAH", "VAL"}:
+        s += w.get("volProfile", 0)
+    if tag.startswith("FIB"):
+        s += w.get("fib", 0)
+    # EMA stack bearish bonus
+    try:
+        latest_bear = ctx.get("ema9") < ctx.get("ema20") < ctx.get("ema50")
+        if latest_bear:
+            s += 0.1
+    except Exception:
+        pass
+    # Distance checks
+    atr = ctx.get("atr") or 0.0
+    min_atr = rules["minATR"] * float(atr or 0.0)
+    dist = entry - float(level.get("level") or 0.0)
+    if dist < max(0.0, min_atr):
+        return None
+    em = ctx.get("expected_move_horizon")
+    if isinstance(em, (int, float)) and dist > float(em) * float(rules.get("maxHorizon", 1.0)):
+        return None
+    span_tp2 = entry - tp2
+    if span_tp2 <= 0:
+        return None
+    ratio = dist / span_tp2
+    rmin, rmax = rules["ratioTP2"]
+    if not (rmin <= ratio <= rmax):
+        return None
+    risk = stop - entry
+    if risk <= 0:
+        return None
+    rr_to_tp1 = dist / risk
+    if rr_to_tp1 < float(min_rr):
+        return None
+    return round(float(s), 4)
+
+
+def _select_tp1_long(entry: float, stop: float, tp2: float, style: str, ctx: Dict[str, Any], min_rr: float) -> Optional[float]:
+    cands = _build_tp_candidates_long(entry, ctx)
+    scored: List[Tuple[float, float]] = []  # (level, score)
+    for L in cands:
+        sc = _score_tp_candidate_long(L, style, entry, stop, tp2, ctx, min_rr)
+        if sc is not None:
+            scored.append((float(L["level"]), sc))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return float(scored[0][0])
+
+
+def _select_tp1_short(entry: float, stop: float, tp2: float, style: str, ctx: Dict[str, Any], min_rr: float) -> Optional[float]:
+    cands = _build_tp_candidates_short(entry, ctx)
+    scored: List[Tuple[float, float]] = []
+    for L in cands:
+        sc = _score_tp_candidate_short(L, style, entry, stop, tp2, ctx, min_rr)
+        if sc is not None:
+            scored.append((float(L["level"]), sc))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return float(scored[0][0])
 
 
 def _collect_htf_levels(session: pd.DataFrame, prev_session: pd.DataFrame | None, latest: pd.Series) -> List[float]:
@@ -417,6 +697,7 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
 
     notes: List[str] = []
     plan: Plan | None = None
+    tp1_dbg: Dict[str, Any] | None = None
 
     recent_slice = post_range.tail(20)
     retest_low = float(recent_slice["low"].min()) if not recent_slice.empty else float("nan")
@@ -427,17 +708,25 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
         stop = retest_low - tolerance * 0.5
         target_primary = max(float(recent_slice["high"].max()), entry + atr_value)
         target_secondary = entry + atr_value * 1.5
-        targets = snap_targets_with_rr(
-            entry=entry,
-            stop=stop,
-            bias="long",
-            tp_raws=[target_primary, target_secondary],
-            htf_levels=ctx.get("htf_levels", []),
-            min_rr=_strategy_min_rr(strategy.id),
-            em=ctx.get("expected_move_horizon"),
-            prefer_em_cap=True,
-            atr=atr_value,
-        )
+        # Select structural TP1 inside EM/ATR/ratio bounds
+        style = _style_for_strategy_id(strategy.id)
+        tp2 = max(float(recent_slice["high"].max()), entry + atr_value * 1.5)
+        tp1_struct = _select_tp1_long(entry, stop, tp2, style, ctx, _strategy_min_rr(strategy.id))
+        if tp1_struct is not None:
+            targets = [tp1_struct, tp2]
+            tp1_dbg = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
+        else:
+            targets = snap_targets_with_rr(
+                entry=entry,
+                stop=stop,
+                bias="long",
+                tp_raws=[target_primary, target_secondary],
+                htf_levels=ctx.get("htf_levels", []),
+                min_rr=_strategy_min_rr(strategy.id),
+                em=ctx.get("expected_move_horizon"),
+                prefer_em_cap=True,
+                atr=atr_value,
+            )
         if not targets:
             return None
         plan = _build_plan(
@@ -457,17 +746,24 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
         stop = retest_high + tolerance * 0.5
         target_primary = min(float(recent_slice["low"].min()), entry - atr_value)
         target_secondary = entry - atr_value * 1.5
-        targets = snap_targets_with_rr(
-            entry=entry,
-            stop=stop,
-            bias="short",
-            tp_raws=[target_primary, target_secondary],
-            htf_levels=ctx.get("htf_levels", []),
-            min_rr=_strategy_min_rr(strategy.id),
-            em=ctx.get("expected_move_horizon"),
-            prefer_em_cap=True,
-            atr=atr_value,
-        )
+        style = _style_for_strategy_id(strategy.id)
+        tp2 = min(float(recent_slice["low"].min()), entry - atr_value * 1.5)
+        tp1_struct = _select_tp1_short(entry, stop, tp2, style, ctx, _strategy_min_rr(strategy.id))
+        if tp1_struct is not None:
+            targets = [tp1_struct, tp2]
+            tp1_dbg = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
+        else:
+            targets = snap_targets_with_rr(
+                entry=entry,
+                stop=stop,
+                bias="short",
+                tp_raws=[target_primary, target_secondary],
+                htf_levels=ctx.get("htf_levels", []),
+                min_rr=_strategy_min_rr(strategy.id),
+                em=ctx.get("expected_move_horizon"),
+                prefer_em_cap=True,
+                atr=atr_value,
+            )
         if not targets:
             return None
         plan = _build_plan(
@@ -504,6 +800,8 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
     }
+    if tp1_dbg:
+        features["tp1_struct_debug"] = tp1_dbg
 
     return Signal(
         symbol=symbol,
@@ -540,12 +838,20 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
     breakout_short = price <= range_low + 0.05 * atr_value
     volume_ok = math.isfinite(ctx["volume_median"]) and latest["volume"] >= ctx["volume_median"]
 
+    tp1_dbg_ph: Dict[str, Any] | None = None
     if price > ctx["vwap"] and ema_stack_long and breakout_long:
         entry = price
         stop = min(range_low, float(session["low"].tail(10).min())) - atr_value * 0.25
         target_primary = entry + atr_value
         target_secondary = max(range_high + atr_value * 0.8, entry + atr_value * 1.6)
-        targets = snap_targets_with_rr(
+        style = _style_for_strategy_id(strategy.id)
+        tp2 = entry + atr_value * 1.6
+        tp1_struct = _select_tp1_long(entry, stop, tp2, style, ctx, _strategy_min_rr(strategy.id))
+        if tp1_struct is not None:
+            targets = [tp1_struct, tp2]
+            tp1_dbg_ph = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
+        else:
+            targets = snap_targets_with_rr(
             entry=entry,
             stop=stop,
             bias="long",
@@ -572,7 +878,14 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
         stop = max(range_high, float(session["high"].tail(10).max())) + atr_value * 0.25
         target_primary = entry - atr_value
         target_secondary = min(range_low - atr_value * 0.8, entry - atr_value * 1.6)
-        targets = snap_targets_with_rr(
+        style = _style_for_strategy_id(strategy.id)
+        tp2 = entry - atr_value * 1.6
+        tp1_struct = _select_tp1_short(entry, stop, tp2, style, ctx, _strategy_min_rr(strategy.id))
+        if tp1_struct is not None:
+            targets = [tp1_struct, tp2]
+            tp1_dbg_ph = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
+        else:
+            targets = snap_targets_with_rr(
             entry=entry,
             stop=stop,
             bias="short",
@@ -616,6 +929,8 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
     }
+    if tp1_dbg_ph:
+        features["tp1_struct_debug"] = tp1_dbg_ph
 
     return Signal(
         symbol=symbol,
