@@ -1816,7 +1816,7 @@ async def gpt_plan(
         "em_cap_applied": bool((volatility.get("expected_move_horizon") if isinstance(volatility, dict) else None)),
         **({"rr_inputs": rr_inputs} if rr_inputs else {}),
     }
-    # Infer snapped_targets by comparing target prices to nearby labelled levels
+    # Infer snapped_targets by comparing target prices to named levels (key_levels + overlays)
     snapped_names: List[str] = []
     try:
         targets_list = plan.get("targets") or []
@@ -1825,8 +1825,49 @@ async def gpt_plan(
         atr_val = float(indicators.get("atr14") or 0.0)
         window = max(atr_val * 0.30, 0.0)
         levels_dict = first.get("key_levels") or {}
-        # build name->value list
-        named = [(name, float(val)) for name, val in levels_dict.items() if isinstance(val, (int, float))]
+        overlays = first.get("context_overlays") or {}
+        named: List[Tuple[str, float]] = []
+        # Key levels (map some to canonical short labels)
+        alias = {
+            "opening_range_high": "ORH",
+            "opening_range_low": "ORL",
+            "prev_high": "prev_high",
+            "prev_low": "prev_low",
+            "prev_close": "prev_close",
+            "session_high": "session_high",
+            "session_low": "session_low",
+            "gap_fill": "gap_fill",
+        }
+        for k, v in (levels_dict or {}).items():
+            if isinstance(v, (int, float)):
+                try:
+                    named.append((alias.get(k, k), float(v)))
+                except Exception:
+                    continue
+        # Volume profile (VAH/VAL/POC/VWAP)
+        vp = overlays.get("volume_profile") or {}
+        for lab, key in [("VAH", "vah"), ("VAL", "val"), ("POC", "poc"), ("VWAP", "vwap")]:
+            val = vp.get(key)
+            if isinstance(val, (int, float)):
+                try:
+                    named.append((lab, float(val)))
+                except Exception:
+                    pass
+        # Anchored VWAPs
+        av = overlays.get("avwap") or {}
+        av_map = {
+            "from_open": "AVWAP(open)",
+            "from_prev_close": "AVWAP(prev_close)",
+            "from_session_low": "AVWAP(session_low)",
+            "from_session_high": "AVWAP(session_high)",
+        }
+        for k, lab in av_map.items():
+            val = av.get(k)
+            if isinstance(val, (int, float)):
+                try:
+                    named.append((lab, float(val)))
+                except Exception:
+                    pass
         for tp in targets_list[:2]:
             try:
                 tp_f = float(tp)
