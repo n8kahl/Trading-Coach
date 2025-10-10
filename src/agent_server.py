@@ -22,7 +22,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
 from urllib.parse import urlencode, quote
 
@@ -227,12 +227,19 @@ class PlanResponse(BaseModel):
     market_snapshot: Dict[str, Any] | None = None
     features: Dict[str, Any] | None = None
     options: Dict[str, Any] | None = None
+    calc_notes: Dict[str, Any] | None = None
+    htf: Dict[str, Any] | None = None
+    decimals: int | None = None
+    data_quality: Dict[str, Any] | None = None
 
 
 class MultiContextRequest(BaseModel):
     symbol: str
-    intervals: List[str]
+    intervals: List[str] = Field(
+        ..., validation_alias=AliasChoices("intervals", "frames")
+    )
     lookback: int | None = None
+    include_series: bool = False
 
 
 class MultiContextResponse(BaseModel):
@@ -242,6 +249,9 @@ class MultiContextResponse(BaseModel):
     sentiment: Dict[str, Any] | None = None
     events: Dict[str, Any] | None = None
     earnings: Dict[str, Any] | None = None
+    summary: Dict[str, Any] | None = None
+    decimals: int | None = None
+    data_quality: Dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1783,6 +1793,38 @@ async def gpt_plan(
     if not results:
         raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
+
+    # Build calc_notes + htf from available payload
+    plan = first.get("plan") or {}
+    charts = (first.get("charts") or {}).get("params") or {}
+    snapshot = first.get("market_snapshot") or {}
+    indicators = (snapshot.get("indicators") or {})
+    rr_inputs = None
+    try:
+        entry = float(plan.get("entry")) if plan.get("entry") is not None else float(charts.get("entry"))
+        stop = float(plan.get("stop")) if plan.get("stop") is not None else float(charts.get("stop"))
+        tp_csv = charts.get("tp") or ",".join(str(x) for x in (plan.get("targets") or []))
+        tp1 = float(str(tp_csv).split(",")[0]) if tp_csv else None
+        if tp1 is not None:
+            rr_inputs = {"entry": entry, "stop": stop, "tp1": tp1}
+    except Exception:
+        rr_inputs = None
+    calc_notes = {
+        "atr14": indicators.get("atr14"),
+        "stop_multiple": None,
+        "em_cap_applied": False,
+        **({"rr_inputs": rr_inputs} if rr_inputs else {}),
+    }
+    htf = {
+        "bias": ((snapshot.get("trend") or {}).get("ema_stack") or "unknown"),
+        "snapped_targets": [],
+    }
+    data_quality = {
+        "series_present": True,
+        "iv_present": True,
+        "earnings_present": True,
+    }
+
     return PlanResponse(
         symbol=first.get("symbol"),
         style=first.get("style"),
@@ -1795,6 +1837,10 @@ async def gpt_plan(
         market_snapshot=first.get("market_snapshot"),
         features=first.get("features"),
         options=first.get("options"),
+        calc_notes=calc_notes,
+        htf=htf,
+        decimals=2,
+        data_quality=data_quality,
     )
 
 
@@ -1831,6 +1877,12 @@ async def gpt_multi_context(
             raise
         context["interval"] = normalized
         context["requested"] = raw
+        if not request_payload.include_series:
+            # Trim heavy series when gating is requested
+            context.pop("bars", None)
+            indicators = context.get("indicators")
+            if isinstance(indicators, dict):
+                context["indicators"] = {k: v[-1] if isinstance(v, list) and v else v for k, v in indicators.items()}
         contexts.append(context)
 
     if not contexts:
@@ -1854,6 +1906,98 @@ async def gpt_multi_context(
     events = (enrichment or {}).get("events")
     earnings = (enrichment or {}).get("earnings")
 
+    # Build summary block
+    frames_used = [c.get("interval") for c in contexts]
+    trend_notes: Dict[str, str] = {}
+    votes: List[int] = []
+    for c in contexts:
+        snap = c.get("snapshot") or {}
+        trend = (snap.get("trend") or {}).get("ema_stack")
+        label = "flat"
+        if trend == "bullish":
+            label = "up"
+            votes.append(1)
+        elif trend == "bearish":
+            label = "down"
+            votes.append(-1)
+        trend_notes[str(c.get("interval"))] = label
+    confluence_score = None
+    if votes:
+        same_dir = abs(sum(1 for v in votes if v > 0) - sum(1 for v in votes if v < 0))
+        confluence_score = round(max(0.0, min(1.0, same_dir / max(1, len(votes)))), 2)
+
+    # Vol regime label
+    regime_label = None
+    try:
+        iv_rank = volatility_regime.get("iv_rank")
+        if isinstance(iv_rank, (int, float)):
+            if iv_rank >= 90:
+                regime_label = "extreme"
+            elif iv_rank >= 75:
+                regime_label = "elevated"
+            elif iv_rank <= 25:
+                regime_label = "low"
+            else:
+                regime_label = "normal"
+    except Exception:
+        pass
+    vol_summary = dict(volatility_regime)
+    if regime_label:
+        vol_summary["regime_label"] = regime_label
+
+    # Expected move horizon: use first snapshot that has it
+    expected_move_horizon = None
+    for c in contexts:
+        snap = c.get("snapshot") or {}
+        vol = snap.get("volatility") or {}
+        em = vol.get("expected_move_horizon")
+        if isinstance(em, (int, float)):
+            expected_move_horizon = float(em)
+            break
+
+    # Nearby levels (compact markers)
+    marker_keys = ["POC", "VAH", "VAL", "prev_high", "prev_low", "prev_close", "opening_range_high", "opening_range_low", "session_high", "session_low"]
+    nearby_levels: List[str] = []
+    for c in contexts:
+        lv = (c.get("snapshot") or {}).get("levels") or {}
+        for k in marker_keys:
+            if k in lv and k not in nearby_levels:
+                nearby_levels.append(k)
+        if len(nearby_levels) >= 6:
+            break
+    summary = {
+        "frames_used": frames_used,
+        "confluence_score": confluence_score,
+        "trend_notes": trend_notes,
+        "volatility_regime": vol_summary,
+        "expected_move_horizon": expected_move_horizon,
+        "nearby_levels": nearby_levels,
+    }
+
+    # Decimals based on first frame's close
+    decimals = 2
+    try:
+        first_close = None
+        for c in contexts:
+            snap = c.get("snapshot") or {}
+            price = (snap.get("price") or {}).get("close")
+            if isinstance(price, (int, float)):
+                first_close = float(price)
+                break
+        if first_close is not None:
+            scale = _price_scale_for(first_close)
+            # pricescale = 10**decimals
+            import math as _math
+            decimals = int(round(_math.log10(scale))) if scale > 0 else 2
+    except Exception:
+        decimals = 2
+
+    data_quality = {
+        "series_present": bool(request_payload.include_series),
+        "iv_present": any(volatility_regime.get(k) is not None for k in ("iv_rank", "iv_atm")),
+        "earnings_present": earnings is not None,
+    }
+
     return MultiContextResponse(
         symbol=symbol,
         contexts=contexts,
@@ -1861,6 +2005,9 @@ async def gpt_multi_context(
         sentiment=sentiment,
         events=events,
         earnings=earnings,
+        summary=summary,
+        decimals=decimals,
+        data_quality=data_quality,
     )
 
 
@@ -2163,6 +2310,28 @@ async def gpt_contracts(
     best = [_enrich_contract_with_plan(contract, plan_anchor, risk_amount) for contract in candidates[:3]]
     alternatives = [_enrich_contract_with_plan(contract, plan_anchor, risk_amount) for contract in candidates[3:10]]
 
+    # Compact table view for UI rendering
+    table_rows: List[Dict[str, Any]] = []
+    for row in best[:6]:
+        try:
+            label = row.get("label") or row.get("symbol") or ""
+            table_rows.append(
+                {
+                    "label": label,
+                    "dte": row.get("dte"),
+                    "strike": row.get("strike"),
+                    "delta": row.get("delta"),
+                    "theta": row.get("theta"),
+                    "iv": row.get("implied_volatility") or row.get("iv"),
+                    "price": row.get("mid") or row.get("mark") or row.get("price"),
+                    "spread_pct": row.get("spread_pct"),
+                    "oi": row.get("open_interest") or row.get("oi"),
+                    "liquidity_score": row.get("tradeability") or row.get("liquidity_score"),
+                }
+            )
+        except Exception:
+            continue
+
     return {
         "symbol": symbol,
         "side": side,
@@ -2172,6 +2341,7 @@ async def gpt_contracts(
         "relaxed_filters": relaxed,
         "best": best,
         "alternatives": alternatives,
+        "table": table_rows,
     }
 
 
