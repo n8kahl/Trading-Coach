@@ -6,13 +6,22 @@ Last updated: 2025-10-08
 
 - GPT data surface
   - `/gpt/scan` and `/gpt/context` deliver market_snapshot, key_levels, features, and charts.params.
-  - `charts.params` now supports: `symbol, interval, ema, vwap, view, theme, strategy, direction, atr, levels`.
+  - `charts.params` now supports: `symbol, interval, ema, vwap, view, theme, strategy, direction, atr, levels, supply, demand, liquidity, fvg, avwap`.
   - Option chains from Polygon are summarized and attached when available; Tradier remains a fallback.
 
 - Canonical chart link builder
   - `POST /gpt/chart-url` returns `{ "interactive": "<url>" }`.
   - Normalizes tokens: `5m→5`, `1h→60`, `1d→1D`; uppercases symbols while preserving exchange prefixes (`NASDAQ:TSLA`).
   - Accepts `levels` (comma floats) for dotted key lines on the chart.
+
+- Contract picker API
+  - `POST /gpt/contracts` ranks Tradier option contracts according to style defaults (scalp/intraday/swing/leaps).
+  - Applies delta/DTE/spread/OI liquidity gates (no budget filtering); risk sizing uses `risk_amount` (defaults $100) for P/L projections only.
+  - Returns `best` (top 3) and `alternatives` (next 7) with tradeability score, price, liquidity, greeks, and scenario projections.
+
+- Multi-interval context
+  - `POST /gpt/multi-context` delivers aggregated snapshots for [1m, 5m, 1h, 1D…] in one call.
+  - Includes cached volatility regime (ATM IV, IV rank/percentile, HV20/60/120) plus per-interval bars/indicators.
 
 - Real strategy scanner
   - `/gpt/scan` now evaluates each strategy with fully grounded calculations (OR retests, VWAP clusters, gap metrics, anchored VWAPs) and publishes a real plan payload (`entry/stop/targets/confidence`).
@@ -25,6 +34,7 @@ Last updated: 2025-10-08
     - EMA overlays from `ema=` and VWAP toggle via `vwap=1`
     - Labeled Entry/Stop/TP lines using axis labels
     - Dotted yellow reference lines from `levels=`
+    - Supply/demand zones, liquidity pools, FVGs, and anchored VWAPs plotted as labeled horizontal bands when provided
     - Robust autoscale: ensures all plan lines and levels are included even when far from current prices
     - Plan rescale: defaults to `scale_plan=auto` so entry/stop/targets adjust to the latest close when the plan was created in a different price regime (disable with `scale_plan=off`, manual factor supported)
     - On‑screen debug when `debug=1` (shows data request + bar count)

@@ -281,6 +281,10 @@ pre-baked trade levels.
   different price basis (splits, stale snapshots, etc.). Add `scale_plan=off`
   to disable, or supply an explicit multiplier (e.g., `scale_plan=0.5`) when
   you know the adjustment factor.
+- **Overlay rendering.** When `charts.params` includes `supply`, `demand`,
+  `liquidity`, `fvg`, or `avwap`, the `/tv` viewer plots labeled horizontal
+  bands/lines to represent higher-timeframe zones, liquidity pools, fair value
+  gaps, and anchored VWAP references.
 - **`context_overlays`** packages higher-timeframe zones, liquidity pools, FVGs,
   relative strength, internals, options/volatility summaries, liquidity
   frictions, event hooks, anchored VWAPs, and volume profile magnets. These
@@ -294,9 +298,15 @@ pre-baked trade levels.
 
 ## `/gpt/chart-url`
 
+## `/gpt/chart-url`
+
 Use this helper whenever you need a shareable chart link. Provide the baseline
 `charts.params` from the scan/context response and append your computed trade
 plan fields.
+
+Depending on the data available, `charts.params` may also include overlay keys
+such as `supply`, `demand`, `liquidity`, `fvg`, and `avwap`; the chart viewer
+will render these automatically.
 
 > **Deployment note:** Set the `BASE_URL` environment variable on Railway to the
 > fully qualified TradingView page (e.g. `https://your-app.up.railway.app/tv`).
@@ -330,7 +340,182 @@ Response:
 If required parameters (`symbol`, `interval`) are missing you will receive a 400
 error with a human-readable message.
 
+## `/gpt/contracts`
+
+Ranks Tradier option contracts according to your style/budget rules and
+returns plug-and-play picks with liquidity and greeks baked in.
+
+### Request body
+
+```json
+{
+  "symbol": "NVDA",
+  "side": "call",
+  "style": "intraday",
+  "min_dte": 1,
+  "max_dte": 5,
+  "min_delta": 0.45,
+  "max_delta": 0.55,
+  "max_spread_pct": 10,
+  "min_oi": 500,
+  "risk_amount": 120,
+  "expiry": null
+}
+```
+
+`max_price` is still accepted for backwards compatibility; when provided it is
+treated as the fallback `risk_amount` for projections.
+
+Style defaults applied server-side when you omit filters:
+
+| Style    | DTE window | Delta window | Max spread % | Min OI |
+|----------|------------|--------------|--------------|--------|
+| scalp    | 0–2        | 0.55–0.65    | 8            | 500    |
+| intraday | 1–5        | 0.45–0.55    | 10           | 500    |
+| swing    | 7–45       | 0.30–0.55    | 12           | 500    |
+| leaps    | ≥180       | 0.25–0.45    | 12           | 500    |
+
+No budget-based filtering is applied. The optional `risk_amount` (default
+**$100**) is only used to size the P/L projections returned for each contract.
+If no contracts pass, the service widens the delta window by ±0.05, then the
+DTE window by ±2 days before returning an empty result.
+
+### Response shape
+
+```jsonc
+{
+  "symbol": "NVDA",
+  "side": "call",
+  "style": "intraday",
+  "risk_amount": 120.0,
+  "filters": {
+    "min_dte": 1,
+    "max_dte": 5,
+    "min_delta": 0.45,
+    "max_delta": 0.55,
+    "max_spread_pct": 10.0,
+    "min_oi": 500
+  },
+  "relaxed_filters": false,
+  "best": [
+    {
+      "label": "NVDA 2024-10-18 460C",
+      "symbol": "NVDA241018C00460000",
+      "expiry": "2024-10-18",
+      "dte": 9,
+      "strike": 460.0,
+      "type": "CALL",
+      "price": 5.6,
+      "bid": 5.5,
+      "ask": 5.7,
+      "spread_pct": 3.57,
+      "volume": 1823,
+      "oi": 9410,
+      "delta": 0.51,
+      "gamma": 0.04,
+      "theta": -0.08,
+      "vega": 0.32,
+      "iv": 0.38,
+      "iv_rank": null,
+      "tradeability": 87.4,
+      "pnl": {
+        "per_contract_cost": 560.0,
+        "at_stop": -55.0,
+        "at_tp1": 120.0,
+        "at_tp2": 260.0,
+        "rr_to_tp1": 2.18
+      },
+      "pl_projection": {
+        "risk_per_contract": 560.0,
+        "contracts_possible": 1,
+        "max_profit_est": 260.0,
+        "max_loss_est": 55.0
+      }
+    }
+  ],
+  "alternatives": [
+    { "symbol": "…", "tradeability": 81.2 }
+  ]
+}
+```
+
+`tradeability` (0–100) weights spread (40 %), delta fit (30 %), open interest
+(20 %), and implied-vol regime (10 %). The endpoint returns up to three
+contracts in `best` and the next seven in `alternatives`.
+
+Field summary:
+
+- **label** – human-friendly identifier (`SYMBOL YYYY-MM-DD STRIKE<Call/Put>`).
+- **price** – mid/mark rounded to cents.
+- **spread_pct** – bid/ask spread as a percentage.
+- **volume / oi** – latest Tradier values.
+- **delta/gamma/theta/vega/iv** – Tradier quote greeks.
+- **iv_rank** – `null` for now (left for GPT to down-rank when IV history is
+  available).
+- **tradeability** – blended liquidity/fit score used for sorting.
+- **pnl / pl_projection** – per-contract scenario results and risk sizing based
+  on the supplied `risk_amount` (defaults to $100).
+
 ## `/gpt/context/{symbol}`
+
+## `/gpt/multi-context`
+
+Fetches market context across multiple timeframes plus implied-volatility
+metrics in a single round-trip.
+
+### Request body
+
+```json
+{
+  "symbol": "AAPL",
+  "intervals": ["1m", "5m", "1h", "1D"],
+  "lookback": 300
+}
+```
+
+Each interval is normalised using the same rules as `/gpt/context`. `lookback`
+defaults to 300 bars when omitted.
+
+### Response
+
+```jsonc
+{
+  "symbol": "AAPL",
+  "iv_metrics": {
+    "timestamp": "2025-10-08T19:40:05.123456Z",
+    "iv_atm": 0.37,
+    "iv_rank": 62.4,
+    "iv_percentile": 68.5,
+    "hv20": 0.29,
+    "hv60": 0.32,
+    "hv120": 0.34,
+    "hv20_percentile": 54.1,
+    "iv_to_hv_ratio": 1.28
+  },
+  "intervals": [
+    {
+      "interval": "1",
+      "requested": "1m",
+      "lookback": 300,
+      "cached": false,
+      "bars": [ {"time": "…", "open": 175.3, …} ],
+      "key_levels": { "session_high": 176.4, … },
+      "snapshot": { /* same shape as single-context snapshot */ },
+      "indicators": {
+        "ema9": [ {"time": "…", "value": 175.28}, … ],
+        "ema20": […],
+        "vwap": […],
+        "atr14": […],
+        "adx14": […]
+      }
+    },
+    { "interval": "60", "requested": "1h", … }
+  ]
+}
+```
+
+Intervals pulled from cache include `"cached": true`. IV metrics fall back to
+`null` when the chain/price data is unavailable.
 
 Example response:
 

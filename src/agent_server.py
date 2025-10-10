@@ -12,8 +12,9 @@ from __future__ import annotations
 import asyncio
 import math
 import logging
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import numpy as np
@@ -29,7 +30,13 @@ from .config import get_settings
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
 from .charts_api import router as charts_router, get_candles, normalize_interval
 from .scanner import scan_market
-from .tradier import TradierNotConfiguredError, fetch_option_chain, select_tradier_contract
+from .tradier import (
+    TradierNotConfiguredError,
+    fetch_option_chain,
+    fetch_option_chain_cached,
+    fetch_option_quotes,
+    select_tradier_contract,
+)
 from .polygon_options import fetch_polygon_option_chain, summarize_polygon_chain
 from .context_overlays import compute_context_overlays
 
@@ -58,7 +65,33 @@ ALLOWED_CHART_KEYS = {
     "atr",
     "title",
     "scale_plan",
+    "supply",
+    "demand",
+    "liquidity",
+    "fvg",
+    "avwap",
 }
+
+
+DATA_SYMBOL_ALIASES: Dict[str, List[str]] = {
+    "SPX": ["^GSPC"],
+    "^SPX": ["^GSPC"],
+    "INDEX:SPX": ["^GSPC"],
+    "SP500": ["^GSPC"],
+}
+
+
+def _data_symbol_candidates(symbol: str) -> List[str]:
+    primary = symbol or ""
+    token = primary.upper()
+    aliases = DATA_SYMBOL_ALIASES.get(token, [])
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    candidates: List[str] = [primary]
+    for alias in aliases:
+        if alias and alias not in candidates:
+            candidates.append(alias)
+    return candidates
 
 
 def _normalize_chart_symbol(value: str) -> str:
@@ -156,6 +189,36 @@ class ScanUniverse(BaseModel):
         default=None,
         description="Optional style filter: 'scalp', 'intraday', 'swing', or 'leap'.",
     )
+
+
+class ContractsRequest(BaseModel):
+    symbol: str
+    side: str | None = None
+    style: str | None = None
+    min_dte: int | None = None
+    max_dte: int | None = None
+    min_delta: float | None = None
+    max_delta: float | None = None
+    max_spread_pct: float | None = None
+    min_oi: int | None = None
+    max_price: float | None = None
+    risk_amount: float | None = None
+    expiry: str | None = None
+    bias: str | None = None
+
+    model_config = ConfigDict(extra="allow")
+
+
+class MultiContextRequest(BaseModel):
+    symbol: str
+    intervals: List[str]
+    lookback: int | None = None
+
+
+class MultiContextResponse(BaseModel):
+    symbol: str
+    contexts: List[Dict[str, Any]]
+    volatility_regime: Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -271,12 +334,26 @@ def _is_stale_frame(frame: pd.DataFrame, timeframe: str) -> bool:
 
 async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None:
     """Fetch recent OHLCV, preferring Polygon when available, else Yahoo Finance."""
-    # Prefer Polygon
-    poly = await _fetch_polygon_ohlcv(symbol, timeframe)
-    if poly is not None and not poly.empty and not _is_stale_frame(poly, timeframe):
-        return poly
-    if poly is not None and not poly.empty:
+    candidates = _data_symbol_candidates(symbol)
+
+    # Try Polygon first for each candidate symbol
+    fresh_polygon: pd.DataFrame | None = None
+    stale_polygon: pd.DataFrame | None = None
+    for candidate in candidates:
+        poly = await _fetch_polygon_ohlcv(candidate, timeframe)
+        if poly is None or poly.empty:
+            continue
+        if not _is_stale_frame(poly, timeframe):
+            fresh_polygon = poly
+            break
+        stale_polygon = poly if stale_polygon is None else stale_polygon
+
+    if fresh_polygon is not None:
+        return fresh_polygon
+
+    if stale_polygon is not None:
         logger.warning("Polygon data is stale for %s; attempting Yahoo fallback.", symbol)
+
     tf = timeframe or "5"
     interval_map = {
         "1": ("1d", "1m"),
@@ -290,57 +367,64 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
         "D": ("1y", "1d"),
     }
     range_span, interval = interval_map.get(tf, ("5d", "5m"))
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    params = {"interval": interval, "range": range_span, "includePrePost": "false"}
-
     timeout = httpx.Timeout(6.0, connect=3.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    for candidate in candidates:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{candidate}"
+        params = {"interval": interval, "range": range_span, "includePrePost": "false"}
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                logger.warning("Yahoo Finance fetch failed for %s: %s", candidate, exc)
+                continue
+
+        payload = response.json()
         try:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            logger.warning("Yahoo Finance fetch failed for %s: %s", symbol, exc)
-            return None
+            chart = payload["chart"]
+            if chart.get("error"):
+                raise ValueError(chart["error"])
+            result = chart["result"][0]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            logger.warning("Unexpected Yahoo Finance payload for %s: %s", candidate, exc)
+            continue
 
-    payload = response.json()
-    try:
-        chart = payload["chart"]
-        if chart.get("error"):
-            raise ValueError(chart["error"])
-        result = chart["result"][0]
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        logger.warning("Unexpected Yahoo Finance payload for %s: %s", symbol, exc)
-        return None
+        timestamps = result.get("timestamp")
+        if not timestamps:
+            logger.warning("Yahoo Finance returned no timestamps for %s", candidate)
+            continue
 
-    timestamps = result.get("timestamp")
-    if not timestamps:
-        logger.warning("Yahoo Finance returned no timestamps for %s", symbol)
-        return None
+        quote = result["indicators"]["quote"][0]
+        o = quote.get("open")
+        h = quote.get("high")
+        l = quote.get("low")
+        c = quote.get("close")
+        v = quote.get("volume")
+        if not all([o, h, l, c, v]):
+            logger.warning("Incomplete OHLCV data for %s", candidate)
+            continue
 
-    quote = result["indicators"]["quote"][0]
-    o = quote.get("open")
-    h = quote.get("high")
-    l = quote.get("low")
-    c = quote.get("close")
-    v = quote.get("volume")
-    if not all([o, h, l, c, v]):
-        logger.warning("Incomplete OHLCV data for %s", symbol)
-        return None
+        frame = pd.DataFrame(
+            {
+                "timestamp": [int(ts) for ts in timestamps],
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": v,
+            }
+        ).dropna()
 
-    frame = pd.DataFrame(
-        {
-            "timestamp": [int(ts) for ts in timestamps],
-            "open": o,
-            "high": h,
-            "low": l,
-            "close": c,
-            "volume": v,
-        }
-    ).dropna()
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="s", utc=True)
+        frame = frame.set_index("timestamp")
+        if not frame.empty:
+            return frame
 
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="s", utc=True)
-    frame = frame.set_index("timestamp")
-    return frame
+    if stale_polygon is not None:
+        return stale_polygon
+
+    return None
 
 
 async def _collect_market_data(tickers: List[str], timeframe: str = "5") -> Dict[str, pd.DataFrame]:
@@ -794,6 +878,404 @@ def _extract_levels_for_chart(key_levels: Dict[str, float]) -> List[str]:
     return levels
 
 
+def _float_to_token(value: float | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return f"{float(value):.2f}"
+    return None
+
+
+def _encode_overlay_params(overlays: Dict[str, Any]) -> Dict[str, str]:
+    payload: Dict[str, str] = {}
+    supply = overlays.get("supply_zones") or []
+    demand = overlays.get("demand_zones") or []
+    liquidity = overlays.get("liquidity_pools") or []
+    fvgs = overlays.get("fvg") or []
+    avwap_bundle = overlays.get("avwap") or {}
+
+    def _format_zone(entry: Dict[str, Any]) -> str | None:
+        low_token = _float_to_token(entry.get("low"))
+        high_token = _float_to_token(entry.get("high"))
+        timeframe = entry.get("timeframe") or ""
+        strength = entry.get("strength") or ""
+        if not low_token or not high_token:
+            return None
+        label = timeframe.replace(";", "").replace("@", "").replace("|", "").replace(",", "")
+        strength_label = strength.replace(";", "").replace("@", "").replace("|", "").replace(",", "")
+        return f"{label}@{low_token}-{high_token}@{strength_label}".strip("@")
+
+    def _format_liquidity(entry: Dict[str, Any]) -> str | None:
+        level_token = _float_to_token(entry.get("level"))
+        if not level_token:
+            return None
+        label = entry.get("type") or ""
+        label = label.replace(";", "").replace("@", "").replace("|", "").replace(",", "")
+        tf = entry.get("timeframe") or ""
+        tf = tf.replace(";", "").replace("@", "").replace("|", "").replace(",", "")
+        density = entry.get("density")
+        density_token = ""
+        if isinstance(density, (int, float)) and math.isfinite(float(density)):
+            density_token = f"{float(density):.2f}"
+        pieces = [label, level_token]
+        if tf:
+            pieces.append(tf)
+        if density_token:
+            pieces.append(density_token)
+        return "@".join(pieces)
+
+    def _format_fvg(entry: Dict[str, Any]) -> str | None:
+        low_token = _float_to_token(entry.get("low"))
+        high_token = _float_to_token(entry.get("high"))
+        if not low_token or not high_token:
+            return None
+        timeframe = entry.get("timeframe") or ""
+        age = entry.get("age")
+        age_token = ""
+        if isinstance(age, (int, float)) and math.isfinite(float(age)):
+            age_token = str(int(age))
+        tf_clean = timeframe.replace(";", "").replace("@", "").replace("|", "").replace(",", "")
+        pieces = [low_token, high_token]
+        if tf_clean:
+            pieces.append(tf_clean)
+        if age_token:
+            pieces.append(age_token)
+        return "@".join(pieces)
+
+    def _format_avwap(label: str, value: Any) -> str | None:
+        token = _float_to_token(value if isinstance(value, (int, float)) else None)
+        if not token:
+            return None
+        clean_label = label.replace(";", "").replace("@", "").replace("|", "").replace(",", "")
+        return f"{clean_label}@{token}"
+
+    supply_tokens = [token for token in (_format_zone(item) for item in supply[:6]) if token]
+    demand_tokens = [token for token in (_format_zone(item) for item in demand[:6]) if token]
+    liquidity_tokens = [token for token in (_format_liquidity(item) for item in liquidity[:8]) if token]
+    fvg_tokens = [token for token in (_format_fvg(item) for item in fvgs[:6]) if token]
+    avwap_tokens = [token for token in (_format_avwap(label, value) for label, value in avwap_bundle.items()) if token]
+
+    if supply_tokens:
+        payload["supply"] = ";".join(supply_tokens)
+    if demand_tokens:
+        payload["demand"] = ";".join(demand_tokens)
+    if liquidity_tokens:
+        payload["liquidity"] = ";".join(liquidity_tokens)
+    if fvg_tokens:
+        payload["fvg"] = ";".join(fvg_tokens)
+    if avwap_tokens:
+        payload["avwap"] = ";".join(avwap_tokens)
+    return payload
+
+
+CONTRACT_STYLE_DEFAULTS: Dict[str, Dict[str, float | int]] = {
+    "scalp": {"min_dte": 0, "max_dte": 2, "min_delta": 0.55, "max_delta": 0.65, "max_spread_pct": 8.0, "min_oi": 500},
+    "intraday": {"min_dte": 1, "max_dte": 5, "min_delta": 0.45, "max_delta": 0.55, "max_spread_pct": 10.0, "min_oi": 500},
+    "swing": {"min_dte": 7, "max_dte": 45, "min_delta": 0.30, "max_delta": 0.55, "max_spread_pct": 12.0, "min_oi": 500},
+    "leaps": {"min_dte": 180, "max_dte": 1200, "min_delta": 0.25, "max_delta": 0.45, "max_spread_pct": 12.0, "min_oi": 500},
+}
+
+
+CONTRACT_STYLE_TARGET_DELTA: Dict[str, float] = {
+    "scalp": 0.60,
+    "intraday": 0.50,
+    "swing": 0.40,
+    "leaps": 0.35,
+}
+
+
+def _normalize_contract_style(style: str | None) -> str:
+    token = (style or "").strip().lower()
+    if token in CONTRACT_STYLE_DEFAULTS:
+        return token
+    if token in {"leap", "leaps"}:
+        return "leaps"
+    if token in {"swing", "swingtrade", "swing_trade"}:
+        return "swing"
+    if token in {"scalp", "0dte", "short"}:
+        return "scalp"
+    return "intraday"
+
+
+def _style_default_bounds(style: str) -> Dict[str, float | int]:
+    return dict(CONTRACT_STYLE_DEFAULTS.get(style, CONTRACT_STYLE_DEFAULTS["intraday"]))
+
+
+def _style_target_delta(style: str) -> float:
+    return CONTRACT_STYLE_TARGET_DELTA.get(style, 0.50)
+
+
+def _format_strike(strike: Any) -> str:
+    try:
+        value = float(strike)
+    except (TypeError, ValueError):
+        return str(strike)
+    text = f"{value:.2f}"
+    text = text.rstrip("0").rstrip(".")
+    return text or f"{value:.0f}"
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def _norm(value: float, lower: float, upper: float) -> float:
+    if lower == upper:
+        return 0.0
+    span = float(upper - lower)
+    if span <= 0:
+        return 0.0
+    ratio = (value - lower) / span
+    return _clamp(ratio, 0.0, 1.0)
+
+
+def _tradeability_score(
+    *,
+    spread_pct: float,
+    delta: float,
+    style: str,
+    oi: float,
+    iv_rank: float | None,
+    theta: float | None,
+) -> float:
+    target_delta = _style_target_delta(style)
+    delta_gap = min(abs(abs(delta) - target_delta), 0.5)
+    spread_score = 1.0 - _norm(spread_pct, 2.0, 12.0)
+    delta_score = 1.0 - delta_gap / 0.5
+    oi_score = _norm(math.log10(max(oi, 1.0)), 2.0, 4.0)
+    vr = iv_rank if iv_rank is not None and math.isfinite(iv_rank) else 55.0
+    vol_score = 1.0 - _norm(vr, 40.0, 70.0)
+    base = 0.4 * spread_score + 0.3 * delta_score + 0.2 * oi_score + 0.1 * vol_score
+    score = max(0.0, min(1.0, base))
+    if style == "leaps" and theta is not None and math.isfinite(theta) and theta > -0.05:
+        score = min(1.0, score + 0.05)
+    return round(score * 100.0, 1)
+
+
+def _compute_price(bid: float | None, ask: float | None, last: float | None, fallback: float | None) -> float | None:
+    mid_value: float | None = None
+    if isinstance(bid, (int, float)) and isinstance(ask, (int, float)):
+        bid_val = float(bid)
+        ask_val = float(ask)
+        if bid_val >= 0 and ask_val >= 0 and ask_val >= bid_val:
+            mid_value = (bid_val + ask_val) / 2.0
+    for candidate in (mid_value, last, fallback, bid, ask):
+        if isinstance(candidate, (int, float)):
+            value = float(candidate)
+            if math.isfinite(value) and value > 0:
+                return value
+    return None
+
+
+def _compute_spread_pct(bid: float | None, ask: float | None, price: float | None) -> float | None:
+    if not isinstance(bid, (int, float)) or not isinstance(ask, (int, float)):
+        return None
+    bid_val = float(bid)
+    ask_val = float(ask)
+    if bid_val <= 0 or ask_val <= 0 or ask_val < bid_val:
+        return None
+    basis = price if isinstance(price, (int, float)) and price > 0 else (ask_val + bid_val) / 2.0
+    if basis <= 0:
+        return None
+    return (ask_val - bid_val) / basis * 100.0
+
+
+def _contract_label(symbol: str, expiry: str | None, strike: Any, option_type: str | None) -> str:
+    strike_text = _format_strike(strike)
+    suffix = option_type[:1].upper() if option_type else ""
+    components = [symbol.upper()]
+    if expiry:
+        components.append(expiry)
+    components.append(f"{strike_text}{suffix}")
+    return " ".join(components)
+
+
+def _percentile(values: np.ndarray, target: float) -> float | None:
+    if values.size == 0 or target is None or not math.isfinite(target):
+        return None
+    sorted_vals = np.sort(values)
+    if sorted_vals.size == 0:
+        return None
+    rank = np.searchsorted(sorted_vals, target, side="right")
+    percentile = (rank / sorted_vals.size) * 100.0
+    return round(float(percentile), 2)
+
+
+_MULTI_CONTEXT_CACHE_TTL = 30.0
+_MULTI_CONTEXT_CACHE: Dict[Tuple[str, str, int], Tuple[float, Dict[str, Any]]] = {}
+_IV_METRICS_CACHE_TTL = 120.0
+_IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+
+async def _compute_iv_metrics(symbol: str) -> Dict[str, Any]:
+    key = symbol.upper()
+    now = time.monotonic()
+    cached = _IV_METRICS_CACHE.get(key)
+    if cached and now - cached[0] < _IV_METRICS_CACHE_TTL:
+        return dict(cached[1])
+
+    metrics: Dict[str, Any] = {
+        "timestamp": pd.Timestamp.utcnow().isoformat(),
+        "iv_atm": None,
+        "iv_rank": None,
+        "iv_percentile": None,
+        "hv_20": None,
+        "hv_60": None,
+        "hv_120": None,
+        "hv_20_percentile": None,
+        "iv_to_hv_ratio": None,
+        "skew_25d": None,
+    }
+
+    daily_history = await _load_remote_ohlcv(symbol, "D")
+    hv_series = None
+    if daily_history is not None and not daily_history.empty:
+        daily = daily_history.sort_index()
+        closes = daily["close"].astype(float)
+        returns = closes.pct_change().dropna()
+        if not returns.empty:
+            def _hv(window: int) -> float | None:
+                if len(returns) < window:
+                    return None
+                vol = returns.tail(window).std(ddof=0)
+                if vol is None or not math.isfinite(vol):
+                    return None
+                return float(vol * math.sqrt(252.0) * 100.0)
+
+            hv20 = _hv(20)
+            hv60 = _hv(60)
+            hv120 = _hv(120)
+            metrics.update({
+                "hv_20": hv20,
+                "hv_60": hv60,
+                "hv_120": hv120,
+            })
+
+            rolling = returns.rolling(20).std(ddof=0) * math.sqrt(252.0) * 100.0
+            hv_series = rolling.dropna().to_numpy(dtype=float)
+            if hv20 is not None and hv_series.size:
+                metrics["hv_20_percentile"] = _percentile(hv_series, hv20)
+
+    atm_iv = None
+    try:
+        chain = await fetch_option_chain_cached(symbol)
+    except Exception:
+        chain = pd.DataFrame()
+
+    if isinstance(chain, pd.DataFrame) and not chain.empty:
+        chain = chain.dropna(subset=["strike"])
+        if not chain.empty:
+            price_ref = None
+            if daily_history is not None and not daily_history.empty:
+                try:
+                    price_ref = float(daily_history["close"].iloc[-1])
+                except Exception:
+                    price_ref = None
+            if price_ref is None:
+                try:
+                    price_ref = float(chain.get("underlying_price").dropna().iloc[-1])
+                except Exception:
+                    price_ref = None
+            candidates = chain.copy()
+            if price_ref is not None:
+                candidates["strike_diff"] = (candidates["strike"] - price_ref).abs()
+            else:
+                candidates["strike_diff"] = 0.0
+            candidates["abs_delta"] = candidates.get("delta", np.nan).abs()
+            candidates = candidates.dropna(subset=["abs_delta", "dte"])
+            candidates = candidates[(candidates["dte"].astype(float) >= 15) & (candidates["dte"].astype(float) <= 60)]
+            if not candidates.empty:
+            candidates = candidates.sort_values(by=["strike_diff", "abs_delta"])
+            for _, row in candidates.iterrows():
+                iv_val = row.get("iv") or row.get("implied_volatility")
+                if isinstance(iv_val, (int, float)) and math.isfinite(iv_val) and iv_val > 0:
+                    atm_iv = float(iv_val) * 100.0
+                    break
+    if atm_iv is not None:
+        metrics["iv_atm"] = round(atm_iv, 2)
+        if hv_series is not None and hv_series.size:
+            hv_min = float(np.nanmin(hv_series))
+            hv_max = float(np.nanmax(hv_series))
+            if hv_max > hv_min:
+                metrics["iv_rank"] = round(_norm(atm_iv, hv_min, hv_max) * 100.0, 2)
+                percentile = _percentile(hv_series, atm_iv)
+                metrics["iv_percentile"] = round((percentile / 100.0) if percentile is not None else None, 4)
+            hv20_val = metrics.get("hv_20")
+            if hv20_val:
+                if hv20_val:
+                    metrics["iv_to_hv_ratio"] = round(atm_iv / hv20_val, 4)
+
+    _IV_METRICS_CACHE[key] = (now, dict(metrics))
+    return metrics
+
+
+async def _build_interval_context(symbol: str, interval: str, lookback: int) -> Dict[str, Any]:
+    cache_key = (symbol.upper(), interval, int(lookback))
+    now = time.monotonic()
+    cached = _MULTI_CONTEXT_CACHE.get(cache_key)
+    if cached and now - cached[0] < _MULTI_CONTEXT_CACHE_TTL:
+        payload = dict(cached[1])
+        payload["cached"] = True
+        return payload
+
+    frame = get_candles(symbol, interval, lookback=lookback)
+    if frame.empty:
+        raise HTTPException(status_code=502, detail=f"No market data available for {symbol.upper()} ({interval}).")
+
+    df = frame.copy()
+    df["time"] = pd.to_datetime(df["time"], utc=True)
+    history = df.set_index("time")
+    key_levels = _extract_key_levels(history)
+    snapshot = _build_market_snapshot(history, key_levels)
+
+    bars: List[Dict[str, Any]] = []
+    for _, row in df.iterrows():
+        ts = pd.Timestamp(row["time"])
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        bars.append(
+            {
+                "time": ts.isoformat(),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": _safe_number(row.get("volume")) or 0.0,
+            }
+        )
+
+    ema9_series = ema(history["close"], 9) if len(history) >= 9 else pd.Series(dtype=float)
+    ema20_series = ema(history["close"], 20) if len(history) >= 20 else pd.Series(dtype=float)
+    ema50_series = ema(history["close"], 50) if len(history) >= 50 else pd.Series(dtype=float)
+    vwap_series = vwap(history["close"], history["volume"])
+    atr_series = atr(history["high"], history["low"], history["close"], 14)
+    adx_series = adx(history["high"], history["low"], history["close"], 14)
+
+    indicators = {
+        "ema9": _series_points(ema9_series),
+        "ema20": _series_points(ema20_series),
+        "ema50": _series_points(ema50_series),
+        "vwap": _series_points(vwap_series),
+        "atr14": _series_points(atr_series),
+        "adx14": _series_points(adx_series),
+    }
+
+    payload = {
+        "interval": interval,
+        "lookback": lookback,
+        "bars": bars,
+        "key_levels": key_levels,
+        "snapshot": snapshot,
+        "indicators": indicators,
+        "cached": False,
+    }
+
+    _MULTI_CONTEXT_CACHE[cache_key] = (now, dict(payload))
+    return payload
+
+
 tv_api = APIRouter(prefix="/tv-api", tags=["tv"])
 
 
@@ -1144,6 +1626,9 @@ async def gpt_scan(
                 chart_query["atr"] = f"{float(signal.plan.atr):.4f}"
             if signal.plan.notes:
                 chart_query["notes"] = signal.plan.notes
+        overlay_params = _encode_overlay_params(enhancements)
+        for key, value in overlay_params.items():
+            chart_query[key] = value
         level_tokens = _extract_levels_for_chart(key_levels)
         if level_tokens:
             chart_query["levels"] = ",".join(level_tokens)
@@ -1213,6 +1698,371 @@ async def gpt_scan(
 
     logger.info("scan universe=%s user=%s results=%d", universe.tickers, user.user_id, len(payload))
     return payload
+
+
+@gpt.post("/multi-context", summary="Return multi-interval context with vol metrics")
+async def gpt_multi_context(
+    request_payload: MultiContextRequest,
+    _: AuthedUser = Depends(require_api_key),
+) -> MultiContextResponse:
+    symbol = (request_payload.symbol or "").strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+    if not request_payload.intervals:
+        raise HTTPException(status_code=400, detail="At least one interval is required")
+
+    contexts: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    lookback = int(request_payload.lookback or 300)
+    for token in request_payload.intervals:
+        raw = (token or "").strip()
+        if not raw:
+            continue
+        try:
+            normalized = normalize_interval(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            context = await _build_interval_context(symbol, normalized, lookback)
+        except HTTPException as exc:
+            if exc.status_code == 502:
+                raise HTTPException(status_code=404, detail=f"No data for {symbol} ({normalized})") from exc
+            raise
+        context["interval"] = normalized
+        context["requested"] = raw
+        contexts.append(context)
+
+    if not contexts:
+        raise HTTPException(status_code=400, detail="No valid intervals provided")
+
+    iv_metrics = await _compute_iv_metrics(symbol)
+    volatility_regime = {
+        "iv_rank": iv_metrics.get("iv_rank"),
+        "iv_percentile": iv_metrics.get("iv_percentile"),
+        "iv_atm": iv_metrics.get("iv_atm"),
+        "hv_20": iv_metrics.get("hv_20"),
+        "hv_60": iv_metrics.get("hv_60"),
+        "hv_120": iv_metrics.get("hv_120"),
+        "hv_20_percentile": iv_metrics.get("hv_20_percentile"),
+        "iv_to_hv_ratio": iv_metrics.get("iv_to_hv_ratio"),
+        "timestamp": iv_metrics.get("timestamp"),
+        "skew_25d": iv_metrics.get("skew_25d"),
+    }
+    return MultiContextResponse(symbol=symbol, contexts=contexts, volatility_regime=volatility_regime)
+
+
+def _infer_contract_side(side: str | None, bias: str | None) -> str | None:
+    token = (side or "").strip().lower()
+    if token.startswith("c"):
+        return "call"
+    if token.startswith("p"):
+        return "put"
+    bias_token = (bias or "").strip().lower()
+    if bias_token.startswith("short") or bias_token in {"bearish", "put"}:
+        return "put"
+    if bias_token.startswith("long") or bias_token in {"bullish", "call"}:
+        return "call"
+    return None
+
+
+def _prepare_contract_filters(payload: ContractsRequest, style: str) -> Dict[str, float | int]:
+    config: Dict[str, float | int] = _style_default_bounds(style)
+    if payload.min_dte is not None:
+        config["min_dte"] = int(payload.min_dte)
+    if payload.max_dte is not None:
+        config["max_dte"] = int(payload.max_dte)
+    if payload.min_delta is not None:
+        config["min_delta"] = float(payload.min_delta)
+    if payload.max_delta is not None:
+        config["max_delta"] = float(payload.max_delta)
+    if payload.max_spread_pct is not None:
+        config["max_spread_pct"] = float(payload.max_spread_pct)
+    if payload.min_oi is not None:
+        config["min_oi"] = int(payload.min_oi)
+    return config
+
+
+def _screen_contracts(
+    chain: pd.DataFrame,
+    quotes: Dict[str, Dict[str, Any]],
+    *,
+    symbol: str,
+    style: str,
+    side: str | None,
+    filters: Dict[str, float | int],
+) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    min_dte = int(filters.get("min_dte", 0))
+    max_dte = int(filters.get("max_dte", 366))
+    min_delta = float(filters.get("min_delta", 0.0))
+    max_delta = float(filters.get("max_delta", 1.0))
+    max_spread = float(filters.get("max_spread_pct", 100.0))
+    min_oi = int(filters.get("min_oi", 0))
+
+    for _, row in chain.iterrows():
+        option_symbol = row.get("symbol")
+        if not option_symbol:
+            continue
+        quote = quotes.get(option_symbol)
+        row_type = (row.get("option_type") or "").strip().lower()
+        if side and row_type != side:
+            continue
+
+        bid = quote.get("bid") if quote else row.get("bid")
+        ask = quote.get("ask") if quote else row.get("ask")
+        last = quote.get("last") if quote else None
+        price = _compute_price(bid, ask, last, row.get("mid"))
+        if price is None:
+            continue
+
+        spread_pct = _compute_spread_pct(bid, ask, price)
+        if spread_pct is None:
+            spread_pct = float(row.get("spread_pct") or 999.0) * 100.0 if row.get("spread_pct") is not None else 999.0
+        if spread_pct > max_spread:
+            continue
+
+        expiration = quote.get("expiration_date") if quote else row.get("expiration_date")
+        dte = row.get("dte")
+        if dte is None and expiration:
+            try:
+                exp_ts = pd.Timestamp(expiration)
+                dte = max((exp_ts.date() - pd.Timestamp.utcnow().date()).days, 0)
+            except Exception:  # pragma: no cover - defensive
+                dte = None
+        if dte is None:
+            continue
+        dte_int = int(dte)
+        if dte_int < min_dte or dte_int > max_dte:
+            continue
+
+        delta = quote.get("delta") if quote else row.get("delta")
+        if delta is None or not math.isfinite(delta):
+            continue
+        abs_delta = abs(float(delta))
+        if abs_delta < min_delta or abs_delta > max_delta:
+            continue
+
+        oi = quote.get("open_interest") if quote else row.get("open_interest")
+        if oi is None:
+            oi = row.get("open_interest") or row.get("oi")
+        oi_val = float(oi or 0)
+        if oi_val < min_oi:
+            continue
+
+        volume = quote.get("volume") if quote else row.get("volume")
+        gamma = quote.get("gamma") if quote else row.get("gamma")
+        theta = quote.get("theta") if quote else row.get("theta")
+        vega = quote.get("vega") if quote else row.get("vega")
+        iv = quote.get("iv") if quote else row.get("iv")
+
+        tradeability = _tradeability_score(
+            spread_pct=spread_pct,
+            delta=abs_delta,
+            style=style,
+            oi=oi_val,
+            iv_rank=None,
+            theta=float(theta) if isinstance(theta, (int, float)) else None,
+        )
+
+        contract = {
+            "label": _contract_label(symbol, expiration, row.get("strike"), row_type),
+            "symbol": option_symbol,
+            "expiry": expiration,
+            "dte": dte_int,
+            "strike": row.get("strike"),
+            "type": row_type.upper() if row_type else None,
+            "price": round(price, 2),
+            "bid": float(bid) if isinstance(bid, (int, float)) else None,
+            "ask": float(ask) if isinstance(ask, (int, float)) else None,
+            "spread_pct": round(float(spread_pct), 2) if spread_pct is not None else None,
+            "volume": int(volume) if isinstance(volume, (int, float)) else None,
+            "oi": int(oi_val),
+            "delta": float(delta),
+            "gamma": float(gamma) if isinstance(gamma, (int, float)) else None,
+            "theta": float(theta) if isinstance(theta, (int, float)) else None,
+            "vega": float(vega) if isinstance(vega, (int, float)) else None,
+            "iv": float(iv) if isinstance(iv, (int, float)) else None,
+            "iv_rank": None,
+            "tradeability": tradeability,
+        }
+        candidates.append(contract)
+
+    candidates.sort(key=lambda item: item["tradeability"], reverse=True)
+    return candidates
+
+
+def _enrich_contract_with_plan(contract: Dict[str, Any], plan_anchor: Any, risk_budget: float | None) -> Dict[str, Any]:
+    enriched = dict(contract)
+    price = float(enriched.get("price") or 0.0)
+    contract_cost = price * 100.0 if price > 0 else None
+    risk_budget = float(risk_budget) if risk_budget is not None else 100.0
+
+    risk_per_contract = round(contract_cost, 2) if contract_cost is not None else None
+    if risk_per_contract and risk_per_contract > 0:
+        contracts_possible = max(1, int(risk_budget // risk_per_contract)) if risk_budget > 0 else 1
+    else:
+        contracts_possible = 1
+
+    pnl_block: Dict[str, Any] = {
+        "per_contract_cost": risk_per_contract,
+        "at_stop": None,
+        "at_tp1": None,
+        "at_tp2": None,
+        "rr_to_tp1": None,
+    }
+
+    pl_projection: Dict[str, Any] = {
+        "risk_per_contract": risk_per_contract,
+        "risk_budget": float(risk_budget) if risk_budget is not None else None,
+        "contracts_possible": contracts_possible,
+        "max_profit_est": None,
+        "max_loss_est": None,
+    }
+
+    plan = plan_anchor or {}
+    try:
+        underlying_entry = float(plan.get("underlying_entry") or plan.get("entry"))
+        stop_level = plan.get("stop")
+        tps = plan.get("targets") or plan.get("tps") or plan.get("tp") or []
+        if isinstance(tps, (int, float)):
+            tps = [float(tps)]
+        tps = [float(val) for val in tps if isinstance(val, (int, float))]
+        stop_level = float(stop_level) if stop_level is not None else None
+    except (TypeError, ValueError):
+        underlying_entry = None
+        stop_level = None
+        tps = []
+
+    if underlying_entry is not None and (stop_level is not None or tps):
+        delta_val = float(enriched.get("delta") or 0.0)
+        gamma_val = float(enriched.get("gamma") or 0.0)
+        theta_val = float(enriched.get("theta") or 0.0)
+        vega_val = float(enriched.get("vega") or 0.0)
+        iv_shift = float(plan.get("iv_shift_bps") or 0.0) / 10000.0
+        slippage = abs(float(plan.get("slippage_bps") or 0.0)) / 10000.0
+        horizon_minutes = float(plan.get("horizon_minutes") or 30.0)
+        trading_hours = float(plan.get("trading_hours_per_day") or 6.5)
+        if trading_hours <= 0:
+            trading_hours = 6.5
+
+        def _scenario(option_price: float, delta_s: float) -> float:
+            d_option = (
+                delta_val * delta_s
+                + 0.5 * gamma_val * (delta_s ** 2)
+                + vega_val * iv_shift
+                - abs(theta_val) * (horizon_minutes / (60.0 * trading_hours))
+            )
+            raw_price = option_price + d_option
+            raw_price = max(raw_price, 0.0)
+            if raw_price >= option_price:
+                return max(raw_price * (1.0 - slippage), 0.0)
+            return max(raw_price * (1.0 + slippage), 0.0)
+
+        stop_delta = None
+        stop_price_option = None
+        if stop_level is not None:
+            stop_delta = float(stop_level) - float(underlying_entry)
+            stop_price_option = _scenario(price, stop_delta)
+            pnl_stop = (stop_price_option - price) * 100.0
+            pnl_block["at_stop"] = round(pnl_stop, 2)
+
+        tp_prices: List[float] = []
+        for target in tps:
+            delta_s = float(target) - float(underlying_entry)
+            tp_prices.append(_scenario(price, delta_s))
+
+        if tp_prices:
+            pnl_tp1 = (tp_prices[0] - price) * 100.0
+            pnl_block["at_tp1"] = round(pnl_tp1, 2)
+            if stop_level is not None and pnl_block["at_stop"] is not None and pnl_block["at_stop"] < 0:
+                risk = abs(pnl_block["at_stop"])
+                if risk > 0:
+                    pnl_block["rr_to_tp1"] = round(pnl_tp1 / risk, 2)
+            if len(tp_prices) > 1:
+                pnl_tp2 = (tp_prices[1] - price) * 100.0
+                pnl_block["at_tp2"] = round(pnl_tp2, 2)
+
+            max_profit = max((tp - price) * 100.0 for tp in tp_prices)
+            pl_projection["max_profit_est"] = round(max_profit * contracts_possible, 2)
+        if pnl_block["at_stop"] is not None:
+            loss = pnl_block["at_stop"] * contracts_possible
+            pl_projection["max_loss_est"] = round(abs(loss), 2)
+
+    if pl_projection["max_loss_est"] is None and pl_projection["risk_budget"]:
+        pl_projection["max_loss_est"] = round(float(pl_projection["risk_budget"]), 2)
+
+    enriched["pnl"] = pnl_block
+    enriched["pl_projection"] = pl_projection
+    if risk_per_contract is not None:
+        enriched.setdefault("cost_basis", {})["per_contract"] = risk_per_contract
+    return enriched
+
+@gpt.post("/contracts", summary="Return ranked option contracts for a symbol")
+async def gpt_contracts(
+    request_payload: ContractsRequest,
+    _: AuthedUser = Depends(require_api_key),
+) -> Dict[str, Any]:
+    symbol = request_payload.symbol.upper().strip()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+
+    try:
+        chain = await fetch_option_chain_cached(symbol, request_payload.expiry)
+    except TradierNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail="Tradier integration is not configured") from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Tradier chain fetch failed for %s", symbol)
+        raise HTTPException(status_code=502, detail=f"Option chain unavailable for {symbol}") from exc
+
+    if chain.empty:
+        raise HTTPException(status_code=502, detail=f"Option chain unavailable for {symbol}")
+
+    # collect quotes for symbols present in the chain
+    option_symbols = [str(sym) for sym in chain["symbol"].dropna().tolist()]
+    quotes = await fetch_option_quotes(option_symbols)
+
+    style = _normalize_contract_style(request_payload.style)
+    filters = _prepare_contract_filters(request_payload, style)
+    side = _infer_contract_side(request_payload.side, request_payload.bias)
+    risk_amount = request_payload.risk_amount or request_payload.max_price or 100.0
+
+    candidates = _screen_contracts(chain, quotes, symbol=symbol, style=style, side=side, filters=filters)
+
+    relaxed = False
+    if not candidates:
+        relaxed = True
+        filters_delta = filters.copy()
+        filters_delta["min_delta"] = _clamp(float(filters_delta.get("min_delta", 0.0)) - 0.05, 0.0, 1.0)
+        filters_delta["max_delta"] = _clamp(float(filters_delta.get("max_delta", 1.0)) + 0.05, 0.0, 1.0)
+        candidates = _screen_contracts(chain, quotes, symbol=symbol, style=style, side=side, filters=filters_delta)
+        if not candidates:
+            filters_dte = filters_delta.copy()
+            filters_dte["min_dte"] = max(0, int(filters_dte.get("min_dte", 0)) - 2)
+            filters_dte["max_dte"] = int(filters_dte.get("max_dte", 365)) + 2
+            candidates = _screen_contracts(chain, quotes, symbol=symbol, style=style, side=side, filters=filters_dte)
+            filters = filters_dte
+        else:
+            filters = filters_delta
+    else:
+        filters = filters
+
+    plan_anchor = getattr(request_payload, "plan_anchor", None)
+    best = [_enrich_contract_with_plan(contract, plan_anchor, risk_amount) for contract in candidates[:3]]
+    alternatives = [_enrich_contract_with_plan(contract, plan_anchor, risk_amount) for contract in candidates[3:10]]
+
+    return {
+        "symbol": symbol,
+        "side": side,
+        "style": style,
+        "risk_amount": risk_amount,
+        "filters": filters,
+        "relaxed_filters": relaxed,
+        "best": best,
+        "alternatives": alternatives,
+    }
 
 
 @gpt.post("/chart-url", summary="Build a canonical chart URL from params", response_model=ChartLinks)

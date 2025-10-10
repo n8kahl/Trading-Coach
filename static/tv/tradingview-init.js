@@ -56,6 +56,92 @@
   let keyLevels = keyLevelsRaw.slice();
   const debug = params.get("debug") === "1";
   const scalePlanParam = (params.get("scale_plan") || "").trim();
+  const supplyTokens = params.get("supply");
+  const demandTokens = params.get("demand");
+  const liquidityTokens = params.get("liquidity");
+  const fvgTokens = params.get("fvg");
+  const avwapTokens = params.get("avwap");
+
+  const cleanToken = (value) => (value || "").replace(/[;@|,]+/g, " ").trim();
+
+  const parseZoneTokens = (value, fallbackLabel) =>
+    parseListParam(value)
+      .map((token) => {
+        const parts = token.split("@").map((chunk) => chunk.trim()).filter(Boolean);
+        if (!parts.length) return null;
+        let label = fallbackLabel;
+        let rangePart = parts[0];
+        let strength = "";
+        if (parts.length >= 2) {
+          label = cleanToken(parts[0]) || fallbackLabel;
+          rangePart = parts[1];
+          strength = cleanToken(parts[2] || "");
+        }
+        if (!rangePart.includes("-")) return null;
+        const [lowStr, highStr] = rangePart.split("-");
+        const low = parseFloat(lowStr);
+        const high = parseFloat(highStr);
+        if (!Number.isFinite(low) || !Number.isFinite(high)) return null;
+        return {
+          label,
+          strength,
+          low: Math.min(low, high),
+          high: Math.max(low, high),
+        };
+      })
+      .filter(Boolean);
+
+  const parseLiquidityTokens = (value) =>
+    parseListParam(value)
+      .map((token) => {
+        const parts = token.split("@").map((chunk) => chunk.trim()).filter(Boolean);
+        if (!parts.length) return null;
+        const label = cleanToken(parts[0]) || "Liquidity";
+        const level = parseFloat(parts[1]);
+        if (!Number.isFinite(level)) return null;
+        return {
+          label,
+          level,
+          timeframe: cleanToken(parts[2] || ""),
+          density: cleanToken(parts[3] || ""),
+        };
+      })
+      .filter(Boolean);
+
+  const parseFvgTokens = (value) =>
+    parseListParam(value)
+      .map((token) => {
+        const parts = token.split("@").map((chunk) => chunk.trim()).filter(Boolean);
+        if (parts.length < 2) return null;
+        const low = parseFloat(parts[0]);
+        const high = parseFloat(parts[1]);
+        if (!Number.isFinite(low) || !Number.isFinite(high)) return null;
+        return {
+          low: Math.min(low, high),
+          high: Math.max(low, high),
+          timeframe: cleanToken(parts[2] || ""),
+          age: cleanToken(parts[3] || ""),
+        };
+      })
+      .filter(Boolean);
+
+  const parseAvwapTokens = (value) =>
+    parseListParam(value)
+      .map((token) => {
+        const parts = token.split("@").map((chunk) => chunk.trim()).filter(Boolean);
+        if (!parts.length) return null;
+        const label = cleanToken(parts[0]) || "AVWAP";
+        const price = parseFloat(parts[1]);
+        if (!Number.isFinite(price)) return null;
+        return { label, price };
+      })
+      .filter(Boolean);
+
+  const supplyZones = parseZoneTokens(supplyTokens, "Supply");
+  const demandZones = parseZoneTokens(demandTokens, "Demand");
+  const liquidityPools = parseLiquidityTokens(liquidityTokens);
+  const fvgs = parseFvgTokens(fvgTokens);
+  const avwapLines = parseAvwapTokens(avwapTokens);
 
   const plan = {
     entry: parseNumber(params.get("entry")),
@@ -289,7 +375,7 @@
       },
     });
 
-    const drawLevel = (chart, price, label, color) => {
+    const drawLevel = (chart, price, label, color, overrides = {}) => {
       const level = parseFloat(price);
       if (!Number.isFinite(level)) return;
       chart.createShape(
@@ -302,6 +388,7 @@
           overrides: {
             color,
             linewidth: 2,
+            ...overrides,
           },
         }
       );
@@ -325,6 +412,39 @@
       if (Number.isFinite(plan.stop)) drawLevel(chart, plan.stop, "Stop", "#ef4444");
       plan.tps.forEach((value, idx) => {
         if (Number.isFinite(value)) drawLevel(chart, value, `TP${idx + 1}`, "#22c55e");
+      });
+
+      const drawZone = (zones, labelPrefix, color) => {
+        zones.forEach((zone) => {
+          const suffix = zone.label ? ` ${zone.label}` : "";
+          if (Number.isFinite(zone.high)) drawLevel(chart, zone.high, `${labelPrefix}${suffix}`, color, { linestyle: 1, linewidth: 1 });
+          if (Number.isFinite(zone.low)) drawLevel(chart, zone.low, `${labelPrefix}${suffix}`, color, { linestyle: 1, linewidth: 1 });
+        });
+      };
+      drawZone(supplyZones, "Supply", "#fb7185");
+      drawZone(demandZones, "Demand", "#34d399");
+
+      if (Number.isFinite(plan.entry)) drawLevel(chart, plan.entry, "Entry", "#facc15");
+      if (Number.isFinite(plan.stop)) drawLevel(chart, plan.stop, "Stop", "#ef4444");
+      plan.tps.forEach((value, idx) => {
+        if (Number.isFinite(value)) drawLevel(chart, value, `TP${idx + 1}`, "#22c55e");
+      });
+
+      liquidityPools.forEach((pool) => {
+        if (!Number.isFinite(pool.level)) return;
+        const suffix = [pool.label, pool.timeframe, pool.density ? `dens ${pool.density}` : ""].filter(Boolean).join(" · ");
+        drawLevel(chart, pool.level, suffix || "Liquidity", "#fbbf24", { linestyle: 2, linewidth: 1 });
+      });
+
+      fvgs.forEach((gap, idx) => {
+        const suffix = ["FVG", gap.timeframe, gap.age ? `age ${gap.age}` : ""].filter(Boolean).join(" ");
+        if (Number.isFinite(gap.high)) drawLevel(chart, gap.high, suffix || `FVG H${idx + 1}`, "#60a5fa", { linestyle: 2, linewidth: 1 });
+        if (Number.isFinite(gap.low)) drawLevel(chart, gap.low, suffix || `FVG L${idx + 1}`, "#60a5fa", { linestyle: 2, linewidth: 1 });
+      });
+
+      avwapLines.forEach((line) => {
+        if (!Number.isFinite(line.price)) return;
+        drawLevel(chart, line.price, `AVWAP ${line.label}`, "#fde047", { linestyle: 0, linewidth: 1 });
       });
 
       updateLegend();
@@ -450,20 +570,47 @@
       }
       applyPlanScale(scaleInfo);
 
+      const emaColors = ["#93c5fd", "#f97316", "#a855f7", "#14b8a6"];
       emaInputs.slice(0, 4).forEach((length, index) => {
+        const color = emaColors[index % emaColors.length];
         const emaSeries = chart.addLineSeries({
-          color: ["#93c5fd", "#f97316", "#a855f7", "#14b8a6"][index % 4],
+          color,
           lineWidth: 2,
           lastValueVisible: true,
-          priceLineVisible: false,
+          priceLineVisible: true,
           crosshairMarkerVisible: false,
+          title: `EMA${length}`,
         });
-        emaSeries.setData(computeEMA(bars, length));
+        const emaData = computeEMA(bars, length);
+        emaSeries.setData(emaData);
+        if (emaData.length) {
+          const lastPoint = emaData[emaData.length - 1];
+          candleSeries.createPriceLine({
+            price: lastPoint.value,
+            color,
+            title: `EMA${length}`,
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Solid,
+            axisLabelVisible: true,
+          });
+        }
       });
 
       if (showVWAP) {
-        const vwapSeries = chart.addLineSeries({ color: "#facc15", lineWidth: 2, lastValueVisible: true, priceLineVisible: false, crosshairMarkerVisible: false });
-        vwapSeries.setData(computeVWAP(bars));
+        const vwapSeries = chart.addLineSeries({ color: "#ffffff", lineWidth: 2, lastValueVisible: true, priceLineVisible: true, crosshairMarkerVisible: false, title: "VWAP" });
+        const vwapData = computeVWAP(bars);
+        vwapSeries.setData(vwapData);
+        if (vwapData.length) {
+          const lastPoint = vwapData[vwapData.length - 1];
+          candleSeries.createPriceLine({
+            price: lastPoint.value,
+            color: "#ffffff",
+            title: "VWAP",
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Solid,
+            axisLabelVisible: true,
+          });
+        }
       }
 
       const addPriceLine = (price, title, color, lineStyle) => {
@@ -486,11 +633,43 @@
       });
       keyLevels.forEach((value) => addPriceLine(value, "Key", "#facc15", LightweightCharts.LineStyle.Dotted));
 
+      const addZoneLines = (zones, labelPrefix, color) => {
+        zones.forEach((zone) => {
+          const suffix = zone.label ? ` ${zone.label}` : "";
+          if (Number.isFinite(zone.high)) addPriceLine(zone.high, `${labelPrefix}${suffix}`, color, LightweightCharts.LineStyle.Dashed);
+          if (Number.isFinite(zone.low)) addPriceLine(zone.low, `${labelPrefix}${suffix}`, color, LightweightCharts.LineStyle.Dashed);
+        });
+      };
+      addZoneLines(supplyZones, "Supply", "#fb7185");
+      addZoneLines(demandZones, "Demand", "#34d399");
+
+      liquidityPools.forEach((pool) => {
+        if (!Number.isFinite(pool.level)) return;
+        const suffix = [pool.label, pool.timeframe, pool.density ? `dens ${pool.density}` : ""].filter(Boolean).join(" · ");
+        addPriceLine(pool.level, suffix || "Liquidity", "#fbbf24", LightweightCharts.LineStyle.Dotted);
+      });
+
+      fvgs.forEach((gap, idx) => {
+        const suffix = ["FVG", gap.timeframe, gap.age ? `age ${gap.age}` : ""].filter(Boolean).join(" ");
+        if (Number.isFinite(gap.high)) addPriceLine(gap.high, suffix || `FVG H${idx + 1}`, "#60a5fa", LightweightCharts.LineStyle.Dotted);
+        if (Number.isFinite(gap.low)) addPriceLine(gap.low, suffix || `FVG L${idx + 1}`, "#60a5fa", LightweightCharts.LineStyle.Dotted);
+      });
+
+      avwapLines.forEach((line) => {
+        if (!Number.isFinite(line.price)) return;
+        addPriceLine(line.price, `AVWAP ${line.label}`, "#fde047", LightweightCharts.LineStyle.Solid);
+      });
+
       const levelValues = [
         ...(Number.isFinite(plan.entry) ? [plan.entry] : []),
         ...(Number.isFinite(plan.stop) ? [plan.stop] : []),
         ...plan.tps.filter((value) => Number.isFinite(value)),
         ...keyLevels,
+        ...supplyZones.flatMap((zone) => [zone.low, zone.high]),
+        ...demandZones.flatMap((zone) => [zone.low, zone.high]),
+        ...liquidityPools.map((pool) => pool.level),
+        ...fvgs.flatMap((gap) => [gap.low, gap.high]),
+        ...avwapLines.map((line) => line.price),
       ].filter((v) => Number.isFinite(v));
 
       if (levelValues.length) {
