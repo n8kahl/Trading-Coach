@@ -209,6 +209,25 @@ class ContractsRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class PlanRequest(BaseModel):
+    symbol: str
+    style: str | None = None
+
+
+class PlanResponse(BaseModel):
+    symbol: str
+    style: str | None = None
+    strategy_id: str | None = None
+    description: str | None = None
+    score: float | None = None
+    plan: Dict[str, Any] | None = None
+    charts: Dict[str, Any] | None = None
+    key_levels: Dict[str, Any] | None = None
+    market_snapshot: Dict[str, Any] | None = None
+    features: Dict[str, Any] | None = None
+    options: Dict[str, Any] | None = None
+
+
 class MultiContextRequest(BaseModel):
     symbol: str
     intervals: List[str]
@@ -1743,6 +1762,39 @@ async def gpt_scan(
 
     logger.info("scan universe=%s user=%s results=%d", universe.tickers, user.user_id, len(payload))
     return payload
+
+
+@gpt.post("/plan", summary="Return a single trade plan for a symbol", response_model=PlanResponse)
+async def gpt_plan(
+    request_payload: PlanRequest,
+    request: Request,
+    user: AuthedUser = Depends(require_api_key),
+) -> PlanResponse:
+    """Compatibility endpoint that returns the top plan for a single symbol.
+
+    Internally reuses /gpt/scan to keep plan logic centralized.
+    """
+    symbol = (request_payload.symbol or "").strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+    universe = ScanUniverse(tickers=[symbol], style=request_payload.style)
+    results = await gpt_scan(universe, request, user)
+    if not results:
+        raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
+    first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
+    return PlanResponse(
+        symbol=first.get("symbol"),
+        style=first.get("style"),
+        strategy_id=first.get("strategy_id"),
+        description=first.get("description"),
+        score=first.get("score"),
+        plan=first.get("plan"),
+        charts=first.get("charts"),
+        key_levels=first.get("key_levels"),
+        market_snapshot=first.get("market_snapshot"),
+        features=first.get("features"),
+        options=first.get("options"),
+    )
 
 
 @gpt.post("/multi-context", summary="Return multi-interval context with vol metrics")
