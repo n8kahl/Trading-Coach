@@ -118,6 +118,96 @@ def snap_targets_with_rr(
     return tps_final[:2]
 
 
+def _normalize_trade_style(style: str | None) -> str:
+    token = (style or "").strip().lower()
+    if token == "leaps":
+        token = "leap"
+    if token not in {"scalp", "intraday", "swing", "leap"}:
+        token = "intraday"
+    return token
+
+
+def _base_targets_for_style(
+    *,
+    style: str | None,
+    bias: str,
+    entry: float,
+    stop: float,
+    atr: float | None,
+    expected_move: float | None,
+    min_rr: float,
+    prefer_em_cap: bool = True,
+) -> List[float]:
+    style_key = _normalize_trade_style(style)
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return []
+    atr_val = float(atr or 0.0)
+    expected_move_val = float(expected_move) if isinstance(expected_move, (int, float)) else None
+
+    rules = {
+        "scalp": {
+            "tp1": {"atr_mult": 0.7, "em_mult": 0.35},
+            "tp2": {"rr_mult": 2.0, "atr_mult": 1.2, "em_mult": 0.8},
+        },
+        "intraday": {
+            "tp1": {"atr_mult": 0.9, "em_mult": 0.55},
+            "tp2": {"rr_mult": 2.2, "atr_mult": 1.5, "em_mult": 0.9},
+        },
+        "swing": {
+            "tp1": {"atr_mult": 1.0, "em_mult": 0.6},
+            "tp2": {"rr_mult": 2.5, "atr_mult": 2.0, "em_mult": 1.0},
+        },
+        "leap": {
+            "tp1": {"pct": 0.06, "rr_mult": 1.0, "em_mult": 0.6},
+            "tp2": {"pct": 0.12, "rr_mult": 2.0, "em_mult": 1.0},
+        },
+    }
+
+    style_rules = rules.get(style_key, rules["intraday"])
+    offsets: List[float] = []
+
+    def _compute_offset(spec: Dict[str, float]) -> float | None:
+        base = min_rr * risk
+        rr_mult = spec.get("rr_mult")
+        if rr_mult is not None and rr_mult > 0:
+            base = max(base, float(rr_mult) * risk)
+        atr_mult = spec.get("atr_mult")
+        if atr_mult is not None and atr_mult > 0 and atr_val > 0:
+            base = max(base, float(atr_mult) * atr_val)
+        pct_mult = spec.get("pct")
+        if pct_mult is not None and pct_mult > 0:
+            base = max(base, abs(entry) * float(pct_mult))
+        if prefer_em_cap and expected_move_val is not None:
+            em_mult = spec.get("em_mult")
+            if em_mult is not None and em_mult > 0:
+                base = min(base, expected_move_val * float(em_mult))
+        if base <= 0 or not math.isfinite(base):
+            return None
+        return base
+
+    for key in ("tp1", "tp2"):
+        spec = style_rules.get(key)
+        if not spec:
+            continue
+        offset = _compute_offset(spec)
+        if offset is not None and offset > 0:
+            offsets.append(offset)
+
+    unique_offsets: List[float] = []
+    for offset in offsets:
+        if all(abs(offset - existing) > 1e-6 for existing in unique_offsets):
+            unique_offsets.append(offset)
+
+    targets: List[float] = []
+    for offset in unique_offsets:
+        if bias == "long":
+            targets.append(entry + offset)
+        else:
+            targets.append(entry - offset)
+    return targets
+
+
 def _strategy_min_rr(strategy_id: str) -> float:
     default = 1.2
     mapping = {
@@ -712,12 +802,22 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
     if price > or_high and math.isfinite(retest_low) and abs(retest_low - or_high) <= tolerance:
         entry = max(price, or_high)
         stop = retest_low - tolerance * 0.5
-        target_primary = max(float(recent_slice["high"].max()), entry + atr_value)
-        target_secondary = entry + atr_value * 1.5
-        # Select structural TP1 inside EM/ATR/ratio bounds
+        min_rr = _strategy_min_rr(strategy.id)
+        expected_move = ctx.get("expected_move_horizon")
         style = _style_for_strategy_id(strategy.id)
-        tp2 = max(float(recent_slice["high"].max()), entry + atr_value * 1.5)
-        tp1_struct = _select_tp1_long(entry, stop, tp2, style, ctx, _strategy_min_rr(strategy.id))
+        base_targets = _base_targets_for_style(
+            style=style,
+            bias="long",
+            entry=entry,
+            stop=stop,
+            atr=atr_value,
+            expected_move=expected_move,
+            min_rr=min_rr,
+        )
+        if not base_targets:
+            base_targets = [entry + atr_value, entry + atr_value * 1.5]
+        tp2 = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
+        tp1_struct = _select_tp1_long(entry, stop, tp2, style, ctx, min_rr)
         if tp1_struct is not None:
             targets = [tp1_struct, tp2]
             tp1_dbg = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
@@ -726,10 +826,10 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
                 entry=entry,
                 stop=stop,
                 bias="long",
-                tp_raws=[target_primary, target_secondary],
+                tp_raws=base_targets,
                 htf_levels=ctx.get("htf_levels", []),
-                min_rr=_strategy_min_rr(strategy.id),
-                em=ctx.get("expected_move_horizon"),
+                min_rr=min_rr,
+                em=expected_move,
                 prefer_em_cap=True,
                 atr=atr_value,
             )
@@ -750,11 +850,22 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
     elif price < or_low and math.isfinite(retest_high) and abs(retest_high - or_low) <= tolerance:
         entry = min(price, or_low)
         stop = retest_high + tolerance * 0.5
-        target_primary = min(float(recent_slice["low"].min()), entry - atr_value)
-        target_secondary = entry - atr_value * 1.5
         style = _style_for_strategy_id(strategy.id)
-        tp2 = min(float(recent_slice["low"].min()), entry - atr_value * 1.5)
-        tp1_struct = _select_tp1_short(entry, stop, tp2, style, ctx, _strategy_min_rr(strategy.id))
+        min_rr = _strategy_min_rr(strategy.id)
+        expected_move = ctx.get("expected_move_horizon")
+        base_targets = _base_targets_for_style(
+            style=style,
+            bias="short",
+            entry=entry,
+            stop=stop,
+            atr=atr_value,
+            expected_move=expected_move,
+            min_rr=min_rr,
+        )
+        if not base_targets:
+            base_targets = [entry - atr_value, entry - atr_value * 1.5]
+        tp2 = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
+        tp1_struct = _select_tp1_short(entry, stop, tp2, style, ctx, min_rr)
         if tp1_struct is not None:
             targets = [tp1_struct, tp2]
             tp1_dbg = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
@@ -763,10 +874,10 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
                 entry=entry,
                 stop=stop,
                 bias="short",
-                tp_raws=[target_primary, target_secondary],
+                tp_raws=base_targets,
                 htf_levels=ctx.get("htf_levels", []),
-                min_rr=_strategy_min_rr(strategy.id),
-                em=ctx.get("expected_move_horizon"),
+                min_rr=min_rr,
+                em=expected_move,
                 prefer_em_cap=True,
                 atr=atr_value,
             )
@@ -852,26 +963,37 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
     if price > ctx["vwap"] and ema_stack_long and breakout_long:
         entry = price
         stop = min(range_low, float(session["low"].tail(10).min())) - atr_value * 0.25
-        target_primary = entry + atr_value
-        target_secondary = max(range_high + atr_value * 0.8, entry + atr_value * 1.6)
         style = _style_for_strategy_id(strategy.id)
-        tp2 = entry + atr_value * 1.6
-        tp1_struct = _select_tp1_long(entry, stop, tp2, style, ctx, _strategy_min_rr(strategy.id))
+        min_rr = _strategy_min_rr(strategy.id)
+        expected_move = ctx.get("expected_move_horizon")
+        base_targets = _base_targets_for_style(
+            style=style,
+            bias="long",
+            entry=entry,
+            stop=stop,
+            atr=atr_value,
+            expected_move=expected_move,
+            min_rr=min_rr,
+        )
+        if not base_targets:
+            base_targets = [entry + atr_value, entry + atr_value * 1.6]
+        tp2 = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
+        tp1_struct = _select_tp1_long(entry, stop, tp2, style, ctx, min_rr)
         if tp1_struct is not None:
             targets = [tp1_struct, tp2]
             tp1_dbg_ph = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
         else:
             targets = snap_targets_with_rr(
-            entry=entry,
-            stop=stop,
-            bias="long",
-            tp_raws=[target_primary, target_secondary],
-            htf_levels=ctx.get("htf_levels", []),
-            min_rr=_strategy_min_rr(strategy.id),
-            em=ctx.get("expected_move_horizon"),
-            prefer_em_cap=True,
-            atr=atr_value,
-        )
+                entry=entry,
+                stop=stop,
+                bias="long",
+                tp_raws=base_targets,
+                htf_levels=ctx.get("htf_levels", []),
+                min_rr=min_rr,
+                em=expected_move,
+                prefer_em_cap=True,
+                atr=atr_value,
+            )
         if not targets:
             return None
         plan = _build_plan(
@@ -886,26 +1008,37 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
     elif price < ctx["vwap"] and ema_stack_short and breakout_short:
         entry = price
         stop = max(range_high, float(session["high"].tail(10).max())) + atr_value * 0.25
-        target_primary = entry - atr_value
-        target_secondary = min(range_low - atr_value * 0.8, entry - atr_value * 1.6)
         style = _style_for_strategy_id(strategy.id)
-        tp2 = entry - atr_value * 1.6
-        tp1_struct = _select_tp1_short(entry, stop, tp2, style, ctx, _strategy_min_rr(strategy.id))
+        min_rr = _strategy_min_rr(strategy.id)
+        expected_move = ctx.get("expected_move_horizon")
+        base_targets = _base_targets_for_style(
+            style=style,
+            bias="short",
+            entry=entry,
+            stop=stop,
+            atr=atr_value,
+            expected_move=expected_move,
+            min_rr=min_rr,
+        )
+        if not base_targets:
+            base_targets = [entry - atr_value, entry - atr_value * 1.6]
+        tp2 = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
+        tp1_struct = _select_tp1_short(entry, stop, tp2, style, ctx, min_rr)
         if tp1_struct is not None:
             targets = [tp1_struct, tp2]
             tp1_dbg_ph = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
         else:
             targets = snap_targets_with_rr(
-            entry=entry,
-            stop=stop,
-            bias="short",
-            tp_raws=[target_primary, target_secondary],
-            htf_levels=ctx.get("htf_levels", []),
-            min_rr=_strategy_min_rr(strategy.id),
-            em=ctx.get("expected_move_horizon"),
-            prefer_em_cap=True,
-            atr=atr_value,
-        )
+                entry=entry,
+                stop=stop,
+                bias="short",
+                tp_raws=base_targets,
+                htf_levels=ctx.get("htf_levels", []),
+                min_rr=min_rr,
+                em=expected_move,
+                prefer_em_cap=True,
+                atr=atr_value,
+            )
         if not targets:
             return None
         plan = _build_plan(
@@ -992,16 +1125,28 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
     if price > ctx["vwap"] and ema_stack_long and cluster_tight and price > cluster_mean:
         entry = price
         stop = min(cluster_mean, np.min(anchored_values)) - tolerance
-        target_primary = entry + atr_value * 1.1
-        target_secondary = entry + atr_value * 1.8
+        style = _style_for_strategy_id(strategy.id)
+        min_rr = _strategy_min_rr(strategy.id)
+        expected_move = ctx.get("expected_move_horizon")
+        base_targets = _base_targets_for_style(
+            style=style,
+            bias="long",
+            entry=entry,
+            stop=stop,
+            atr=atr_value,
+            expected_move=expected_move,
+            min_rr=min_rr,
+        )
+        if not base_targets:
+            base_targets = [entry + atr_value * 1.1, entry + atr_value * 1.8]
         targets = snap_targets_with_rr(
             entry=entry,
             stop=stop,
             bias="long",
-            tp_raws=[target_primary, target_secondary],
+            tp_raws=base_targets,
             htf_levels=ctx.get("htf_levels", []),
-            min_rr=_strategy_min_rr(strategy.id),
-            em=ctx.get("expected_move_horizon"),
+            min_rr=min_rr,
+            em=expected_move,
             prefer_em_cap=True,
             atr=atr_value,
         )
@@ -1019,16 +1164,28 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
     elif price < ctx["vwap"] and ema_stack_short and cluster_tight and price < cluster_mean:
         entry = price
         stop = max(cluster_mean, np.max(anchored_values)) + tolerance
-        target_primary = entry - atr_value * 1.1
-        target_secondary = entry - atr_value * 1.8
+        style = _style_for_strategy_id(strategy.id)
+        min_rr = _strategy_min_rr(strategy.id)
+        expected_move = ctx.get("expected_move_horizon")
+        base_targets = _base_targets_for_style(
+            style=style,
+            bias="short",
+            entry=entry,
+            stop=stop,
+            atr=atr_value,
+            expected_move=expected_move,
+            min_rr=min_rr,
+        )
+        if not base_targets:
+            base_targets = [entry - atr_value * 1.1, entry - atr_value * 1.8]
         targets = snap_targets_with_rr(
             entry=entry,
             stop=stop,
             bias="short",
-            tp_raws=[target_primary, target_secondary],
+            tp_raws=base_targets,
             htf_levels=ctx.get("htf_levels", []),
-            min_rr=_strategy_min_rr(strategy.id),
-            em=ctx.get("expected_move_horizon"),
+            min_rr=min_rr,
+            em=expected_move,
             prefer_em_cap=True,
             atr=atr_value,
         )
