@@ -1,21 +1,29 @@
 # Trading Coach GPT Backend
 
-A quick note: latest deploy refresh triggered on 2025-10-08 15:15 UTC.
+_Latest deploy refresh: 2025‑10‑10 14:10 UTC_
 
-A lightweight FastAPI service that exposes trading utilities for consumption by a custom GPT (via Actions).  
-It keeps the quantitative bits—market scanning, ATR-based trade management, watchlists, and journaling—while stripping out the legacy ChatKit UI and OpenAI Agents runtime.
+A lightweight FastAPI service that prepares market data, trading plans, volatility context, and option contract picks for a custom GPT agent. The backend owns the quantitative plumbing so the GPT can focus on reasoning with traders.
 
-> ⚠️ **Disclaimer:** All code and strategy examples are for educational purposes only.  
-> They are not a recommendation to trade securities. Always do your own research and consult a licensed professional.
+> ⚠️ **Disclaimer:** All code and strategy examples are for educational purposes only. Nothing here is a recommendation to trade securities.
 
-## Features
+---
 
-- **`POST /gpt/scan`** – ranks tickers per strategy and returns enriched market snapshots (levels, indicators, volatility).  
-- **`GET /gpt/context/{symbol}`** – delivers recent OHLCV bars plus indicator series for custom analysis.  
-- **`GET /tv`** – serves the TradingView Advanced Chart experience (with an automatic Lightweight Charts fallback). Use `POST /gpt/chart-url` to generate shareable links with AI-supplied levels.  
-  **`GET /charts/html` / `/charts/png`** remain available for the legacy static renderer.
-- **`GET /gpt/widgets/{kind}`** – generate lightweight dashboard cards.  
-- Optional bearer auth (`BACKEND_API_KEY`) plus `X-User-Id` scoping; falls back to anonymous mode for quick prototyping.
+## Current surface area
+
+| Endpoint | Purpose | Notes |
+| --- | --- | --- |
+| `POST /gpt/scan` | Evaluate strategy playbooks (ORB retest, VWAP cluster, gap fill, midday fade, etc.) on any ticker list and return grounded plans (entry/stop/targets/confidence) plus overlays and indicators. | No stub logic remains—scores reflect real market structure. |
+| `GET /gpt/context/{symbol}` | Stream the latest OHLCV bars + indicator series for a single interval. | Use when the GPT needs extra bars for bespoke analysis. |
+| `POST /gpt/multi-context` | Fetch multiple intervals in one call (e.g., `["5m","1h","4h","1D"]`) and attach a volatility regime block (ATM IV, IV rank/percentile, HV20/60/120, IV↔HV ratio). | Responses are cached for 30 s per symbol+interval+lookback. |
+| `POST /gpt/contracts` | Rank Tradier option contracts with liquidity gates (spread, Δ, DTE, OI) and compute scenario P/L using plan anchors (delta/gamma/vega/theta). | `risk_amount` (defaults $100) is used only for sizing projections; no budget filtering occurs. |
+| `POST /gpt/chart-url` | Normalise chart parameters and return a `/tv` URL containing plan lines, overlays, and metadata. | Supports plan rescaling, supply/demand zones, liquidity pools, FVG bands, and anchored VWAPs. |
+| `GET /tv` | Serves the TradingView Advanced UI when bundled; otherwise falls back to Lightweight Charts with EMA labels, white VWAP, plan bands, and overlay lines. | `scale_plan=auto` rescales historic plans to current price regimes. |
+
+Support routes: `/tv-api/*` (Lightweight Charts datafeed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html|png` (static renderer).
+
+Authentication is optional. Set `BACKEND_API_KEY` to require Bearer tokens; include `X-User-Id` to scope data per user.
+
+---
 
 ## Project layout
 
@@ -23,79 +31,115 @@ It keeps the quantitative bits—market scanning, ATR-based trade management, wa
 .
 ├── README.md
 ├── requirements.txt
-├── nixpacks.toml            # Deploys a Python-only image on Railway
+├── nixpacks.toml            # Railway build config
 ├── Procfile                 # uvicorn launch command
+├── docs/
+│   ├── gpt_integration.md   # API schemas + GPT usage guide
+│   └── progress.md          # Change log, roadmap, operational notes
 └── src/
-    ├── agent_server.py      # FastAPI app (all /gpt endpoints + health checks)
-    ├── calculations.py      # Indicator helpers (EMA, ATR, VWAP, ADX, etc.)
-    ├── contract_selector.py # Option contract filters (placeholder)
-    ├── follower.py          # TradeFollower state machine
+    ├── agent_server.py      # FastAPI app (all /gpt + /tv/* routes)
     ├── scanner.py           # Strategy evaluation engine
     ├── strategy_library.py  # Declarative strategy definitions
-    ├── backtester.py        # Stub for future historical analysis
-    └── config.py            # Environment settings (Polygon, backend API key)
+    ├── context_overlays.py  # Supply/demand, liquidity, volatility extras
+    ├── tradier.py           # Tradier option helpers + caching
+    ├── polygon_options.py   # Polygon option helpers (fallback only)
+    ├── calculations.py      # Indicator utilities (EMA/ATR/VWAP/ADX…)
+    └── config.py            # Settings loader (env vars, caching)
 ```
 
-## Getting started
+Static assets for the fallback chart renderer live in `static/tv/`.
 
-```bash
+---
+
+## Local development
+
+```
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn src.agent_server:app --reload --port 8000
 ```
 
-Environment variables (recommended):
+Environment variables (read via Pydantic):
 
-```bash
-# .env
-POLYGON_API_KEY=pk_xxx          # not yet used, but reserved for real data
-BACKEND_API_KEY=super-secret    # omit to allow anonymous access during dev
-# Tradier sandbox (provided example values)
-TRADIER_SANDBOX_TOKEN=3QP4qlzY6acyDQujsYDp3lk15Xyj
-TRADIER_SANDBOX_ACCOUNT=VA52364852
+```
+# .env (example)
+POLYGON_API_KEY=pk_your_key              # Required for premium Polygon data (optional)
+BACKEND_API_KEY=super-secret             # Omit for anonymous access during dev
+BASE_URL=https://<your-app>.up.railway.app/tv
+
+# Tradier (sandbox defaults shown)
+TRADIER_SANDBOX_TOKEN=XXXXXXXXXXXX
+TRADIER_SANDBOX_ACCOUNT=VA0000000000
+TRADIER_SANDBOX_BASE_URL=https://sandbox.tradier.com
 ```
 
-Visit `http://localhost:8000/docs` for interactive Swagger docs, or call endpoints directly:
+Use `pytest` to run the current unit test suite (indicator maths only right now).
 
-```bash
-curl http://localhost:8000/gpt/scan \
-  -H "Content-Type: application/json" \
-  -d '{"tickers":["AAPL","MSFT","TSLA"]}'
-```
+---
 
-## Connecting to myGPT (Actions)
+## Architecture primer
 
-1. In the GPT Builder, open **Actions → Add action**.  
-2. Use the deployed base URL (e.g. `https://your-railway-domain.up.railway.app`).  
-3. Set the schema URL to `https://.../openapi.json`. FastAPI exposes an up-to-date OpenAPI doc.  
-4. Configure security:  
-   - If `BACKEND_API_KEY` is set, add a Bearer token in the Action request headers and supply an `X-User-Id` header.  
-   - Otherwise leave auth empty—the backend will accept anonymous calls and store data under `anonymous`.  
-5. Provide the GPT with short usage tips, e.g.:
+- **FastAPI app (`src/agent_server.py`)** – hosts GPT endpoints, the `/tv` viewer, and a `/tv-api` datafeed. Uses async helpers for I/O.
+- **Market data** – Polygon aggregates with Yahoo fallback for OHLCV; Tradier chains & quotes (batched + cached for 15 s) provide option prices, greeks, and IV. Polygon option snapshots are best-effort; failures simply fall back to Tradier.
+- **Strategy engine (`scanner.py`)** – builds real trade plans from intraday context (anchored VWAPs, ATR, EMA alignment, breakout checks). Plans include direction, entry, stop, target ladder, confidence, ATR, notes, R:R, and overlays.
+- **Volatility metrics** – `_compute_iv_metrics` in `agent_server.py` caches ATM IV, IV rank/percentile, and HV20/60/120 for 2 minutes per symbol.
+- **Chart renderer (`static/tv`)** – Lightweight Charts fallback draws labelled EMAs, white VWAP, plan lines, supply/demand bands, liquidity pools, fair value gaps, and anchored VWAPs. Autoscale + plan rescaling keep everything on-screen.
+- **Caching** – Multi-context responses (30 s), IV metrics (120 s), Tradier chains/quotes (15 s). All caches are in-memory; restart clears them.
 
+---
+
+## Wiring a custom GPT (Actions)
+
+1. In GPT Builder, add a new Action pointing at your deployment (e.g. `https://<railway-app>.up.railway.app`).
+2. For the schema URL, use `https://<host>/openapi.json`. FastAPI serves the latest OpenAPI document.
+3. Configure auth:  
+   - If `BACKEND_API_KEY` is set, add a Bearer token and send `X-User-Id` on each call.  
+   - Otherwise leave headers empty; the backend will scope data to `anonymous`.
+4. Suggested GPT instructions:
    ```
-   - Start with /gpt/scan to pull market snapshots for the requested tickers.
-   - Use /gpt/context/{symbol} for the latest bars if you need to compute custom indicators.
-   - Render charts by calling /gpt/chart-url with charts.params plus your entry/stop/targets; open the returned /tv link to view the plan.
+   - Start every analysis with /gpt/scan.
+   - Pull additional bars with /gpt/context or /gpt/multi-context.
+   - Use /gpt/contracts with plan anchors to source option ideas.
+   - Generate shareable charts using /gpt/chart-url and present the returned /tv link.
    ```
 
-The GPT can now reason about the user’s portfolio, recall notes, and fetch strategy-driven scans.
+See `docs/gpt_integration.md` for full schemas and sample payloads.
 
-## Implementation notes
+---
 
-- **Market data:** `/gpt/scan`, `/gpt/context`, and `/charts` pull Polygon aggregates with a Yahoo fallback. Provide credentials before production use.  
-- **Data-first flow:** The server returns metrics (levels, ATR/ADX, squeeze state) but leaves trade construction to your GPT agent. See `docs/gpt_integration.md` for schema details and a prompt template.  
-- **Strategies:** `strategy_library.py` defines several sample setups (ORB retest, gap fill open, midday mean reversion, etc.). Expand or tweak scoring in `scanner.py` as needed.  
-- **State:** Results are ephemeral—if you need persistence, add your own storage layer for watchlists, notes, or trade journals.
+## Operational notes & troubleshooting
 
-## Next steps
+| Symptom | Cause / mitigation |
+| --- | --- |
+| `Polygon option snapshot failed ... 400 Bad Request` spam | The account tied to `POLYGON_API_KEY` lacks the options snapshot entitlement. These warnings are expected; the service automatically falls back to Tradier quotes. |
+| `/gpt/multi-context` returns 400 | At least one interval token is invalid. Use tokens such as `1m`, `5m`, `15m`, `1h`, `4h`, `1D`. Duplicates are ignored silently. |
+| `/gpt/contracts` returns empty `best` | Liquidity filters removed everything. The service widens Δ by ±0.05 and DTE by ±2 once each; if it still returns empty there genuinely isn’t a liquid contract under the constraints. |
+| Chart missing plan bands | Ensure you pass `entry`, `stop`, and `tp` (comma separated) when calling `/gpt/chart-url`. The GPT should forward the plan payload from `/gpt/scan`. |
 
-1. Fetch real market data (Polygon aggregates into `market_data` inside `/gpt/scan`).  
-2. Persist user artefacts in Postgres or Firestore.  
-3. Harden auth (JWT, OAuth) if you expose the service publicly.  
-4. Extend the Tradier integration to respect strategy-specific filters (DTE, delta targets).  
-5. Add additional GPT-friendly endpoints (e.g. `/gpt/volatility`, `/gpt/backtest`).  
-6. Write tests for the critical logic (scanner heuristics, trade follower transitions).
+Deployment is currently handled by Railway (`nixpacks.toml` + `Procfile`). Logs will show cache hits (`cached=true`) and option snapshot warnings.
 
-Happy building, and trade responsibly!
+---
+
+## Roadmap & hand-off
+
+The detailed progress log and backlog live in [`docs/progress.md`](docs/progress.md). Highlights:
+
+- **Charts:** Add `focus=plan` zooming and upgrade to TradingView overlays once the Advanced bundle is packaged.
+- **Contracts:** Improve IV rank by incorporating historical IV time series; expose skew/term slope.
+- **Scanning:** Persist user watchlists / plan history; expose playbook metadata for GPT explanation generation.
+- **Ops:** Optionally suppress Polygon snapshot warnings when entitlement is missing; consider Redis-based caching for multi-instance deployments.
+- **Tests:** Expand beyond indicator math—add API contract tests and regression coverage for scanner heuristics.
+
+Refer to the progress doc for the active TODO list, open questions, and a changelog of recent enhancements.
+
+---
+
+## Additional references
+
+- [`docs/gpt_integration.md`](docs/gpt_integration.md) – API schemas, GPT request examples, and contract/multi-context usage notes.
+- [`docs/progress.md`](docs/progress.md) – Chronological change log, roadmap, operational caveats.
+- [`static/tv/`](static/tv/) – Fallback chart renderer assets.
+- [`tests/`](tests/) – Current unit test coverage.
+
+Happy building—and trade responsibly.
