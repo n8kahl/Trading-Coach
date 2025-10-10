@@ -410,6 +410,19 @@ def _build_idea_url(request: Request, plan_id: str, version: int) -> str:
 
     path = f"/idea/{plan_id}"
     base = f"{scheme}://{host}{path}" if host else f"{str(request.base_url).rstrip('/')}{path}"
+    logger.debug(
+        "idea_url components resolved",
+        extra={
+            "plan_id": plan_id,
+            "version": version,
+            "scheme": scheme,
+            "host": host,
+            "path": path,
+            "xfwd_proto": headers.get("x-forwarded-proto"),
+            "xfwd_host": headers.get("x-forwarded-host"),
+            "forwarded": headers.get("forwarded"),
+        },
+    )
     return f"{base}?v={version}"
 
 
@@ -454,6 +467,14 @@ async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
     async with _IDEA_LOCK:
         versions = _IDEA_STORE.setdefault(plan_id, [])
         versions.append(snapshot)
+    logger.info(
+        "idea snapshot stored",
+        extra={
+            "plan_id": plan_id,
+            "versions": len(_IDEA_STORE.get(plan_id, [])),
+            "snapshot_keys": list(snapshot.keys()),
+        },
+    )
 
 
 async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
@@ -581,7 +602,11 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
     charts_payload: Dict[str, Any] = {"params": chart_params}
     if chart_links:
         charts_payload["interactive"] = chart_links.interactive
-    chart_url_value = chart_links.interactive if chart_links else None
+    else:
+        fallback_chart_url = _build_tv_chart_url(request, chart_params)
+        charts_payload["interactive"] = fallback_chart_url
+        chart_links = None
+    chart_url_value = charts_payload.get("interactive")
 
     features = {
         "plan_entry": plan_block["entry"],
@@ -1320,6 +1345,20 @@ def _format_chart_note(
             parts.append(f"Targets {formatted}")
     summary = " | ".join(parts)
     return summary[:140]
+
+
+def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
+    base = f"{str(request.base_url).rstrip('/')}/tv"
+    query: Dict[str, str] = {}
+    for key, value in params.items():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            value = ",".join(str(item) for item in value if item is not None)
+        query[key] = str(value)
+    if not query:
+        return base
+    return f"{base}?{urlencode(query, safe=',|:;+-_() ')}"
 
 
 TV_SUPPORTED_RESOLUTIONS = ["1", "3", "5", "15", "30", "60", "120", "240", "1D"]
@@ -2204,6 +2243,13 @@ async def gpt_scan(
         charts_payload: Dict[str, Any] = {"params": chart_query}
         if chart_links:
             charts_payload["interactive"] = chart_links.interactive
+        elif required_chart_keys.issubset(chart_query.keys()):
+            fallback_chart_url = _build_tv_chart_url(request, chart_query)
+            charts_payload["interactive"] = fallback_chart_url
+            logger.debug(
+                "chart link fallback used",
+                extra={"symbol": signal.symbol, "strategy_id": signal.strategy_id, "url": fallback_chart_url},
+            )
 
         polygon_bundle: Dict[str, Any] | None = None
         if polygon_chains:
@@ -2261,6 +2307,14 @@ async def gpt_plan(
     symbol = (request_payload.symbol or "").strip().upper()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
+    logger.info(
+        "gpt_plan received",
+        extra={
+            "symbol": symbol,
+            "style": request_payload.style,
+            "user_id": getattr(user, "user_id", None),
+        },
+    )
     universe = ScanUniverse(tickers=[symbol], style=request_payload.style)
     results = await gpt_scan(universe, request, user)
     if not results:
@@ -2343,6 +2397,14 @@ async def gpt_plan(
         charts_payload["params"] = chart_params_payload
     if chart_url_value:
         charts_payload["interactive"] = chart_url_value
+    elif chart_params_payload and {"direction", "entry", "stop", "tp"}.issubset(chart_params_payload.keys()):
+        fallback_chart_url = _build_tv_chart_url(request, chart_params_payload)
+        charts_payload["interactive"] = fallback_chart_url
+        chart_url_value = fallback_chart_url
+        logger.debug(
+            "plan chart fallback used",
+            extra={"symbol": symbol, "plan_id": plan_id, "url": fallback_chart_url},
+        )
 
     atr_val = _safe_number(indicators.get("atr14"))
     calc_notes: Dict[str, Any] = {}
@@ -2463,6 +2525,17 @@ async def gpt_plan(
         "risk_note": None,
     }
     await _store_idea_snapshot(plan_id, idea_snapshot)
+    logger.info(
+        "plan response built",
+        extra={
+            "symbol": symbol,
+            "style": first.get("style"),
+            "plan_id": plan_id,
+            "idea_url": idea_url,
+            "chart_url_present": bool(chart_url_value),
+            "targets": targets_list[:2],
+        },
+    )
 
     # Debug info: include any structural TP1 notes from features
     debug_payload = {}
