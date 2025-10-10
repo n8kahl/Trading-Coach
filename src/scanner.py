@@ -35,6 +35,7 @@ class Plan:
     risk_reward: float
     notes: str | None = None
     atr: float | None = None
+    warnings: List[str] = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -46,6 +47,7 @@ class Plan:
             "risk_reward": round(float(self.risk_reward), 3),
             "atr": round(float(self.atr), 4) if self.atr is not None else None,
             "notes": self.notes,
+            "warnings": list(self.warnings),
         }
 
 
@@ -220,9 +222,12 @@ def _build_plan(
     risk_reward = reward / risk
     confidence = _score_conditions(conditions)
     # Append guardrail warning to notes if geometry was reordered or invalid
-    guard_note = None
+    warnings: List[str] = []
     if geometry_reordered or not geometry_ok:
+        warnings.append("Geometry check: targets reordered or watch plan recommended")
         guard_note = "Geometry check: targets reordered or watch plan recommended"
+    else:
+        guard_note = None
     final_notes = notes
     if guard_note:
         final_notes = (notes + " | " + guard_note) if notes else guard_note
@@ -236,6 +241,7 @@ def _build_plan(
         risk_reward=float(round(risk_reward, 3)),
         notes=final_notes,
         atr=float(atr_value) if atr_value is not None and math.isfinite(atr_value) else None,
+        warnings=warnings,
     )
 
 
@@ -800,6 +806,10 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
     }
+    if plan.warnings:
+        features["plan_warnings"] = list(plan.warnings)
+    if plan.warnings:
+        features["plan_warnings"] = list(plan.warnings)
     if tp1_dbg:
         features["tp1_struct_debug"] = tp1_dbg
 
@@ -929,6 +939,8 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
     }
+    if plan.warnings:
+        features["plan_warnings"] = list(plan.warnings)
     if tp1_dbg_ph:
         features["tp1_struct_debug"] = tp1_dbg_ph
 
@@ -1052,6 +1064,8 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
     }
+    if plan.warnings:
+        features["plan_warnings"] = list(plan.warnings)
 
     return Signal(
         symbol=symbol,
@@ -1142,6 +1156,8 @@ def _detect_gap_fill(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> Si
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
     }
+    if plan.warnings:
+        features["plan_warnings"] = list(plan.warnings)
 
     return Signal(
         symbol=symbol,

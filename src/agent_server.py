@@ -13,6 +13,7 @@ import asyncio
 import math
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -216,6 +217,10 @@ class PlanRequest(BaseModel):
 
 
 class PlanResponse(BaseModel):
+    plan_id: str | None = None
+    version: int | None = None
+    idea_url: str | None = None
+    warnings: List[str] | None = None
     symbol: str
     style: str | None = None
     strategy_id: str | None = None
@@ -232,6 +237,24 @@ class PlanResponse(BaseModel):
     decimals: int | None = None
     data_quality: Dict[str, Any] | None = None
     debug: Dict[str, Any] | None = None
+
+
+class IdeaStoreRequest(BaseModel):
+    plan: Dict[str, Any]
+    summary: Dict[str, Any] | None = None
+    volatility_regime: Dict[str, Any] | None = None
+    htf: Dict[str, Any] | None = None
+    data_quality: Dict[str, Any] | None = None
+    chart_url: str | None = None
+    options: Dict[str, Any] | None = None
+    why_this_works: List[str] | None = None
+    invalidation: List[str] | None = None
+    risk_note: str | None = None
+
+
+class IdeaStoreResponse(BaseModel):
+    plan_id: str
+    idea_url: str
 
 
 class MultiContextRequest(BaseModel):
@@ -321,6 +344,68 @@ def _normalize_style(style: str | None) -> str | None:
     if normalized in {"power_hour", "powerhour", "power-hour", "power hour"}:
         normalized = "scalp"
     return normalized
+
+
+def _build_idea_url(base: str, plan_id: str, version: int) -> str:
+    base_clean = base.rstrip("/")
+    return f"{base_clean}/idea/{plan_id}?v={version}"
+
+
+def _extract_plan_core(first: Dict[str, Any], plan_id: str, version: int, decimals: int | None) -> Dict[str, Any]:
+    plan_block = first.get("plan") or {}
+    charts = first.get("charts") or {}
+    core = {
+        "plan_id": plan_id,
+        "version": version,
+        "symbol": first.get("symbol"),
+        "style": first.get("style"),
+        "bias": plan_block.get("direction"),
+        "setup": first.get("strategy_id"),
+        "entry": plan_block.get("entry"),
+        "stop": plan_block.get("stop"),
+        "targets": plan_block.get("targets"),
+        "rr_to_t1": plan_block.get("risk_reward"),
+        "confidence": plan_block.get("confidence"),
+        "decimals": decimals,
+        "charts_params": charts.get("params") if isinstance(charts, dict) else None,
+    }
+    return core
+
+
+def _build_snapshot_summary(first: Dict[str, Any]) -> Dict[str, Any]:
+    features = first.get("features") or {}
+    snapshot = first.get("market_snapshot") or {}
+    volatility = snapshot.get("volatility") or {}
+    trend = (snapshot.get("trend") or {}).get("ema_stack")
+    summary = {
+        "frames_used": [],
+        "confluence_score": features.get("plan_confidence"),
+        "trend_notes": {"primary": trend} if trend else {},
+        "volatility_regime": volatility,
+        "expected_move_horizon": volatility.get("expected_move_horizon"),
+        "nearby_levels": list((first.get("key_levels") or {}).keys()),
+    }
+    return summary
+
+
+async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
+    async with _IDEA_LOCK:
+        versions = _IDEA_STORE.setdefault(plan_id, [])
+        versions.append(snapshot)
+
+
+async def _get_idea_snapshot(plan_id: str, version: Optional[int] = None) -> Dict[str, Any]:
+    async with _IDEA_LOCK:
+        versions = _IDEA_STORE.get(plan_id)
+        if not versions:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        if version is None:
+            return versions[-1]
+        for snap in versions:
+            plan = snap.get("plan") or {}
+            if plan.get("version") == version:
+                return snap
+        raise HTTPException(status_code=404, detail="Plan version not found")
 
 
 async def _fetch_polygon_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None:
@@ -1171,6 +1256,10 @@ def _percentile(values: np.ndarray, target: float) -> float | None:
 
 _MULTI_CONTEXT_CACHE_TTL = 30.0
 _MULTI_CONTEXT_CACHE: Dict[Tuple[str, str, int], Tuple[float, Dict[str, Any]]] = {}
+
+# Idea snapshot store (in-memory)
+_IDEA_STORE: Dict[str, List[Dict[str, Any]]] = {}
+_IDEA_LOCK = asyncio.Lock()
 _IV_METRICS_CACHE_TTL = 120.0
 _IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
@@ -1768,6 +1857,7 @@ async def gpt_scan(
                 },
                 "features": feature_payload,
                 **({"plan": plan_payload} if plan_payload else {}),
+                "warnings": plan_payload.get("warnings") if plan_payload else [],
                 "data": {
                     "bars": f"{base_url}/gpt/context/{signal.symbol}?interval={interval}&lookback=300"
                 },
@@ -1798,6 +1888,11 @@ async def gpt_plan(
     if not results:
         raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
+
+    plan_id = uuid.uuid4().hex[:10]
+    version = 1
+    base_url = str(request.base_url)
+    idea_url = _build_idea_url(base_url, plan_id, version)
 
     # Build calc_notes + htf from available payload
     plan = first.get("plan") or {}
@@ -1898,6 +1993,47 @@ async def gpt_plan(
         "iv_present": True,
         "earnings_present": True,
     }
+    plan_warnings: List[str] = first.get("warnings") or plan.get("warnings") or []
+
+    # Build chart URL via internal validator (best effort)
+    chart_url_value: Optional[str] = None
+    chart_params_payload = (first.get("charts") or {}).get("params")
+    if isinstance(chart_params_payload, dict) and chart_params_payload.get("symbol") and chart_params_payload.get("interval"):
+        try:
+            chart_model = ChartParams(**chart_params_payload)
+            chart_links = await gpt_chart_url(chart_model, request)
+            chart_url_value = chart_links.interactive
+        except Exception:
+            chart_url_value = None
+
+    price_close = snapshot.get("price", {}).get("close")
+    decimals_value = 2
+    if isinstance(price_close, (int, float)):
+        try:
+            scale = _price_scale_for(float(price_close))
+            if scale > 0:
+                decimals_value = int(round(math.log10(scale)))
+        except Exception:
+            decimals_value = 2
+
+    plan_core = _extract_plan_core(first, plan_id, version, decimals_value)
+    plan_core["idea_url"] = idea_url
+    if plan_warnings:
+        plan_core["warnings"] = plan_warnings
+    summary_snapshot = _build_snapshot_summary(first)
+    idea_snapshot = {
+        "plan": plan_core,
+        "summary": summary_snapshot,
+        "volatility_regime": summary_snapshot.get("volatility_regime"),
+        "htf": htf,
+        "data_quality": data_quality,
+        "chart_url": chart_url_value,
+        "options": first.get("options"),
+        "why_this_works": [],
+        "invalidation": [],
+        "risk_note": None,
+    }
+    await _store_idea_snapshot(plan_id, idea_snapshot)
 
     # Debug info: include any structural TP1 notes from features
     debug_payload = {}
@@ -1910,6 +2046,10 @@ async def gpt_plan(
         debug_payload = {}
 
     return PlanResponse(
+        plan_id=plan_id,
+        version=version,
+        idea_url=idea_url,
+        warnings=plan_warnings or None,
         symbol=first.get("symbol"),
         style=first.get("style"),
         strategy_id=first.get("strategy_id"),
@@ -1923,10 +2063,35 @@ async def gpt_plan(
         options=first.get("options"),
         calc_notes=calc_notes,
         htf=htf,
-        decimals=2,
+        decimals=decimals_value,
         data_quality=data_quality,
         debug=debug_payload or None,
     )
+
+
+@app.post("/internal/idea/store", include_in_schema=False, tags=["internal"])
+async def internal_idea_store(payload: IdeaStoreRequest, request: Request) -> IdeaStoreResponse:
+    plan_block = payload.plan or {}
+    plan_id = plan_block.get("plan_id")
+    version = plan_block.get("version")
+    if not plan_id or version is None:
+        raise HTTPException(status_code=400, detail="plan.plan_id and plan.version are required")
+    base_url = str(request.base_url)
+    idea_url = _build_idea_url(base_url, plan_id, int(version))
+    snapshot = payload.model_dump()
+    snapshot.setdefault("chart_url", None)
+    await _store_idea_snapshot(plan_id, snapshot)
+    return IdeaStoreResponse(plan_id=plan_id, idea_url=idea_url)
+
+
+@app.get("/idea/{plan_id}")
+async def get_latest_idea(plan_id: str) -> Dict[str, Any]:
+    return await _get_idea_snapshot(plan_id)
+
+
+@app.get("/idea/{plan_id}/{version}")
+async def get_idea_version(plan_id: str, version: int) -> Dict[str, Any]:
+    return await _get_idea_snapshot(plan_id, version=version)
 
 
 @gpt.post("/multi-context", summary="Return multi-interval context with vol metrics")
