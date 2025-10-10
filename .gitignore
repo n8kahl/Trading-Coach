@@ -35,6 +35,10 @@ venv.bak/
 
 # Node modules
 node_modules/
+idea-page/node_modules/
+idea-page/.next/
+idea-page/.turbo/
+idea-page/out/
 
 # Secrets
 .env
