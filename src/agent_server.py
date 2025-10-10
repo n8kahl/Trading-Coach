@@ -15,6 +15,7 @@ import math
 import logging
 import time
 import uuid
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1243,6 +1244,53 @@ def _view_for_style(style: str | None) -> str:
     return mapping.get(normalized, "fit")
 
 
+def _humanize_strategy(strategy_id: str | None) -> str:
+    if not strategy_id:
+        return "Setup"
+    tokens = re.split(r"[_\s]+", strategy_id.strip()) if isinstance(strategy_id, str) else []
+    cleaned = [token.capitalize() for token in tokens if token]
+    return " ".join(cleaned) if cleaned else "Setup"
+
+
+def _format_chart_title(symbol: str, bias: str | None, strategy_id: str | None) -> str:
+    symbol_token = symbol.upper() if symbol else "PLAN"
+    bias_token = (bias or "").strip().lower()
+    if bias_token == "long":
+        bias_label = "Long Bias"
+    elif bias_token == "short":
+        bias_label = "Short Bias"
+    else:
+        bias_label = None
+    strategy_label = _humanize_strategy(strategy_id)
+    if bias_label:
+        return f"{symbol_token} · {bias_label} ({strategy_label})"
+    return f"{symbol_token} · {strategy_label}"
+
+
+def _format_chart_note(
+    symbol: str,
+    style: str | None,
+    entry: float | None,
+    stop: float | None,
+    targets: List[float] | None,
+) -> str:
+    parts: List[str] = []
+    if symbol:
+        parts.append(symbol.upper())
+    if style:
+        parts.append(style.title())
+    if entry is not None:
+        parts.append(f"Entry {entry:.2f}")
+    if stop is not None:
+        parts.append(f"Stop {stop:.2f}")
+    if targets:
+        formatted = "/".join(f"{float(tp):.2f}" for tp in targets[:2] if isinstance(tp, (int, float)))
+        if formatted:
+            parts.append(f"Targets {formatted}")
+    summary = " | ".join(parts)
+    return summary[:140]
+
+
 TV_SUPPORTED_RESOLUTIONS = ["1", "3", "5", "15", "30", "60", "120", "240", "1D"]
 
 
@@ -2043,13 +2091,11 @@ async def gpt_scan(
 
         base_url = str(request.base_url).rstrip("/")
         interval = _timeframe_for_style(style)
-        title = f"{signal.symbol.upper()} {signal.strategy_id}"
         chart_query: Dict[str, Any] = {
             "symbol": signal.symbol.upper(),
             "interval": interval,
             "ema": ",".join(str(span) for span in ema_spans),
             "view": _view_for_style(style),
-            "title": title,
             "vwap": "1",
             "theme": "dark",
         }
@@ -2068,20 +2114,31 @@ async def gpt_scan(
             logger.warning("compute_context_overlays failed for %s: %s", signal.symbol, exc)
             enhancements = {}
 
+        plan_entry = None
+        plan_stop = None
+        plan_targets: List[float] = []
+        plan_direction = direction_hint
         if signal.plan is not None:
             plan_payload = signal.plan.as_dict()
+            plan_entry = float(signal.plan.entry)
+            plan_stop = float(signal.plan.stop)
+            plan_targets = [float(target) for target in signal.plan.targets]
+            plan_direction = signal.plan.direction or plan_direction
             chart_query["entry"] = f"{signal.plan.entry:.2f}"
             chart_query["stop"] = f"{signal.plan.stop:.2f}"
             chart_query["tp"] = ",".join(f"{target:.2f}" for target in signal.plan.targets)
             chart_query.setdefault("direction", signal.plan.direction)
             if signal.plan.atr and "atr" not in chart_query:
                 chart_query["atr"] = f"{float(signal.plan.atr):.4f}"
-            # Always include a notes field for chart URLs, even if brief
-            notes_text = (signal.plan.notes or "").strip()
-            if not notes_text:
-                # fallback: concise phrase using strategy + direction
-                notes_text = f"{signal.strategy_id} ({direction_hint or signal.plan.direction})"
-            chart_query["notes"] = notes_text[:140]
+        bias_for_chart = plan_direction or direction_hint
+        chart_query["title"] = _format_chart_title(signal.symbol, bias_for_chart, signal.strategy_id)
+        chart_note = None
+        if signal.plan is not None and signal.plan.notes:
+            chart_note = str(signal.plan.notes).strip()
+        if not chart_note:
+            chart_note = _format_chart_note(signal.symbol, style, plan_entry, plan_stop, plan_targets)
+        if chart_note:
+            chart_query["notes"] = chart_note[:140]
         overlay_params = _encode_overlay_params(enhancements or {})
         for key, value in overlay_params.items():
             chart_query[key] = value
@@ -2089,8 +2146,8 @@ async def gpt_scan(
         if level_tokens:
             chart_query["levels"] = ",".join(level_tokens)
         chart_query["strategy"] = signal.strategy_id
-        if direction_hint:
-            chart_query["direction"] = direction_hint
+        if bias_for_chart:
+            chart_query["direction"] = bias_for_chart
         atr_hint = snapshot.get("indicators", {}).get("atr14")
         if isinstance(atr_hint, (int, float)) and math.isfinite(atr_hint):
             chart_query["atr"] = f"{float(atr_hint):.4f}"
@@ -2187,7 +2244,15 @@ async def gpt_plan(
     idea_url = _build_idea_url(request, plan_id, version)
 
     # Build calc_notes + htf from available payload
-    plan = first.get("plan") or {}
+    raw_plan = first.get("plan") or {}
+    plan: Dict[str, Any] = dict(raw_plan)
+    plan.setdefault("plan_id", plan_id)
+    plan.setdefault("version", version)
+    plan.setdefault("symbol", symbol)
+    plan.setdefault("style", first.get("style"))
+    plan.setdefault("direction", plan.get("direction") or (snapshot.get("trend") or {}).get("direction_hint"))
+    plan["idea_url"] = idea_url
+    first["plan"] = plan
     charts_container = first.get("charts") or {}
     charts = charts_container.get("params") if isinstance(charts_container, dict) else None
     chart_params_payload: Dict[str, Any] = charts if isinstance(charts, dict) else {}
@@ -2221,6 +2286,15 @@ async def gpt_plan(
         rr_inputs = {"entry": entry_val, "stop": stop_val, "tp1": tp1_value}
 
     if chart_params_payload:
+        bias_token = plan.get("direction") or chart_params_payload.get("direction") or (snapshot.get("trend") or {}).get("direction_hint")
+        chart_params_payload.setdefault(
+            "title",
+            _format_chart_title(symbol, bias_token, first.get("strategy_id")),
+        )
+        if entry_val is not None or stop_val is not None or targets_list:
+            default_note = _format_chart_note(symbol, first.get("style"), entry_val, stop_val, targets_list)
+            if default_note and not chart_params_payload.get("notes"):
+                chart_params_payload["notes"] = default_note
         try:
             chart_model = ChartParams(**chart_params_payload)
             if not chart_url_value or not isinstance(chart_url_value, str):
@@ -2980,6 +3054,8 @@ async def gpt_contracts(
             label = row.get("label") or row.get("symbol") or ""
             # Preserve a compact, ordered shape: label, dte, strike, price, bid, ask, delta, theta, iv, spread_pct, oi, liquidity_score
             price_val = row.get("price") or row.get("mid") or row.get("mark")
+            if isinstance(price_val, (int, float)):
+                price_val = round(float(price_val), 2)
             table_rows.append({
                 "label": label,
                 "dte": row.get("dte"),
