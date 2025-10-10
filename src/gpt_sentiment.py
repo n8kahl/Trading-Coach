@@ -189,7 +189,11 @@ async def _get_latest_video(client: httpx.AsyncClient, channel_id: str) -> Dict[
         when = re.search(r"<published>([^<]+)</published>", e)
         if not (vid and title and when):
             continue
-        published = dtp.parse(when.group(1)) if _DEPS_OK else datetime.now(timezone.utc)
+        try:
+            published = dtp.parse(when.group(1)) if _DEPS_OK else datetime.now(timezone.utc)
+        except Exception:
+            # Skip malformed entries instead of crashing
+            continue
         item = {
             "video_id": vid.group(1),
             "title": html.unescape(title.group(1)),
@@ -207,67 +211,73 @@ async def gpt_sentiment(
     window_hours: int = Query(36, ge=1, le=168),
     force: bool = Query(False),
 ):
-    if not _DEPS_OK:
-        raise HTTPException(status_code=503, detail="Sentiment dependencies not installed on server")
+    try:
+        if not _DEPS_OK:
+            raise HTTPException(status_code=503, detail="Sentiment dependencies not installed on server")
 
-    now = time.time()
-    key = f"{channel}|{window_hours}"
-    if not force and _CACHE["data"] and _CACHE["key"] == key and (now - float(_CACHE["ts"])) < _TTL:
-        return _CACHE["data"]
+        now = time.time()
+        key = f"{channel}|{window_hours}"
+        if not force and _CACHE["data"] and _CACHE["key"] == key and (now - float(_CACHE["ts"])) < _TTL:
+            return _CACHE["data"]
 
-    async with httpx.AsyncClient(follow_redirects=True, headers=DEFAULT_HEADERS, timeout=20) as client:
-        try:
-            channel_id = await _resolve_channel_id(client, channel)
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"YouTube handle fetch error: {exc}")
-        latest = None
-        try:
-            latest = await _get_latest_video(client, channel_id)
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"YouTube RSS error: {exc}")
-        if not latest:
-            raise HTTPException(status_code=204, detail="No recent videos")
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-        if latest["published_at"].astimezone(timezone.utc) < cutoff:
-            raise HTTPException(status_code=204, detail="No recent video in window")
+        async with httpx.AsyncClient(follow_redirects=True, headers=DEFAULT_HEADERS, timeout=20) as client:
+            try:
+                channel_id = await _resolve_channel_id(client, channel)
+            except httpx.HTTPError as exc:
+                raise HTTPException(status_code=502, detail=f"YouTube handle fetch error: {exc}")
+            latest = None
+            try:
+                latest = await _get_latest_video(client, channel_id)
+            except httpx.HTTPError as exc:
+                raise HTTPException(status_code=502, detail=f"YouTube RSS error: {exc}")
+            if not latest:
+                raise HTTPException(status_code=204, detail="No recent videos")
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+            if latest["published_at"].astimezone(timezone.utc) < cutoff:
+                raise HTTPException(status_code=204, detail="No recent video in window")
 
-        # Transcript is optional; failures yield empty string
-        transcript = await _fetch_transcript(latest["video_id"])  # optional
-        text_blob = f"{latest['title']}\n{transcript}"
-        tickers = _extract_tickers(text_blob)
-        key_levels = _extract_levels(text_blob)
-        lbl, score = _pick_sentiment(text_blob)
+            # Transcript is optional; failures yield empty string
+            transcript = await _fetch_transcript(latest["video_id"])  # optional
+            text_blob = f"{latest['title']}\n{transcript}"
+            tickers = _extract_tickers(text_blob)
+            key_levels = _extract_levels(text_blob)
+            lbl, score = _pick_sentiment(text_blob)
 
-        quotes: List[str] = []
-        risks: List[str] = []
-        for line in re.split(r"[\n\.]+", transcript)[:15]:
-            if re.search(r"(watch|careful|risk|volatile|data|earnings|CPI|FOMC|NFP|jobs|rates)", line, re.I):
-                risks.append(line.strip())
-            if len(quotes) < 3 and 30 < len(line) < 140:
-                quotes.append(line.strip())
+            quotes: List[str] = []
+            risks: List[str] = []
+            for line in re.split(r"[\n\.]+", transcript)[:15]:
+                if re.search(r"(watch|careful|risk|volatile|data|earnings|CPI|FOMC|NFP|jobs|rates)", line, re.I):
+                    risks.append(line.strip())
+                if len(quotes) < 3 and 30 < len(line) < 140:
+                    quotes.append(line.strip())
 
-        summary = (
-            f"Sentiment {lbl} (score {score:+.2f}). "
-            f"Tickers: {', '.join(tickers[:6]) or '—'}. "
-            f"Key levels: "
-            + (", ".join([f"{kl.symbol} {kl.level:.2f}" for kl in key_levels[:5]]) if key_levels else "—")
-        )
+            summary = (
+                f"Sentiment {lbl} (score {score:+.2f}). "
+                f"Tickers: {', '.join(tickers[:6]) or '—'}. "
+                f"Key levels: "
+                + (", ".join([f"{kl.symbol} {kl.level:.2f}" for kl in key_levels[:5]]) if key_levels else "—")
+            )
 
-        resp = SentimentResponse(
-            channel=channel,
-            video_id=latest["video_id"],
-            video_url=latest["url"],
-            published_at=latest["published_at"],
-            title=latest["title"],
-            summary=summary,
-            sentiment_label=lbl,
-            sentiment_score=score,
-            tickers=tickers,
-            key_levels=key_levels[:12],
-            risks=risks[:5],
-            quotes=quotes[:3],
-            raw_excerpt=transcript[:500] if transcript else "",
-        )
+            resp = SentimentResponse(
+                channel=channel,
+                video_id=latest["video_id"],
+                video_url=latest["url"],
+                published_at=latest["published_at"],
+                title=latest["title"],
+                summary=summary,
+                sentiment_label=lbl,
+                sentiment_score=score,
+                tickers=tickers,
+                key_levels=key_levels[:12],
+                risks=risks[:5],
+                quotes=quotes[:3],
+                raw_excerpt=transcript[:500] if transcript else "",
+            )
 
-        _CACHE["data"], _CACHE["ts"], _CACHE["key"] = resp, now, key
-        return resp
+            _CACHE["data"], _CACHE["ts"], _CACHE["key"] = resp, now, key
+            return resp
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Last-resort guard to keep responses JSON and avoid HTML 500 pages
+        raise HTTPException(status_code=502, detail=f"Unexpected error in /gpt/sentiment: {exc.__class__.__name__}")
