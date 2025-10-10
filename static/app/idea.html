@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trading Coach · Idea</title>
+    <link rel="stylesheet" href="./css/main.css" />
+  </head>
+  <body>
+    <header class="tc-header">
+      <div class="brand">
+        <h1>Trading Coach</h1>
+        <span class="badge">Idea Page</span>
+      </div>
+      <nav class="actions">
+        <a href="./index.html" class="link">Back to Scanner</a>
+      </nav>
+    </header>
+
+    <main class="idea">
+      <section id="quick-strip" class="quick-strip">
+        <div class="levels">
+          <div><span>Symbol</span><strong id="plan-symbol">—</strong></div>
+          <div><span>Bias</span><strong id="plan-bias">—</strong></div>
+          <div><span>Entry</span><strong id="plan-entry">—</strong></div>
+          <div><span>Stop</span><strong id="plan-stop">—</strong></div>
+          <div><span>TP1</span><strong id="plan-tp1">—</strong></div>
+          <div><span>TP2</span><strong id="plan-tp2">—</strong></div>
+          <div><span>RR → TP1</span><strong id="plan-rr">—</strong></div>
+        </div>
+        <div class="actions">
+          <button id="copy-levels" class="btn secondary">Copy Levels</button>
+          <a id="idea-url" class="btn tertiary" target="_blank" rel="noopener">Open Idea</a>
+        </div>
+      </section>
+
+      <section class="grid">
+        <section class="panel chart-panel">
+          <header>
+            <h2>Chart</h2>
+            <div class="toggle">
+              <button id="live-btn" class="btn secondary active">Live</button>
+              <button id="replay-btn" class="btn secondary">Replay</button>
+            </div>
+          </header>
+          <iframe id="chart-frame" title="Idea chart"></iframe>
+          <div id="chart-warning" class="alert hidden">
+            Chart URL failed validation. Use the data below or try reloading the plan.
+          </div>
+        </section>
+
+        <section class="panel coaching">
+          <header><h2>Live Coaching</h2></header>
+          <div class="coach-events" id="coach-events"></div>
+        </section>
+
+        <section class="panel options">
+          <header>
+            <h2>Options &amp; What-If</h2>
+            <div class="sliders">
+              <label>
+                IV Shift (bps)
+                <input type="range" id="iv-shift" min="-200" max="200" value="0" />
+                <span id="iv-value">0</span>
+              </label>
+              <label>
+                Slippage (bps)
+                <input type="range" id="slippage" min="0" max="50" value="10" />
+                <span id="slippage-value">10</span>
+              </label>
+            </div>
+          </header>
+          <table id="options-table">
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Price</th>
+                <th>Bid</th>
+                <th>Ask</th>
+                <th>Δ</th>
+                <th>Θ</th>
+                <th>IV</th>
+                <th>Spread%</th>
+                <th>OI</th>
+                <th>Liq</th>
+                <th>Scenario</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <p id="options-empty" class="muted hidden">No options data available.</p>
+        </section>
+
+        <section class="panel confluence">
+          <header><h2>Confluence &amp; Structure</h2></header>
+          <div id="confluence-content"></div>
+        </section>
+
+        <section class="panel education">
+          <header><h2>Why This Works &amp; Education</h2></header>
+          <div id="education-cards" class="cards small"></div>
+        </section>
+
+        <section class="panel provenance">
+          <header><h2>Provenance</h2></header>
+          <div class="provenance-grid">
+            <div>
+              <h3>Calc Notes</h3>
+              <pre id="calc-notes"></pre>
+            </div>
+            <div>
+              <h3>HTF Snaps</h3>
+              <pre id="htf-snaps"></pre>
+            </div>
+            <div>
+              <h3>Data Quality</h3>
+              <pre id="data-quality"></pre>
+            </div>
+            <div>
+              <h3>Warnings</h3>
+              <ul id="plan-warnings"></ul>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script type="module" src="./js/idea.js"></script>
+  </body>
+</html>

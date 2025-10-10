@@ -149,6 +149,10 @@ TV_STATIC_DIR = STATIC_ROOT / "tv"
 if TV_STATIC_DIR.exists():
     app.mount("/tv", StaticFiles(directory=str(TV_STATIC_DIR), html=True), name="tv")
 
+APP_STATIC_DIR = STATIC_ROOT / "app"
+if APP_STATIC_DIR.exists():
+    app.mount("/app", StaticFiles(directory=str(APP_STATIC_DIR), html=True), name="app")
+
 
 # ---------------------------------------------------------------------------
 # Auth helper
@@ -353,9 +357,12 @@ def _normalize_style(style: str | None) -> str | None:
     return normalized
 
 
-def _build_idea_url(base: str, plan_id: str, version: int) -> str:
-    base_clean = base.rstrip("/")
-    return f"{base_clean}/idea/{plan_id}?v={version}"
+def _build_idea_url(request: Request, plan_id: str, version: int) -> str:
+    try:
+        base = request.url_for("get_latest_idea", plan_id=plan_id)
+    except Exception:
+        base = f"{str(request.base_url).rstrip('/')}/idea/{plan_id}"
+    return f"{base}?v={version}"
 
 
 def _extract_plan_core(first: Dict[str, Any], plan_id: str, version: int, decimals: int | None) -> Dict[str, Any]:
@@ -1983,8 +1990,7 @@ async def gpt_plan(
 
     plan_id = uuid.uuid4().hex[:10]
     version = 1
-    base_url = str(request.base_url)
-    idea_url = _build_idea_url(base_url, plan_id, version)
+    idea_url = _build_idea_url(request, plan_id, version)
 
     # Build calc_notes + htf from available payload
     plan = first.get("plan") or {}
@@ -2168,8 +2174,7 @@ async def internal_idea_store(payload: IdeaStoreRequest, request: Request) -> Id
     version = plan_block.get("version")
     if not plan_id or version is None:
         raise HTTPException(status_code=400, detail="plan.plan_id and plan.version are required")
-    base_url = str(request.base_url)
-    idea_url = _build_idea_url(base_url, plan_id, int(version))
+    idea_url = _build_idea_url(request, plan_id, int(version))
     snapshot = payload.model_dump()
     snapshot.setdefault("chart_url", None)
     await _store_idea_snapshot(plan_id, snapshot)
