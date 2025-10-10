@@ -229,6 +229,22 @@ class PlanResponse(BaseModel):
     warnings: List[str] | None = None
     symbol: str
     style: str | None = None
+    bias: str | None = None
+    setup: str | None = None
+    entry: float | None = None
+    stop: float | None = None
+    targets: List[float] | None = None
+    rr_to_t1: float | None = None
+    confidence: float | None = None
+    confidence_factors: List[str] | None = None
+    notes: str | None = None
+    relevant_levels: Dict[str, Any] | None = None
+    expected_move_basis: str | None = None
+    sentiment: Dict[str, Any] | None = None
+    events: Dict[str, Any] | None = None
+    earnings: Dict[str, Any] | None = None
+    charts_params: Dict[str, Any] | None = None
+    chart_url: str | None = None
     strategy_id: str | None = None
     description: str | None = None
     score: float | None = None
@@ -493,19 +509,15 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "atr": round(atr, 4) if atr else None,
     }
 
-    calc_notes = {
-        "atr14": indicators.get("atr14"),
-        "stop_multiple": stop_multiple,
-        "em_cap_applied": False,
-        "rr_inputs": {
-            "entry": plan_block["entry"],
-            "stop": plan_block["stop"],
-            "tp1": plan_block["targets"][0],
-        },
-        "reasons": {
-            "tp1": ["Structural baseline"],
-            "context": ["Generated during closed session"],
-        },
+    calc_notes: Dict[str, Any] = {}
+    atr_val = _safe_number(indicators.get("atr14"))
+    if atr_val is not None:
+        calc_notes["atr14"] = atr_val
+    calc_notes["stop_multiple"] = round(float(stop_multiple), 3)
+    calc_notes["rr_inputs"] = {
+        "entry": plan_block["entry"],
+        "stop": plan_block["stop"],
+        "tp1": plan_block["targets"][0],
     }
 
     htf = {
@@ -534,6 +546,10 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         chart_links = await gpt_chart_url(ChartParams(**chart_params), request)
     except Exception:
         chart_links = None
+    charts_payload: Dict[str, Any] = {"params": chart_params}
+    if chart_links:
+        charts_payload["interactive"] = chart_links.interactive
+    chart_url_value = chart_links.interactive if chart_links else None
 
     features = {
         "plan_entry": plan_block["entry"],
@@ -552,7 +568,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "expected_move_horizon": snapshot.get("volatility", {}).get("expected_move_horizon"),
     }
 
-    snapshot = {
+    idea_payload = {
         "plan": {
             "plan_id": plan_id,
             "version": version,
@@ -580,7 +596,11 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "invalidation": ["Price gaps beyond stop on open"],
         "risk_note": "Market closed; re-validate levels pre-open.",
     }
-    await _store_idea_snapshot(plan_id, snapshot)
+    await _store_idea_snapshot(plan_id, idea_payload)
+
+    relevant_levels = context.get("key_levels") or {}
+    expected_move_basis = "expected_move_horizon" if snapshot.get("volatility", {}).get("expected_move_horizon") else None
+    calc_notes_output = calc_notes or None
 
     return PlanResponse(
         plan_id=plan_id,
@@ -589,13 +609,25 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         warnings=plan_block["warnings"],
         symbol=symbol,
         style=style or "intraday",
+        bias=plan_block["direction"],
+        setup="watch_plan",
+        entry=plan_block["entry"],
+        stop=plan_block["stop"],
+        targets=plan_block["targets"],
+        rr_to_t1=plan_block["risk_reward"],
+        confidence=plan_block["confidence"],
+        notes=plan_block["notes"],
+        relevant_levels=relevant_levels or None,
+        expected_move_basis=expected_move_basis,
+        charts_params=chart_params,
+        chart_url=chart_url_value,
         plan=plan_block,
-        charts={"params": chart_params},
-        key_levels=context.get("key_levels"),
+        charts=charts_payload,
+        key_levels=relevant_levels,
         market_snapshot=context.get("snapshot"),
         features=features,
         options=None,
-        calc_notes=calc_notes,
+        calc_notes=calc_notes_output,
         htf=htf,
         decimals=decimals,
         data_quality=data_quality,
@@ -2071,6 +2103,20 @@ async def gpt_scan(
             for key, value in plan_dict.items():
                 feature_payload[f"plan_{key}"] = value
 
+        chart_links = None
+        required_chart_keys = {"direction", "entry", "stop", "tp"}
+        if required_chart_keys.issubset(chart_query.keys()):
+            try:
+                chart_links = await gpt_chart_url(ChartParams(**chart_query), request)
+            except HTTPException as exc:
+                logger.debug("chart link generation failed for %s: %s", signal.symbol, exc)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("chart link generation error for %s: %s", signal.symbol, exc)
+
+        charts_payload: Dict[str, Any] = {"params": chart_query}
+        if chart_links:
+            charts_payload["interactive"] = chart_links.interactive
+
         polygon_bundle: Dict[str, Any] | None = None
         if polygon_chains:
             cache_key = (signal.symbol, signal.strategy_id)
@@ -2098,9 +2144,7 @@ async def gpt_scan(
                 "direction_hint": direction_hint,
                 "key_levels": key_levels,
                 "market_snapshot": snapshot,
-                "charts": {
-                    "params": chart_query,
-                },
+                "charts": charts_payload,
                 "features": feature_payload,
                 **({"plan": plan_payload} if plan_payload else {}),
                 "warnings": plan_payload.get("warnings") if plan_payload else [],
@@ -2144,34 +2188,77 @@ async def gpt_plan(
 
     # Build calc_notes + htf from available payload
     plan = first.get("plan") or {}
-    charts = (first.get("charts") or {}).get("params") or {}
+    charts_container = first.get("charts") or {}
+    charts = charts_container.get("params") if isinstance(charts_container, dict) else None
+    chart_params_payload: Dict[str, Any] = charts if isinstance(charts, dict) else {}
+    chart_url_value: Optional[str] = charts_container.get("interactive") if isinstance(charts_container, dict) else None
     snapshot = first.get("market_snapshot") or {}
     indicators = (snapshot.get("indicators") or {})
     volatility = (snapshot.get("volatility") or {})
+
+    def _coerce_float(value: Any) -> Optional[float]:
+        try:
+            if value is None or (isinstance(value, str) and not value.strip()):
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    entry_val = _coerce_float(plan.get("entry")) or _coerce_float(chart_params_payload.get("entry"))
+    stop_val = _coerce_float(plan.get("stop")) or _coerce_float(chart_params_payload.get("stop"))
+    target_tokens: List[Any] = list(plan.get("targets") or [])
+    if not target_tokens and chart_params_payload.get("tp"):
+        target_tokens = [
+            _coerce_float(token.strip())
+            for token in str(chart_params_payload.get("tp")).split(",")
+            if token and str(token).strip()
+        ]
+    targets_list = [float(tp) for tp in target_tokens if tp is not None]
+    tp1_value = targets_list[0] if targets_list else None
+
     rr_inputs = None
-    try:
-        entry = float(plan.get("entry")) if plan.get("entry") is not None else float(charts.get("entry"))
-        stop = float(plan.get("stop")) if plan.get("stop") is not None else float(charts.get("stop"))
-        tp_csv = charts.get("tp") or ",".join(str(x) for x in (plan.get("targets") or []))
-        tp1 = float(str(tp_csv).split(",")[0]) if tp_csv else None
-        if tp1 is not None:
-            rr_inputs = {"entry": entry, "stop": stop, "tp1": tp1}
-    except Exception:
-        rr_inputs = None
-    calc_notes = {
-        "atr14": indicators.get("atr14"),
-        "stop_multiple": None,
-        "em_cap_applied": bool((volatility.get("expected_move_horizon") if isinstance(volatility, dict) else None)),
-        **({"rr_inputs": rr_inputs} if rr_inputs else {}),
-    }
+    if entry_val is not None and stop_val is not None and tp1_value is not None:
+        rr_inputs = {"entry": entry_val, "stop": stop_val, "tp1": tp1_value}
+
+    if chart_params_payload:
+        try:
+            chart_model = ChartParams(**chart_params_payload)
+            if not chart_url_value or not isinstance(chart_url_value, str):
+                chart_links = await gpt_chart_url(chart_model, request)
+                chart_url_value = chart_links.interactive
+        except HTTPException as exc:
+            logger.debug("plan chart link validation failed for %s: %s", symbol, exc)
+            chart_url_value = None
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("plan chart link error for %s: %s", symbol, exc)
+            chart_url_value = None
+
+    charts_payload: Dict[str, Any] = {}
+    if chart_params_payload:
+        charts_payload["params"] = chart_params_payload
+    if chart_url_value:
+        charts_payload["interactive"] = chart_url_value
+
+    atr_val = _safe_number(indicators.get("atr14"))
+    calc_notes: Dict[str, Any] = {}
+    if atr_val is not None:
+        calc_notes["atr14"] = atr_val
+    stop_multiple = None
+    if atr_val and atr_val > 0 and entry_val is not None and stop_val is not None:
+        try:
+            stop_multiple = abs(entry_val - stop_val) / atr_val
+        except ZeroDivisionError:
+            stop_multiple = None
+    if stop_multiple is not None:
+        calc_notes["stop_multiple"] = round(float(stop_multiple), 3)
+    if rr_inputs:
+        calc_notes["rr_inputs"] = rr_inputs
     # Infer snapped_targets by comparing target prices to named levels (key_levels + overlays)
     snapped_names: List[str] = []
     try:
-        targets_list = plan.get("targets") or []
-        if not targets_list and charts.get("tp"):
-            targets_list = [float(x.strip()) for x in str(charts.get("tp")).split(",") if x.strip()]
-        atr_val = float(indicators.get("atr14") or 0.0)
-        window = max(atr_val * 0.30, 0.0)
+        targets_for_snap = list(targets_list)
+        atr_for_window = float(indicators.get("atr14") or 0.0)
+        window = max(atr_for_window * 0.30, 0.0)
         levels_dict = first.get("key_levels") or {}
         overlays = first.get("context_overlays") or {}
         named: List[Tuple[str, float]] = []
@@ -2216,7 +2303,7 @@ async def gpt_plan(
                     named.append((lab, float(val)))
                 except Exception:
                     pass
-        for tp in targets_list[:2]:
+        for tp in targets_for_snap[:2]:
             try:
                 tp_f = float(tp)
             except Exception:
@@ -2242,17 +2329,6 @@ async def gpt_plan(
         "earnings_present": True,
     }
     plan_warnings: List[str] = first.get("warnings") or plan.get("warnings") or []
-
-    # Build chart URL via internal validator (best effort)
-    chart_url_value: Optional[str] = None
-    chart_params_payload = (first.get("charts") or {}).get("params")
-    if isinstance(chart_params_payload, dict) and chart_params_payload.get("symbol") and chart_params_payload.get("interval"):
-        try:
-            chart_model = ChartParams(**chart_params_payload)
-            chart_links = await gpt_chart_url(chart_model, request)
-            chart_url_value = chart_links.interactive
-        except Exception:
-            chart_url_value = None
 
     price_close = snapshot.get("price", {}).get("close")
     decimals_value = 2
@@ -2293,6 +2369,36 @@ async def gpt_plan(
     except Exception:
         debug_payload = {}
 
+    entry_output = plan.get("entry") if plan.get("entry") is not None else entry_val
+    stop_output = plan.get("stop") if plan.get("stop") is not None else stop_val
+    targets_output = plan.get("targets") or (targets_list if targets_list else None)
+    rr_output = plan.get("risk_reward")
+    confidence_output = plan.get("confidence")
+    notes_output = (plan.get("notes") or "").strip() if plan else ""
+    if not notes_output:
+        notes_output = ""
+    bias_output = plan.get("direction") or ((snapshot.get("trend") or {}).get("direction_hint"))
+    relevant_levels = first.get("key_levels") or {}
+    expected_move_basis = None
+    if isinstance(volatility.get("expected_move_horizon"), (int, float)):
+        expected_move_basis = "expected_move_horizon"
+    sentiment_block = first.get("sentiment")
+    events_block = first.get("events")
+    earnings_block = first.get("earnings")
+    confidence_factors = None
+    feature_block = first.get("features") or {}
+    for key in ("plan_confidence_factors", "plan_confidence_reasons", "confidence_reasons"):
+        raw = feature_block.get(key)
+        if isinstance(raw, (list, tuple)):
+            confidence_factors = [str(item) for item in raw if item]
+            break
+    calc_notes_output = calc_notes or None
+    if calc_notes_output is not None and not calc_notes_output:
+        calc_notes_output = None
+    charts_field = charts_payload or None
+    charts_params_output = chart_params_payload or None
+    chart_url_output = chart_url_value or None
+
     return PlanResponse(
         plan_id=plan_id,
         version=version,
@@ -2300,16 +2406,32 @@ async def gpt_plan(
         warnings=plan_warnings or None,
         symbol=first.get("symbol"),
         style=first.get("style"),
+        bias=bias_output,
+        setup=first.get("strategy_id"),
+        entry=entry_output,
+        stop=stop_output,
+        targets=targets_output,
+        rr_to_t1=rr_output,
+        confidence=confidence_output,
+        confidence_factors=confidence_factors,
+        notes=notes_output,
+        relevant_levels=relevant_levels or None,
+        expected_move_basis=expected_move_basis,
+        sentiment=sentiment_block,
+        events=events_block,
+        earnings=earnings_block,
+        charts_params=charts_params_output,
+        chart_url=chart_url_output,
         strategy_id=first.get("strategy_id"),
         description=first.get("description"),
         score=first.get("score"),
         plan=first.get("plan"),
-        charts=first.get("charts"),
+        charts=charts_field,
         key_levels=first.get("key_levels"),
         market_snapshot=first.get("market_snapshot"),
         features=first.get("features"),
         options=first.get("options"),
-        calc_notes=calc_notes,
+        calc_notes=calc_notes_output,
         htf=htf,
         decimals=decimals_value,
         data_quality=data_quality,
