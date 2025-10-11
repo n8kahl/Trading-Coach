@@ -31,11 +31,19 @@ function ToastListener() {
 
   return (
     <>
-      {toasts.map((toast) => (
-        <Toast key={toast.id} variant={toast.variant} onOpenChange={(open) => !open && dismiss(toast.id)}>
+      {toasts.map(({ id, title, description, variant, onOpenChange, ...toastProps }) => (
+        <Toast
+          key={id}
+          variant={variant}
+          {...toastProps}
+          onOpenChange={(open) => {
+            onOpenChange?.(open);
+            if (!open) dismiss(id);
+          }}
+        >
           <div className="grid gap-1">
-            {toast.title && <ToastTitle>{toast.title}</ToastTitle>}
-            {toast.description && <ToastDescription>{toast.description}</ToastDescription>}
+            {title && <ToastTitle>{title}</ToastTitle>}
+            {description && <ToastDescription>{description}</ToastDescription>}
           </div>
           <ToastClose />
         </Toast>

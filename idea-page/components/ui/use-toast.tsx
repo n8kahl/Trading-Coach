@@ -4,11 +4,17 @@ import * as React from "react";
 
 import type { ToastProps } from "@/components/ui/toast";
 
-type Toast = ToastProps & { id: string };
+type ToastData = ToastProps & {
+  id: string;
+  title?: React.ReactNode;
+  description?: React.ReactNode;
+};
+
+type ToastOptions = Omit<ToastData, "id"> & { id?: string };
 
 const ToastContext = React.createContext<{
-  toasts: Toast[];
-  toast: (props: ToastProps) => string;
+  toasts: ToastData[];
+  toast: (props: ToastOptions) => string;
   dismiss: (toastId?: string) => void;
 }>({
   toasts: [],
@@ -25,11 +31,12 @@ function genId() {
 }
 
 export function ToastProviderCustom({ children }: { children: React.ReactNode }) {
-  const [toasts, setToasts] = React.useState<Toast[]>([]);
+  const [toasts, setToasts] = React.useState<ToastData[]>([]);
 
-  const toast = React.useCallback((props: ToastProps) => {
-    const id = props.id ?? genId();
-    setToasts((current) => [...current, { ...props, id }]);
+  const toast = React.useCallback((props: ToastOptions) => {
+    const { id: providedId, ...rest } = props;
+    const id = providedId ?? genId();
+    setToasts((current) => [...current, { ...rest, id }]);
     return id;
   }, []);
 

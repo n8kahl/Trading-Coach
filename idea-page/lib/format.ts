@@ -1,4 +1,4 @@
-import type { PlanCore } from "@/lib/types";
+import type { Plan } from "@/lib/types";
 
 const MARKET_PHASE_LABELS: Record<string, string> = {
   regular: "REG",
@@ -49,7 +49,7 @@ export function formatDateTime(timestamp?: string | null): string {
   }
 }
 
-export function buildLevelsCopy(plan: PlanCore): string {
+export function buildLevelsCopy(plan: Plan): string {
   const rr = formatRR(plan.rr_to_t1);
   const targets = [...plan.targets, ...Array(3 - plan.targets.length).fill(null)]
     .slice(0, 2)
@@ -59,7 +59,7 @@ export function buildLevelsCopy(plan: PlanCore): string {
   )} | tp1 ${targets[0]} | tp2 ${targets[1]} | RR: ${rr}`;
 }
 
-export function buildPlanString(plan: PlanCore, snappedTargets?: string[] | null): string {
+export function buildPlanString(plan: Plan, snappedTargets?: string[] | null): string {
   const rr = formatRR(plan.rr_to_t1);
   const atrMultiple = snappedTargets && snappedTargets.length > 0 ? ` | ${snappedTargets[0]}` : "";
   return `${plan.bias === "long" ? "Long" : "Short"} ${plan.entry.toFixed(plan.decimals)} | s ${plan.stop.toFixed(
