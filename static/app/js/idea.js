@@ -47,7 +47,8 @@ async function init() {
     const url = version
       ? `${API_BASE}/idea/${encodeURIComponent(planId)}/${encodeURIComponent(version)}`
       : `${API_BASE}/idea/${encodeURIComponent(planId)}`;
-    ideaSnapshot = await fetchJSON(url);
+    const raw = await fetchJSON(url);
+    ideaSnapshot = normalizeSnapshot(raw);
     populate();
     startLive();
   } catch (err) {
@@ -57,7 +58,7 @@ async function init() {
     try {
       const fallback = await regenerateFromSlug(planId);
       if (fallback) {
-        ideaSnapshot = fallback;
+        ideaSnapshot = normalizeSnapshot(fallback);
         populate();
         startLive();
         return;
@@ -87,13 +88,63 @@ async function regenerateFromSlug(id) {
     method: 'POST',
     body: JSON.stringify(body),
   });
-  // PlanResponse is close enough to IdeaSnapshot for our renderer
   return plan;
+}
+
+function normalizeSnapshot(payload) {
+  if (!payload) return null;
+  // Already an IdeaSnapshot shape
+  if (payload.plan && payload.plan.plan_id) {
+    const clone = { ...payload };
+    clone.plan = { ...payload.plan };
+    clone.plan.trade_detail = clone.plan.trade_detail || clone.plan.idea_url || clone.trade_detail || clone.idea_url;
+    clone.plan.idea_url = clone.plan.idea_url || clone.plan.trade_detail;
+    clone.trade_detail = clone.trade_detail || clone.plan.trade_detail;
+    clone.idea_url = clone.idea_url || clone.trade_detail;
+    clone.warnings = clone.warnings || clone.plan.warnings || [];
+    return clone;
+  }
+
+  const tradeLink = payload.trade_detail || payload.idea_url || null;
+  const planBlock = {
+    plan_id: payload.plan_id,
+    version: payload.version,
+    symbol: payload.symbol,
+    style: payload.style,
+    bias: payload.bias,
+    setup: payload.setup,
+    entry: payload.entry,
+    stop: payload.stop,
+    targets: payload.targets || [],
+    rr_to_t1: payload.rr_to_t1,
+    confidence: payload.confidence,
+    notes: payload.notes,
+    decimals: payload.decimals ?? 2,
+    charts_params: payload.charts_params || {},
+    warnings: payload.warnings || [],
+    trade_detail: tradeLink,
+    idea_url: tradeLink,
+  };
+
+  return {
+    plan: planBlock,
+    summary: payload.summary || null,
+    volatility_regime: payload.volatility_regime || null,
+    htf: payload.htf || null,
+    data_quality: payload.data_quality || null,
+    chart_url: payload.chart_url || null,
+    options: payload.options || null,
+    why_this_works: payload.why_this_works || [],
+    invalidation: payload.invalidation || [],
+    risk_note: payload.risk_note || null,
+    calc_notes: payload.calc_notes || null,
+    warnings: payload.warnings || [],
+  };
 }
 
 function populate() {
   const plan = ideaSnapshot.plan || {};
-  const planData = ideaSnapshot.plan || {};
+  const planData = plan;
   const targets = planData.targets || [];
   decimals = planData.decimals ?? ideaSnapshot.summary?.decimals ?? 2;
 
