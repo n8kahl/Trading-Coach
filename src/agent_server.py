@@ -650,12 +650,17 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
     if entry <= 0:
         return None
     decimals = 2
-    stop_multiple = 0.5
-    tp1_multiple = 0.6
-    tp2_multiple = 0.9
-    stop = entry - atr * stop_multiple if atr else entry * 0.998
-    tp1 = entry + atr * tp1_multiple if atr else entry * 1.002
-    tp2 = entry + atr * tp2_multiple if atr else entry * 1.004
+    stop_multiple = 1.0
+    tp1_multiple = 1.8
+    tp2_multiple = 3.0
+    if atr:
+        stop = entry - atr * stop_multiple
+        tp1 = entry + atr * tp1_multiple
+        tp2 = entry + atr * tp2_multiple
+    else:
+        stop = entry * 0.992
+        tp1 = entry * 1.01
+        tp2 = entry * 1.02
     rr = (tp1 - entry) / (entry - stop) if entry != stop else 0.0
 
     plan_id = uuid.uuid4().hex[:10]
