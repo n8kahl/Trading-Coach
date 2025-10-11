@@ -596,6 +596,16 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "trade_detail": trade_detail_url,
         "idea_url": trade_detail_url,
     }
+    logger.info(
+        "watch plan generated",
+        extra={
+            "symbol": symbol,
+            "style": style,
+            "plan_id": plan_id,
+            "trade_detail": trade_detail_url,
+            "idea_url": trade_detail_url,
+        },
+    )
 
     calc_notes: Dict[str, Any] = {}
     atr_val = _safe_number(indicators.get("atr14"))
@@ -2372,6 +2382,16 @@ async def gpt_plan(
             return fallback
         raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
+    logger.info(
+        "gpt_plan raw result received",
+        extra={
+            "symbol": symbol,
+            "style": first.get("style"),
+            "contains_plan": bool(first.get("plan")),
+            "planning_context": first.get("planning_context"),
+            "available_keys": sorted(first.keys()),
+        },
+    )
 
     snapshot = first.get("market_snapshot") or {}
     indicators = (snapshot.get("indicators") or {})
@@ -2658,6 +2678,19 @@ async def gpt_plan(
     charts_params_output = chart_params_payload or None
     chart_url_output = chart_url_value or None
 
+    logger.info(
+        "plan response ready",
+        extra={
+            "symbol": symbol,
+            "plan_id": plan_id,
+            "version": version,
+            "planning_context": planning_context_value,
+            "trade_detail": trade_detail_url,
+            "idea_url": trade_detail_url,
+            "offline_basis_keys": sorted((offline_basis or {}).keys()) if offline_basis else None,
+        },
+    )
+
     return PlanResponse(
         plan_id=plan_id,
         version=version,
@@ -2699,7 +2732,6 @@ async def gpt_plan(
         data_quality=data_quality,
         debug=debug_payload or None,
     )
-
 
 @app.post("/internal/idea/store", include_in_schema=False, tags=["internal"])
 async def internal_idea_store(payload: IdeaStoreRequest, request: Request) -> IdeaStoreResponse:
