@@ -112,6 +112,20 @@ export const IdeaSnapshot = z.object({
   why_this_works: z.array(z.string()),
   invalidation: z.array(z.string()).optional(),
   risk_note: z.string().nullable().optional(),
+  calc_notes: z
+    .object({
+      atr14: z.number().optional(),
+      stop_multiple: z.number().optional(),
+      rr_inputs: z
+        .object({
+          entry: z.number().optional(),
+          stop: z.number().optional(),
+          tp1: z.number().optional(),
+        })
+        .optional(),
+    })
+    .nullable()
+    .optional(),
   planning_context: z.enum(["live", "offline", "backtest"]).optional(),
   offline_basis: OfflineBasis,
 });
