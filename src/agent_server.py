@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
 from urllib.parse import urlencode, quote, urlsplit, urlunsplit, parse_qsl
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 
 from .config import get_settings
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
@@ -438,9 +438,9 @@ def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str
     if not host:
         host = headers.get("host") or request.url.netloc
 
-    # Always point trade_detail to the shareable viewer page that accepts plan_id + version
+    # Prefer pretty permalink under /idea/{plan_id} (content-negotiated)
     root = f"{scheme}://{host}" if host else str(request.base_url).rstrip("/")
-    path = "/app/idea.html"
+    path = f"/idea/{plan_id}"
     base = f"{root.rstrip('/')}{path}"
     logger.info(
         "trade_detail components resolved",
@@ -453,10 +453,30 @@ def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str
             "xfwd_proto": headers.get("x-forwarded-proto"),
             "xfwd_host": headers.get("x-forwarded-host"),
             "forwarded": headers.get("forwarded"),
-            "resolved_url": f"{base}?plan_id={plan_id}&v={version}",
+            "resolved_url": base,
         },
     )
-    return f"{base}?plan_id={quote(plan_id)}&v={int(version)}"
+    return base
+
+
+def _generate_plan_slug(symbol: str, style: Optional[str], direction: Optional[str], snapshot: Dict[str, Any]) -> str:
+    """Generate a deterministic, human-readable plan_id slug.
+
+    Format: {symbol-lower}-{style-lower}-{direction-lower}-{YYYY-MM}
+    Fallbacks: unknown values become 'unknown'.
+    """
+    import datetime as _dt
+
+    sym = (symbol or "").strip().lower() or "unknown"
+    sty = (style or "").strip().lower() or "unknown"
+    drn = (direction or "").strip().lower() or "unknown"
+    ts = (snapshot or {}).get("timestamp_utc")
+    try:
+        when = _dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00")) if ts else _dt.datetime.utcnow()
+    except Exception:
+        when = _dt.datetime.utcnow()
+    stamp = when.strftime("%Y-%m")
+    return f"{sym}-{sty}-{drn}-{stamp}"
 
 
 def _extract_plan_core(first: Dict[str, Any], plan_id: str, version: int, decimals: int | None) -> Dict[str, Any]:
@@ -2401,12 +2421,14 @@ async def gpt_plan(
     raw_plan = first.get("plan") or {}
     plan: Dict[str, Any] = dict(raw_plan)
     raw_plan_id = str(plan.get("plan_id") or "").strip()
-    plan_id = raw_plan_id or uuid.uuid4().hex[:10]
     raw_version = plan.get("version")
     try:
         version = int(raw_version) if raw_version is not None else 1
     except (TypeError, ValueError):
         version = 1
+    # Determine direction for slugging
+    direction_hint = plan.get("direction") or (snapshot.get("trend") or {}).get("direction_hint")
+    plan_id = raw_plan_id or _generate_plan_slug(symbol, first.get("style"), direction_hint, snapshot)
     trade_detail_url = _build_trade_detail_url(request, plan_id, version)
 
     plan["plan_id"] = plan_id
@@ -2753,12 +2775,20 @@ async def internal_idea_store(payload: IdeaStoreRequest, request: Request) -> Id
 
 
 @app.get("/idea/{plan_id}")
-async def get_latest_idea(plan_id: str) -> Dict[str, Any]:
+async def get_latest_idea(plan_id: str, request: Request) -> Any:
+    accept = (request.headers.get("accept") or "").lower()
+    if "text/html" in accept:
+        url = f"/app/idea.html?plan_id={quote(plan_id)}"
+        return RedirectResponse(url=url, status_code=302)
     return await _get_idea_snapshot(plan_id)
 
 
 @app.get("/idea/{plan_id}/{version}")
-async def get_idea_version(plan_id: str, version: int) -> Dict[str, Any]:
+async def get_idea_version(plan_id: str, version: int, request: Request) -> Any:
+    accept = (request.headers.get("accept") or "").lower()
+    if "text/html" in accept:
+        url = f"/app/idea.html?plan_id={quote(plan_id)}&v={int(version)}"
+        return RedirectResponse(url=url, status_code=302)
     return await _get_idea_snapshot(plan_id, version=version)
 
 
