@@ -1,6 +1,6 @@
 import { IdeaSnapshot, type TIdeaSnapshot } from "@/lib/types";
 
-const BASE_URL = "https://trading-coach-production.up.railway.app";
+export const API_BASE = "https://trading-coach-production.up.railway.app";
 
 export class SnapshotNotFoundError extends Error {
   constructor(message = "Snapshot not found") {
@@ -11,7 +11,7 @@ export class SnapshotNotFoundError extends Error {
 
 export async function fetchIdea(planId: string, version?: string | number): Promise<TIdeaSnapshot> {
   const path = version ? `/idea/${planId}/${version}` : `/idea/${planId}`;
-  const res = await fetch(`${BASE_URL}${path}`, { cache: "no-store" });
+  const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
 
   if (!res.ok) {
     if (res.status === 404) {

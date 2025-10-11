@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 
 import ChartEmbed from "@/components/ChartEmbed";
@@ -8,6 +8,7 @@ import ConfluencePanel from "@/components/ConfluencePanel";
 import ContractsTable from "@/components/ContractsTable";
 import EducationRail from "@/components/EducationRail";
 import IdeaHeader from "@/components/IdeaHeader";
+import LiveCoaching from "@/components/LiveCoaching";
 import Playbook from "@/components/Playbook";
 import Provenance from "@/components/Provenance";
 import QuickPlan from "@/components/QuickPlan";
@@ -40,12 +41,21 @@ export default function IdeaSnapshotClient({ initialData, planId, version }: Ide
   });
 
   const [highlightedRows, setHighlightedRows] = useState<Set<string>>(new Set());
+  const previousSnapshot = useRef<TIdeaSnapshot | null>(initialData);
 
   useEffect(() => {
-    if (!data?.options?.table || !initialData?.options?.table) return;
-    const changed = new Set<string>();
+    if (!data?.options?.table) {
+      previousSnapshot.current = data ?? previousSnapshot.current;
+      return;
+    }
+    const previous = previousSnapshot.current?.options?.table;
+    if (!previous) {
+      previousSnapshot.current = data;
+      return;
+    }
+    const changes = new Set<string>();
     data.options.table.slice(0, 6).forEach((row) => {
-      const baseline = initialData.options?.table?.find((item) => item.label === row.label);
+      const baseline = previous.find((item) => item.label === row.label);
       if (!baseline) return;
       if (
         baseline.price !== row.price ||
@@ -54,15 +64,16 @@ export default function IdeaSnapshotClient({ initialData, planId, version }: Ide
         baseline.iv !== row.iv ||
         baseline.liquidity_score !== row.liquidity_score
       ) {
-        changed.add(row.label);
+        changes.add(row.label);
       }
     });
-    if (changed.size > 0) {
-      setHighlightedRows(changed);
-      const timer = setTimeout(() => setHighlightedRows(new Set()), 1500);
+    if (changes.size > 0) {
+      setHighlightedRows(changes);
+      const timer = setTimeout(() => setHighlightedRows(new Set()), 1600);
       return () => clearTimeout(timer);
     }
-  }, [data?.options?.table, initialData?.options?.table]);
+    previousSnapshot.current = data;
+  }, [data]);
 
   const hasOptions = Boolean(data?.options?.table && data.options.table.length > 0);
 
@@ -100,19 +111,18 @@ export default function IdeaSnapshotClient({ initialData, planId, version }: Ide
     );
   }
 
-  const plan = data.plan;
-  const confidence = plan.confidence;
-  const snapshot = data;
-
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 pb-20 pt-10">
-      <IdeaHeader idea={snapshot} isRefreshing={isValidating} />
-      <SanityBanner plan={snapshot.plan} />
-      <QuickPlan idea={snapshot} />
-      <section className="grid gap-6 lg:grid-cols-[3fr,2fr]">
-        <ChartEmbed chartUrl={snapshot.chart_url} />
+      <IdeaHeader idea={data} isRefreshing={isValidating} />
+      <SanityBanner plan={data.plan} />
+      <QuickPlan idea={data} />
+      <section className="grid gap-6 xl:grid-cols-[3fr,2fr]">
+        <ChartEmbed chartUrl={data.chart_url} />
+        <LiveCoaching idea={data} />
+      </section>
+      <section className="grid gap-6 xl:grid-cols-[3fr,2fr]">
         {hasOptions ? (
-          <ContractsTable idea={snapshot} highlightedRows={highlightedRows} onRefresh={() => mutate()} />
+          <ContractsTable idea={data} highlightedRows={highlightedRows} onRefresh={() => mutate()} />
         ) : (
           <Card className="min-h-[320px]">
             <CardContent className="flex h-full flex-col items-center justify-center text-center text-muted-foreground">
@@ -121,15 +131,13 @@ export default function IdeaSnapshotClient({ initialData, planId, version }: Ide
             </CardContent>
           </Card>
         )}
+        <ConfluencePanel idea={data} />
       </section>
-      <section className="grid gap-6 lg:grid-cols-[3fr,2fr]">
-        <ConfluencePanel idea={snapshot} />
-        <EducationRail idea={snapshot} />
+      <section className="grid gap-6 xl:grid-cols-[3fr,2fr]">
+        <Playbook idea={data} />
+        <EducationRail idea={data} />
       </section>
-      <section className="grid gap-6 lg:grid-cols-[3fr,2fr]">
-        <Playbook idea={snapshot} />
-        <Provenance idea={snapshot} />
-      </section>
+      <Provenance idea={data} />
     </div>
   );
 }
