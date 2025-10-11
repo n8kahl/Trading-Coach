@@ -436,11 +436,9 @@ def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str
     if not host:
         host = headers.get("host") or request.url.netloc
 
-    slug_pattern = r"^[a-z0-9]+(?:_[a-z0-9]+)*_v\d+$"
-    is_slug_plan = bool(re.match(slug_pattern, plan_id.lower()))
-    path = f"/ideas/{plan_id}" if is_slug_plan else f"/idea/{plan_id}"
+    # Always point trade_detail to the shareable viewer page that accepts plan_id + version
     root = f"{scheme}://{host}" if host else str(request.base_url).rstrip("/")
-    base = f"{root.rstrip('/')}{path}"
+    base = f"{root.rstrip('/')}/app/idea.html"
     logger.debug(
         "trade_detail components resolved",
         extra={
@@ -454,9 +452,7 @@ def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str
             "forwarded": headers.get("forwarded"),
         },
     )
-    if is_slug_plan:
-        return base
-    return f"{base}?v={version}"
+    return f"{base}?plan_id={quote(plan_id)}&v={int(version)}"
 
 
 def _extract_plan_core(first: Dict[str, Any], plan_id: str, version: int, decimals: int | None) -> Dict[str, Any]:
