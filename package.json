@@ -1,0 +1,10 @@
+{
+  "name": "trading-coach",
+  "private": true,
+  "description": "Root package for coordinating Next.js frontend builds.",
+  "scripts": {
+    "build": "npm --prefix idea-page ci && npm --prefix idea-page run build",
+    "start": "npm --prefix idea-page run start -- --hostname 0.0.0.0 --port ${PORT:-3000}",
+    "dev": "npm --prefix idea-page run dev"
+  }
+}
