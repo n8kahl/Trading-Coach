@@ -54,13 +54,10 @@
     title: params.get('title'),
   };
   const emaTokens = parseList(params.get('ema'));
-  const keyLevels = parseFloatList(params.get('levels'));
-  const overlayValues = [
-    plan.entry,
-    plan.stop,
-    ...plan.tps,
-    ...keyLevels,
-  ].filter((value) => Number.isFinite(value));
+  let keyLevels = parseFloatList(params.get('levels'));
+  let overlayValues = [];
+  const scalePlanToken = (params.get('scale_plan') || 'auto').toLowerCase();
+  let emaSeries = [];
 
   const container = document.getElementById('tv_chart_container');
   const legendEl = document.getElementById('plan_legend');
@@ -106,6 +103,18 @@
     priceFormat: { type: 'volume' },
     scaleMargins: { top: 0.7, bottom: 0 },
   });
+
+  emaSeries = emaTokens.reduce((acc, token) => {
+    const span = parseInt(token, 10);
+    if (!Number.isFinite(span) || span <= 0) return acc;
+    const series = chart.addLineSeries({
+      lineWidth: 2,
+      color: theme === 'light' ? '#0ea5e9' : '#38bdf8',
+      title: `EMA${span}`,
+    });
+    acc.push({ span, series });
+    return acc;
+  }, []);
 
   const priceLines = [];
   const clearPriceLines = () => {
@@ -192,6 +201,57 @@
       }));
       volumeSeries.setData(volumeData);
 
+      const lastPrice = bars[bars.length - 1]?.close ?? null;
+      let scaleMultiplier = 1;
+      if (scalePlanToken !== 'off') {
+        if (scalePlanToken === 'auto') {
+          if (Number.isFinite(plan.entry) && Number.isFinite(lastPrice) && plan.entry && lastPrice) {
+            const ratio = lastPrice / plan.entry;
+            if (ratio > 1.2 || ratio < 0.8) {
+              scaleMultiplier = ratio;
+            }
+          }
+        } else {
+          const manual = parseFloat(scalePlanToken);
+          if (Number.isFinite(manual) && manual > 0) {
+            scaleMultiplier = manual;
+          }
+        }
+      }
+
+      if (scaleMultiplier !== 1 && Number.isFinite(scaleMultiplier) && scaleMultiplier > 0) {
+        if (Number.isFinite(plan.entry)) plan.entry *= scaleMultiplier;
+        if (Number.isFinite(plan.stop)) plan.stop *= scaleMultiplier;
+        plan.tps = plan.tps.map((tp) => (Number.isFinite(tp) ? tp * scaleMultiplier : tp));
+        keyLevels = keyLevels.map((lvl) => (Number.isFinite(lvl) ? lvl * scaleMultiplier : lvl));
+      }
+
+      overlayValues = [
+        plan.entry,
+        plan.stop,
+        ...plan.tps,
+        ...keyLevels,
+      ].filter((value) => Number.isFinite(value));
+
+      if (emaSeries.length) {
+        emaSeries.forEach(({ span, series }) => {
+          const values = [];
+          const weight = 2 / (span + 1);
+          let emaValue = null;
+          for (let i = 0; i < candleData.length; i += 1) {
+            const close = candleData[i].close;
+            if (close == null) continue;
+            if (emaValue === null) {
+              emaValue = close;
+            } else {
+              emaValue = close * weight + emaValue * (1 - weight);
+            }
+            values.push({ time: candleData[i].time, value: emaValue });
+          }
+          series.setData(values);
+        });
+      }
+
       clearPriceLines();
       addPriceLine(plan.entry, 'Entry', '#facc15');
       addPriceLine(plan.stop, 'Stop', '#ef4444');
@@ -201,7 +261,6 @@
         .sort((a, b) => b - a)
         .forEach((level, idx) => addPriceLine(level, `Level ${idx + 1}`, '#6366f1', LightweightCharts.LineStyle.Dashed));
 
-      const lastPrice = bars[bars.length - 1]?.close ?? null;
       renderLegend(lastPrice);
       const priceScale = chart.priceScale('right');
       if (overlayValues.length) {
@@ -236,32 +295,3 @@
   });
   window.setInterval(fetchBars, 60000);
 })();
-  const emaSeries = emaTokens.reduce((acc, token) => {
-    const span = parseInt(token, 10);
-    if (!Number.isFinite(span) || span <= 0) return acc;
-    const series = chart.addLineSeries({
-      lineWidth: 2,
-      color: theme === 'light' ? '#0ea5e9' : '#38bdf8',
-      title: `EMA${span}`,
-    });
-    acc.push({ span, series });
-    return acc;
-  }, []);
-      if (emaSeries.length) {
-        emaSeries.forEach(({ span, series }) => {
-          const values = [];
-          let k = 2 / (span + 1);
-          let emaVal = null;
-          for (let i = 0; i < candleData.length; i += 1) {
-            const close = candleData[i].close;
-            if (close == null) continue;
-            if (emaVal === null) {
-              emaVal = close;
-            } else {
-              emaVal = close * k + emaVal * (1 - k);
-            }
-            values.push({ time: candleData[i].time, value: emaVal });
-          }
-          series.setData(values);
-        });
-      }

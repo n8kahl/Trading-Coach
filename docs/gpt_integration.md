@@ -335,7 +335,10 @@ pre-baked trade levels.
   `120`, `240`, `1D`); minute/hours strings like `1m` and `1h` are also
   normalized automatically. Key levels extracted from the response are included
   automatically in `levels` so the chart renders dotted reference lines for
-  session/previous highs and lows.
+  session/previous highs and lows. Include `scale_plan=auto` (default) to let
+  the viewer rescale legacy entries/stops/targets/levels to the latest prices
+  after splits or large gaps; set `scale_plan=off` to render the raw values or
+  pass an explicit multiplier (e.g. `scale_plan=0.5`).
 - **Plan rescaling.** The viewer defaults to `scale_plan=auto`, which rescales
   entry/stop/targets/levels to the latest close when the plan was built on a
   different price basis (splits, stale snapshots, etc.). Add `scale_plan=off`
