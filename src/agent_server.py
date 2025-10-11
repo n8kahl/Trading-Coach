@@ -35,7 +35,12 @@ from .config import get_settings
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
 from .charts_api import router as charts_router, get_candles, normalize_interval
 from .gpt_sentiment import router as gpt_sentiment_router
-from .scanner import scan_market
+from .scanner import (
+    scan_market,
+    _apply_tp_logic,
+    _base_targets_for_style,
+    _normalize_trade_style,
+)
 from .tradier import (
     TradierNotConfiguredError,
     fetch_option_chain,
@@ -651,12 +656,66 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         return None
     decimals = 2
     stop_multiple = 0.5
-    tp1_multiple = 0.6
-    tp2_multiple = 0.9
     stop = entry - atr * stop_multiple if atr else entry * 0.998
-    tp1 = entry + atr * tp1_multiple if atr else entry * 1.002
-    tp2 = entry + atr * tp2_multiple if atr else entry * 1.004
-    rr = (tp1 - entry) / (entry - stop) if entry != stop else 0.0
+    style_normalized = _normalize_trade_style(style)
+    symbol_upper = symbol.upper()
+    index_symbols = {"SPY", "QQQ", "IWM", "ES", "NQ", "YM", "RTY"}
+    is_index = symbol_upper in index_symbols
+    min_rr = 1.5 if style_normalized in {"scalp", "intraday"} and is_index else 1.2
+
+    volatility_block = snapshot.get("volatility") or {}
+    expected_move = _safe_number(volatility_block.get("expected_move_horizon"))
+
+    base_targets = _base_targets_for_style(
+        style=style_normalized,
+        bias="long",
+        entry=entry,
+        stop=stop,
+        atr=atr if atr > 0 else None,
+        expected_move=expected_move,
+        min_rr=min_rr,
+        prefer_em_cap=True,
+    )
+    if not base_targets:
+        fallback_span = atr if atr > 0 else max(entry * 0.01, abs(entry - stop), 0.5)
+        base_targets = [entry + fallback_span, entry + fallback_span * 1.5]
+    if len(base_targets) == 1:
+        bump = atr if atr > 0 else max(abs(entry - stop), entry * 0.01, 0.5)
+        base_targets.append(base_targets[0] + bump)
+
+    key_levels = context.get("key_levels") or {}
+    levels_numeric = [float(val) for val in key_levels.values() if isinstance(val, (int, float))]
+    indicator_block = snapshot.get("indicators") or {}
+    tp_ctx = {
+        "key": {name: float(val) for name, val in key_levels.items() if isinstance(val, (int, float))},
+        "vol_profile": {},
+        "vwap": _safe_number(indicator_block.get("vwap")),
+        "ema9": _safe_number(indicator_block.get("ema9")),
+        "ema20": _safe_number(indicator_block.get("ema20")),
+        "ema50": _safe_number(indicator_block.get("ema50")),
+        "fib_up": {},
+        "fib_down": {},
+        "htf_levels": levels_numeric,
+        "expected_move_horizon": expected_move,
+        "atr": atr,
+    }
+
+    targets, tp_warnings, tp_debug = _apply_tp_logic(
+        symbol=symbol,
+        style=style_normalized,
+        bias="long",
+        entry=entry,
+        stop=stop,
+        base_targets=base_targets,
+        ctx=tp_ctx,
+        min_rr=min_rr,
+        atr=atr,
+        expected_move=expected_move,
+        prefer_em_cap=True,
+    )
+    if not targets:
+        return None
+    rr = (targets[0] - entry) / (entry - stop) if entry != stop else 0.0
 
     plan_id = uuid.uuid4().hex[:10]
     # Version bump based on existing snapshots for this plan_id
@@ -665,15 +724,20 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         version = (existing[-1].get("plan", {}).get("version", len(existing)) + 1) if existing else 1
     trade_detail_url = _build_trade_detail_url(request, plan_id, version)
 
+    rounded_targets = [round(tp, decimals) for tp in targets]
+    plan_warnings = ["Market closed — treat as next-session watch plan"]
+    if tp_warnings:
+        plan_warnings.extend(tp_warnings)
+
     plan_block = {
         "direction": "long",
         "entry": round(entry, decimals),
         "stop": round(stop, decimals),
-        "targets": [round(tp1, decimals), round(tp2, decimals)],
+        "targets": rounded_targets,
         "confidence": 0.32,
         "risk_reward": round(rr, 2),
         "notes": "Watch plan: market closed; awaiting next session trigger.",
-        "warnings": ["Market closed — treat as next-session watch plan"],
+        "warnings": plan_warnings,
         "atr": round(atr, 4) if atr else None,
         "trade_detail": trade_detail_url,
         "idea_url": trade_detail_url,
@@ -686,6 +750,8 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
             "plan_id": plan_id,
             "trade_detail": trade_detail_url,
             "idea_url": trade_detail_url,
+            "targets": targets[:2],
+            "tp_debug": tp_debug,
         },
     )
 
@@ -694,15 +760,33 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
     if atr_val is not None:
         calc_notes["atr14"] = atr_val
     calc_notes["stop_multiple"] = round(float(stop_multiple), 3)
+    calc_notes["min_rr"] = float(min_rr)
+    if expected_move is not None:
+        calc_notes["expected_move_horizon"] = expected_move
+    if tp_debug:
+        calc_notes["tp_logic"] = tp_debug
     calc_notes["rr_inputs"] = {
         "entry": plan_block["entry"],
         "stop": plan_block["stop"],
         "tp1": plan_block["targets"][0],
     }
 
+    snapped_labels: List[str] = []
+    tolerance = max(0.05, (atr or 0.0) * 0.25)
+    for target in plan_block["targets"]:
+        label = None
+        for name, val in key_levels.items():
+            if not isinstance(val, (int, float)):
+                continue
+            if abs(float(val) - target) <= tolerance:
+                label = f"{name}:{round(float(val), decimals)}"
+                break
+        if label:
+            snapped_labels.append(label)
+
     htf = {
         "bias": (snapshot.get("trend") or {}).get("ema_stack") or "neutral",
-        "snapped_targets": [],
+        "snapped_targets": snapped_labels,
     }
     data_quality = {
         "series_present": bool(context.get("bars")),

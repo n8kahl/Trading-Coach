@@ -24,6 +24,38 @@ TZ_ET = "America/New_York"
 RTH_START_MINUTE = 9 * 60 + 30
 RTH_END_MINUTE = 16 * 60
 
+_STYLE_TARGET_PRESETS: Dict[str, Dict[str, Any]] = {
+    "scalp": {
+        "measure": "atr",
+        "tp1_range": (0.35, 0.50),
+        "tp2_range": (0.70, 0.90),
+    },
+    "intraday": {
+        "measure": "atr",
+        "tp1_range": (0.75, 1.00),
+        "tp2_range": (1.25, 1.50),
+    },
+    "swing": {
+        "measure": "atr",
+        "tp1_range": (1.00, 1.50),
+        "tp2_range": (2.00, 3.00),
+    },
+    "leap": {
+        "measure": "em",
+        "tp1_range": (1.00, 1.30),
+        "tp2_range": (1.60, 2.00),
+    },
+}
+
+_PRICE_INCREMENT_OVERRIDES: Dict[str, float] = {
+    "ES": 0.25,
+    "NQ": 0.25,
+    "YM": 1.0,
+    "RTY": 0.10,
+    "CL": 0.01,
+    "GC": 0.10,
+}
+
 
 @dataclass(slots=True)
 class Plan:
@@ -73,51 +105,6 @@ def rr(entry: float, stop: float, tp: float, bias: str) -> float:
     return max(0.0, reward / risk)
 
 
-def _within_expected_move(entry: float, tp: float, em: Optional[float], prefer_cap: bool) -> bool:
-    if not prefer_cap or em is None or not math.isfinite(em):
-        return True
-    return abs(tp - entry) <= em
-
-
-def snap_targets_with_rr(
-    *,
-    entry: float,
-    stop: float,
-    bias: str,
-    tp_raws: List[float],
-    htf_levels: List[float],
-    min_rr: float,
-    em: Optional[float],
-    prefer_em_cap: bool,
-    snap_window_atr: float = 0.30,
-    atr: Optional[float] = None,
-) -> List[float]:
-    window = (atr or 0.0) * snap_window_atr
-    levels_sorted = sorted({float(level) for level in htf_levels if math.isfinite(level)})
-    tps_final: List[float] = []
-
-    for tp_raw in tp_raws:
-        if not math.isfinite(tp_raw):
-            continue
-        candidate: Optional[float] = None
-        if levels_sorted and atr:
-            nearest = min(levels_sorted, key=lambda lvl: abs(lvl - tp_raw))
-            if abs(nearest - tp_raw) <= window:
-                candidate = nearest
-
-        for tp_try in ([candidate] if candidate is not None else []) + [tp_raw]:
-            if tp_try is None or not math.isfinite(tp_try):
-                continue
-            if not _within_expected_move(entry, tp_try, em, prefer_em_cap):
-                continue
-            if rr(entry, stop, tp_try, bias) >= min_rr:
-                tps_final.append(tp_try)
-                break
-
-    tps_final = sorted(set(tps_final), reverse=(bias == "short"))
-    return tps_final[:2]
-
-
 def _normalize_trade_style(style: str | None) -> str:
     token = (style or "").strip().lower()
     if token == "leaps":
@@ -144,68 +131,336 @@ def _base_targets_for_style(
         return []
     atr_val = float(atr or 0.0)
     expected_move_val = float(expected_move) if isinstance(expected_move, (int, float)) else None
+    preset = _STYLE_TARGET_PRESETS.get(style_key, _STYLE_TARGET_PRESETS["intraday"])
+    measure_type = preset.get("measure", "atr")
+    measure_value = atr_val if measure_type == "atr" else expected_move_val
+    if measure_value is None or not math.isfinite(measure_value) or measure_value <= 0:
+        # Fallback ordering: ATR → expected move → risk
+        if atr_val > 0:
+            measure_value = atr_val
+        elif expected_move_val and expected_move_val > 0:
+            measure_value = expected_move_val
+        else:
+            measure_value = risk
 
-    rules = {
-        "scalp": {
-            "tp1": {"atr_mult": 0.7, "em_mult": 0.35},
-            "tp2": {"rr_mult": 2.0, "atr_mult": 1.2, "em_mult": 0.8},
-        },
-        "intraday": {
-            "tp1": {"atr_mult": 0.9, "em_mult": 0.55},
-            "tp2": {"rr_mult": 2.2, "atr_mult": 1.5, "em_mult": 0.9},
-        },
-        "swing": {
-            "tp1": {"atr_mult": 1.0, "em_mult": 0.6},
-            "tp2": {"rr_mult": 2.5, "atr_mult": 2.0, "em_mult": 1.0},
-        },
-        "leap": {
-            "tp1": {"pct": 0.06, "rr_mult": 1.0, "em_mult": 0.6},
-            "tp2": {"pct": 0.12, "rr_mult": 2.0, "em_mult": 1.0},
-        },
-    }
+    def _offset_from_range(mult_range: Tuple[float, float]) -> float:
+        low, high = mult_range
+        base_mult = (float(low) + float(high)) / 2.0
+        offset = base_mult * measure_value
+        min_distance = max(min_rr * risk, 0.0)
+        if offset < min_distance:
+            offset = float(high) * measure_value
+        if offset < min_distance:
+            offset = min_distance
+        return max(offset, 0.0)
 
-    style_rules = rules.get(style_key, rules["intraday"])
-    offsets: List[float] = []
+    tp1_offset = _offset_from_range(tuple(preset["tp1_range"]))
+    tp2_offset = _offset_from_range(tuple(preset["tp2_range"]))
 
-    def _compute_offset(spec: Dict[str, float]) -> float | None:
-        base = min_rr * risk
-        rr_mult = spec.get("rr_mult")
-        if rr_mult is not None and rr_mult > 0:
-            base = max(base, float(rr_mult) * risk)
-        atr_mult = spec.get("atr_mult")
-        if atr_mult is not None and atr_mult > 0 and atr_val > 0:
-            base = max(base, float(atr_mult) * atr_val)
-        pct_mult = spec.get("pct")
-        if pct_mult is not None and pct_mult > 0:
-            base = max(base, abs(entry) * float(pct_mult))
-        if prefer_em_cap and expected_move_val is not None:
-            em_mult = spec.get("em_mult")
-            if em_mult is not None and em_mult > 0:
-                base = min(base, expected_move_val * float(em_mult))
-        if base <= 0 or not math.isfinite(base):
-            return None
-        return base
+    em_limit = None
+    if expected_move_val and math.isfinite(expected_move_val) and expected_move_val > 0:
+        em_limit = float(expected_move_val) * (1.0 if prefer_em_cap else 1.10)
 
-    for key in ("tp1", "tp2"):
-        spec = style_rules.get(key)
-        if not spec:
-            continue
-        offset = _compute_offset(spec)
-        if offset is not None and offset > 0:
-            offsets.append(offset)
+    if em_limit is not None:
+        tp1_offset = min(tp1_offset, em_limit)
+        tp2_offset = min(tp2_offset, em_limit)
 
-    unique_offsets: List[float] = []
-    for offset in offsets:
-        if all(abs(offset - existing) > 1e-6 for existing in unique_offsets):
-            unique_offsets.append(offset)
+    if tp2_offset < tp1_offset:
+        tp2_offset = tp1_offset
 
     targets: List[float] = []
-    for offset in unique_offsets:
+    if bias == "long":
+        targets.append(entry + tp1_offset)
+        targets.append(entry + tp2_offset)
+    else:
+        targets.append(entry - tp1_offset)
+        targets.append(entry - tp2_offset)
+    return [float(t) for t in targets if math.isfinite(t)]
+
+
+def _price_increment(symbol: str | None, reference: float) -> float:
+    sym = (symbol or "").upper()
+    if sym in _PRICE_INCREMENT_OVERRIDES:
+        return _PRICE_INCREMENT_OVERRIDES[sym]
+    if reference < 5:
+        return 0.01
+    if reference < 25:
+        return 0.02
+    return 0.05
+
+
+def _round_to_increment(value: float, increment: float) -> float:
+    if increment <= 0:
+        return round(float(value), 4)
+    scaled = round(value / increment)
+    return round(scaled * increment, 4)
+
+
+def _expected_move_limit(expected_move: float | None, prefer_em_cap: bool) -> float | None:
+    if expected_move is None:
+        return None
+    try:
+        em_val = abs(float(expected_move))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(em_val) or em_val <= 0:
+        return None
+    return em_val * (1.0 if prefer_em_cap else 1.10)
+
+
+def _clamp_to_em(entry: float, candidate: float, bias: str, em_limit: float | None) -> float:
+    if em_limit is None:
+        return candidate
+    if bias == "long":
+        max_price = entry + em_limit
+        return min(candidate, max_price)
+    max_price = entry - em_limit
+    return max(candidate, max_price)
+
+
+def _collect_priority_levels(entry: float, bias: str, ctx: Dict[str, Any]) -> List[Tuple[int, float, float, str]]:
+    levels: List[Tuple[int, float, float, str]] = []
+    symbol_levels: List[Dict[str, Any]] = []
+    if bias == "long":
+        symbol_levels.extend(_build_tp_candidates_long(entry, ctx))
+    else:
+        symbol_levels.extend(_build_tp_candidates_short(entry, ctx))
+
+    priority_map = {
+        "POC": 1,
+        "VAH": 1,
+        "VAL": 1,
+        "PRIOR_HIGH": 2,
+        "PRIOR_LOW": 2,
+        "ORB_HIGH": 2,
+        "ORB_LOW": 2,
+        "SESSION_HIGH": 2,
+        "SESSION_LOW": 2,
+        "WEEK_HIGH": 3,
+        "WEEK_LOW": 3,
+        "SWING_HIGH": 4,
+        "SWING_LOW": 4,
+        "VWAP": 4,
+        "EMA9": 4,
+        "EMA20": 4,
+        "EMA50": 4,
+    }
+
+    fib_tags = {"FIB0.618", "FIB0.786", "FIB1.0", "FIB1.272", "FIB1.618", "FIB2.0"}
+
+    for item in list(symbol_levels):
+        tag = (item.get("tag") or "").upper()
+        level_value = item.get("level")
+        if not isinstance(level_value, (int, float)):
+            continue
+        price = float(level_value)
+        if bias == "long" and price <= entry:
+            continue
+        if bias == "short" and price >= entry:
+            continue
+        priority = priority_map.get(tag, 5 if tag in fib_tags else 6)
+        distance = abs(price - entry)
+        levels.append((priority, distance, price, tag))
+
+    htf_levels = ctx.get("htf_levels") or []
+    for raw in htf_levels:
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if bias == "long" and price <= entry:
+            continue
+        if bias == "short" and price >= entry:
+            continue
+        distance = abs(price - entry)
+        levels.append((3, distance, price, "HTF"))
+
+    seen: set[float] = set()
+    unique_levels: List[Tuple[int, float, float, str]] = []
+    for priority, distance, price, tag in sorted(levels, key=lambda x: (x[0], x[1])):
+        key = round(price, 4)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_levels.append((priority, distance, price, tag))
+    if bias == "short":
+        unique_levels.sort(key=lambda x: (x[0], x[2]), reverse=False)
+    return unique_levels
+
+
+def _choose_snapped_target(
+    *,
+    base_price: float,
+    entry: float,
+    stop: float,
+    bias: str,
+    min_rr: float,
+    tick_size: float,
+    em_limit: float | None,
+    levels: List[Tuple[int, float, float, str]],
+    used_prices: List[float],
+    previous_price: float | None,
+) -> Tuple[float, str] | None:
+    tolerance = max(tick_size * 0.6, 0.01)
+    for _, _, price, tag in levels:
+        if any(abs(price - used) <= tolerance for used in used_prices):
+            continue
         if bias == "long":
-            targets.append(entry + offset)
+            if price < base_price - tolerance:
+                continue
+            if previous_price is not None and price <= previous_price + tolerance:
+                continue
+            distance = price - entry
         else:
-            targets.append(entry - offset)
-    return targets
+            if price > base_price + tolerance:
+                continue
+            if previous_price is not None and price >= previous_price - tolerance:
+                continue
+            distance = entry - price
+        if em_limit is not None:
+            limit_allowance = em_limit * 1.10
+            if distance > limit_allowance * 1.001:
+                continue
+        if rr(entry, stop, price, bias) < float(min_rr) - 1e-6:
+            continue
+        return price, tag
+    return None
+
+
+def _apply_tp_logic(
+    *,
+    symbol: str,
+    style: str | None,
+    bias: str,
+    entry: float,
+    stop: float,
+    base_targets: List[float],
+    ctx: Dict[str, Any],
+    min_rr: float,
+    atr: float | None,
+    expected_move: float | None,
+    prefer_em_cap: bool,
+    structural_tp1: float | None = None,
+) -> Tuple[List[float], List[str], Dict[str, Any]]:
+    tick_size = _price_increment(symbol, entry)
+    em_limit = _expected_move_limit(expected_move, prefer_em_cap)
+    sign = 1 if bias == "long" else -1
+
+    ordered_targets = list(base_targets[:2])
+    if structural_tp1 is not None:
+        ordered_targets[:1] = [structural_tp1]
+
+    used_prices: List[float] = []
+    results: List[float] = []
+    target_debug: Dict[str, Any] = {
+        "base": ordered_targets.copy(),
+        "snap": [],
+        "tick_size": tick_size,
+        "em_limit": em_limit,
+    }
+    levels = _collect_priority_levels(entry, bias, ctx)
+
+    for idx, base_price in enumerate(ordered_targets):
+        if not math.isfinite(base_price):
+            continue
+        candidate = float(base_price)
+        previous_price = results[idx - 1] if idx > 0 and results else None
+        snapped_choice = _choose_snapped_target(
+            base_price=candidate,
+            entry=entry,
+            stop=stop,
+            bias=bias,
+            min_rr=min_rr,
+            tick_size=tick_size,
+            em_limit=em_limit,
+            levels=levels,
+            used_prices=used_prices,
+            previous_price=previous_price,
+        )
+        snapped_price = None
+        snapped_tag = None
+        if snapped_choice is not None:
+            snapped_price, snapped_tag = snapped_choice
+
+        effective_limit = em_limit
+        if snapped_price is not None and em_limit is not None:
+            effective_limit = em_limit * 1.10
+        final_price = snapped_price if snapped_price is not None else candidate
+        final_price = _clamp_to_em(entry, final_price, bias, effective_limit)
+        final_price = _round_to_increment(final_price, tick_size)
+        results.append(final_price)
+        used_prices.append(final_price)
+        target_debug["snap"].append(
+            {
+                "index": idx,
+                "base": candidate,
+                "final": final_price,
+                "used_snapped": snapped_price is not None,
+                "tag": snapped_tag,
+            }
+        )
+
+    if not results:
+        return [], ["No valid targets computed"], target_debug
+
+    # Geometry enforcement
+    if bias == "long":
+        results = sorted(results)
+    else:
+        results = sorted(results, reverse=True)
+
+    # Ensure TP2 respects TP1 ordering
+    if len(results) >= 2:
+        increment = tick_size
+        if bias == "long" and results[1] <= results[0]:
+            results[1] = _round_to_increment(results[0] + max(increment, tick_size), tick_size)
+        if bias == "short" and results[1] >= results[0]:
+            results[1] = _round_to_increment(results[0] - max(increment, tick_size), tick_size)
+
+    warnings: List[str] = []
+    rr_tp1 = rr(entry, stop, results[0], bias)
+    if rr_tp1 < float(min_rr) - 1e-6:
+        atr_val = float(atr or 0.0)
+        risk = abs(entry - stop)
+        nudge = atr_val * 0.15 if atr_val > 0 else risk * 0.15
+        nudge = max(nudge, tick_size)
+        attempt = results[0] + sign * nudge
+        attempt = _clamp_to_em(entry, attempt, bias, em_limit)
+        snap_choice = _choose_snapped_target(
+            base_price=attempt,
+            entry=entry,
+            stop=stop,
+            bias=bias,
+            min_rr=min_rr,
+            tick_size=tick_size,
+            em_limit=em_limit,
+            levels=levels,
+            used_prices=results[1:] if len(results) > 1 else [],
+            previous_price=results[1] if len(results) > 1 else None,
+        )
+        snapped_tag = None
+        if snap_choice is not None:
+            attempt, snapped_tag = snap_choice
+        attempt = _round_to_increment(attempt, tick_size)
+        attempt_rr = rr(entry, stop, attempt, bias)
+        target_debug["rr_check"] = {
+            "initial_rr": rr_tp1,
+            "attempt_price": attempt,
+            "attempt_rr": attempt_rr,
+            "nudge": nudge,
+            "snap_tag": snapped_tag,
+        }
+        if attempt_rr >= float(min_rr) - 1e-6:
+            results[0] = attempt
+            if len(results) >= 2:
+                if bias == "long" and results[1] <= results[0]:
+                    results[1] = _round_to_increment(results[0] + tick_size, tick_size)
+                if bias == "short" and results[1] >= results[0]:
+                    results[1] = _round_to_increment(results[0] - tick_size, tick_size)
+        else:
+            warnings.append(f"TP1 R:R {attempt_rr:.2f} < {float(min_rr):.2f}; consider marking as watch plan")
+
+    return results[:2], warnings, target_debug
 
 
 def _strategy_min_rr(strategy_id: str) -> float:
@@ -794,6 +1049,7 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
     notes: List[str] = []
     plan: Plan | None = None
     tp1_dbg: Dict[str, Any] | None = None
+    tp_debug_info: Dict[str, Any] | None = None
 
     recent_slice = post_range.tail(20)
     retest_low = float(recent_slice["low"].min()) if not recent_slice.empty else float("nan")
@@ -815,24 +1071,31 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
             min_rr=min_rr,
         )
         if not base_targets:
-            base_targets = [entry + atr_value, entry + atr_value * 1.5]
-        tp2 = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
-        tp1_struct = _select_tp1_long(entry, stop, tp2, style, ctx, min_rr)
+            default_span = atr_value if atr_value > 0 else abs(entry - stop)
+            default_span = default_span if default_span and default_span > 0 else max(abs(entry - stop), 1.0)
+            base_targets = [entry + default_span, entry + default_span * 1.5]
+        if len(base_targets) == 1:
+            bump = atr_value if atr_value and atr_value > 0 else abs(entry - stop)
+            base_targets.append(base_targets[0] + (bump or 1.0))
+        tp2_seed = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
+        tp1_struct = _select_tp1_long(entry, stop, tp2_seed, style, ctx, min_rr)
+        targets, tp_warnings, tp_debug = _apply_tp_logic(
+            symbol=symbol,
+            style=style,
+            bias="long",
+            entry=entry,
+            stop=stop,
+            base_targets=base_targets,
+            ctx=ctx,
+            min_rr=min_rr,
+            atr=atr_value,
+            expected_move=expected_move,
+            prefer_em_cap=True,
+            structural_tp1=tp1_struct,
+        )
+        tp_debug_info = tp_debug
         if tp1_struct is not None:
-            targets = [tp1_struct, tp2]
-            tp1_dbg = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
-        else:
-            targets = snap_targets_with_rr(
-                entry=entry,
-                stop=stop,
-                bias="long",
-                tp_raws=base_targets,
-                htf_levels=ctx.get("htf_levels", []),
-                min_rr=min_rr,
-                em=expected_move,
-                prefer_em_cap=True,
-                atr=atr_value,
-            )
+            tp1_dbg = {"picked": tp1_struct, "base_targets": base_targets[:2]}
         if not targets:
             return None
         plan = _build_plan(
@@ -845,6 +1108,8 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
             conditions=[ema_stack_long, adx_strong, volume_ok],
         )
         if plan:
+            if tp_warnings:
+                plan.warnings.extend(tp_warnings)
             notes.append("Long OR retest validated")
 
     elif price < or_low and math.isfinite(retest_high) and abs(retest_high - or_low) <= tolerance:
@@ -863,24 +1128,31 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
             min_rr=min_rr,
         )
         if not base_targets:
-            base_targets = [entry - atr_value, entry - atr_value * 1.5]
-        tp2 = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
-        tp1_struct = _select_tp1_short(entry, stop, tp2, style, ctx, min_rr)
+            default_span = atr_value if atr_value > 0 else abs(entry - stop)
+            default_span = default_span if default_span and default_span > 0 else max(abs(entry - stop), 1.0)
+            base_targets = [entry - default_span, entry - default_span * 1.5]
+        if len(base_targets) == 1:
+            bump = atr_value if atr_value and atr_value > 0 else abs(entry - stop)
+            base_targets.append(base_targets[0] - (bump or 1.0))
+        tp2_seed = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
+        tp1_struct = _select_tp1_short(entry, stop, tp2_seed, style, ctx, min_rr)
+        targets, tp_warnings, tp_debug = _apply_tp_logic(
+            symbol=symbol,
+            style=style,
+            bias="short",
+            entry=entry,
+            stop=stop,
+            base_targets=base_targets,
+            ctx=ctx,
+            min_rr=min_rr,
+            atr=atr_value,
+            expected_move=expected_move,
+            prefer_em_cap=True,
+            structural_tp1=tp1_struct,
+        )
+        tp_debug_info = tp_debug
         if tp1_struct is not None:
-            targets = [tp1_struct, tp2]
-            tp1_dbg = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
-        else:
-            targets = snap_targets_with_rr(
-                entry=entry,
-                stop=stop,
-                bias="short",
-                tp_raws=base_targets,
-                htf_levels=ctx.get("htf_levels", []),
-                min_rr=min_rr,
-                em=expected_move,
-                prefer_em_cap=True,
-                atr=atr_value,
-            )
+            tp1_dbg = {"picked": tp1_struct, "base_targets": base_targets[:2]}
         if not targets:
             return None
         plan = _build_plan(
@@ -893,6 +1165,8 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
             conditions=[ema_stack_short, adx_strong, volume_ok],
         )
         if plan:
+            if tp_warnings:
+                plan.warnings.extend(tp_warnings)
             notes.append("Short OR retest validated")
 
     if plan is None:
@@ -923,6 +1197,8 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
         features["plan_warnings"] = list(plan.warnings)
     if tp1_dbg:
         features["tp1_struct_debug"] = tp1_dbg
+    if tp_debug_info:
+        features["tp_targets_debug"] = tp_debug_info
 
     return Signal(
         symbol=symbol,
@@ -960,6 +1236,7 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
     volume_ok = math.isfinite(ctx["volume_median"]) and latest["volume"] >= ctx["volume_median"]
 
     tp1_dbg_ph: Dict[str, Any] | None = None
+    tp_debug_info_ph: Dict[str, Any] | None = None
     if price > ctx["vwap"] and ema_stack_long and breakout_long:
         entry = price
         stop = min(range_low, float(session["low"].tail(10).min())) - atr_value * 0.25
@@ -976,24 +1253,31 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
             min_rr=min_rr,
         )
         if not base_targets:
-            base_targets = [entry + atr_value, entry + atr_value * 1.6]
-        tp2 = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
-        tp1_struct = _select_tp1_long(entry, stop, tp2, style, ctx, min_rr)
+            default_span = atr_value if atr_value > 0 else abs(entry - stop)
+            default_span = default_span if default_span and default_span > 0 else max(abs(entry - stop), 1.0)
+            base_targets = [entry + default_span, entry + default_span * 1.5]
+        if len(base_targets) == 1:
+            bump = atr_value if atr_value and atr_value > 0 else abs(entry - stop)
+            base_targets.append(base_targets[0] + (bump or 1.0))
+        tp2_seed = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
+        tp1_struct = _select_tp1_long(entry, stop, tp2_seed, style, ctx, min_rr)
+        targets, tp_warnings, tp_debug = _apply_tp_logic(
+            symbol=symbol,
+            style=style,
+            bias="long",
+            entry=entry,
+            stop=stop,
+            base_targets=base_targets,
+            ctx=ctx,
+            min_rr=min_rr,
+            atr=atr_value,
+            expected_move=expected_move,
+            prefer_em_cap=True,
+            structural_tp1=tp1_struct,
+        )
+        tp_debug_info_ph = tp_debug
         if tp1_struct is not None:
-            targets = [tp1_struct, tp2]
-            tp1_dbg_ph = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
-        else:
-            targets = snap_targets_with_rr(
-                entry=entry,
-                stop=stop,
-                bias="long",
-                tp_raws=base_targets,
-                htf_levels=ctx.get("htf_levels", []),
-                min_rr=min_rr,
-                em=expected_move,
-                prefer_em_cap=True,
-                atr=atr_value,
-            )
+            tp1_dbg_ph = {"picked": tp1_struct, "base_targets": base_targets[:2]}
         if not targets:
             return None
         plan = _build_plan(
@@ -1005,6 +1289,8 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
             notes=f"VWAP support {ctx['vwap']:.2f}; afternoon range high {range_high:.2f}",
             conditions=[adx_strong, volume_ok, breakout_long],
         )
+        if plan and tp_warnings:
+            plan.warnings.extend(tp_warnings)
     elif price < ctx["vwap"] and ema_stack_short and breakout_short:
         entry = price
         stop = max(range_high, float(session["high"].tail(10).max())) + atr_value * 0.25
@@ -1021,24 +1307,31 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
             min_rr=min_rr,
         )
         if not base_targets:
-            base_targets = [entry - atr_value, entry - atr_value * 1.6]
-        tp2 = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
-        tp1_struct = _select_tp1_short(entry, stop, tp2, style, ctx, min_rr)
+            default_span = atr_value if atr_value > 0 else abs(entry - stop)
+            default_span = default_span if default_span and default_span > 0 else max(abs(entry - stop), 1.0)
+            base_targets = [entry - default_span, entry - default_span * 1.5]
+        if len(base_targets) == 1:
+            bump = atr_value if atr_value and atr_value > 0 else abs(entry - stop)
+            base_targets.append(base_targets[0] - (bump or 1.0))
+        tp2_seed = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
+        tp1_struct = _select_tp1_short(entry, stop, tp2_seed, style, ctx, min_rr)
+        targets, tp_warnings, tp_debug = _apply_tp_logic(
+            symbol=symbol,
+            style=style,
+            bias="short",
+            entry=entry,
+            stop=stop,
+            base_targets=base_targets,
+            ctx=ctx,
+            min_rr=min_rr,
+            atr=atr_value,
+            expected_move=expected_move,
+            prefer_em_cap=True,
+            structural_tp1=tp1_struct,
+        )
+        tp_debug_info_ph = tp_debug
         if tp1_struct is not None:
-            targets = [tp1_struct, tp2]
-            tp1_dbg_ph = {"picked": tp1_struct, "tp2": tp2, "method": "structural", "style": style}
-        else:
-            targets = snap_targets_with_rr(
-                entry=entry,
-                stop=stop,
-                bias="short",
-                tp_raws=base_targets,
-                htf_levels=ctx.get("htf_levels", []),
-                min_rr=min_rr,
-                em=expected_move,
-                prefer_em_cap=True,
-                atr=atr_value,
-            )
+            tp1_dbg_ph = {"picked": tp1_struct, "base_targets": base_targets[:2]}
         if not targets:
             return None
         plan = _build_plan(
@@ -1050,6 +1343,8 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
             notes=f"VWAP resistance {ctx['vwap']:.2f}; afternoon range low {range_low:.2f}",
             conditions=[adx_strong, volume_ok, breakout_short],
         )
+        if plan and tp_warnings:
+            plan.warnings.extend(tp_warnings)
 
     if plan is None:
         return None
@@ -1076,6 +1371,8 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
         features["plan_warnings"] = list(plan.warnings)
     if tp1_dbg_ph:
         features["tp1_struct_debug"] = tp1_dbg_ph
+    if tp_debug_info_ph:
+        features["tp_targets_debug"] = tp_debug_info_ph
 
     return Signal(
         symbol=symbol,
@@ -1138,18 +1435,27 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
             min_rr=min_rr,
         )
         if not base_targets:
-            base_targets = [entry + atr_value * 1.1, entry + atr_value * 1.8]
-        targets = snap_targets_with_rr(
+            default_span = atr_value if atr_value > 0 else abs(entry - stop)
+            default_span = default_span if default_span and default_span > 0 else max(abs(entry - stop), 1.0)
+            base_targets = [entry + default_span, entry + default_span * 1.6]
+        if len(base_targets) == 1:
+            bump = atr_value if atr_value and atr_value > 0 else abs(entry - stop)
+            base_targets.append(base_targets[0] + (bump or 1.0))
+        targets, tp_warnings, tp_debug = _apply_tp_logic(
+            symbol=symbol,
+            style=style,
+            bias="long",
             entry=entry,
             stop=stop,
-            bias="long",
-            tp_raws=base_targets,
-            htf_levels=ctx.get("htf_levels", []),
+            base_targets=base_targets,
+            ctx=ctx,
             min_rr=min_rr,
-            em=expected_move,
-            prefer_em_cap=True,
             atr=atr_value,
+            expected_move=expected_move,
+            prefer_em_cap=True,
         )
+        tp_warnings_result = tp_warnings
+        tp_debug_info = tp_debug
         if not targets:
             return None
         plan = _build_plan(
@@ -1161,6 +1467,8 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
             notes=f"Above VWAP cluster (~{cluster_mean:.2f}); spread {cluster_spread:.2f}",
             conditions=[cluster_tight, adx_ok],
         )
+        if plan and tp_warnings_result:
+            plan.warnings.extend(tp_warnings_result)
     elif price < ctx["vwap"] and ema_stack_short and cluster_tight and price < cluster_mean:
         entry = price
         stop = max(cluster_mean, np.max(anchored_values)) + tolerance
@@ -1177,18 +1485,27 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
             min_rr=min_rr,
         )
         if not base_targets:
-            base_targets = [entry - atr_value * 1.1, entry - atr_value * 1.8]
-        targets = snap_targets_with_rr(
+            default_span = atr_value if atr_value > 0 else abs(entry - stop)
+            default_span = default_span if default_span and default_span > 0 else max(abs(entry - stop), 1.0)
+            base_targets = [entry - default_span, entry - default_span * 1.6]
+        if len(base_targets) == 1:
+            bump = atr_value if atr_value and atr_value > 0 else abs(entry - stop)
+            base_targets.append(base_targets[0] - (bump or 1.0))
+        targets, tp_warnings, tp_debug = _apply_tp_logic(
+            symbol=symbol,
+            style=style,
+            bias="short",
             entry=entry,
             stop=stop,
-            bias="short",
-            tp_raws=base_targets,
-            htf_levels=ctx.get("htf_levels", []),
+            base_targets=base_targets,
+            ctx=ctx,
             min_rr=min_rr,
-            em=expected_move,
-            prefer_em_cap=True,
             atr=atr_value,
+            expected_move=expected_move,
+            prefer_em_cap=True,
         )
+        tp_warnings_result = tp_warnings
+        tp_debug_info = tp_debug
         if not targets:
             return None
         plan = _build_plan(
@@ -1200,6 +1517,8 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
             notes=f"Below VWAP cluster (~{cluster_mean:.2f}); spread {cluster_spread:.2f}",
             conditions=[cluster_tight, adx_ok],
         )
+        if plan and tp_warnings_result:
+            plan.warnings.extend(tp_warnings_result)
 
     if plan is None:
         return None
@@ -1223,6 +1542,9 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
     }
     if plan.warnings:
         features["plan_warnings"] = list(plan.warnings)
+
+    if tp_debug_info:
+        features["tp_targets_debug"] = tp_debug_info
 
     return Signal(
         symbol=symbol,
