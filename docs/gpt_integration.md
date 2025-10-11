@@ -344,7 +344,8 @@ pre-baked trade levels.
 - **Overlay rendering.** When `charts.params` includes `supply`, `demand`,
   `liquidity`, `fvg`, or `avwap`, the `/tv` viewer plots labeled horizontal
   bands/lines to represent higher-timeframe zones, liquidity pools, fair value
-  gaps, and anchored VWAP references.
+  gaps, and anchored VWAP references. When `ema` is provided (e.g. `"9,20,50"`)
+  the viewer overlays those EMAs on the price action.
 - **`context_overlays`** packages higher-timeframe zones, liquidity pools, FVGs,
   relative strength, internals, options/volatility summaries, liquidity
   frictions, event hooks, anchored VWAPs, and volume profile magnets. These

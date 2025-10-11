@@ -53,6 +53,7 @@
     notes: params.get('notes'),
     title: params.get('title'),
   };
+  const emaTokens = parseList(params.get('ema'));
   const keyLevels = parseFloatList(params.get('levels'));
   const overlayValues = [
     plan.entry,
@@ -235,3 +236,32 @@
   });
   window.setInterval(fetchBars, 60000);
 })();
+  const emaSeries = emaTokens.reduce((acc, token) => {
+    const span = parseInt(token, 10);
+    if (!Number.isFinite(span) || span <= 0) return acc;
+    const series = chart.addLineSeries({
+      lineWidth: 2,
+      color: theme === 'light' ? '#0ea5e9' : '#38bdf8',
+      title: `EMA${span}`,
+    });
+    acc.push({ span, series });
+    return acc;
+  }, []);
+      if (emaSeries.length) {
+        emaSeries.forEach(({ span, series }) => {
+          const values = [];
+          let k = 2 / (span + 1);
+          let emaVal = null;
+          for (let i = 0; i < candleData.length; i += 1) {
+            const close = candleData[i].close;
+            if (close == null) continue;
+            if (emaVal === null) {
+              emaVal = close;
+            } else {
+              emaVal = close * k + emaVal * (1 - k);
+            }
+            values.push({ time: candleData[i].time, value: emaVal });
+          }
+          series.setData(values);
+        });
+      }
