@@ -335,7 +335,9 @@ pre-baked trade levels.
   `120`, `240`, `1D`); minute/hours strings like `1m` and `1h` are also
   normalized automatically. Key levels extracted from the response are included
   automatically in `levels` so the chart renders dotted reference lines for
-  session/previous highs and lows. Include `scale_plan=auto` (default) to let
+  session/previous highs and lows. Provide optional labels via
+  `levels=259.40|ORH;255.90|VAL` to have the viewer annotate each line. Include
+  `scale_plan=auto` (default) to let
   the viewer rescale legacy entries/stops/targets/levels to the latest prices
   after splits or large gaps; set `scale_plan=off` to render the raw values or
   pass an explicit multiplier (e.g. `scale_plan=0.5`).
@@ -348,7 +350,8 @@ pre-baked trade levels.
   `liquidity`, `fvg`, or `avwap`, the `/tv` viewer plots labeled horizontal
   bands/lines to represent higher-timeframe zones, liquidity pools, fair value
   gaps, and anchored VWAP references. When `ema` is provided (e.g. `"9,20,50"`)
-  the viewer overlays those EMAs on the price action.
+  the viewer overlays those EMAs on the price action; add `vwap=true` to plot
+  the session VWAP curve.
 - **`context_overlays`** packages higher-timeframe zones, liquidity pools, FVGs,
   relative strength, internals, options/volatility summaries, liquidity
   frictions, event hooks, anchored VWAPs, and volume profile magnets. These

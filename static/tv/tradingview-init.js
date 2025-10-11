@@ -32,6 +32,21 @@
       .map((item) => parseFloat(item))
       .filter((num) => Number.isFinite(num));
 
+  const parseNamedLevels = (value) => {
+    if (!value) return [];
+    const chunks = value.includes(';') ? value.split(';') : value.split(',');
+    return chunks
+      .map((raw) => {
+        const token = raw.trim();
+        if (!token) return null;
+        const [pricePart, labelPart] = token.split('|').map((part) => part.trim());
+        const price = parseFloat(pricePart);
+        if (!Number.isFinite(price)) return null;
+        return { price, label: labelPart || null };
+      })
+      .filter(Boolean);
+  };
+
   const parseNumber = (value) => {
     if (value === null || value === undefined || value === '') return null;
     const num = Number.parseFloat(value);
@@ -54,7 +69,7 @@
     title: params.get('title'),
   };
   const emaTokens = parseList(params.get('ema'));
-  let keyLevels = parseFloatList(params.get('levels'));
+  let keyLevels = parseNamedLevels(params.get('levels'));
   let overlayValues = [];
   const scalePlanToken = (params.get('scale_plan') || 'auto').toLowerCase();
   let emaSeries = [];
@@ -223,33 +238,55 @@
         if (Number.isFinite(plan.entry)) plan.entry *= scaleMultiplier;
         if (Number.isFinite(plan.stop)) plan.stop *= scaleMultiplier;
         plan.tps = plan.tps.map((tp) => (Number.isFinite(tp) ? tp * scaleMultiplier : tp));
-        keyLevels = keyLevels.map((lvl) => (Number.isFinite(lvl) ? lvl * scaleMultiplier : lvl));
+        keyLevels = keyLevels.map((lvl) => (Number.isFinite(lvl.price) ? { ...lvl, price: lvl.price * scaleMultiplier } : lvl));
       }
 
       overlayValues = [
         plan.entry,
         plan.stop,
         ...plan.tps,
-        ...keyLevels,
+        ...keyLevels.map((lvl) => lvl.price),
       ].filter((value) => Number.isFinite(value));
 
-      if (emaSeries.length) {
-        emaSeries.forEach(({ span, series }) => {
-          const values = [];
-          const weight = 2 / (span + 1);
-          let emaValue = null;
-          for (let i = 0; i < candleData.length; i += 1) {
-            const close = candleData[i].close;
-            if (close == null) continue;
-            if (emaValue === null) {
-              emaValue = close;
-            } else {
-              emaValue = close * weight + emaValue * (1 - weight);
-            }
-            values.push({ time: candleData[i].time, value: emaValue });
-          }
-          series.setData(values);
+      const vwapRequested = (params.get('vwap') || '').toLowerCase() !== 'false';
+      let vwapSeries = null;
+      if (vwapRequested) {
+        vwapSeries = chart.addLineSeries({
+          lineWidth: 2,
+          color: theme === 'light' ? '#f97316' : '#fb923c',
+          title: 'VWAP',
         });
+      }
+      emaSeries.forEach(({ span, series }) => {
+        const values = [];
+        const weight = 2 / (span + 1);
+        let emaValue = null;
+        for (let i = 0; i < candleData.length; i += 1) {
+          const close = candleData[i].close;
+          if (close == null) continue;
+          if (emaValue === null) {
+            emaValue = close;
+          } else {
+            emaValue = close * weight + emaValue * (1 - weight);
+          }
+          values.push({ time: candleData[i].time, value: emaValue });
+        }
+        series.setData(values);
+      });
+      if (vwapSeries) {
+        const values = [];
+        let cumulativePV = 0;
+        let cumulativeVol = 0;
+        for (let i = 0; i < candleData.length; i += 1) {
+          const bar = candleData[i];
+          const vol = volumeData[i]?.value || 0;
+          const typical = (bar.high + bar.low + bar.close) / 3;
+          cumulativePV += typical * vol;
+          cumulativeVol += vol;
+          const vwapValue = cumulativeVol > 0 ? cumulativePV / cumulativeVol : typical;
+          values.push({ time: bar.time, value: vwapValue });
+        }
+        vwapSeries.setData(values);
       }
 
       clearPriceLines();
@@ -257,9 +294,12 @@
       addPriceLine(plan.stop, 'Stop', '#ef4444');
       plan.tps.forEach((tp, idx) => addPriceLine(tp, `TP${idx + 1}`, '#22c55e'));
       [...keyLevels]
-        .filter((level) => Number.isFinite(level))
-        .sort((a, b) => b - a)
-        .forEach((level, idx) => addPriceLine(level, `Level ${idx + 1}`, '#6366f1', LightweightCharts.LineStyle.Dashed));
+        .filter((level) => Number.isFinite(level.price))
+        .sort((a, b) => b.price - a.price)
+        .forEach((level, idx) => {
+          const label = level.label ? level.label : `Level ${idx + 1}`;
+          addPriceLine(level.price, label, '#6366f1', LightweightCharts.LineStyle.Dotted);
+        });
 
       renderLegend(lastPrice);
       const priceScale = chart.priceScale('right');
