@@ -436,8 +436,11 @@ def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str
     if not host:
         host = headers.get("host") or request.url.netloc
 
-    path = f"/idea/{plan_id}"
-    base = f"{scheme}://{host}{path}" if host else f"{str(request.base_url).rstrip('/')}{path}"
+    slug_pattern = r"^[a-z0-9]+(?:_[a-z0-9]+)*_v\d+$"
+    is_slug_plan = bool(re.match(slug_pattern, plan_id.lower()))
+    path = f"/ideas/{plan_id}" if is_slug_plan else f"/idea/{plan_id}"
+    root = f"{scheme}://{host}" if host else str(request.base_url).rstrip("/")
+    base = f"{root.rstrip('/')}{path}"
     logger.debug(
         "trade_detail components resolved",
         extra={
@@ -451,6 +454,8 @@ def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str
             "forwarded": headers.get("forwarded"),
         },
     )
+    if is_slug_plan:
+        return base
     return f"{base}?v={version}"
 
 
@@ -589,6 +594,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "warnings": ["Market closed — treat as next-session watch plan"],
         "atr": round(atr, 4) if atr else None,
         "trade_detail": trade_detail_url,
+        "idea_url": trade_detail_url,
     }
 
     calc_notes: Dict[str, Any] = {}
@@ -2366,10 +2372,6 @@ async def gpt_plan(
         raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
 
-    plan_id = uuid.uuid4().hex[:10]
-    version = 1
-    trade_detail_url = _build_trade_detail_url(request, plan_id, version)
-
     snapshot = first.get("market_snapshot") or {}
     indicators = (snapshot.get("indicators") or {})
     volatility = (snapshot.get("volatility") or {})
@@ -2377,13 +2379,22 @@ async def gpt_plan(
     # Build calc_notes + htf from available payload
     raw_plan = first.get("plan") or {}
     plan: Dict[str, Any] = dict(raw_plan)
-    plan.setdefault("plan_id", plan_id)
-    plan.setdefault("version", version)
+    raw_plan_id = str(plan.get("plan_id") or "").strip()
+    plan_id = raw_plan_id or uuid.uuid4().hex[:10]
+    raw_version = plan.get("version")
+    try:
+        version = int(raw_version) if raw_version is not None else 1
+    except (TypeError, ValueError):
+        version = 1
+    trade_detail_url = _build_trade_detail_url(request, plan_id, version)
+
+    plan["plan_id"] = plan_id
+    plan["version"] = version
     plan.setdefault("symbol", symbol)
     plan.setdefault("style", first.get("style"))
     plan.setdefault("direction", plan.get("direction") or (snapshot.get("trend") or {}).get("direction_hint"))
     plan["trade_detail"] = trade_detail_url
-    plan.pop("idea_url", None)
+    plan["idea_url"] = trade_detail_url  # legacy compatibility until all clients migrate
     first["plan"] = plan
     charts_container = first.get("charts") or {}
     charts = charts_container.get("params") if isinstance(charts_container, dict) else None
