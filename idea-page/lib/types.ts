@@ -30,6 +30,7 @@ export const PlanCore = z.object({
   rr_to_t1: z.number(),
   confidence: z.number(),
   decimals: z.number(),
+  trade_detail: z.string().optional(),
   charts_params: ChartsParams,
   warnings: z.array(z.string()).optional(),
   planning_context: z.enum(["live", "offline", "backtest"]).optional(),

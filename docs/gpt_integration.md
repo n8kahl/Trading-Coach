@@ -36,7 +36,7 @@ This section captures the exact surface area and behaviors considered “product
 
 What’s included
 - `/gpt/plan`
-  - Returns: `plan`, `charts`, `key_levels`, `market_snapshot`, `features`, `options`
+  - Returns: `plan`, `charts`, `key_levels`, `market_snapshot`, `features`, `options`, `trade_detail`
   - Provenance: `calc_notes` (atr14, rr_inputs, em_cap_applied), `htf` (bias, snapped_targets), `debug.tp1` (when structural TP1 is used)
 - `/gpt/multi-context`
   - Request: `include_series` (default false), `intervals` (aka `frames`)
@@ -55,7 +55,7 @@ Planner internals
 
 Client guidance
 - Use `contracts.table` to render compact options; always show `bid`, `ask`, and `price`.
-- Use `plan.calc_notes` and `plan.htf.snapped_targets` in explanations; the model should not recompute these locally.
+- Use `plan.calc_notes`, `plan.trade_detail`, and `plan.htf.snapped_targets` in explanations; the model should not recompute these locally.
 - For charts, always call `POST /gpt/chart-url` and validate the returned URL before rendering.
 
 This snapshot is the “last production point” before the upcoming significant change. Future updates may alter schemas and behaviors; use this section to maintain compatibility with current GPT prompts and tooling.
