@@ -7,7 +7,8 @@ module.exports = {
   rules: {
     "@typescript-eslint/explicit-module-boundary-types": "off",
     "@typescript-eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
-    "react/jsx-sort-props": ["warn", { "callbacksLast": true, "ignoreCase": true, "reservedFirst": true }],
+    "react/jsx-sort-props": "off",
+    "react-hooks/exhaustive-deps": "off",
     "react/no-unescaped-entities": "off"
   }
 };

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 
 import ChartEmbed from "@/components/ChartEmbed";
@@ -17,7 +17,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { fetchIdea } from "@/lib/api";
 import type { TIdeaSnapshot } from "@/lib/types";
-import { cn } from "@/lib/utils";
 
 type IdeaSnapshotClientProps = {
   initialData: TIdeaSnapshot;

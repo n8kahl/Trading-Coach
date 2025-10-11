@@ -5,7 +5,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { buildLevelsCopy, buildPlanString, formatConfidence, formatDateTime, formatMarketPhase } from "@/lib/format";
 import type { TIdeaSnapshot } from "@/lib/types";
 import { copyToClipboard } from "@/lib/copy";
-import { cn } from "@/lib/utils";
 
 type IdeaHeaderProps = {
   idea: TIdeaSnapshot;

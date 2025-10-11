@@ -1,7 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { TIdeaSnapshot } from "@/lib/types";
-import { cn } from "@/lib/utils";
 
 type ConfluencePanelProps = {
   idea: TIdeaSnapshot;
