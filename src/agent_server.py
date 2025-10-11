@@ -1425,7 +1425,34 @@ def _format_chart_note(
 
 
 def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
-    base = f"{str(request.base_url).rstrip('/')}/tv"
+    # Respect reverse-proxy headers to avoid mixed-content (http iframe on https page)
+    headers = request.headers
+    scheme = None
+    host = None
+    xf_proto = headers.get("x-forwarded-proto")
+    if xf_proto:
+        scheme = xf_proto.split(",")[0].strip()
+    xf_host = headers.get("x-forwarded-host")
+    if xf_host:
+        host = xf_host.split(",")[0].strip()
+    fwd = headers.get("forwarded")
+    if fwd:
+        first = fwd.split(",", 1)[0]
+        for part in first.split(";"):
+            name, _, value = part.partition("=")
+            if not value:
+                continue
+            name = name.strip().lower()
+            value = value.strip().strip('"')
+            if name == "proto" and not scheme:
+                scheme = value
+            elif name == "host" and not host:
+                host = value
+    if not scheme:
+        scheme = request.url.scheme or "https"
+    if not host:
+        host = headers.get("host") or request.url.netloc
+    base = f"{scheme}://{host}/tv"
     query: Dict[str, str] = {}
     for key, value in params.items():
         if value is None:
