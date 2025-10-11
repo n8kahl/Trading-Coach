@@ -52,8 +52,43 @@ async function init() {
     startLive();
   } catch (err) {
     console.error(err);
+    // Fallback: if the snapshot isn't present (e.g., after a restart),
+    // attempt to regenerate via /gpt/plan using a slug-parsed symbol/style.
+    try {
+      const fallback = await regenerateFromSlug(planId);
+      if (fallback) {
+        ideaSnapshot = fallback;
+        populate();
+        startLive();
+        return;
+      }
+    } catch (e) {
+      console.warn('fallback regeneration failed', e);
+    }
     showToast(`Failed to load idea: ${err.message}`);
   }
+}
+
+function parseSlug(id) {
+  // Expect: symbol-style-direction-YYYY-MM (direction optional)
+  const parts = String(id || '').split('-').filter(Boolean);
+  if (parts.length < 3) return null;
+  const symbol = (parts[0] || '').toUpperCase();
+  const style = (parts[1] || '').toLowerCase();
+  const direction = (parts[2] || '').toLowerCase();
+  return { symbol, style, direction };
+}
+
+async function regenerateFromSlug(id) {
+  const parsed = parseSlug(id);
+  if (!parsed || !parsed.symbol || !parsed.style) return null;
+  const body = { symbol: parsed.symbol, style: parsed.style };
+  const plan = await fetchJSON(`${API_BASE}/gpt/plan`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  // PlanResponse is close enough to IdeaSnapshot for our renderer
+  return plan;
 }
 
 function populate() {
