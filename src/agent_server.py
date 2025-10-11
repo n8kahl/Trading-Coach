@@ -1793,22 +1793,22 @@ def _price_scale_for(price: float | None) -> int:
 
 def _extract_levels_for_chart(key_levels: Dict[str, float]) -> List[str]:
     order = [
-        "session_high",
-        "session_low",
-        "opening_range_high",
-        "opening_range_low",
-        "prev_high",
-        "prev_low",
-        "prev_close",
-        "gap_fill",
+        ("session_high", "Session High"),
+        ("session_low", "Session Low"),
+        ("opening_range_high", "OR High"),
+        ("opening_range_low", "OR Low"),
+        ("prev_high", "Prev High"),
+        ("prev_low", "Prev Low"),
+        ("prev_close", "Prev Close"),
+        ("gap_fill", "Gap Fill"),
     ]
     levels: List[str] = []
-    for key in order:
+    for key, label in order:
         value = key_levels.get(key)
         if value is None:
             continue
         if isinstance(value, (int, float)) and math.isfinite(float(value)):
-            levels.append(f"{float(value):.2f}")
+            levels.append(f"{float(value):.2f}|{label}")
     return levels
 
 
