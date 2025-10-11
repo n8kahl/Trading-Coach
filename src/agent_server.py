@@ -438,8 +438,9 @@ def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str
 
     # Always point trade_detail to the shareable viewer page that accepts plan_id + version
     root = f"{scheme}://{host}" if host else str(request.base_url).rstrip("/")
-    base = f"{root.rstrip('/')}/app/idea.html"
-    logger.debug(
+    path = "/app/idea.html"
+    base = f"{root.rstrip('/')}{path}"
+    logger.info(
         "trade_detail components resolved",
         extra={
             "plan_id": plan_id,
@@ -450,6 +451,7 @@ def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str
             "xfwd_proto": headers.get("x-forwarded-proto"),
             "xfwd_host": headers.get("x-forwarded-host"),
             "forwarded": headers.get("forwarded"),
+            "resolved_url": f"{base}?plan_id={plan_id}&v={version}",
         },
     )
     return f"{base}?plan_id={quote(plan_id)}&v={int(version)}"
@@ -2392,6 +2394,17 @@ async def gpt_plan(
     plan["trade_detail"] = trade_detail_url
     plan["idea_url"] = trade_detail_url  # legacy compatibility until all clients migrate
     first["plan"] = plan
+    logger.info(
+        "plan identity normalized",
+        extra={
+            "symbol": symbol,
+            "requested_style": request_payload.style,
+            "plan_id": plan_id,
+            "version": version,
+            "trade_detail": trade_detail_url,
+            "source_plan_keys": list(raw_plan.keys()),
+        },
+    )
     charts_container = first.get("charts") or {}
     charts = charts_container.get("params") if isinstance(charts_container, dict) else None
     chart_params_payload: Dict[str, Any] = charts if isinstance(charts, dict) else {}
@@ -2595,6 +2608,7 @@ async def gpt_plan(
             "style": first.get("style"),
             "plan_id": plan_id,
             "trade_detail": trade_detail_url,
+            "version": version,
             "chart_url_present": bool(chart_url_value),
             "targets": targets_list[:2],
         },
