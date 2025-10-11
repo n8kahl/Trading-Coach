@@ -2976,35 +2976,33 @@ async def gpt_plan(
         if offline_notice not in plan_warnings:
             plan_warnings.append(offline_notice)
 
+    style_token = plan.get("style") or first.get("style") or request_payload.style
+    style_public = public_style(style_token) or "intraday"
+    side_hint = _infer_contract_side(plan.get("side"), plan.get("direction") or direction_hint)
     options_payload = first.get("options")
-    contracts_needed = offline_mode or not options_payload
-    if contracts_needed:
-        style_token = plan.get("style") or first.get("style") or request_payload.style
-        style_public = public_style(style_token) or "intraday"
-        side_hint = _infer_contract_side(plan.get("side"), plan.get("direction"))
-        if side_hint:
-            plan_anchor: Dict[str, Any] = {}
-            if entry_val is not None:
-                plan_anchor["underlying_entry"] = entry_val
-            if stop_val is not None:
-                plan_anchor["stop"] = stop_val
-            if targets_list:
-                plan_anchor["targets"] = targets_list[:2]
-            plan_anchor["horizon_minutes"] = 60 if style_public in {"swing", "leaps"} else 30
-            contract_request = ContractsRequest(
-                symbol=symbol,
-                side=side_hint,
-                style=style_public,
-                selection_mode="analyze",
-                plan_anchor=plan_anchor or None,
-            )
-            try:
-                options_payload = await gpt_contracts(contract_request, request, user)
-                first["options"] = options_payload
-            except HTTPException as exc:
-                logger.info("contract lookup skipped for %s: %s", symbol, exc)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("contract lookup error for %s: %s", symbol, exc)
+    if side_hint:
+        plan_anchor: Dict[str, Any] = {}
+        if entry_val is not None:
+            plan_anchor["underlying_entry"] = entry_val
+        if stop_val is not None:
+            plan_anchor["stop"] = stop_val
+        if targets_list:
+            plan_anchor["targets"] = targets_list[:2]
+        plan_anchor["horizon_minutes"] = 60 if style_public in {"swing", "leaps"} else 30
+        contract_request = ContractsRequest(
+            symbol=symbol,
+            side=side_hint,
+            style=style_public,
+            selection_mode="analyze",
+            plan_anchor=plan_anchor or None,
+        )
+        try:
+            options_payload = await gpt_contracts(contract_request, request, user)
+            first["options"] = options_payload
+        except HTTPException as exc:
+            logger.info("contract lookup skipped for %s: %s", symbol, exc)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("contract lookup error for %s: %s", symbol, exc)
 
     if offline_mode and options_payload:
         closed_note = "Options quotes reflect last available prices with the market closed."
