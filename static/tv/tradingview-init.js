@@ -278,10 +278,17 @@
         const values = [];
         let cumulativePV = 0;
         let cumulativeVol = 0;
+        let currentSession = null;
         for (let i = 0; i < candleData.length; i += 1) {
           const bar = candleData[i];
           const vol = volumeData[i]?.value || 0;
           const typical = (bar.high + bar.low + bar.close) / 3;
+          const sessionKey = new Date(bar.time * 1000).toISOString().slice(0, 10);
+          if (sessionKey !== currentSession) {
+            currentSession = sessionKey;
+            cumulativePV = 0;
+            cumulativeVol = 0;
+          }
           cumulativePV += typical * vol;
           cumulativeVol += vol;
           const vwapValue = cumulativeVol > 0 ? cumulativePV / cumulativeVol : typical;
