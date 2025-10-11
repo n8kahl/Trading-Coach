@@ -1,9 +1,9 @@
 import { AlertTriangle } from "lucide-react";
 
-import type { PlanCore } from "@/lib/types";
+import type { Plan } from "@/lib/types";
 
 type SanityBannerProps = {
-  plan: PlanCore;
+  plan: Plan;
 };
 
 export default function SanityBanner({ plan }: SanityBannerProps) {

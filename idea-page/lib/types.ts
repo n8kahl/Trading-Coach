@@ -131,3 +131,4 @@ export const IdeaSnapshot = z.object({
 });
 
 export type TIdeaSnapshot = z.infer<typeof IdeaSnapshot>;
+export type Plan = z.infer<typeof PlanCore>;
