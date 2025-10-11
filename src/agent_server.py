@@ -2903,6 +2903,24 @@ async def get_idea_version(plan_id: str, version: int, request: Request) -> Any:
     return snapshot
 
 
+@app.get("/plan/{plan_id}")
+async def get_plan_latest(plan_id: str, request: Request) -> Any:
+    """Alias for /idea/{plan_id} to support new frontend permalinks."""
+    accept = (request.headers.get("accept") or "").lower()
+    if "text/html" in accept:
+        return RedirectResponse(url=f"/idea/{quote(plan_id)}", status_code=302)
+    return await _ensure_snapshot(plan_id, None, request)
+
+
+@app.get("/plan/{plan_id}/{version}")
+async def get_plan_version(plan_id: str, version: int, request: Request) -> Any:
+    """Alias for /idea/{plan_id}/{version} to support new frontend permalinks."""
+    accept = (request.headers.get("accept") or "").lower()
+    if "text/html" in accept:
+        return RedirectResponse(url=f"/idea/{quote(plan_id)}/{int(version)}", status_code=302)
+    return await _ensure_snapshot(plan_id, int(version), request)
+
+
 @app.get("/stream/market")
 async def stream_market(symbol: str = Query(..., min_length=1)) -> StreamingResponse:
     async def event_generator():

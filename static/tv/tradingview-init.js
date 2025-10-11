@@ -54,6 +54,12 @@
     title: params.get('title'),
   };
   const keyLevels = parseFloatList(params.get('levels'));
+  const overlayValues = [
+    plan.entry,
+    plan.stop,
+    ...plan.tps,
+    ...keyLevels,
+  ].filter((value) => Number.isFinite(value));
 
   const container = document.getElementById('tv_chart_container');
   const legendEl = document.getElementById('plan_legend');
@@ -189,10 +195,33 @@
       addPriceLine(plan.entry, 'Entry', '#facc15');
       addPriceLine(plan.stop, 'Stop', '#ef4444');
       plan.tps.forEach((tp, idx) => addPriceLine(tp, `TP${idx + 1}`, '#22c55e'));
-      keyLevels.forEach((level) => addPriceLine(level, 'Level', '#6366f1', LightweightCharts.LineStyle.Dashed));
+      [...keyLevels]
+        .filter((level) => Number.isFinite(level))
+        .sort((a, b) => b - a)
+        .forEach((level, idx) => addPriceLine(level, `Level ${idx + 1}`, '#6366f1', LightweightCharts.LineStyle.Dashed));
 
       const lastPrice = bars[bars.length - 1]?.close ?? null;
       renderLegend(lastPrice);
+      const priceScale = chart.priceScale('right');
+      if (overlayValues.length) {
+        const dataLows = bars.map((bar) => bar.low).filter((val) => Number.isFinite(val));
+        const dataHighs = bars.map((bar) => bar.high).filter((val) => Number.isFinite(val));
+        const dataMin = dataLows.length ? Math.min(...dataLows) : null;
+        const dataMax = dataHighs.length ? Math.max(...dataHighs) : null;
+        const overlayMin = Math.min(...overlayValues);
+        const overlayMax = Math.max(...overlayValues);
+        const combinedMin = [overlayMin, dataMin].filter((val) => val !== null && val !== undefined).reduce((acc, val) => Math.min(acc, val));
+        const combinedMax = [overlayMax, dataMax].filter((val) => val !== null && val !== undefined).reduce((acc, val) => Math.max(acc, val));
+        if (Number.isFinite(combinedMin) && Number.isFinite(combinedMax) && combinedMax > combinedMin) {
+          const padding = Math.max((combinedMax - combinedMin) * 0.1, 0.01);
+          priceScale.setAutoScale(false);
+          priceScale.setPriceRange({ minValue: combinedMin - padding, maxValue: combinedMax + padding });
+        } else {
+          priceScale.setAutoScale(true);
+        }
+      } else {
+        priceScale.setAutoScale(true);
+      }
       debugEl.style.display = 'none';
       debugEl.textContent = '';
     } catch (err) {
