@@ -293,7 +293,7 @@
       clearPriceLines();
       addPriceLine(plan.entry, 'Entry', '#facc15', LightweightCharts.LineStyle.Solid, 3);
       addPriceLine(plan.stop, 'Stop', '#ef4444', LightweightCharts.LineStyle.Solid, 3);
-      plan.tps.forEach((tp, idx) => addPriceLine(tp, `TP${idx + 1}`, '#4ade80', LightweightCharts.LineStyle.Solid, 3));
+      plan.tps.forEach((tp, idx) => addPriceLine(tp, `TP${idx + 1}`, '#7CFC00', LightweightCharts.LineStyle.Solid, 3));
       [...keyLevels]
         .filter((level) => Number.isFinite(level.price))
         .sort((a, b) => b.price - a.price)
