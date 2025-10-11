@@ -440,7 +440,7 @@ def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str
 
     # Prefer pretty permalink under /idea/{plan_id} (content-negotiated)
     root = f"{scheme}://{host}" if host else str(request.base_url).rstrip("/")
-    path = f"/idea/{plan_id}"
+    path = f"/idea/{plan_id}/{int(version)}"
     base = f"{root.rstrip('/')}{path}"
     logger.info(
         "trade_detail components resolved",
@@ -600,7 +600,10 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
     rr = (tp1 - entry) / (entry - stop) if entry != stop else 0.0
 
     plan_id = uuid.uuid4().hex[:10]
-    version = 1
+    # Version bump based on existing snapshots for this plan_id
+    async with _IDEA_LOCK:
+        existing = _IDEA_STORE.get(plan_id) or []
+        version = (existing[-1].get("plan", {}).get("version", len(existing)) + 1) if existing else 1
     trade_detail_url = _build_trade_detail_url(request, plan_id, version)
 
     plan_block = {
@@ -2429,6 +2432,11 @@ async def gpt_plan(
     # Determine direction for slugging
     direction_hint = plan.get("direction") or (snapshot.get("trend") or {}).get("direction_hint")
     plan_id = raw_plan_id or _generate_plan_slug(symbol, first.get("style"), direction_hint, snapshot)
+    # If version not provided, bump based on snapshot store to ensure unique URLs
+    if raw_version is None:
+        async with _IDEA_LOCK:
+            existing = _IDEA_STORE.get(plan_id) or []
+            version = (existing[-1].get("plan", {}).get("version", len(existing)) + 1) if existing else 1
     trade_detail_url = _build_trade_detail_url(request, plan_id, version)
 
     plan["plan_id"] = plan_id
