@@ -16,6 +16,7 @@ import logging
 import time
 import uuid
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import copy
@@ -41,6 +42,11 @@ from .scanner import (
     _base_targets_for_style,
     _normalize_trade_style,
 )
+from .strategy_library import (
+    normalize_style_input,
+    public_style,
+    strategy_public_category,
+)
 from .tradier import (
     TradierNotConfiguredError,
     fetch_option_chain,
@@ -50,6 +56,7 @@ from .tradier import (
 )
 from .polygon_options import fetch_polygon_option_chain, summarize_polygon_chain
 from .context_overlays import compute_context_overlays
+from zoneinfo import ZoneInfo
 
 
 logger = logging.getLogger(__name__)
@@ -90,6 +97,16 @@ DATA_SYMBOL_ALIASES: Dict[str, List[str]] = {
     "INDEX:SPX": ["^GSPC"],
     "SP500": ["^GSPC"],
 }
+
+_FUTURES_PROXY_MAP: Dict[str, str] = {
+    "es_proxy": "SPY",
+    "nq_proxy": "QQQ",
+    "ym_proxy": "DIA",
+    "rty_proxy": "IWM",
+    "vix": "CBOE:VIX",
+}
+
+_FUTURES_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}
 
 
 def _data_symbol_candidates(symbol: str) -> List[str]:
@@ -307,7 +324,7 @@ class MultiContextRequest(BaseModel):
 
 class MultiContextResponse(BaseModel):
     symbol: str
-    contexts: List[Dict[str, Any]]
+    snapshots: List[Dict[str, Any]]
     volatility_regime: Dict[str, Any]
     sentiment: Dict[str, Any] | None = None
     events: Dict[str, Any] | None = None
@@ -315,6 +332,7 @@ class MultiContextResponse(BaseModel):
     summary: Dict[str, Any] | None = None
     decimals: int | None = None
     data_quality: Dict[str, Any] | None = None
+    contexts: List[Dict[str, Any]] | None = None  # backward compatibility
 
 
 # ---------------------------------------------------------------------------
@@ -356,33 +374,18 @@ async def _fetch_context_enrichment(symbol: str) -> Dict[str, Any] | None:
 
 
 def _style_for_strategy(strategy_id: str) -> str:
-    sid = strategy_id.lower()
-    if "power" in sid:
-        return "scalp"
-    if "gap" in sid:
-        return "scalp"
-    if "midday" in sid:
-        return "intraday"
-    if "pmcc" in sid or "leap" in sid:
-        return "leap"
-    if "orb" in sid:
-        return "scalp"
-    if "vwap" in sid or "inside" in sid:
-        return "intraday"
-    return "swing"
+    return strategy_public_category(strategy_id)
 
 
 def _normalize_style(style: str | None) -> str | None:
     if style is None:
         return None
-    normalized = style.strip().lower()
-    if not normalized:
+    token = style.strip().lower()
+    if not token:
         return None
-    if normalized == "leaps":
-        normalized = "leap"
-    if normalized in {"power_hour", "powerhour", "power-hour", "power hour"}:
-        normalized = "scalp"
-    return normalized
+    if token in {"power_hour", "powerhour", "power-hour", "power hour"}:
+        token = "scalp"
+    return normalize_style_input(token)
 
 
 def _append_query_params(url: str, extra: Dict[str, str]) -> str:
@@ -409,6 +412,58 @@ async def _gather_offline_basis(symbol: str) -> Dict[str, Any]:
         "expected_move_days": 5,
     }
     return {k: v for k, v in basis.items() if v is not None}
+
+
+def _market_phase_chicago(now: Optional[datetime] = None) -> str:
+    tz = ZoneInfo("America/Chicago")
+    dt_now = (now or datetime.now(timezone.utc)).astimezone(tz)
+    if dt_now.weekday() >= 5:
+        return "closed"
+    minutes = dt_now.hour * 60 + dt_now.minute
+    reg_open, reg_close = 8 * 60 + 30, 15 * 60  # 08:30–15:00 CT
+    pre_open = 3 * 60
+    after_close = 19 * 60
+    if pre_open <= minutes < reg_open:
+        return "premarket"
+    if reg_open <= minutes < reg_close:
+        return "regular"
+    if reg_close <= minutes < after_close:
+        return "afterhours"
+    return "closed"
+
+
+async def _fetch_futures_quote(client: httpx.AsyncClient, symbol: str, api_key: str) -> Dict[str, Any]:
+    try:
+        resp = await client.get(
+            "https://finnhub.io/api/v1/quote",
+            params={"symbol": symbol, "token": api_key},
+            timeout=8.0,
+        )
+        resp.raise_for_status()
+        payload = resp.json() or {}
+        last = payload.get("c")
+        prev_close = payload.get("pc")
+        pct = None
+        if isinstance(last, (int, float)) and isinstance(prev_close, (int, float)) and prev_close not in (0, None):
+            try:
+                pct = (float(last) / float(prev_close)) - 1.0
+            except Exception:
+                pct = None
+        return {
+            "symbol": symbol,
+            "last": last,
+            "percent": pct,
+            "time_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "stale": False,
+        }
+    except Exception:
+        return {
+            "symbol": symbol,
+            "last": None,
+            "percent": None,
+            "time_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "stale": True,
+        }
 
 
 def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str:
@@ -658,6 +713,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
     stop_multiple = 0.5
     stop = entry - atr * stop_multiple if atr else entry * 0.998
     style_normalized = _normalize_trade_style(style)
+    style_public = public_style(style_normalized) or "intraday"
     symbol_upper = symbol.upper()
     index_symbols = {"SPY", "QQQ", "IWM", "ES", "NQ", "YM", "RTY"}
     is_index = symbol_upper in index_symbols
@@ -746,7 +802,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "watch plan generated",
         extra={
             "symbol": symbol,
-            "style": style,
+            "style": style_public,
             "plan_id": plan_id,
             "trade_detail": trade_detail_url,
             "idea_url": trade_detail_url,
@@ -885,7 +941,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         idea_url=trade_detail_url,
         warnings=plan_block["warnings"],
         symbol=symbol,
-        style=style or "intraday",
+        style=style_public,
         bias=plan_block["direction"],
         setup="watch_plan",
         entry=plan_block["entry"],
@@ -2315,6 +2371,37 @@ async def gpt_health(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]
     }
 
 
+@gpt.get("/futures-snapshot", summary="Overnight/offsessions market tape (ETF proxies via Finnhub)")
+async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
+    now_ts = time.time()
+    cached = _FUTURES_CACHE.get("data")
+    ts = float(_FUTURES_CACHE.get("ts") or 0)
+    if cached and (now_ts - ts < 180):
+        payload = {k: (dict(v) if isinstance(v, dict) else v) for k, v in cached.items()}
+        payload["stale_seconds"] = int(now_ts - ts)
+        return payload
+
+    settings = get_settings()
+    api_key = (settings.finnhub_api_key or "").strip() if hasattr(settings, "finnhub_api_key") else ""
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "UNAVAILABLE", "message": "FINNHUB_API_KEY missing"},
+        )
+
+    quotes: Dict[str, Any] = {}
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        for key, symbol in _FUTURES_PROXY_MAP.items():
+            quotes[key] = await _fetch_futures_quote(client, symbol, api_key)
+
+    payload: Dict[str, Any] = dict(quotes)
+    payload["market_phase"] = _market_phase_chicago()
+    payload["stale_seconds"] = 0
+    _FUTURES_CACHE["data"] = copy.deepcopy(payload)
+    _FUTURES_CACHE["ts"] = now_ts
+    return payload
+
+
 @gpt.post("/scan", summary="Rank trade setups across a list of tickers")
 async def gpt_scan(
     universe: ScanUniverse,
@@ -3205,7 +3292,7 @@ async def gpt_multi_context(
 
     return MultiContextResponse(
         symbol=symbol,
-        contexts=contexts,
+        snapshots=contexts,
         volatility_regime=volatility_regime,
         sentiment=sentiment,
         events=events,
@@ -3213,6 +3300,7 @@ async def gpt_multi_context(
         summary=summary,
         decimals=decimals,
         data_quality=data_quality,
+        contexts=contexts,
     )
 
 

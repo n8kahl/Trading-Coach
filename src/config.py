@@ -41,6 +41,7 @@ class Settings(BaseSettings):
         default="http://localhost:8081",
         env="ENRICH_SERVICE_URL",
     )
+    finnhub_api_key: str | None = Field(None, env="FINNHUB_API_KEY")
 
 @lru_cache()
 def get_settings() -> Settings:

@@ -16,7 +16,12 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .strategy_library import Strategy, load_strategies
+from .strategy_library import (
+    Strategy,
+    load_strategies,
+    normalize_style_input,
+    strategy_internal_category,
+)
 from .context_overlays import _volume_profile
 from .calculations import atr, ema, vwap, adx
 
@@ -106,12 +111,7 @@ def rr(entry: float, stop: float, tp: float, bias: str) -> float:
 
 
 def _normalize_trade_style(style: str | None) -> str:
-    token = (style or "").strip().lower()
-    if token == "leaps":
-        token = "leap"
-    if token not in {"scalp", "intraday", "swing", "leap"}:
-        token = "intraday"
-    return token
+    return normalize_style_input(style) or "intraday"
 
 
 def _base_targets_for_style(
@@ -821,12 +821,7 @@ _TP1_RULES: Dict[str, Dict[str, Any]] = {
 
 
 def _style_for_strategy_id(strategy_id: str) -> str:
-    sid = (strategy_id or "").lower()
-    if "power" in sid or "orb" in sid or "gap" in sid:
-        return "intraday"
-    if "midday" in sid:
-        return "intraday"
-    return "intraday"
+    return strategy_internal_category(strategy_id)
 
 
 def _build_tp_candidates_long(entry: float, ctx: Dict[str, Any]) -> List[Dict[str, Any]]:

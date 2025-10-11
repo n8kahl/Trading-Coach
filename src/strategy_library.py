@@ -24,6 +24,7 @@ modifying the scanning logic.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import List, Dict, Optional
 
 
@@ -558,3 +559,50 @@ def load_strategies() -> List[Strategy]:
     )
 
     return strategies
+
+
+def _normalize_category_token(category: Optional[str]) -> str:
+    token = (category or "").strip().lower()
+    if token in {"leaps", "leap"}:
+        return "leap"
+    if token == "index":
+        return "intraday"
+    if token in {"scalp", "intraday", "swing"}:
+        return token
+    return "intraday"
+
+
+def _public_category_token(category: Optional[str]) -> str:
+    normalized = _normalize_category_token(category)
+    if normalized == "leap":
+        return "leaps"
+    return normalized
+
+
+@lru_cache(maxsize=1)
+def _strategy_category_map() -> Dict[str, str]:
+    return {strategy.id.lower(): _normalize_category_token(strategy.category) for strategy in load_strategies()}
+
+
+def strategy_internal_category(strategy_id: str) -> str:
+    """Return the internal style token used for calculations."""
+    return _strategy_category_map().get((strategy_id or "").lower(), "intraday")
+
+
+def strategy_public_category(strategy_id: str) -> str:
+    """Return the public style token aligned with the OpenAPI schema."""
+    return _public_category_token(strategy_internal_category(strategy_id))
+
+
+def normalize_style_input(style: Optional[str]) -> Optional[str]:
+    """Normalize user-supplied style filters to internal tokens."""
+    if style is None:
+        return None
+    token = _normalize_category_token(style)
+    return token
+
+
+def public_style(style: Optional[str]) -> Optional[str]:
+    if style is None:
+        return None
+    return _public_category_token(style)
