@@ -14,6 +14,13 @@ focuses on data prep; the agent performs the higher-level reasoning.
   - `curl -sS https://trading-coach-production.up.railway.app/openapi.json | jq '.paths | keys'`
 - `curl -sS -X POST https://trading-coach-production.up.railway.app/gpt/scan -H 'content-type: application/json' -d '{"tickers":["AAPL"],"style":"intraday"}'`
 
+## Prompt & Schema (Live)
+
+- Master prompt (**approved v2.1**): [`docs/prompts/master_prompt_v2.1.md`](prompts/master_prompt_v2.1.md)
+- API schema (**OpenAPI 1.9.5**): mirrors `https://trading-coach-production.up.railway.app/openapi.json`
+- Deployment status: **Production ready & approved** (2025-10-10 refresh)
+- Persistent storage: set `DB_URL` (Postgres) so `/gpt/plan` snapshots and idea permalinks survive restarts.
+
 ---
 
 ## Offline Planning Mode

@@ -56,6 +56,11 @@ from .tradier import (
 )
 from .polygon_options import fetch_polygon_option_chain, summarize_polygon_chain
 from .context_overlays import compute_context_overlays
+from .db import (
+    ensure_schema as ensure_db_schema,
+    fetch_idea_snapshot as db_fetch_idea_snapshot,
+    store_idea_snapshot as db_store_idea_snapshot,
+)
 from zoneinfo import ZoneInfo
 
 
@@ -177,6 +182,18 @@ if TV_STATIC_DIR.exists():
 APP_STATIC_DIR = STATIC_ROOT / "app"
 if APP_STATIC_DIR.exists():
     app.mount("/app", StaticFiles(directory=str(APP_STATIC_DIR), html=True), name="app")
+
+
+@app.on_event("startup")
+async def _startup_tasks() -> None:
+    global _IDEA_PERSISTENCE_ENABLED
+    persisted = await ensure_db_schema()
+    if persisted:
+        _IDEA_PERSISTENCE_ENABLED = True
+        logger.info("Persistent idea snapshot storage enabled")
+    else:
+        _IDEA_PERSISTENCE_ENABLED = False
+        logger.info("Idea snapshots will be cached in-memory (database unavailable or not configured)")
 
 
 # ---------------------------------------------------------------------------
@@ -594,16 +611,86 @@ def _build_snapshot_summary(first: Dict[str, Any]) -> Dict[str, Any]:
     return summary
 
 
-async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
+def _extract_snapshot_version(snapshot: Dict[str, Any]) -> Optional[int]:
+    plan = snapshot.get("plan") or {}
+    version = plan.get("version")
+    try:
+        return int(version)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _cache_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
+    version = _extract_snapshot_version(snapshot)
     async with _IDEA_LOCK:
-        versions = _IDEA_STORE.setdefault(plan_id, [])
+        versions = list(_IDEA_STORE.get(plan_id, []))
+        if version is not None:
+            versions = [snap for snap in versions if _extract_snapshot_version(snap) != version]
         versions.append(snapshot)
+        versions.sort(key=lambda snap: _extract_snapshot_version(snap) or 0)
+        if len(versions) > _MAX_IDEA_CACHE_VERSIONS:
+            versions = versions[-_MAX_IDEA_CACHE_VERSIONS:]
+        _IDEA_STORE[plan_id] = versions
+
+
+async def _get_cached_snapshot(plan_id: str, version: Optional[int]) -> Optional[Dict[str, Any]]:
+    async with _IDEA_LOCK:
+        versions = _IDEA_STORE.get(plan_id)
+        if not versions:
+            return None
+        if version is None:
+            return versions[-1]
+        for snap in versions:
+            if _extract_snapshot_version(snap) == version:
+                return snap
+    return None
+
+
+async def _latest_snapshot_version(plan_id: str) -> Optional[int]:
+    async with _IDEA_LOCK:
+        versions = _IDEA_STORE.get(plan_id)
+        if versions:
+            latest = _extract_snapshot_version(versions[-1])
+            if latest is not None:
+                return latest
+    if not _IDEA_PERSISTENCE_ENABLED:
+        return None
+    snapshot = await db_fetch_idea_snapshot(plan_id)
+    if snapshot:
+        await _cache_snapshot(plan_id, snapshot)
+        return _extract_snapshot_version(snapshot)
+    return None
+
+
+async def _next_plan_version(plan_id: str) -> int:
+    latest = await _latest_snapshot_version(plan_id)
+    return latest + 1 if latest is not None else 1
+
+
+async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
+    await _cache_snapshot(plan_id, snapshot)
+    persisted = False
+    version = _extract_snapshot_version(snapshot)
+    if _IDEA_PERSISTENCE_ENABLED:
+        if version is not None:
+            persisted = await db_store_idea_snapshot(plan_id, version, snapshot)
+            if not persisted:
+                logger.warning(
+                    "idea snapshot persistence failed; continuing with in-memory cache",
+                    extra={"plan_id": plan_id, "version": version},
+                )
+        else:
+            logger.warning(
+                "idea snapshot missing version; skipping persistence",
+                extra={"plan_id": plan_id},
+            )
     logger.info(
         "idea snapshot stored",
         extra={
             "plan_id": plan_id,
-            "versions": len(_IDEA_STORE.get(plan_id, [])),
+            "versions": len((_IDEA_STORE.get(plan_id) or [])),
             "snapshot_keys": list(snapshot.keys()),
+            "persisted": persisted,
         },
     )
 
@@ -624,17 +711,17 @@ async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
 
 
 async def _get_idea_snapshot(plan_id: str, version: Optional[int] = None) -> Dict[str, Any]:
-    async with _IDEA_LOCK:
-        versions = _IDEA_STORE.get(plan_id)
-        if not versions:
-            raise HTTPException(status_code=404, detail="Plan not found")
-        if version is None:
-            return versions[-1]
-        for snap in versions:
-            plan = snap.get("plan") or {}
-            if plan.get("version") == version:
-                return snap
-        raise HTTPException(status_code=404, detail="Plan version not found")
+    cached = await _get_cached_snapshot(plan_id, version)
+    if cached:
+        return cached
+    if _IDEA_PERSISTENCE_ENABLED:
+        snapshot = await db_fetch_idea_snapshot(plan_id, version=version)
+        if snapshot:
+            await _cache_snapshot(plan_id, snapshot)
+            return snapshot
+    if version is None:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    raise HTTPException(status_code=404, detail="Plan version not found")
 
 
 async def _regenerate_snapshot_from_slug(plan_id: str, version: Optional[int], request: Request, slug_meta: Dict[str, str]) -> Optional[Dict[str, Any]]:
@@ -774,10 +861,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
     rr = (targets[0] - entry) / (entry - stop) if entry != stop else 0.0
 
     plan_id = uuid.uuid4().hex[:10]
-    # Version bump based on existing snapshots for this plan_id
-    async with _IDEA_LOCK:
-        existing = _IDEA_STORE.get(plan_id) or []
-        version = (existing[-1].get("plan", {}).get("version", len(existing)) + 1) if existing else 1
+    version = await _next_plan_version(plan_id)
     trade_detail_url = _build_trade_detail_url(request, plan_id, version)
 
     rounded_targets = [round(tp, decimals) for tp in targets]
@@ -1954,9 +2038,11 @@ def _percentile(values: np.ndarray, target: float) -> float | None:
 _MULTI_CONTEXT_CACHE_TTL = 30.0
 _MULTI_CONTEXT_CACHE: Dict[Tuple[str, str, int], Tuple[float, Dict[str, Any]]] = {}
 
-# Idea snapshot store (in-memory)
+# Idea snapshot store (in-memory cache with optional database persistence)
 _IDEA_STORE: Dict[str, List[Dict[str, Any]]] = {}
 _IDEA_LOCK = asyncio.Lock()
+_MAX_IDEA_CACHE_VERSIONS = 20
+_IDEA_PERSISTENCE_ENABLED = False
 _STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
 _STREAM_LOCK = asyncio.Lock()
 _IV_METRICS_CACHE_TTL = 120.0
@@ -2694,9 +2780,7 @@ async def gpt_plan(
     plan_id = raw_plan_id or _generate_plan_slug(symbol, first.get("style"), direction_hint, snapshot)
     # If version not provided, bump based on snapshot store to ensure unique URLs
     if raw_version is None:
-        async with _IDEA_LOCK:
-            existing = _IDEA_STORE.get(plan_id) or []
-            version = (existing[-1].get("plan", {}).get("version", len(existing)) + 1) if existing else 1
+        version = await _next_plan_version(plan_id)
     trade_detail_url = _build_trade_detail_url(request, plan_id, version)
 
     plan["plan_id"] = plan_id

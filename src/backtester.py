@@ -14,7 +14,6 @@ from __future__ import annotations
 from typing import List, Dict
 import pandas as pd
 
-from .scanner import evaluate_strategy
 from .strategy_library import load_strategies, Strategy
 
 

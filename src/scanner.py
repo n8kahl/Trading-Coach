@@ -241,135 +241,246 @@ def _clamp_to_em(entry: float, candidate: float, bias: str, em_limit: float | No
     return max(candidate, max_price)
 
 
-def _collect_priority_levels(entry: float, bias: str, ctx: Dict[str, Any]) -> List[Tuple[int, float, float, str]]:
-    levels: List[Tuple[int, float, float, str]] = []
-    symbol_levels: List[Dict[str, Any]] = []
-    if bias == "long":
-        symbol_levels.extend(_build_tp_candidates_long(entry, ctx))
-    else:
-        symbol_levels.extend(_build_tp_candidates_short(entry, ctx))
+def _canonical_style_token(style: str | None) -> str:
+    token = (_normalize_trade_style(style) or "intraday").lower()
+    if token == "leap":
+        return "leaps"
+    return token
 
-    priority_map = {
-        "POC": 1,
-        "VAH": 1,
-        "VAL": 1,
-        "PRIOR_HIGH": 2,
-        "PRIOR_LOW": 2,
-        "ORB_HIGH": 2,
-        "ORB_LOW": 2,
-        "SESSION_HIGH": 2,
-        "SESSION_LOW": 2,
-        "WEEK_HIGH": 3,
-        "WEEK_LOW": 3,
-        "SWING_HIGH": 4,
-        "SWING_LOW": 4,
-        "VWAP": 4,
-        "EMA9": 4,
-        "EMA20": 4,
-        "EMA50": 4,
+
+def _atr_for_style(style_key: str, ctx: Dict[str, Any]) -> float | None:
+    lookup = {
+        "0dte": ctx.get("atr_5m"),
+        "scalp": ctx.get("atr_5m"),
+        "intraday": ctx.get("atr_15m") or ctx.get("atr_5m"),
+        "swing": ctx.get("atr_1d") or ctx.get("atr_15m"),
+        "leaps": ctx.get("atr_1w") or ctx.get("atr_1d"),
     }
+    value = lookup.get(style_key, ctx.get("atr"))
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric <= 0:
+        return None
+    return numeric
 
-    fib_tags = {"FIB0.618", "FIB0.786", "FIB1.0", "FIB1.272", "FIB1.618", "FIB2.0"}
 
-    for item in list(symbol_levels):
-        tag = (item.get("tag") or "").upper()
-        level_value = item.get("level")
-        if not isinstance(level_value, (int, float)):
-            continue
-        price = float(level_value)
-        if bias == "long" and price <= entry:
-            continue
-        if bias == "short" and price >= entry:
-            continue
-        priority = priority_map.get(tag, 5 if tag in fib_tags else 6)
-        distance = abs(price - entry)
-        levels.append((priority, distance, price, tag))
+def _minimum_tp_distance(
+    *,
+    style_key: str,
+    entry: float,
+    stop: float,
+    ctx: Dict[str, Any],
+    min_rr: float,
+    tick_size: float,
+) -> float:
+    risk = abs(entry - stop)
+    fallback = max(tick_size, 0.0)
 
-    htf_levels = ctx.get("htf_levels") or []
-    for raw in htf_levels:
+    def _finite_candidates(values: Iterable[float | None]) -> List[float]:
+        clean: List[float] = []
+        for item in values:
+            if item is None:
+                continue
+            try:
+                val = float(item)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(val) and val > 0:
+                clean.append(val)
+        return clean
+
+    distance: float | None = None
+    if style_key == "0dte":
+        atr_5 = _atr_for_style("0dte", ctx)
+        if atr_5 is not None:
+            distance = atr_5 * 0.30
+    elif style_key == "scalp":
+        atr_5 = _atr_for_style("scalp", ctx)
+        if atr_5 is not None:
+            distance = atr_5 * 0.60
+    elif style_key == "intraday":
+        atr_15 = _atr_for_style("intraday", ctx)
+        if atr_15 is not None:
+            distance = atr_15 * 0.80
+    elif style_key == "swing":
+        atr_1d = ctx.get("atr_1d")
+        candidates = _finite_candidates([atr_1d * 1.20 if atr_1d else None, abs(entry) * 0.015])
+        if candidates:
+            distance = max(candidates)
+    elif style_key == "leaps":
+        atr_1w = ctx.get("atr_1w")
+        atr_1d = ctx.get("atr_1d")
+        candidates = _finite_candidates(
+            [
+                atr_1w * 1.00 if atr_1w else None,
+                atr_1d * 2.5 if atr_1d else None,
+                abs(entry) * 0.05,
+            ]
+        )
+        if candidates:
+            distance = max(candidates)
+
+    if distance is None or not math.isfinite(distance) or distance <= 0:
+        return fallback
+    return max(distance, fallback)
+
+
+def _intraday_levels_list(ctx: Dict[str, Any]) -> List[Tuple[str, float]]:
+    key = ctx.get("key") or {}
+    mapping = {
+        "SESSION_HIGH": key.get("session_high"),
+        "SESSION_LOW": key.get("session_low"),
+        "ORB_HIGH": key.get("opening_range_high"),
+        "ORB_LOW": key.get("opening_range_low"),
+        "PRIOR_HIGH": key.get("prev_high"),
+        "PRIOR_LOW": key.get("prev_low"),
+        "PRIOR_CLOSE": key.get("prev_close"),
+    }
+    levels: List[Tuple[str, float]] = []
+    for tag, value in mapping.items():
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price):
+            levels.append((tag, price))
+
+    for ema_tag in ("ema9", "ema20", "ema50"):
+        value = ctx.get(ema_tag)
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price):
+            levels.append((ema_tag.upper(), price))
+
+    vwap_val = ctx.get("vwap")
+    try:
+        vwap_price = float(vwap_val)
+    except (TypeError, ValueError):
+        vwap_price = None
+    if vwap_price is not None and math.isfinite(vwap_price):
+        levels.append(("VWAP", vwap_price))
+
+    for raw in ctx.get("htf_levels") or []:
         try:
             price = float(raw)
         except (TypeError, ValueError):
             continue
-        if bias == "long" and price <= entry:
-            continue
-        if bias == "short" and price >= entry:
-            continue
-        distance = abs(price - entry)
-        levels.append((3, distance, price, "HTF"))
+        if math.isfinite(price):
+            levels.append(("HTF", price))
 
-    seen: set[float] = set()
-    unique_levels: List[Tuple[int, float, float, str]] = []
-    for priority, distance, price, tag in sorted(levels, key=lambda x: (x[0], x[1])):
-        key = round(price, 4)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique_levels.append((priority, distance, price, tag))
-    if bias == "short":
-        unique_levels.sort(key=lambda x: (x[0], x[2]), reverse=False)
-    return unique_levels
+    dedup: Dict[float, Tuple[str, float]] = {}
+    for tag, price in levels:
+        rounded = round(price, 4)
+        if rounded not in dedup:
+            dedup[rounded] = (tag, price)
+    return list(dedup.values())
 
 
-def _choose_snapped_target(
+def _dict_to_level_list(data: Dict[str, float] | None, prefix: str) -> List[Tuple[str, float]]:
+    if not data:
+        return []
+    results: List[Tuple[str, float]] = []
+    for key, value in data.items():
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price):
+            results.append((f"{prefix}_{key.upper()}", price))
+    results.sort(key=lambda item: item[1])
+    return results
+
+
+def _fib_candidate_list(style_key: str, bias: str, ctx: Dict[str, Any]) -> List[Tuple[str, float]]:
+    direction_key = "long" if bias == "long" else "short"
+    if style_key == "leaps":
+        pack = ctx.get("fib_weekly") or {}
+        entries = pack.get(direction_key, [])
+        return [(tag, float(price)) for tag, price in entries if math.isfinite(float(price))]
+    if style_key == "swing":
+        pack = ctx.get("fib_daily") or {}
+        entries = pack.get(direction_key, [])
+        return [(tag, float(price)) for tag, price in entries if math.isfinite(float(price))]
+    fib_map = ctx.get("fib_up") if bias == "long" else ctx.get("fib_down")
+    results: List[Tuple[str, float]] = []
+    for tag, value in (fib_map or {}).items():
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price):
+            results.append((tag, price))
+    results.sort(key=lambda item: item[1], reverse=(bias == "short"))
+    return results
+
+
+def _structural_candidates(
     *,
-    base_price: float,
-    base_distance: float,
-    entry: float,
-    stop: float,
+    style_key: str,
     bias: str,
-    min_rr: float,
-    tick_size: float,
-    em_limit: float | None,
-    levels: List[Tuple[int, float, float, str]],
-    used_prices: List[float],
-    previous_price: float | None,
-    atr: float | None,
-) -> Tuple[float, str, bool] | None:
-    tolerance = max(tick_size * 0.6, 0.01)
-    strong_tags = {
-        "POC",
-        "VAH",
-        "VAL",
-        "PRIOR_HIGH",
-        "PRIOR_LOW",
-        "ORB_HIGH",
-        "ORB_LOW",
-        "SESSION_HIGH",
-        "SESSION_LOW",
-        "WEEK_HIGH",
-        "WEEK_LOW",
-    }
-    atr_cap = None
-    if atr and atr > 0:
-        atr_cap = float(atr) * 1.75
-    distance_cap = max(base_distance * 1.8, atr_cap or 0.0)
-    for _, _, price, tag in levels:
-        if any(abs(price - used) <= tolerance for used in used_prices):
-            continue
-        if bias == "long":
-            if price < base_price - tolerance:
+    entry: float,
+    ctx: Dict[str, Any],
+    structural_hint: float | None = None,
+) -> List[Dict[str, Any]]:
+    if style_key == "leaps":
+        categories: List[Tuple[str, List[Tuple[str, float]]]] = [
+            ("htf_weekly", ctx.get("levels_weekly") or []),
+            ("volume_profile_weekly", _dict_to_level_list(ctx.get("vol_profile_weekly"), "WVP")),
+            ("anchored_weekly", []),
+            ("fib_weekly", _fib_candidate_list(style_key, bias, ctx)),
+        ]
+    elif style_key == "swing":
+        categories = [
+            ("htf_daily", ctx.get("levels_daily") or []),
+            ("volume_profile_daily", _dict_to_level_list(ctx.get("vol_profile_daily"), "DVP")),
+            ("anchored_daily", []),
+            ("fib_daily", _fib_candidate_list(style_key, bias, ctx)),
+        ]
+    else:
+        categories = [
+            ("htf_intraday", _intraday_levels_list(ctx)),
+            ("volume_profile_intraday", _dict_to_level_list(ctx.get("vol_profile"), "VP")),
+            ("anchored_vwap_intraday", list((ctx.get("anchored_vwaps_intraday") or {}).items())),
+            ("fib_intraday", _fib_candidate_list(style_key, bias, ctx)),
+        ]
+
+    if structural_hint is not None and math.isfinite(structural_hint):
+        categories.insert(0, ("manual_hint", [("STRUCTURAL_HINT", float(structural_hint))]))
+
+    seen: Dict[float, Dict[str, Any]] = {}
+    for priority, (category, items) in enumerate(categories):
+        for tag, value in items:
+            try:
+                price = float(value)
+            except (TypeError, ValueError):
                 continue
-            if previous_price is not None and price <= previous_price + tolerance:
+            if not math.isfinite(price):
                 continue
-            distance = price - entry
-        else:
-            if price > base_price + tolerance:
+            if bias == "long" and price <= entry:
                 continue
-            if previous_price is not None and price >= previous_price - tolerance:
+            if bias == "short" and price >= entry:
                 continue
-            distance = entry - price
-        if distance_cap and distance > distance_cap * 1.001:
-            continue
-        allow_extension = tag in strong_tags
-        if em_limit is not None:
-            limit_allowance = em_limit * (1.10 if allow_extension else 1.0)
-            if distance > limit_allowance * 1.001:
-                continue
-        if rr(entry, stop, price, bias) < float(min_rr) - 1e-6:
-            continue
-        return price, tag, allow_extension
-    return None
+            distance = abs(price - entry)
+            rounded = round(price, 4)
+            payload = {
+                "price": price,
+                "tag": str(tag),
+                "category": category,
+                "priority": priority,
+                "distance": distance,
+            }
+            existing = seen.get(rounded)
+            if existing is None or (priority, distance) < (existing["priority"], existing["distance"]):
+                seen[rounded] = payload
+    candidates = list(seen.values())
+    candidates.sort(key=lambda item: (item["priority"], item["distance"]))
+    return candidates
 
 
 def _apply_tp_logic(
@@ -388,137 +499,218 @@ def _apply_tp_logic(
     structural_tp1: float | None = None,
 ) -> Tuple[List[float], List[str], Dict[str, Any]]:
     tick_size = _price_increment(symbol, entry)
-    em_limit = _expected_move_limit(expected_move, prefer_em_cap)
-    sign = 1 if bias == "long" else -1
+    style_key = _canonical_style_token(style)
+    if style_key not in {"0dte", "scalp", "intraday", "swing", "leaps"}:
+        style_key = "intraday"
 
-    ordered_targets = list(base_targets[:2])
-    if structural_tp1 is not None:
-        ordered_targets[:1] = [structural_tp1]
+    use_em_cap = prefer_em_cap and style_key in {"0dte", "scalp", "intraday"}
+    em_limit = _expected_move_limit(expected_move if use_em_cap else None, use_em_cap)
+    min_distance = _minimum_tp_distance(
+        style_key=style_key,
+        entry=entry,
+        stop=stop,
+        ctx=ctx,
+        min_rr=min_rr,
+        tick_size=tick_size,
+    )
 
-    used_prices: List[float] = []
-    results: List[float] = []
-    target_debug: Dict[str, Any] = {
-        "base": ordered_targets.copy(),
-        "snap": [],
-        "tick_size": tick_size,
-        "em_limit": em_limit,
-    }
-    levels = _collect_priority_levels(entry, bias, ctx)
+    candidates = _structural_candidates(
+        style_key=style_key,
+        bias=bias,
+        entry=entry,
+        ctx=ctx,
+        structural_hint=structural_tp1,
+    )
 
-    for idx, base_price in enumerate(ordered_targets):
-        if not math.isfinite(base_price):
+    selected: List[float] = []
+    selected_meta: List[Dict[str, Any]] = []
+    used_prices: set[float] = set()
+    direction = 1 if bias == "long" else -1
+
+    def _distance(target_price: float) -> float:
+        return (target_price - entry) if bias == "long" else (entry - target_price)
+
+    def _within_em(distance_value: float, category: str) -> bool:
+        if em_limit is None:
+            return True
+        allowance = 1.05 if category.startswith("htf") or "volume_profile" in category else 1.0
+        return distance_value <= em_limit * allowance * 1.001
+
+    def _register(price: float, meta: Dict[str, Any]) -> None:
+        nonlocal selected, selected_meta, used_prices
+        rounded = round(price, 4)
+        if rounded in used_prices:
+            return
+        used_prices.add(rounded)
+        if len(selected) < 2:
+            selected.append(price)
+            selected_meta.append(meta)
+
+    for cand in candidates:
+        price = _round_to_increment(cand["price"], tick_size)
+        price = _apply_limit_with_tick(entry, bias, price, em_limit, tick_size)
+        if bias == "long" and price <= entry:
             continue
-        candidate = float(base_price)
-        base_distance = abs(candidate - entry)
-        previous_price = results[idx - 1] if idx > 0 and results else None
-        snapped_choice = _choose_snapped_target(
-            base_price=candidate,
-            base_distance=base_distance,
-            entry=entry,
-            stop=stop,
-            bias=bias,
-            min_rr=min_rr,
-            tick_size=tick_size,
-            em_limit=em_limit,
-            levels=levels,
-            used_prices=used_prices,
-            previous_price=previous_price,
-            atr=atr,
-        )
-        snapped_price = None
-        snapped_tag = None
-        snapped_strong = False
-        if snapped_choice is not None:
-            snapped_price, snapped_tag, snapped_strong = snapped_choice
+        if bias == "short" and price >= entry:
+            continue
+        distance = _distance(price)
+        if distance < min_distance - tick_size * 0.5:
+            continue
+        if not _within_em(distance, cand["category"]):
+            continue
+        rr_value = rr(entry, stop, price, bias)
+        if rr_value < float(min_rr) - 1e-6:
+            continue
+        meta = {
+            "price": price,
+            "category": cand["category"],
+            "tag": cand["tag"],
+            "distance": distance,
+            "rr": rr_value,
+        }
+        _register(price, meta)
+        if len(selected) >= 2:
+            break
 
-        effective_limit = em_limit
-        if snapped_price is not None and em_limit is not None:
-            effective_limit = em_limit * (1.10 if snapped_strong else 1.0)
-        final_price = snapped_price if snapped_price is not None else candidate
-        final_price = _clamp_to_em(entry, final_price, bias, effective_limit)
-        final_price = _round_to_increment(final_price, tick_size)
-        final_price = _apply_limit_with_tick(entry, bias, final_price, effective_limit, tick_size)
-        results.append(final_price)
-        used_prices.append(final_price)
-        target_debug["snap"].append(
-            {
-                "index": idx,
-                "base": candidate,
-                "final": final_price,
-                "used_snapped": snapped_price is not None,
-                "tag": snapped_tag,
-                "strong": snapped_strong,
+    def _extend_with_candidates(pool: Iterable[Dict[str, Any]]) -> None:
+        for cand in pool:
+            price = _round_to_increment(cand["price"], tick_size)
+            price = _apply_limit_with_tick(entry, bias, price, em_limit, tick_size)
+            if bias == "long" and price <= entry:
+                continue
+            if bias == "short" and price >= entry:
+                continue
+            distance = _distance(price)
+            if distance < min_distance - tick_size * 0.5:
+                continue
+            if not _within_em(distance, cand.get("category", "fallback")):
+                continue
+            rr_value = rr(entry, stop, price, bias)
+            if rr_value < float(min_rr) - 1e-6:
+                continue
+            meta = {
+                "price": price,
+                "category": cand.get("category", "fallback"),
+                "tag": cand.get("tag", "FALLBACK"),
+                "distance": distance,
+                "rr": rr_value,
             }
-        )
+            _register(price, meta)
+            if len(selected) >= 2:
+                break
 
-    if not results:
-        return [], ["No valid targets computed"], target_debug
+    if len(selected) < 2 and base_targets:
+        fallback_candidates = []
+        for idx, base_target in enumerate(base_targets):
+            if not math.isfinite(base_target):
+                continue
+            fallback_candidates.append(
+                {
+                    "price": float(base_target),
+                    "tag": f"BASE_{idx + 1}",
+                    "category": "math_fallback",
+                }
+            )
+        _extend_with_candidates(fallback_candidates)
 
-    # Geometry enforcement
-    if bias == "long":
-        results = sorted(results)
-    else:
-        results = sorted(results, reverse=True)
-
-    # Ensure TP2 respects TP1 ordering
-    if len(results) >= 2:
-        increment = tick_size
-        if bias == "long" and results[1] <= results[0]:
-            results[1] = _round_to_increment(results[0] + max(increment, tick_size), tick_size)
-        if bias == "short" and results[1] >= results[0]:
-            results[1] = _round_to_increment(results[0] - max(increment, tick_size), tick_size)
+    if len(selected) < 2:
+        fib_fallback = [
+            {"price": price, "tag": tag, "category": "fib_fallback"}
+            for tag, price in _fib_candidate_list(style_key, bias, ctx)
+        ]
+        _extend_with_candidates(fib_fallback)
 
     warnings: List[str] = []
-    rr_tp1 = rr(entry, stop, results[0], bias)
-    if rr_tp1 < float(min_rr) - 1e-6:
-        atr_val = float(atr or 0.0)
-        risk = abs(entry - stop)
-        nudge = atr_val * 0.15 if atr_val > 0 else risk * 0.15
-        nudge = max(nudge, tick_size)
-        attempt = results[0] + sign * nudge
-        attempt = _clamp_to_em(entry, attempt, bias, em_limit)
-        base_distance_attempt = abs(attempt - entry)
-        snap_choice = _choose_snapped_target(
-            base_price=attempt,
-            base_distance=base_distance_attempt,
-            entry=entry,
-            stop=stop,
-            bias=bias,
-            min_rr=min_rr,
-            tick_size=tick_size,
-            em_limit=em_limit,
-            levels=levels,
-            used_prices=results[1:] if len(results) > 1 else [],
-            previous_price=results[1] if len(results) > 1 else None,
-            atr=atr,
+
+    if not selected:
+        fallback_price = entry + direction * max(min_distance, tick_size)
+        fallback_price = _round_to_increment(fallback_price, tick_size)
+        fallback_price = _apply_limit_with_tick(entry, bias, fallback_price, em_limit, tick_size)
+        selected.append(fallback_price)
+        selected_meta.append(
+            {
+                "price": fallback_price,
+                "category": "constructed",
+                "tag": "MIN_DISTANCE",
+                "distance": _distance(fallback_price),
+                "rr": rr(entry, stop, fallback_price, bias),
+            }
         )
-        snapped_tag = None
-        snapped_strong = False
-        if snap_choice is not None:
-            attempt, snapped_tag, snapped_strong = snap_choice
+        warnings.append("TP1 constructed using minimum distance guardrail (no structural levels).")
+
+    if len(selected) == 1:
+        fallback_tp2 = selected[0] + direction * max(min_distance, tick_size)
+        fallback_tp2 = _round_to_increment(fallback_tp2, tick_size)
+        fallback_tp2 = _apply_limit_with_tick(entry, bias, fallback_tp2, em_limit, tick_size)
+        if (bias == "long" and fallback_tp2 <= selected[0]) or (bias == "short" and fallback_tp2 >= selected[0]):
+            fallback_tp2 = selected[0] + direction * max(tick_size, min_distance * 0.5)
+            fallback_tp2 = _round_to_increment(fallback_tp2, tick_size)
+            fallback_tp2 = _apply_limit_with_tick(entry, bias, fallback_tp2, em_limit, tick_size)
+        selected.append(fallback_tp2)
+        selected_meta.append(
+            {
+                "price": fallback_tp2,
+                "category": "constructed",
+                "tag": "MIN_DISTANCE_LADDER",
+                "distance": _distance(fallback_tp2),
+                "rr": rr(entry, stop, fallback_tp2, bias),
+            }
+        )
+        warnings.append("TP2 constructed using distance ladder fallback.")
+
+    if bias == "long":
+        selected = sorted(selected)
+    else:
+        selected = sorted(selected, reverse=True)
+
+    if len(selected) >= 2:
+        if bias == "long" and selected[1] <= selected[0]:
+            selected[1] = _round_to_increment(selected[0] + max(tick_size, min_distance * 0.4), tick_size)
+            selected[1] = _apply_limit_with_tick(entry, bias, selected[1], em_limit, tick_size)
+        if bias == "short" and selected[1] >= selected[0]:
+            selected[1] = _round_to_increment(selected[0] - max(tick_size, min_distance * 0.4), tick_size)
+            selected[1] = _apply_limit_with_tick(entry, bias, selected[1], em_limit, tick_size)
+
+    target_debug: Dict[str, Any] = {
+        "style": style_key,
+        "min_distance": min_distance,
+        "em_limit": em_limit,
+        "selected_meta": selected_meta,
+    }
+
+    rr_tp1 = rr(entry, stop, selected[0], bias)
+    if rr_tp1 < float(min_rr) - 1e-6:
+        atr_basis = _atr_for_style(style_key, ctx) or (atr if isinstance(atr, (int, float)) else None)
+        risk = abs(entry - stop)
+        nudge_basis = float(atr_basis) if atr_basis is not None else risk
+        nudge = max(tick_size, nudge_basis * 0.15)
+        attempt = selected[0] + direction * nudge
         attempt = _round_to_increment(attempt, tick_size)
-        limit_for_attempt = em_limit * (1.10 if snapped_strong else 1.0) if em_limit is not None else em_limit
-        attempt = _apply_limit_with_tick(entry, bias, attempt, limit_for_attempt, tick_size)
+        attempt = _apply_limit_with_tick(entry, bias, attempt, em_limit, tick_size)
+        if (bias == "long" and attempt <= entry) or (bias == "short" and attempt >= entry):
+            attempt = selected[0] + direction * max(tick_size, nudge * 0.5)
+            attempt = _round_to_increment(attempt, tick_size)
+            attempt = _apply_limit_with_tick(entry, bias, attempt, em_limit, tick_size)
         attempt_rr = rr(entry, stop, attempt, bias)
-        target_debug["rr_check"] = {
+        target_debug["rr_adjustment"] = {
             "initial_rr": rr_tp1,
             "attempt_price": attempt,
             "attempt_rr": attempt_rr,
             "nudge": nudge,
-            "snap_tag": snapped_tag,
-            "snap_strong": snapped_strong,
         }
         if attempt_rr >= float(min_rr) - 1e-6:
-            results[0] = attempt
-            if len(results) >= 2:
-                if bias == "long" and results[1] <= results[0]:
-                    results[1] = _round_to_increment(results[0] + tick_size, tick_size)
-                if bias == "short" and results[1] >= results[0]:
-                    results[1] = _round_to_increment(results[0] - tick_size, tick_size)
+            selected[0] = attempt
+            if len(selected) >= 2:
+                if bias == "long" and selected[1] <= selected[0]:
+                    selected[1] = _round_to_increment(selected[0] + max(tick_size, min_distance * 0.3), tick_size)
+                    selected[1] = _apply_limit_with_tick(entry, bias, selected[1], em_limit, tick_size)
+                if bias == "short" and selected[1] >= selected[0]:
+                    selected[1] = _round_to_increment(selected[0] - max(tick_size, min_distance * 0.3), tick_size)
+                    selected[1] = _apply_limit_with_tick(entry, bias, selected[1], em_limit, tick_size)
         else:
             warnings.append(f"TP1 R:R {attempt_rr:.2f} < {float(min_rr):.2f}; consider marking as watch plan")
 
-    return results[:2], warnings, target_debug
+    return selected[:2], warnings, target_debug
 
 
 def _strategy_min_rr(strategy_id: str) -> float:
@@ -703,6 +895,127 @@ def _prepare_symbol_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+def _infer_bar_minutes(index: pd.Index) -> float | None:
+    if not isinstance(index, pd.DatetimeIndex) or index.size < 2:
+        return None
+    try:
+        delta = (index[-1] - index[-2]).total_seconds() / 60.0
+    except Exception:
+        return None
+    if not math.isfinite(delta) or delta <= 0:
+        return None
+    return float(delta)
+
+
+def _resample_ohlcv(frame: pd.DataFrame, rule: str, min_length: int = 20) -> pd.DataFrame | None:
+    if frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+        return None
+    try:
+        resampled = (
+            frame[["open", "high", "low", "close", "volume"]]
+            .resample(rule, label="right", closed="right")
+            .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+        )
+    except Exception:
+        return None
+    resampled = resampled.dropna(subset=["open", "high", "low", "close"])
+    if resampled.empty or len(resampled) < min_length:
+        return None
+    resampled = resampled.copy()
+    resampled["typical_price"] = (resampled["high"] + resampled["low"] + resampled["close"]) / 3.0
+    return resampled
+
+
+def _latest_atr_value(frame: pd.DataFrame | None, period: int = 14) -> float | None:
+    if frame is None or frame.empty or len(frame) < period:
+        return None
+    try:
+        series = atr(frame["high"], frame["low"], frame["close"], period)
+        value = float(series.iloc[-1])
+    except Exception:
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def _levels_from_frame(frame: pd.DataFrame | None, prefix: str) -> List[Tuple[str, float]]:
+    if frame is None or frame.empty:
+        return []
+    levels: List[Tuple[str, float]] = []
+    latest = frame.iloc[-1]
+    mapping = {
+        f"{prefix}_HIGH": latest.get("high"),
+        f"{prefix}_LOW": latest.get("low"),
+        f"{prefix}_CLOSE": latest.get("close"),
+    }
+    if len(frame) >= 2:
+        prev = frame.iloc[-2]
+        mapping[f"{prefix}_PREV_HIGH"] = prev.get("high")
+        mapping[f"{prefix}_PREV_LOW"] = prev.get("low")
+        mapping[f"{prefix}_PREV_CLOSE"] = prev.get("close")
+    for tag, value in mapping.items():
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price):
+            levels.append((tag, price))
+    dedup: Dict[float, Tuple[str, float]] = {}
+    for tag, price in levels:
+        rounded = round(price, 4)
+        if rounded not in dedup:
+            dedup[rounded] = (tag, price)
+    return list(dedup.values())
+
+
+def _volume_profile_levels(frame: pd.DataFrame | None) -> Dict[str, float]:
+    if frame is None or frame.empty:
+        return {}
+    try:
+        profile = _volume_profile(frame)
+    except Exception:
+        profile = {}
+    clean = {}
+    for key, value in (profile or {}).items():
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price):
+            clean[key] = price
+    return clean
+
+
+def _fib_extensions_from_frame(frame: pd.DataFrame | None, window: int = 50) -> Dict[str, List[Tuple[str, float]]]:
+    if frame is None or frame.empty:
+        return {"long": [], "short": []}
+    window_frame = frame.tail(window)
+    if window_frame.empty:
+        return {"long": [], "short": []}
+    try:
+        swing_high = float(window_frame["high"].max())
+        swing_low = float(window_frame["low"].min())
+    except Exception:
+        return {"long": [], "short": []}
+    if not math.isfinite(swing_high) or not math.isfinite(swing_low):
+        return {"long": [], "short": []}
+    span = swing_high - swing_low
+    if span <= 0 or not math.isfinite(span):
+        return {"long": [], "short": []}
+    long_levels = [
+        ("FIB1.0", round(swing_high, 4)),
+        ("FIB1.272", round(swing_high + span * 0.272, 4)),
+        ("FIB1.618", round(swing_high + span * 0.618, 4)),
+    ]
+    short_levels = [
+        ("FIB1.0", round(swing_low, 4)),
+        ("FIB1.272", round(swing_low - span * 0.272, 4)),
+        ("FIB1.618", round(swing_low - span * 0.618, 4)),
+    ]
+    return {"long": long_levels, "short": short_levels}
+
+
 def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
     session_df, prev_session_df = _latest_sessions(frame)
     latest = frame.iloc[-1]
@@ -786,6 +1099,45 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
     except Exception:
         fib_up, fib_down = {}, {}
 
+    bar_minutes = _infer_bar_minutes(frame.index)
+    resampled_5m = _resample_ohlcv(frame, "5T") if bar_minutes is not None and bar_minutes <= 5.01 else None
+    resampled_15m = _resample_ohlcv(frame, "15T") if bar_minutes is not None and bar_minutes <= 15.01 else None
+    resampled_daily = _resample_ohlcv(frame, "1D", min_length=10)
+    resampled_weekly = _resample_ohlcv(frame, "1W", min_length=10)
+
+    atr_5m = _latest_atr_value(resampled_5m)
+    atr_15m = _latest_atr_value(resampled_15m)
+    atr_1d = _latest_atr_value(resampled_daily)
+    atr_1w = _latest_atr_value(resampled_weekly)
+
+    daily_levels = _levels_from_frame(resampled_daily, "DAILY")
+    weekly_levels = _levels_from_frame(resampled_weekly, "WEEKLY")
+
+    daily_profile = _volume_profile_levels(resampled_daily.tail(60) if resampled_daily is not None else None)
+    weekly_profile = _volume_profile_levels(resampled_weekly.tail(30) if resampled_weekly is not None else None)
+
+    fib_daily = _fib_extensions_from_frame(resampled_daily)
+    fib_weekly = _fib_extensions_from_frame(resampled_weekly, window=26)
+
+    anchored_vwaps_intraday: Dict[str, float] = {}
+    try:
+        if prev_session_df is not None and not prev_session_df.empty and not session_df.empty:
+            prev_high_idx = prev_session_df["high"].idxmax()
+            prev_low_idx = prev_session_df["low"].idxmin()
+            session_open_idx = session_df.index[0]
+            anchors = {
+                "AVWAP_PREV_HIGH": _anchored_vwap(frame, prev_high_idx),
+                "AVWAP_PREV_LOW": _anchored_vwap(frame, prev_low_idx),
+                "AVWAP_SESSION_OPEN": _anchored_vwap(frame, session_open_idx),
+            }
+            anchored_vwaps_intraday = {
+                tag: float(val)
+                for tag, val in anchors.items()
+                if val is not None and math.isfinite(float(val))
+            }
+    except Exception:
+        anchored_vwaps_intraday = {}
+
     return {
         "frame": frame,
         "session": session_df,
@@ -808,6 +1160,18 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
         "vol_profile": vol_profile,
         "fib_up": fib_up,
         "fib_down": fib_down,
+        "bar_minutes": bar_minutes,
+        "atr_5m": atr_5m,
+        "atr_15m": atr_15m,
+        "atr_1d": atr_1d,
+        "atr_1w": atr_1w,
+        "levels_daily": daily_levels,
+        "levels_weekly": weekly_levels,
+        "vol_profile_daily": daily_profile,
+        "vol_profile_weekly": weekly_profile,
+        "fib_daily": fib_daily,
+        "fib_weekly": fib_weekly,
+        "anchored_vwaps_intraday": anchored_vwaps_intraday,
     }
 
 

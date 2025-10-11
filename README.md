@@ -80,6 +80,7 @@ BACKEND_API_KEY=super-secret             # Omit for anonymous access during dev
 BASE_URL=https://<your-app>.up.railway.app/tv
 FINNHUB_API_KEY=your_finnhub_key         # Required for enrich_service.py
 ENRICH_SERVICE_URL=http://localhost:8081 # Override if deploying enrichment elsewhere
+DB_URL=postgresql://user:pass@host:5432/dbname  # Optional; enables persistent idea snapshots
 
 # Tradier (sandbox defaults shown)
 TRADIER_SANDBOX_TOKEN=XXXXXXXXXXXX
@@ -129,6 +130,7 @@ See `docs/gpt_integration.md` for full schemas and sample payloads.
 | `/gpt/multi-context` returns 400 | At least one interval token is invalid. Use tokens such as `1m`, `5m`, `15m`, `1h`, `4h`, `1D`. Duplicates are ignored silently. |
 | `/gpt/contracts` returns empty `best` | Liquidity filters removed everything. The service widens Δ by ±0.05 and DTE by ±2 once each; if it still returns empty there genuinely isn’t a liquid contract under the constraints. |
 | Chart missing plan bands | Ensure you pass `entry`, `stop`, and `tp` (comma separated) when calling `/gpt/chart-url`. The GPT should forward the plan payload from `/gpt/scan`. |
+| Plan URLs stop working after restart | Configure `DB_URL` with your Railway Postgres connection so plan/idea snapshots persist across deploys; otherwise the in-memory cache resets. |
 
 Deployment is currently handled by Railway (`nixpacks.toml` + `Procfile`). Logs will show cache hits (`cached=true`) and option snapshot warnings.
 

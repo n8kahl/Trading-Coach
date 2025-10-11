@@ -15,11 +15,25 @@ def _make_tp_ctx(
     htf_levels=None,
     expected_move=None,
     atr=None,
+    atr_5m=None,
+    atr_15m=None,
+    atr_1d=None,
+    atr_1w=None,
+    vol_profile=None,
+    vol_profile_daily=None,
+    vol_profile_weekly=None,
+    levels_daily=None,
+    levels_weekly=None,
+    fib_daily=None,
+    fib_weekly=None,
+    anchored_vwaps=None,
 ):
     key_levels = key_levels or {}
     return {
         "key": {k: float(v) for k, v in key_levels.items() if isinstance(v, (int, float))},
-        "vol_profile": {},
+        "vol_profile": vol_profile or {},
+        "vol_profile_daily": vol_profile_daily or {},
+        "vol_profile_weekly": vol_profile_weekly or {},
         "vwap": vwap,
         "ema9": ema9,
         "ema20": ema20,
@@ -29,14 +43,24 @@ def _make_tp_ctx(
         "htf_levels": [float(v) for v in (htf_levels or []) if isinstance(v, (int, float))],
         "expected_move_horizon": expected_move,
         "atr": atr,
+        "atr_5m": atr_5m,
+        "atr_15m": atr_15m,
+        "atr_1d": atr_1d,
+        "atr_1w": atr_1w,
+        "levels_daily": levels_daily or [],
+        "levels_weekly": levels_weekly or [],
+        "fib_daily": fib_daily or {"long": [], "short": []},
+        "fib_weekly": fib_weekly or {"long": [], "short": []},
+        "anchored_vwaps_intraday": anchored_vwaps or {},
     }
 
 
-def test_apply_tp_logic_respects_expected_move_cap_with_warning():
+def test_intraday_tp1_respects_min_distance_and_em_cap():
     entry = 100.0
     stop = 98.0
-    atr = 1.5
-    expected_move = 1.0
+    atr = 1.4
+    atr_15m = 1.6
+    expected_move = 2.5
     min_rr = 1.2
 
     base_targets = _base_targets_for_style(
@@ -50,7 +74,19 @@ def test_apply_tp_logic_respects_expected_move_cap_with_warning():
         prefer_em_cap=True,
     )
 
-    ctx = _make_tp_ctx(expected_move=expected_move, atr=atr)
+    ctx = _make_tp_ctx(
+        expected_move=expected_move,
+        atr=atr,
+        atr_15m=atr_15m,
+        atr_5m=1.1,
+        key_levels={"session_high": 101.8, "prev_high": 102.1},
+        vwap=101.2,
+        ema9=101.0,
+        ema20=100.7,
+        vol_profile={"poc": 101.3, "vah": 101.9, "val": 99.6},
+        htf_levels=[102.4],
+    )
+
     targets, warnings, debug = _apply_tp_logic(
         symbol="AAPL",
         style="intraday",
@@ -68,17 +104,17 @@ def test_apply_tp_logic_respects_expected_move_cap_with_warning():
     assert len(targets) == 2
     assert targets[0] > entry
     diff = targets[0] - entry
-    assert diff <= expected_move + 1e-6
-    assert diff >= expected_move * 0.6  # RR nudge may pull slightly lower but should stay meaningful
-    assert any("TP1 R:R" in message for message in warnings)
-    assert debug["base"]
+    assert diff >= atr_15m * 0.8 - 0.05
+    assert diff <= expected_move * 1.05  # EM cap applied with small allowance
+    assert debug["selected_meta"]
 
 
-def test_apply_tp_logic_snap_allows_em_extension():
-    entry = 50.0
-    stop = 49.0
-    atr = 1.2
-    expected_move = 1.5
+def test_swing_ignores_expected_move_cap():
+    entry = 100.0
+    stop = 89.0
+    atr = 2.5
+    atr_1d = 7.0
+    expected_move = 3.5  # should be ignored for swing targets
     min_rr = 1.2
 
     base_targets = _base_targets_for_style(
@@ -92,12 +128,17 @@ def test_apply_tp_logic_snap_allows_em_extension():
         prefer_em_cap=True,
     )
 
-    key_level_price = 51.6
+    daily_level = 210.0
     ctx = _make_tp_ctx(
-        key_levels={"prev_high": key_level_price},
-        htf_levels=[key_level_price],
-        expected_move=expected_move,
+        key_levels={"prev_high": 198.0},
+        htf_levels=[205.0],
         atr=atr,
+        atr_1d=atr_1d,
+        atr_1w=12.0,
+        expected_move=expected_move,
+        levels_daily=[("DAILY_HIGH", daily_level)],
+        vol_profile_daily={"poc": 206.0},
+        fib_daily={"long": [("FIB1.272", 215.0)], "short": []},
     )
 
     targets, warnings, debug = _apply_tp_logic(
@@ -114,23 +155,22 @@ def test_apply_tp_logic_snap_allows_em_extension():
         prefer_em_cap=True,
     )
 
-    assert not warnings
-    assert math.isclose(targets[0], key_level_price, abs_tol=0.15)
-    assert targets[1] >= targets[0]
-    assert debug["snap"][0]["used_snapped"] is True
-    assert targets[0] - entry <= expected_move * 1.10 + 1e-6
+    assert warnings == []
+    assert targets[0] >= entry + max(atr_1d * 1.20, entry * 0.015) - 0.01
+    assert targets[0] > entry + expected_move  # EM cap not applied
+    assert any(meta["category"].startswith("htf") for meta in debug["selected_meta"])
 
 
-def test_apply_tp_logic_short_geometry_and_rr():
-    entry = 100.0
-    stop = 102.0
-    atr = 1.5
-    expected_move = 3.0
+def test_rr_floor_triggers_watch_warning_when_unresolved():
+    entry = 50.0
+    stop = 49.5
+    atr = 0.4
+    expected_move = 5.0
     min_rr = 1.2
 
     base_targets = _base_targets_for_style(
-        style="intraday",
-        bias="short",
+        style="scalp",
+        bias="long",
         entry=entry,
         stop=stop,
         atr=atr,
@@ -139,11 +179,18 @@ def test_apply_tp_logic_short_geometry_and_rr():
         prefer_em_cap=True,
     )
 
-    ctx = _make_tp_ctx(expected_move=expected_move, atr=atr)
+    ctx = _make_tp_ctx(
+        expected_move=expected_move,
+        atr=atr,
+        atr_5m=0.4,
+        key_levels={},
+        vol_profile={},
+    )
+
     targets, warnings, debug = _apply_tp_logic(
-        symbol="TSLA",
-        style="intraday",
-        bias="short",
+        symbol="MSFT",
+        style="scalp",
+        bias="long",
         entry=entry,
         stop=stop,
         base_targets=base_targets,
@@ -155,8 +202,5 @@ def test_apply_tp_logic_short_geometry_and_rr():
     )
 
     assert len(targets) == 2
-    assert targets[0] < entry
-    assert targets[0] > targets[1]
-    rr_value = rr(entry, stop, targets[0], "short")
-    assert rr_value >= min_rr - 1e-3 or not warnings
-    assert math.isclose(debug["tick_size"], 0.05, rel_tol=0.0, abs_tol=0.05)
+    assert targets[0] > entry
+    assert any("TP2 constructed" in message for message in warnings)
