@@ -2676,6 +2676,9 @@ async def gpt_plan(
     snapshot = first.get("market_snapshot") or {}
     indicators = (snapshot.get("indicators") or {})
     volatility = (snapshot.get("volatility") or {})
+    session_phase = str(((snapshot.get("session") or {}).get("phase") or "").lower())
+    if not offline_mode and session_phase in {"off", "postmarket", "premarket", "closed"}:
+        offline_mode = True
 
     # Build calc_notes + htf from available payload
     raw_plan = first.get("plan") or {}
