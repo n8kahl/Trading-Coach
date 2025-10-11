@@ -227,7 +227,7 @@ class PlanRequest(BaseModel):
 class PlanResponse(BaseModel):
     plan_id: str | None = None
     version: int | None = None
-    idea_url: str | None = None
+    trade_detail: str | None = None
     warnings: List[str] | None = None
     planning_context: str | None = None
     offline_basis: Dict[str, Any] | None = None
@@ -280,7 +280,7 @@ class IdeaStoreRequest(BaseModel):
 
 class IdeaStoreResponse(BaseModel):
     plan_id: str
-    idea_url: str
+    trade_detail: str
 
 
 class StreamPushRequest(BaseModel):
@@ -403,7 +403,7 @@ async def _gather_offline_basis(symbol: str) -> Dict[str, Any]:
     return {k: v for k, v in basis.items() if v is not None}
 
 
-def _build_idea_url(request: Request, plan_id: str, version: int) -> str:
+def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str:
     headers = request.headers
     scheme = None
     host = None
@@ -439,7 +439,7 @@ def _build_idea_url(request: Request, plan_id: str, version: int) -> str:
     path = f"/idea/{plan_id}"
     base = f"{scheme}://{host}{path}" if host else f"{str(request.base_url).rstrip('/')}{path}"
     logger.debug(
-        "idea_url components resolved",
+        "trade_detail components resolved",
         extra={
             "plan_id": plan_id,
             "version": version,
@@ -576,7 +576,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
 
     plan_id = uuid.uuid4().hex[:10]
     version = 1
-    idea_url = _build_idea_url(request, plan_id, version)
+    trade_detail_url = _build_trade_detail_url(request, plan_id, version)
 
     plan_block = {
         "direction": "long",
@@ -588,6 +588,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "notes": "Watch plan: market closed; awaiting next session trigger.",
         "warnings": ["Market closed — treat as next-session watch plan"],
         "atr": round(atr, 4) if atr else None,
+        "trade_detail": trade_detail_url,
     }
 
     calc_notes: Dict[str, Any] = {}
@@ -676,7 +677,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
             "confidence": plan_block["confidence"],
             "decimals": decimals,
             "charts_params": chart_params,
-            "idea_url": idea_url,
+            "trade_detail": trade_detail_url,
             "warnings": plan_block["warnings"],
         },
         "summary": summary,
@@ -698,7 +699,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
     return PlanResponse(
         plan_id=plan_id,
         version=version,
-        idea_url=idea_url,
+        trade_detail=trade_detail_url,
         warnings=plan_block["warnings"],
         symbol=symbol,
         style=style or "intraday",
@@ -2367,7 +2368,11 @@ async def gpt_plan(
 
     plan_id = uuid.uuid4().hex[:10]
     version = 1
-    idea_url = _build_idea_url(request, plan_id, version)
+    trade_detail_url = _build_trade_detail_url(request, plan_id, version)
+
+    snapshot = first.get("market_snapshot") or {}
+    indicators = (snapshot.get("indicators") or {})
+    volatility = (snapshot.get("volatility") or {})
 
     # Build calc_notes + htf from available payload
     raw_plan = first.get("plan") or {}
@@ -2377,15 +2382,13 @@ async def gpt_plan(
     plan.setdefault("symbol", symbol)
     plan.setdefault("style", first.get("style"))
     plan.setdefault("direction", plan.get("direction") or (snapshot.get("trend") or {}).get("direction_hint"))
-    plan["idea_url"] = idea_url
+    plan["trade_detail"] = trade_detail_url
+    plan.pop("idea_url", None)
     first["plan"] = plan
     charts_container = first.get("charts") or {}
     charts = charts_container.get("params") if isinstance(charts_container, dict) else None
     chart_params_payload: Dict[str, Any] = charts if isinstance(charts, dict) else {}
     chart_url_value: Optional[str] = charts_container.get("interactive") if isinstance(charts_container, dict) else None
-    snapshot = first.get("market_snapshot") or {}
-    indicators = (snapshot.get("indicators") or {})
-    volatility = (snapshot.get("volatility") or {})
 
     def _coerce_float(value: Any) -> Optional[float]:
         try:
@@ -2561,7 +2564,7 @@ async def gpt_plan(
             decimals_value = 2
 
     plan_core = _extract_plan_core(first, plan_id, version, decimals_value)
-    plan_core["idea_url"] = idea_url
+    plan_core["trade_detail"] = trade_detail_url
     if plan_warnings:
         plan_core["warnings"] = plan_warnings
     summary_snapshot = _build_snapshot_summary(first)
@@ -2584,7 +2587,7 @@ async def gpt_plan(
             "symbol": symbol,
             "style": first.get("style"),
             "plan_id": plan_id,
-            "idea_url": idea_url,
+            "trade_detail": trade_detail_url,
             "chart_url_present": bool(chart_url_value),
             "targets": targets_list[:2],
         },
@@ -2633,7 +2636,7 @@ async def gpt_plan(
     return PlanResponse(
         plan_id=plan_id,
         version=version,
-        idea_url=idea_url,
+        trade_detail=trade_detail_url,
         warnings=plan_warnings or None,
         planning_context=planning_context_value,
         offline_basis=offline_basis,
@@ -2674,16 +2677,21 @@ async def gpt_plan(
 
 @app.post("/internal/idea/store", include_in_schema=False, tags=["internal"])
 async def internal_idea_store(payload: IdeaStoreRequest, request: Request) -> IdeaStoreResponse:
-    plan_block = payload.plan or {}
+    plan_block = dict(payload.plan or {})
     plan_id = plan_block.get("plan_id")
     version = plan_block.get("version")
     if not plan_id or version is None:
         raise HTTPException(status_code=400, detail="plan.plan_id and plan.version are required")
-    idea_url = _build_idea_url(request, plan_id, int(version))
+    trade_detail_url = _build_trade_detail_url(request, plan_id, int(version))
     snapshot = payload.model_dump()
+    plan_payload = snapshot.get("plan") or {}
+    legacy_detail = plan_payload.pop("idea_url", None)
+    if "trade_detail" not in plan_payload:
+        plan_payload["trade_detail"] = legacy_detail or trade_detail_url
+    snapshot["plan"] = plan_payload
     snapshot.setdefault("chart_url", None)
     await _store_idea_snapshot(plan_id, snapshot)
-    return IdeaStoreResponse(plan_id=plan_id, idea_url=idea_url)
+    return IdeaStoreResponse(plan_id=plan_id, trade_detail=trade_detail_url)
 
 
 @app.get("/idea/{plan_id}")

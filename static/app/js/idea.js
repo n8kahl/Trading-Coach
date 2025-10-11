@@ -69,8 +69,9 @@ function populate() {
   tp1El.textContent = formatNumber(targets[0], decimals);
   tp2El.textContent = formatNumber(targets[1], decimals);
   rrEl.textContent = formatNumber(planData.rr_to_t1, 2);
-  ideaUrlEl.href = planData.idea_url || '#';
-  ideaUrlEl.classList.toggle('muted', !planData.idea_url);
+  const tradeDetailUrl = planData.trade_detail || planData.idea_url;
+  ideaUrlEl.href = tradeDetailUrl || '#';
+  ideaUrlEl.classList.toggle('muted', !tradeDetailUrl);
 
   renderWarnings(planData.warnings || ideaSnapshot.warnings || []);
   renderCalcNotes(ideaSnapshot.calc_notes || plan.calc_notes);
@@ -80,7 +81,7 @@ function populate() {
   renderEducationCards(ideaSnapshot);
   renderOptions(ideaSnapshot.options);
 
-  const chartUrl = ideaSnapshot.chart_url || plan.idea_url;
+  const chartUrl = ideaSnapshot.chart_url || plan.trade_detail || plan.idea_url;
   if (chartUrl && chartUrl.includes('/tv')) {
     chartFrame.src = chartUrl;
     chartWarning.classList.add('hidden');

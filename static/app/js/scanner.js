@@ -114,13 +114,14 @@ async function openIdea(item) {
       method: 'POST',
       body: JSON.stringify(body),
     });
-    if (plan.plan_id) {
+    const detailUrl = plan.trade_detail || plan.idea_url;
+    if (detailUrl) {
+      window.open(detailUrl, '_blank');
+    } else if (plan.plan_id) {
       const url = buildIdeaUrl(plan.plan_id, plan.version || 1);
       window.open(url, '_blank');
-    } else if (plan.idea_url) {
-      window.open(plan.idea_url, '_blank');
     } else {
-      throw new Error('Plan did not include idea URL');
+      throw new Error('Plan did not include a trade detail link');
     }
   } catch (err) {
     console.error(err);
