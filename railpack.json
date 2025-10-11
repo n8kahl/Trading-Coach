@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "build": {
+    "commands": [
+      "cd idea-page && npm ci",
+      "cd idea-page && npm run build"
+    ]
+  },
+  "deploy": {
+    "startCommand": "cd idea-page && npm run start -- --hostname 0.0.0.0 --port ${PORT:-3000}"
+  }
+}
