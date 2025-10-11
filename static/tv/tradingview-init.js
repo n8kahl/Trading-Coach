@@ -119,12 +119,13 @@
     scaleMargins: { top: 0.7, bottom: 0 },
   });
 
-  emaSeries = emaTokens.reduce((acc, token) => {
+  const emaPalette = ['#38bdf8', '#a855f7', '#facc15', '#f97316'];
+  emaSeries = emaTokens.reduce((acc, token, idx) => {
     const span = parseInt(token, 10);
     if (!Number.isFinite(span) || span <= 0) return acc;
     const series = chart.addLineSeries({
       lineWidth: 2,
-      color: theme === 'light' ? '#0ea5e9' : '#38bdf8',
+      color: emaPalette[idx % emaPalette.length],
       title: `EMA${span}`,
     });
     acc.push({ span, series });
@@ -253,7 +254,7 @@
       if (vwapRequested) {
         vwapSeries = chart.addLineSeries({
           lineWidth: 2,
-          color: theme === 'light' ? '#f97316' : '#fb923c',
+          color: '#ffffff',
           title: 'VWAP',
         });
       }
@@ -298,7 +299,7 @@
         .sort((a, b) => b.price - a.price)
         .forEach((level, idx) => {
           const label = level.label ? level.label : `Level ${idx + 1}`;
-          addPriceLine(level.price, label, '#6366f1', LightweightCharts.LineStyle.Dotted);
+          addPriceLine(level.price, label, '#94a3b8', LightweightCharts.LineStyle.Dotted);
         });
 
       renderLegend(lastPrice);
