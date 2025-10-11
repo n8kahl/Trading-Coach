@@ -196,6 +196,29 @@ def _round_to_increment(value: float, increment: float) -> float:
     return round(scaled * increment, 4)
 
 
+def _apply_limit_with_tick(entry: float, bias: str, value: float, limit: float | None, tick_size: float) -> float:
+    if limit is None or tick_size <= 0:
+        return value
+    bound = entry + limit if bias == "long" else entry - limit
+    epsilon = tick_size * 0.5
+    if bias == "long":
+        if value <= bound + epsilon:
+            return value
+        steps = math.floor(bound / tick_size)
+        capped = steps * tick_size
+        if capped < entry:
+            capped = entry
+        return round(capped, 4)
+    else:
+        if value >= bound - epsilon:
+            return value
+        steps = math.ceil(bound / tick_size)
+        capped = steps * tick_size
+        if capped > entry:
+            capped = entry
+        return round(capped, 4)
+
+
 def _expected_move_limit(expected_move: float | None, prefer_em_cap: bool) -> float | None:
     if expected_move is None:
         return None
@@ -291,6 +314,7 @@ def _collect_priority_levels(entry: float, bias: str, ctx: Dict[str, Any]) -> Li
 def _choose_snapped_target(
     *,
     base_price: float,
+    base_distance: float,
     entry: float,
     stop: float,
     bias: str,
@@ -300,8 +324,26 @@ def _choose_snapped_target(
     levels: List[Tuple[int, float, float, str]],
     used_prices: List[float],
     previous_price: float | None,
-) -> Tuple[float, str] | None:
+    atr: float | None,
+) -> Tuple[float, str, bool] | None:
     tolerance = max(tick_size * 0.6, 0.01)
+    strong_tags = {
+        "POC",
+        "VAH",
+        "VAL",
+        "PRIOR_HIGH",
+        "PRIOR_LOW",
+        "ORB_HIGH",
+        "ORB_LOW",
+        "SESSION_HIGH",
+        "SESSION_LOW",
+        "WEEK_HIGH",
+        "WEEK_LOW",
+    }
+    atr_cap = None
+    if atr and atr > 0:
+        atr_cap = float(atr) * 1.75
+    distance_cap = max(base_distance * 1.8, atr_cap or 0.0)
     for _, _, price, tag in levels:
         if any(abs(price - used) <= tolerance for used in used_prices):
             continue
@@ -317,13 +359,16 @@ def _choose_snapped_target(
             if previous_price is not None and price >= previous_price - tolerance:
                 continue
             distance = entry - price
+        if distance_cap and distance > distance_cap * 1.001:
+            continue
+        allow_extension = tag in strong_tags
         if em_limit is not None:
-            limit_allowance = em_limit * 1.10
+            limit_allowance = em_limit * (1.10 if allow_extension else 1.0)
             if distance > limit_allowance * 1.001:
                 continue
         if rr(entry, stop, price, bias) < float(min_rr) - 1e-6:
             continue
-        return price, tag
+        return price, tag, allow_extension
     return None
 
 
@@ -364,9 +409,11 @@ def _apply_tp_logic(
         if not math.isfinite(base_price):
             continue
         candidate = float(base_price)
+        base_distance = abs(candidate - entry)
         previous_price = results[idx - 1] if idx > 0 and results else None
         snapped_choice = _choose_snapped_target(
             base_price=candidate,
+            base_distance=base_distance,
             entry=entry,
             stop=stop,
             bias=bias,
@@ -376,18 +423,21 @@ def _apply_tp_logic(
             levels=levels,
             used_prices=used_prices,
             previous_price=previous_price,
+            atr=atr,
         )
         snapped_price = None
         snapped_tag = None
+        snapped_strong = False
         if snapped_choice is not None:
-            snapped_price, snapped_tag = snapped_choice
+            snapped_price, snapped_tag, snapped_strong = snapped_choice
 
         effective_limit = em_limit
         if snapped_price is not None and em_limit is not None:
-            effective_limit = em_limit * 1.10
+            effective_limit = em_limit * (1.10 if snapped_strong else 1.0)
         final_price = snapped_price if snapped_price is not None else candidate
         final_price = _clamp_to_em(entry, final_price, bias, effective_limit)
         final_price = _round_to_increment(final_price, tick_size)
+        final_price = _apply_limit_with_tick(entry, bias, final_price, effective_limit, tick_size)
         results.append(final_price)
         used_prices.append(final_price)
         target_debug["snap"].append(
@@ -397,6 +447,7 @@ def _apply_tp_logic(
                 "final": final_price,
                 "used_snapped": snapped_price is not None,
                 "tag": snapped_tag,
+                "strong": snapped_strong,
             }
         )
 
@@ -426,8 +477,10 @@ def _apply_tp_logic(
         nudge = max(nudge, tick_size)
         attempt = results[0] + sign * nudge
         attempt = _clamp_to_em(entry, attempt, bias, em_limit)
+        base_distance_attempt = abs(attempt - entry)
         snap_choice = _choose_snapped_target(
             base_price=attempt,
+            base_distance=base_distance_attempt,
             entry=entry,
             stop=stop,
             bias=bias,
@@ -437,11 +490,15 @@ def _apply_tp_logic(
             levels=levels,
             used_prices=results[1:] if len(results) > 1 else [],
             previous_price=results[1] if len(results) > 1 else None,
+            atr=atr,
         )
         snapped_tag = None
+        snapped_strong = False
         if snap_choice is not None:
-            attempt, snapped_tag = snap_choice
+            attempt, snapped_tag, snapped_strong = snap_choice
         attempt = _round_to_increment(attempt, tick_size)
+        limit_for_attempt = em_limit * (1.10 if snapped_strong else 1.0) if em_limit is not None else em_limit
+        attempt = _apply_limit_with_tick(entry, bias, attempt, limit_for_attempt, tick_size)
         attempt_rr = rr(entry, stop, attempt, bias)
         target_debug["rr_check"] = {
             "initial_rr": rr_tp1,
@@ -449,6 +506,7 @@ def _apply_tp_logic(
             "attempt_rr": attempt_rr,
             "nudge": nudge,
             "snap_tag": snapped_tag,
+            "snap_strong": snapped_strong,
         }
         if attempt_rr >= float(min_rr) - 1e-6:
             results[0] = attempt
