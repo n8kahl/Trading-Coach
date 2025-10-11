@@ -18,6 +18,7 @@ import uuid
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import copy
 
 import httpx
 import numpy as np
@@ -479,6 +480,23 @@ def _generate_plan_slug(symbol: str, style: Optional[str], direction: Optional[s
     return f"{sym}-{sty}-{drn}-{stamp}"
 
 
+def _parse_plan_slug(plan_id: str) -> Optional[Dict[str, str]]:
+    token = (plan_id or '').strip().lower()
+    if not token:
+        return None
+    parts = [chunk for chunk in token.split('-') if chunk]
+    if len(parts) < 3:
+        return None
+    symbol = parts[0].upper()
+    style = parts[1].lower()
+    direction = parts[2].lower()
+    return {
+        'symbol': symbol,
+        'style': style,
+        'direction': direction,
+    }
+
+
 def _extract_plan_core(first: Dict[str, Any], plan_id: str, version: int, decimals: int | None) -> Dict[str, Any]:
     plan_block = first.get("plan") or {}
     charts = first.get("charts") or {}
@@ -557,6 +575,47 @@ async def _get_idea_snapshot(plan_id: str, version: Optional[int] = None) -> Dic
             if plan.get("version") == version:
                 return snap
         raise HTTPException(status_code=404, detail="Plan version not found")
+
+
+async def _regenerate_snapshot_from_slug(plan_id: str, version: Optional[int], request: Request, slug_meta: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """Regenerate a snapshot for slug-style plan IDs when not cached."""
+
+    try:
+        plan_request = PlanRequest(symbol=slug_meta['symbol'], style=slug_meta.get('style'))
+    except Exception:
+        return None
+
+    # Call gpt_plan directly with a synthetic user context
+    user = AuthedUser(user_id="slug-regenerator")
+    response = await gpt_plan(plan_request, request, user)
+
+    # Fetch the snapshot that gpt_plan just stored
+    base_snapshot = None
+    try:
+        base_snapshot = await _get_idea_snapshot(response.plan_id, version=response.version)
+    except HTTPException:
+        base_snapshot = None
+
+    if base_snapshot is None:
+        return None
+
+    # If the generated plan already matches the slug and version, just return it
+    if response.plan_id == plan_id:
+        return base_snapshot
+
+    cloned = copy.deepcopy(base_snapshot)
+    plan_block = dict(cloned.get("plan") or {})
+    plan_block["plan_id"] = plan_id
+    plan_block["version"] = response.version
+    redirect_url = _build_trade_detail_url(request, plan_id, response.version)
+    plan_block["trade_detail"] = redirect_url
+    plan_block["idea_url"] = redirect_url
+    cloned["plan"] = plan_block
+    cloned["trade_detail"] = redirect_url
+    cloned["idea_url"] = redirect_url
+
+    await _store_idea_snapshot(plan_id, cloned)
+    return cloned
 
 
 async def _stream_generator(symbol: str) -> Any:
@@ -2809,13 +2868,29 @@ async def internal_idea_store(payload: IdeaStoreRequest, request: Request) -> Id
     return IdeaStoreResponse(plan_id=plan_id, trade_detail=trade_detail_url, idea_url=trade_detail_url)
 
 
+async def _ensure_snapshot(plan_id: str, version: Optional[int], request: Request) -> Dict[str, Any]:
+    try:
+        return await _get_idea_snapshot(plan_id, version=version)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        slug_meta = _parse_plan_slug(plan_id)
+        if not slug_meta:
+            raise
+    regenerated = await _regenerate_snapshot_from_slug(plan_id, version, request, slug_meta)
+    if regenerated is None:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return regenerated
+
+
 @app.get("/idea/{plan_id}")
 async def get_latest_idea(plan_id: str, request: Request) -> Any:
     accept = (request.headers.get("accept") or "").lower()
     if "text/html" in accept:
         url = f"/app/idea.html?plan_id={quote(plan_id)}"
         return RedirectResponse(url=url, status_code=302)
-    return await _get_idea_snapshot(plan_id)
+    snapshot = await _ensure_snapshot(plan_id, None, request)
+    return snapshot
 
 
 @app.get("/idea/{plan_id}/{version}")
@@ -2824,7 +2899,8 @@ async def get_idea_version(plan_id: str, version: int, request: Request) -> Any:
     if "text/html" in accept:
         url = f"/app/idea.html?plan_id={quote(plan_id)}&v={int(version)}"
         return RedirectResponse(url=url, status_code=302)
-    return await _get_idea_snapshot(plan_id, version=version)
+    snapshot = await _ensure_snapshot(plan_id, int(version), request)
+    return snapshot
 
 
 @app.get("/stream/market")
