@@ -228,6 +228,7 @@ class PlanResponse(BaseModel):
     plan_id: str | None = None
     version: int | None = None
     trade_detail: str | None = None
+    idea_url: str | None = None
     warnings: List[str] | None = None
     planning_context: str | None = None
     offline_basis: Dict[str, Any] | None = None
@@ -281,6 +282,7 @@ class IdeaStoreRequest(BaseModel):
 class IdeaStoreResponse(BaseModel):
     plan_id: str
     trade_detail: str
+    idea_url: str
 
 
 class StreamPushRequest(BaseModel):
@@ -704,6 +706,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         plan_id=plan_id,
         version=version,
         trade_detail=trade_detail_url,
+        idea_url=trade_detail_url,
         warnings=plan_block["warnings"],
         symbol=symbol,
         style=style or "intraday",
@@ -2585,6 +2588,7 @@ async def gpt_plan(
 
     plan_core = _extract_plan_core(first, plan_id, version, decimals_value)
     plan_core["trade_detail"] = trade_detail_url
+    plan_core["idea_url"] = trade_detail_url
     if plan_warnings:
         plan_core["warnings"] = plan_warnings
     summary_snapshot = _build_snapshot_summary(first)
@@ -2658,6 +2662,7 @@ async def gpt_plan(
         plan_id=plan_id,
         version=version,
         trade_detail=trade_detail_url,
+        idea_url=trade_detail_url,
         warnings=plan_warnings or None,
         planning_context=planning_context_value,
         offline_basis=offline_basis,
@@ -2712,7 +2717,7 @@ async def internal_idea_store(payload: IdeaStoreRequest, request: Request) -> Id
     snapshot["plan"] = plan_payload
     snapshot.setdefault("chart_url", None)
     await _store_idea_snapshot(plan_id, snapshot)
-    return IdeaStoreResponse(plan_id=plan_id, trade_detail=trade_detail_url)
+    return IdeaStoreResponse(plan_id=plan_id, trade_detail=trade_detail_url, idea_url=trade_detail_url)
 
 
 @app.get("/idea/{plan_id}")
