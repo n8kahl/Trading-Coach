@@ -319,6 +319,9 @@ pre-baked trade levels.
   mirrored `plan_*` feature fields) includes direction, entry, stop, two
   targets, confidence, risk:reward, ATR reference, and notes derived from the
   live data check.
+- **Style tokens reflect the strategy library.** Expect one of `scalp`,
+  `intraday`, `swing`, or `leaps` (index-focused strategies map to
+  `intraday`). Use this value when filtering scans or requesting contracts.
 - **`direction_hint` is advisory.** It reflects indicator alignment; override
   it if your analysis disagrees.
 - **`options` bundle** surfaces Polygon's filtered option chain (best contract
@@ -355,11 +358,13 @@ pre-baked trade levels.
 
 ## `/gpt/chart-url`
 
-## `/gpt/chart-url`
-
 Use this helper whenever you need a shareable chart link. Provide the baseline
 `charts.params` from the scan/context response and append your computed trade
 plan fields.
+
+**Required body fields:** `symbol`, `interval`, `direction`, `entry`, `stop`,
+and `tp` (comma-separated list for multiple targets). Missing any of these will
+return a `422` validation error.
 
 Depending on the data available, `charts.params` may also include overlay keys
 such as `supply`, `demand`, `liquidity`, `fvg`, and `avwap`; the chart viewer
@@ -379,6 +384,7 @@ curl -s -X POST https://host/gpt/chart-url \
   -d '{
         "symbol":"AAPL",
         "interval":"1",
+        "direction":"long",
         "ema":"9,20,50",
         "view":"30m",
         "entry":"258.40",
@@ -394,8 +400,8 @@ Response:
 {"interactive":"https://host/tv?symbol=AAPL&interval=1m&ema=9%2C20%2C50&view=30m&entry=258.40&stop=257.80&tp=259.60%2C260.10&notes=Breakout+plan"}
 ```
 
-If required parameters (`symbol`, `interval`) are missing you will receive a 400
-error with a human-readable message.
+If any required parameter is missing or geometry/risk constraints fail you will
+receive a `422` response with a descriptive error message.
 
 ### Client-side URL validation (optional but recommended)
 
@@ -567,7 +573,7 @@ defaults to 300 bars when omitted.
 ```jsonc
 {
   "symbol": "AAPL",
-  "contexts": [
+  "snapshots": [
     {
       "interval": "1",
       "requested": "1m",
@@ -586,6 +592,7 @@ defaults to 300 bars when omitted.
     },
     { "interval": "60", "requested": "1h", … }
   ],
+  "contexts": [ /* deprecated alias, mirrors snapshots for older clients */ ],
   "volatility_regime": {
     "timestamp": "2025-10-08T19:40:05.123456Z",
     "iv_atm": 0.37,
@@ -625,6 +632,34 @@ Intervals pulled from cache include `"cached": true`. IV metrics fall back to
 `sentiment`, `events`, and `earnings` are populated when the enrichment sidecar
 (`enrich_service.py`) is running with a valid `FINNHUB_API_KEY`. They are `null`
 when the sidecar is disabled or the upstream APIs fail temporarily.
+
+Legacy note: the response still includes a `contexts` array (mirroring
+`snapshots`) so existing GPT tooling keeps working. New integrations should
+read from `snapshots`.
+
+## `/gpt/futures-snapshot`
+
+```
+GET /gpt/futures-snapshot
+```
+
+Returns Finnhub-backed ETF proxies for the major index futures plus VIX. The
+endpoint now lives on the primary FastAPI service (no sidecar round-trip).
+
+```jsonc
+{
+  "es_proxy": { "symbol": "SPY", "last": 565.2, "percent": -0.003, "time_utc": "…", "stale": false },
+  "nq_proxy": { "symbol": "QQQ", … },
+  "ym_proxy": { "symbol": "DIA", … },
+  "rty_proxy": { "symbol": "IWM", … },
+  "vix": { "symbol": "CBOE:VIX", … },
+  "market_phase": "afterhours",
+  "stale_seconds": 0
+}
+```
+
+Responses are cached for three minutes. A missing `FINNHUB_API_KEY` raises a
+`503` with `{ "code": "UNAVAILABLE", "message": "FINNHUB_API_KEY missing" }`.
 
 ## Suggested GPT system prompt
 
