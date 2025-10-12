@@ -6,6 +6,7 @@
     if (!token) return '1';
     if (token.endsWith('m')) return String(parseInt(token.replace('m', ''), 10) || 1);
     if (token.endsWith('h')) return String((parseInt(token.replace('h', ''), 10) || 1) * 60);
+    if (token.endsWith('w')) return '1W';
     if (token === 'd' || token === '1d') return '1D';
     return token.toUpperCase();
   };
@@ -15,6 +16,10 @@
     if (token.endsWith('D')) {
       const days = parseInt(token, 10) || 1;
       return days * 24 * 60 * 60;
+    }
+    if (token.endsWith('W')) {
+      const weeks = parseInt(token, 10) || 1;
+      return weeks * 7 * 24 * 60 * 60;
     }
     const minutes = parseInt(token, 10);
     if (!Number.isFinite(minutes) || minutes <= 0) return 60;
@@ -54,23 +59,9 @@
   };
 
   const symbol = (params.get('symbol') || 'AAPL').toUpperCase();
-  const resolution = normalizeResolution(params.get('interval') || '15');
+  let currentResolution = normalizeResolution(params.get('interval') || '15');
   const theme = params.get('theme') === 'light' ? 'light' : 'dark';
   const baseUrl = `${window.location.protocol}//${window.location.host}`;
-
-  let tpMeta = [];
-  try {
-    tpMeta = JSON.parse(params.get('tp_meta') || '[]');
-  } catch (err) {
-    tpMeta = [];
-  }
-
-  let runnerConfig = null;
-  try {
-    runnerConfig = JSON.parse(params.get('runner') || 'null');
-  } catch (err) {
-    runnerConfig = null;
-  }
 
   const plan = {
     entry: parseNumber(params.get('entry')),
@@ -81,42 +72,105 @@
     atr: parseNumber(params.get('atr')),
     notes: params.get('notes'),
     title: params.get('title'),
-    tpMeta,
-    runner: runnerConfig,
-  };
-  const emaTokensInput = parseList(params.get('ema'));
-  let keyLevels = parseNamedLevels(params.get('levels'));
-  let overlayValues = [];
-  const scalePlanToken = (params.get('scale_plan') || 'auto').toLowerCase();
-  let emaSeries = [];
-
-  const container = document.getElementById('tv_chart_container');
-  const legendEl = document.getElementById('plan_legend');
-  const debugEl = document.getElementById('debug_banner');
-
-  const dbg = (msg) => {
-    debugEl.style.display = 'block';
-    debugEl.textContent += (debugEl.textContent ? '\n' : '') + msg;
+    tpMeta: (() => {
+      try {
+        return JSON.parse(params.get('tp_meta') || '[]');
+      } catch {
+        return [];
+      }
+    })(),
+    runner: (() => {
+      try {
+        return JSON.parse(params.get('runner') || 'null');
+      } catch {
+        return null;
+      }
+    })(),
   };
 
-  if (!window.LightweightCharts) {
-    dbg('LightweightCharts not available');
-    return;
+  let planMeta = {};
+  try {
+    planMeta = JSON.parse(params.get('plan_meta') || '{}');
+  } catch {
+    planMeta = {};
   }
 
+  const mergedPlanMeta = {
+    symbol,
+    style: planMeta.style || params.get('style'),
+    style_display: planMeta.style_display || null,
+    bias: planMeta.bias || plan.direction || null,
+    confidence: planMeta.confidence,
+    risk_reward: planMeta.risk_reward,
+    notes: planMeta.notes || plan.notes || null,
+    warnings: Array.isArray(planMeta.warnings) ? planMeta.warnings : [],
+    runner: planMeta.runner || plan.runner,
+    targets: Array.isArray(planMeta.targets) && planMeta.targets.length ? planMeta.targets : plan.tps,
+    target_meta: Array.isArray(planMeta.target_meta) && planMeta.target_meta.length ? planMeta.target_meta : plan.tpMeta,
+    entry: Number.isFinite(planMeta.entry) ? planMeta.entry : plan.entry,
+    stop: Number.isFinite(planMeta.stop) ? planMeta.stop : plan.stop,
+    atr: Number.isFinite(planMeta.atr) ? planMeta.atr : plan.atr,
+    strategy: planMeta.strategy_label || plan.strategy,
+    expected_move: planMeta.expected_move,
+    horizon_minutes: planMeta.horizon_minutes,
+  };
+
+  const headerSymbolEl = document.getElementById('header_symbol');
+  const headerStrategyEl = document.getElementById('header_strategy');
+  const headerBiasEl = document.getElementById('header_bias');
+  const headerConfidenceEl = document.getElementById('header_confidence');
+  const headerRREl = document.getElementById('header_rr');
+  const headerDurationEl = document.getElementById('header_duration');
+  const headerLastPriceEl = document.getElementById('header_lastprice');
+  const timeframeSwitcherEl = document.getElementById('timeframe_switcher');
+  const planPanelEl = document.getElementById('plan_panel');
+  const planPanelBodyEl = document.getElementById('plan_panel_body');
+  const debugEl = document.getElementById('debug_banner');
+
+  const TIMEFRAMES = [
+    { label: '1m', resolution: '1' },
+    { label: '5m', resolution: '5' },
+    { label: '10m', resolution: '10' },
+    { label: '30m', resolution: '30' },
+    { label: '1H', resolution: '60' },
+    { label: '1D', resolution: '1D' },
+    { label: '1W', resolution: '1W' },
+  ];
+  let activeTimeframe =
+    TIMEFRAMES.find((tf) => normalizeResolution(tf.resolution) === currentResolution) || TIMEFRAMES[0];
+
+  const layoutBase = {
+    background: { type: 'solid', color: theme === 'light' ? '#ffffff' : '#0b0f14' },
+    textColor: theme === 'light' ? '#1b2733' : '#e6edf3',
+  };
+  const gridBase = {
+    vertLines: { color: theme === 'light' ? '#e5e9f0' : '#1f2933' },
+    horzLines: { color: theme === 'light' ? '#e5e9f0' : '#1f2933' },
+  };
+
+  const container = document.getElementById('tv_chart_container');
   const chart = LightweightCharts.createChart(container, {
-    layout: {
-      background: { type: 'solid', color: theme === 'light' ? '#ffffff' : '#0b0f14' },
-      textColor: theme === 'light' ? '#1b2733' : '#e6edf3',
-    },
-    grid: {
-      vertLines: { color: theme === 'light' ? '#e5e9f0' : '#1f2933' },
-      horzLines: { color: theme === 'light' ? '#e5e9f0' : '#1f2933' },
-    },
+    layout: layoutBase,
+    grid: gridBase,
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
     timeScale: { borderColor: theme === 'light' ? '#d1d5db' : '#1f2933' },
-    rightPriceScale: { borderColor: theme === 'light' ? '#d1d5db' : '#1f2933', scaleMargins: { top: 0.1, bottom: 0.25 } },
-    leftPriceScale: { visible: true, borderColor: theme === 'light' ? '#d1d5db' : '#1f2933', scaleMargins: { top: 0.8, bottom: 0.02 } },
+    rightPriceScale: {
+      borderColor: theme === 'light' ? '#d1d5db' : '#1f2933',
+      scaleMargins: { top: 0.1, bottom: 0.25 },
+    },
+    leftPriceScale: {
+      visible: true,
+      borderColor: theme === 'light' ? '#d1d5db' : '#1f2933',
+      scaleMargins: { top: 0.8, bottom: 0.02 },
+    },
+    watermark: {
+      visible: true,
+      fontSize: 22,
+      horzAlign: 'left',
+      vertAlign: 'bottom',
+      color: theme === 'light' ? 'rgba(15,23,42,0.08)' : 'rgba(148,163,184,0.08)',
+      text: '',
+    },
   });
 
   const candleSeries = chart.addCandlestickSeries({
@@ -136,8 +190,9 @@
   });
 
   const emaPalette = ['#38bdf8', '#a855f7', '#facc15', '#f97316'];
+  const emaTokensInput = parseList(params.get('ema'));
   const emaTokens = emaTokensInput.length ? emaTokensInput : ['9', '21', '50'];
-  emaSeries = emaTokens.reduce((acc, token, idx) => {
+  const emaSeries = emaTokens.reduce((acc, token, idx) => {
     const span = parseInt(token, 10);
     if (!Number.isFinite(span) || span <= 0) return acc;
     const series = chart.addLineSeries({
@@ -149,75 +204,244 @@
     return acc;
   }, []);
 
-  const priceLines = [];
-  const clearPriceLines = () => {
-    while (priceLines.length) {
-      const line = priceLines.pop();
-      candleSeries.removePriceLine(line);
+  let vwapSeries = null;
+  const keyLevels = parseNamedLevels(params.get('levels'));
+  const scalePlanToken = (params.get('scale_plan') || 'off').toLowerCase();
+
+  let lastKnownPrice = null;
+
+  const setWatermark = () => {
+    const tfLabel = activeTimeframe ? activeTimeframe.label : currentResolution;
+    chart.applyOptions({
+      watermark: {
+        text: `${symbol} · ${tfLabel}`,
+      },
+    });
+  };
+
+  const TIMEFRAME_REFRESH_MS = 60000;
+
+  const initializeTimeframes = () => {
+    timeframeSwitcherEl.innerHTML = '';
+    TIMEFRAMES.forEach((tf) => {
+      const button = document.createElement('button');
+      button.className = 'timeframe-button';
+      button.textContent = tf.label;
+      button.dataset.resolution = tf.resolution;
+      if (normalizeResolution(tf.resolution) === currentResolution) {
+        button.classList.add('active');
+        activeTimeframe = tf;
+      }
+      button.addEventListener('click', () => {
+        if (normalizeResolution(tf.resolution) === currentResolution) return;
+        currentResolution = normalizeResolution(tf.resolution);
+        activeTimeframe = tf;
+        params.set('interval', tf.label);
+        const newUrl = `${window.location.pathname}?${params.toString()}`;
+        window.history.replaceState({}, '', newUrl);
+        Array.from(timeframeSwitcherEl.querySelectorAll('button')).forEach((btn) => btn.classList.remove('active'));
+        button.classList.add('active');
+        setWatermark();
+        fetchBars();
+      });
+      timeframeSwitcherEl.appendChild(button);
+    });
+  };
+
+  const formatPrice = (value) => (Number.isFinite(value) ? value.toFixed(2) : '—');
+  const formatPercentage = (value) => (Number.isFinite(value) ? `${(value * 100).toFixed(0)}%` : '—');
+
+  const formatProbability = (value) => {
+    if (!Number.isFinite(value)) return null;
+    return `${Math.round(value * 100)}% POT`;
+  };
+
+  const estimateDuration = () => {
+    if (Number.isFinite(mergedPlanMeta.horizon_minutes)) {
+      const minutes = mergedPlanMeta.horizon_minutes;
+      if (minutes >= 1440) {
+        const days = minutes / 1440;
+        return `Stay in trade ≈ ${days.toFixed(days >= 2 ? 0 : 1)} day${days >= 2 ? 's' : ''}`;
+      }
+      if (minutes >= 60) {
+        const hours = minutes / 60;
+        return `Stay in trade ≈ ${hours.toFixed(hours >= 2 ? 0 : 1)} hour${hours >= 2 ? 's' : ''}`;
+      }
+      return `Stay in trade ≈ ${minutes.toFixed(0)} minutes`;
+    }
+    const styleToken = (mergedPlanMeta.style || '').toLowerCase();
+    if (styleToken === 'scalp' || styleToken === '0dte') return 'Stay in trade ≈ 30–60 minutes';
+    if (styleToken === 'intraday') return 'Stay in trade ≈ 2–4 hours';
+    if (styleToken === 'swing') return 'Stay in trade ≈ 3–5 days';
+    if (styleToken === 'leaps') return 'Stay in trade: multi-week campaign';
+    return null;
+  };
+
+  const renderHeader = () => {
+    const bias = (mergedPlanMeta.bias || plan.direction || '').toLowerCase();
+    if (headerSymbolEl) headerSymbolEl.textContent = symbol;
+    if (headerStrategyEl) {
+      const styleLabel = mergedPlanMeta.style_display || (mergedPlanMeta.style || '').toUpperCase();
+      const strategyLabel = mergedPlanMeta.strategy || plan.strategy || '';
+      headerStrategyEl.textContent = [styleLabel, strategyLabel].filter(Boolean).join(' · ');
+    }
+    if (headerBiasEl) headerBiasEl.textContent = bias ? `Bias: ${bias === 'long' ? 'Long 🟢' : 'Short 🔴'}` : '';
+    if (headerConfidenceEl) {
+      headerConfidenceEl.textContent = Number.isFinite(mergedPlanMeta.confidence)
+        ? `Confidence: ${(mergedPlanMeta.confidence * 100).toFixed(0)}%`
+        : '';
+    }
+    if (headerRREl) {
+      headerRREl.textContent = Number.isFinite(mergedPlanMeta.risk_reward)
+        ? `R:R (TP1): ${mergedPlanMeta.risk_reward.toFixed(2)}`
+        : '';
+    }
+    if (headerDurationEl) {
+      headerDurationEl.textContent = estimateDuration() || '';
     }
   };
 
-  const addPriceLine = (price, title, color, style = LightweightCharts.LineStyle.Solid, width = 2) => {
-    if (!Number.isFinite(price)) return;
-    const line = candleSeries.createPriceLine({
-      price,
-      color,
-      title,
-      lineWidth: width,
-      lineStyle: style,
-    });
-    priceLines.push(line);
+  const renderPlanPanel = (lastPrice) => {
+    if (!planPanelBodyEl) return;
+    const bias = (mergedPlanMeta.bias || plan.direction || '').toLowerCase();
+    const targetsMeta = Array.isArray(mergedPlanMeta.target_meta) ? mergedPlanMeta.target_meta : [];
+    const warnings = Array.isArray(mergedPlanMeta.warnings) ? mergedPlanMeta.warnings : [];
+
+    const targetsList = plan.tps
+      .map((tp, idx) => {
+        if (!Number.isFinite(tp)) return null;
+        const meta = targetsMeta[idx] || {};
+        const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
+        const label = sequence >= 3 ? 'Runner' : `TP${sequence}`;
+        const rr = Number.isFinite(meta.rr) ? ` · R:R ${meta.rr.toFixed(2)}` : '';
+        const pot = formatProbability(meta.prob_touch);
+        const em = Number.isFinite(meta.em_fraction) ? ` · ${meta.em_fraction.toFixed(2)}×EM` : '';
+        return `<li><strong>${label}:</strong> ${formatPrice(tp)}${em}${pot ? ` · ${pot}` : ''}${rr}</li>`;
+      })
+      .filter(Boolean)
+      .join('');
+
+    const warningsList = warnings
+      .map((warning) => `<li>${warning}</li>`)
+      .join('');
+
+    const confidenceCopy = Number.isFinite(mergedPlanMeta.confidence)
+      ? `${(mergedPlanMeta.confidence * 100).toFixed(0)}%`
+      : '—';
+    const rrCopy = Number.isFinite(mergedPlanMeta.risk_reward) ? mergedPlanMeta.risk_reward.toFixed(2) : '—';
+    const runnerNote = mergedPlanMeta.runner && mergedPlanMeta.runner.note ? mergedPlanMeta.runner.note : null;
+
+    const lastPriceCopy = Number.isFinite(lastPrice) ? formatPrice(lastPrice) : '—';
+
+    planPanelBodyEl.innerHTML = `
+      <div class="plan-panel__section">
+        <h3>Trade Setup</h3>
+        <dl class="plan-panel__list">
+          <dt>Entry</dt><dd>${formatPrice(mergedPlanMeta.entry)}</dd>
+          <dt>Stop</dt><dd>${formatPrice(mergedPlanMeta.stop)}</dd>
+          <dt>Last Price</dt><dd>${lastPriceCopy}</dd>
+          <dt>Confidence</dt><dd>${confidenceCopy}</dd>
+          <dt>R:R (TP1)</dt><dd>${rrCopy}</dd>
+        </dl>
+      </div>
+      <div class="plan-panel__section">
+        <h3>Targets</h3>
+        <ul class="plan-panel__targets">
+          ${targetsList || '<li>No targets supplied.</li>'}
+        </ul>
+      </div>
+      ${
+        runnerNote
+          ? `<div class="plan-panel__section">
+              <h3>Runner Guidance</h3>
+              <p>${runnerNote}</p>
+            </div>`
+          : ''
+      }
+      <div class="plan-panel__section">
+        <h3>Pre-Entry Checklist</h3>
+        <ul class="plan-panel__warnings">
+          ${
+            warningsList ||
+            '<li>Confirm structure alignment, volume tone, and that price reclaims entry trigger before committing capital.</li>'
+          }
+        </ul>
+      </div>
+      ${
+        mergedPlanMeta.notes
+          ? `<div class="plan-panel__section">
+              <h3>Plan Notes</h3>
+              <p>${mergedPlanMeta.notes}</p>
+            </div>`
+          : ''
+      }
+    `;
+    if (planPanelEl) {
+      if (window.innerWidth <= 1024) {
+        planPanelEl.open = false;
+      } else {
+        planPanelEl.open = true;
+      }
+    }
   };
 
-  const renderLegend = (lastPrice) => {
-    const rows = [];
-    const pushRow = (label, value) => {
-      if (value === null || value === undefined) return;
-      rows.push(`<dt>${label}</dt><dd>${value}</dd>`);
-    };
-    pushRow('Symbol', symbol);
-    pushRow('Resolution', resolution);
-    if (Number.isFinite(lastPrice)) pushRow('Last', lastPrice.toFixed(2));
-    if (Number.isFinite(plan.entry)) pushRow('Entry', plan.entry.toFixed(2));
-    if (Number.isFinite(plan.stop)) pushRow('Stop', plan.stop.toFixed(2));
+  const updateHeaderPricing = (lastPrice) => {
+    if (headerLastPriceEl) {
+      headerLastPriceEl.textContent = Number.isFinite(lastPrice) ? `Last: ${formatPrice(lastPrice)}` : '';
+    }
+  };
+
+  const buildMarkers = (bars) => {
+    if (!bars.length) return [];
+    const markerTime = bars[bars.length - 1].time;
+    if (!Number.isFinite(markerTime)) return [];
+    const direction = (mergedPlanMeta.bias || plan.direction || 'long').toLowerCase();
+    const markers = [];
+    if (Number.isFinite(plan.entry)) {
+      markers.push({
+        time: markerTime,
+        position: direction === 'long' ? 'belowBar' : 'aboveBar',
+        color: '#facc15',
+        shape: direction === 'long' ? 'arrowUp' : 'arrowDown',
+        text: `Entry ${formatPrice(plan.entry)}`,
+      });
+    }
+    if (Number.isFinite(plan.stop)) {
+      markers.push({
+        time: markerTime,
+        position: direction === 'long' ? 'aboveBar' : 'belowBar',
+        color: '#ef4444',
+        shape: direction === 'long' ? 'arrowDown' : 'arrowUp',
+        text: `Stop ${formatPrice(plan.stop)}`,
+      });
+    }
+    const metaList = Array.isArray(mergedPlanMeta.target_meta) ? mergedPlanMeta.target_meta : [];
     plan.tps.forEach((tp, idx) => {
       if (!Number.isFinite(tp)) return;
-      const meta = Array.isArray(plan.tpMeta) ? plan.tpMeta[idx] || {} : {};
+      const meta = metaList[idx] || {};
       const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
-      let label = meta.label || `TP${sequence}`;
-      if (sequence >= 3) {
-        label = 'Runner';
-      }
-      let details = tp.toFixed(2);
-      if (meta.em_fraction && Number.isFinite(meta.em_fraction)) {
-        details += ` (≈ ${Number(meta.em_fraction).toFixed(2)}×EM)`;
-      }
-      if (meta.prob_touch && Number.isFinite(meta.prob_touch)) {
-        details += ` · POT ${Math.round(meta.prob_touch * 100)}%`;
-      }
-      pushRow(label, details);
+      const label = sequence >= 3 ? 'Runner' : `TP${sequence}`;
+      markers.push({
+        time: markerTime,
+        position: direction === 'long' ? 'aboveBar' : 'belowBar',
+        color: sequence >= 3 ? '#c084fc' : '#22c55e',
+        shape: 'circle',
+        text: `${label} ${formatPrice(tp)}`,
+      });
     });
-    if (Number.isFinite(plan.atr)) pushRow('ATR', plan.atr.toFixed(4));
-    if (plan.strategy) pushRow('Setup', plan.strategy);
-    if (plan.runner && plan.runner.note) pushRow('Runner', plan.runner.note);
-    legendEl.innerHTML = `
-      <h2>${plan.title || `${symbol} · ${resolution}`}</h2>
-      <dl>${rows.join('')}</dl>
-      ${plan.notes ? `<p class="notes">${plan.notes}</p>` : ''}
-    `;
-    legendEl.classList.add('visible');
+    return markers;
   };
 
   const rangeTokenRaw = (params.get('range') || '').toLowerCase();
 
   const resolveSpanSeconds = () => {
-    const base = resolutionToSeconds(resolution) * 600;
+    const base = resolutionToSeconds(currentResolution) * 600;
     if (!rangeTokenRaw) return base;
 
     if (/^\d+$/.test(rangeTokenRaw)) {
       const barsCount = parseInt(rangeTokenRaw, 10);
       if (Number.isFinite(barsCount) && barsCount > 0) {
-        return resolutionToSeconds(resolution) * barsCount;
+        return resolutionToSeconds(currentResolution) * barsCount;
       }
     }
 
@@ -242,13 +466,13 @@
   const fetchBars = async () => {
     try {
       const now = Math.floor(Date.now() / 1000);
-      const minSpan = resolutionToSeconds(resolution) * 200;
-      const maxSpan = 60 * 60 * 24 * 365 * 2; // cap at ~2 years
+      const minSpan = resolutionToSeconds(currentResolution) * 200;
+      const maxSpan = 60 * 60 * 24 * 365 * 2;
       const span = Math.min(Math.max(resolveSpanSeconds(), minSpan), maxSpan);
       const from = now - span;
       const qs = new URLSearchParams({
         symbol,
-        resolution,
+        resolution: currentResolution,
         from: String(from),
         to: String(now),
       }).toString();
@@ -283,6 +507,10 @@
       volumeSeries.setData(volumeData);
 
       const lastPrice = bars[bars.length - 1]?.close ?? null;
+      lastKnownPrice = lastPrice;
+      updateHeaderPricing(lastPrice);
+      renderPlanPanel(lastPrice);
+
       let scaleMultiplier = 1;
       if (scalePlanToken !== 'off') {
         if (scalePlanToken === 'auto') {
@@ -304,84 +532,23 @@
         if (Number.isFinite(plan.entry)) plan.entry *= scaleMultiplier;
         if (Number.isFinite(plan.stop)) plan.stop *= scaleMultiplier;
         plan.tps = plan.tps.map((tp) => (Number.isFinite(tp) ? tp * scaleMultiplier : tp));
-        keyLevels = keyLevels.map((lvl) => (Number.isFinite(lvl.price) ? { ...lvl, price: lvl.price * scaleMultiplier } : lvl));
       }
 
-      const deriveSessionLevels = () => {
-        if (!bars.length) return [];
-        const latestTs = bars[bars.length - 1].time;
-        const latestDateKey = new Date(latestTs * 1000).toISOString().slice(0, 10);
-        const sessionBars = bars.filter((bar) => new Date(bar.time * 1000).toISOString().slice(0, 10) === latestDateKey);
-        if (sessionBars.length < 3) return [];
-
-        const levels = [];
-        const sessionHigh = Math.max(...sessionBars.map((bar) => bar.high).filter((val) => Number.isFinite(val)));
-        const sessionLow = Math.min(...sessionBars.map((bar) => bar.low).filter((val) => Number.isFinite(val)));
-        if (Number.isFinite(sessionHigh)) levels.push({ price: sessionHigh, label: 'Session High' });
-        if (Number.isFinite(sessionLow)) levels.push({ price: sessionLow, label: 'Session Low' });
-
-        const firstBar = sessionBars[0];
-        if (firstBar) {
-          const resolutionSeconds = resolutionToSeconds(resolution);
-          const openingRangeSpan = Math.max(15 * 60, resolutionSeconds * 3);
-          const orBars = sessionBars.filter((bar) => bar.time - firstBar.time <= openingRangeSpan);
-          if (orBars.length) {
-            const orHigh = Math.max(...orBars.map((bar) => bar.high).filter((val) => Number.isFinite(val)));
-            const orLow = Math.min(...orBars.map((bar) => bar.low).filter((val) => Number.isFinite(val)));
-            if (Number.isFinite(orHigh)) levels.push({ price: orHigh, label: 'OR High' });
-            if (Number.isFinite(orLow)) levels.push({ price: orLow, label: 'OR Low' });
-          }
-        }
-
-        const priorBars = bars.filter((bar) => new Date(bar.time * 1000).toISOString().slice(0, 10) < latestDateKey);
-        if (priorBars.length) {
-          const prevClose = priorBars[priorBars.length - 1].close;
-          if (Number.isFinite(prevClose)) levels.push({ price: prevClose, label: 'Prev Close' });
-        }
-
-        return levels;
-      };
-
-      if (!keyLevels.length) {
-        keyLevels = deriveSessionLevels();
-      }
-
-      overlayValues = [
+      const overlayValues = [
         plan.entry,
         plan.stop,
         ...plan.tps,
         ...keyLevels.map((lvl) => lvl.price),
-      ];
-      if (plan.runner && Number.isFinite(plan.runner.anchor)) {
-        overlayValues.push(plan.runner.anchor);
-      }
-      overlayValues = overlayValues.filter((value) => Number.isFinite(value));
+      ].filter((value) => Number.isFinite(value));
 
       const vwapRequested = (params.get('vwap') || '').toLowerCase() !== 'false';
-      let vwapSeries = null;
-      if (vwapRequested) {
+      if (vwapRequested && !vwapSeries) {
         vwapSeries = chart.addLineSeries({
           lineWidth: 2,
           color: '#f8fafc',
           title: 'VWAP',
         });
       }
-      emaSeries.forEach(({ span, series }) => {
-        const values = [];
-        const weight = 2 / (span + 1);
-        let emaValue = null;
-        for (let i = 0; i < candleData.length; i += 1) {
-          const close = candleData[i].close;
-          if (close == null) continue;
-          if (emaValue === null) {
-            emaValue = close;
-          } else {
-            emaValue = close * weight + emaValue * (1 - weight);
-          }
-          values.push({ time: candleData[i].time, value: emaValue });
-        }
-        series.setData(values);
-      });
       let lastVwap = null;
       if (vwapSeries) {
         const values = [];
@@ -409,25 +576,61 @@
         vwapSeries.setData(values);
       }
       if (Number.isFinite(lastVwap)) {
-        addPriceLine(lastVwap, 'VWAP', '#f8fafc', LightweightCharts.LineStyle.Solid, 2);
         overlayValues.push(lastVwap);
       }
+
+      emaSeries.forEach(({ span, series }) => {
+        const values = [];
+        const weight = 2 / (span + 1);
+        let emaValue = null;
+        for (let i = 0; i < candleData.length; i += 1) {
+          const close = candleData[i].close;
+          if (close == null) continue;
+          if (emaValue === null) {
+            emaValue = close;
+          } else {
+            emaValue = close * weight + emaValue * (1 - weight);
+          }
+          values.push({ time: candleData[i].time, value: emaValue });
+        }
+        series.setData(values);
+      });
+
+      const priceLines = [];
+      const clearPriceLines = () => {
+        while (priceLines.length) {
+          const line = priceLines.pop();
+          candleSeries.removePriceLine(line);
+        }
+      };
+      const addPriceLine = (price, title, color, style = LightweightCharts.LineStyle.Solid, width = 2) => {
+        if (!Number.isFinite(price)) return;
+        const line = candleSeries.createPriceLine({
+          price,
+          color,
+          title,
+          lineWidth: width,
+          lineStyle: style,
+        });
+        priceLines.push(line);
+      };
 
       clearPriceLines();
       addPriceLine(plan.entry, 'Entry', '#facc15', LightweightCharts.LineStyle.Solid, 2);
       addPriceLine(plan.stop, 'Stop', '#ef4444', LightweightCharts.LineStyle.Solid, 2);
       plan.tps.forEach((tp, idx) => {
-      if (!Number.isFinite(tp)) return;
-      const meta = Array.isArray(plan.tpMeta) ? plan.tpMeta[idx] || {} : {};
+        if (!Number.isFinite(tp)) return;
+        const meta = Array.isArray(mergedPlanMeta.target_meta) ? mergedPlanMeta.target_meta[idx] || {} : {};
         const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
         let label = meta.label || `TP${sequence}`;
-        let color = '#22c55e';
-        if (sequence >= 3 || /3/.test(label)) {
+        if (sequence >= 3) {
           label = 'Runner';
-          color = '#c084fc';
         }
-        addPriceLine(tp, label, color, LightweightCharts.LineStyle.Dashed, 2);
+        addPriceLine(tp, label, '#22c55e', LightweightCharts.LineStyle.Dashed, 2);
       });
+      if (Number.isFinite(lastVwap)) {
+        addPriceLine(lastVwap, 'VWAP', '#f8fafc', LightweightCharts.LineStyle.Solid, 2);
+      }
       [...keyLevels]
         .filter((level) => Number.isFinite(level.price))
         .sort((a, b) => b.price - a.price)
@@ -440,7 +643,12 @@
         addPriceLine(plan.runner.anchor, runnerLabel, '#ff4fa3', LightweightCharts.LineStyle.Dashed, 2);
       }
 
-      renderLegend(lastPrice);
+      if (mergedPlanMeta.bias && plan.tps.length) {
+        candleSeries.setMarkers(buildMarkers(bars));
+      } else {
+        candleSeries.setMarkers([]);
+      }
+
       const priceScale = chart.priceScale('right');
       if (overlayValues.length) {
         const dataLows = bars.map((bar) => bar.low).filter((val) => Number.isFinite(val));
@@ -449,8 +657,12 @@
         const dataMax = dataHighs.length ? Math.max(...dataHighs) : null;
         const overlayMin = Math.min(...overlayValues);
         const overlayMax = Math.max(...overlayValues);
-        const combinedMin = [overlayMin, dataMin].filter((val) => val !== null && val !== undefined).reduce((acc, val) => Math.min(acc, val));
-        const combinedMax = [overlayMax, dataMax].filter((val) => val !== null && val !== undefined).reduce((acc, val) => Math.max(acc, val));
+        const combinedMin = [overlayMin, dataMin]
+          .filter((val) => val !== null && val !== undefined)
+          .reduce((acc, val) => Math.min(acc, val));
+        const combinedMax = [overlayMax, dataMax]
+          .filter((val) => val !== null && val !== undefined)
+          .reduce((acc, val) => Math.max(acc, val));
         if (Number.isFinite(combinedMin) && Number.isFinite(combinedMax) && combinedMax > combinedMin) {
           const padding = Math.max((combinedMax - combinedMin) * 0.1, 0.01);
           priceScale.setAutoScale(false);
@@ -461,16 +673,25 @@
       } else {
         priceScale.setAutoScale(true);
       }
+
       debugEl.style.display = 'none';
       debugEl.textContent = '';
     } catch (err) {
-      dbg(`Error loading data: ${err.message}`);
+      debugEl.style.display = 'block';
+      debugEl.textContent = `Error loading data: ${err.message}`;
     }
   };
 
+  renderHeader();
+  initializeTimeframes();
+  setWatermark();
   fetchBars();
   window.addEventListener('resize', () => {
     chart.resize(container.clientWidth, container.clientHeight);
+    if (planPanelEl && window.innerWidth > 1024) {
+      planPanelEl.open = true;
+    }
+    renderPlanPanel(lastKnownPrice);
   });
-  window.setInterval(fetchBars, 60000);
+  window.setInterval(fetchBars, TIMEFRAME_REFRESH_MS);
 })();

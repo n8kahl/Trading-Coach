@@ -3,10 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Trading Coach – Advanced Chart</title>
+    <title>Trading Coach – Plan Viewer</title>
     <style>
       :root {
         color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
       }
       body,
       html {
@@ -14,49 +17,160 @@
         padding: 0;
         height: 100%;
         width: 100%;
-        background: #0b0f14;
         font-family: "Inter", "Segoe UI", sans-serif;
+        background: #070b10;
         color: #e6edf3;
+      }
+      .page {
+        min-height: 100%;
+        display: flex;
+        flex-direction: column;
+        background: #070b10;
+      }
+      .plan-header {
+        padding: 16px 20px 8px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 12px;
+        align-items: end;
+      }
+      .plan-header__symbol {
+        font-size: 26px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+      }
+      .plan-header__strategy {
+        font-size: 14px;
+        opacity: 0.7;
+        margin-top: 4px;
+      }
+      .plan-header__metrics {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        font-size: 13px;
+        opacity: 0.85;
+      }
+      .plan-header__metrics span {
+        display: inline-flex;
+        gap: 4px;
+        align-items: center;
+      }
+      .plan-header__duration {
+        font-size: 13px;
+        opacity: 0.85;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        justify-content: flex-end;
+        align-items: flex-end;
+      }
+      .plan-header__duration strong {
+        font-weight: 600;
+      }
+
+      .timeframe-switcher {
+        display: flex;
+        gap: 8px;
+        padding: 0 20px 12px;
+        overflow-x: auto;
+        scrollbar-width: thin;
+      }
+      .timeframe-button {
+        background: rgba(148, 163, 184, 0.16);
+        border: none;
+        color: #e6edf3;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 13px;
+        cursor: pointer;
+        transition: background 0.2s ease, color 0.2s ease;
+        white-space: nowrap;
+      }
+      .timeframe-button:hover {
+        background: rgba(148, 163, 184, 0.24);
+      }
+      .timeframe-button.active {
+        background: #2563eb;
+        color: #f8fafc;
+        font-weight: 600;
+      }
+
+      .page-body {
+        flex: 1;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(260px, 320px) 1fr;
+        gap: 16px;
+        padding: 0 20px 20px;
+      }
+
+      .plan-panel {
+        background: rgba(15, 23, 42, 0.92);
+        border-radius: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.15);
+        overflow: hidden;
+      }
+      .plan-panel__summary {
+        padding: 14px 18px;
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+        list-style: none;
+      }
+      .plan-panel__summary::-webkit-details-marker {
+        display: none;
+      }
+      .plan-panel__body {
+        padding: 0 18px 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        font-size: 13px;
+      }
+      .plan-panel__section h3 {
+        margin: 12px 0 6px;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        opacity: 0.7;
+      }
+      .plan-panel__list {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 6px 12px;
+        margin: 0;
+      }
+      .plan-panel__list dt {
+        opacity: 0.7;
+      }
+      .plan-panel__targets,
+      .plan-panel__warnings {
+        margin: 0;
+        padding-left: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .plan-panel__targets li {
+        list-style: disc;
+      }
+      .plan-panel__warnings li {
+        list-style: square;
+      }
+
+      .chart-wrapper {
+        position: relative;
+        background: #0f172a;
+        border-radius: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.1);
+        overflow: hidden;
       }
       #tv_chart_container {
         height: 100%;
         width: 100%;
       }
-      .plan-legend {
-        position: fixed;
-        top: 20px;
-        left: 20px;
-        padding: 16px 20px;
-        background: rgba(12, 16, 22, 0.9);
-        border-radius: 12px;
-        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.45);
-        max-width: 320px;
-        backdrop-filter: blur(10px);
-        display: none;
-      }
-      .plan-legend.visible {
-        display: block;
-      }
-      .plan-legend h2 {
-        font-size: 16px;
-        margin: 0 0 8px;
-      }
-      .plan-legend dl {
-        margin: 0;
-        display: grid;
-        grid-template-columns: max-content 1fr;
-        gap: 6px 12px;
-        font-size: 13px;
-      }
-      .plan-legend dt {
-        opacity: 0.72;
-      }
-      .plan-legend .notes {
-        margin-top: 12px;
-        font-size: 12px;
-        opacity: 0.8;
-        line-height: 1.4;
-      }
+
       .debug-banner {
         position: fixed;
         bottom: 12px;
@@ -70,13 +184,67 @@
         color: #ffcc66;
         display: none;
         white-space: pre-wrap;
+        z-index: 10;
+      }
+
+      @media (max-width: 1024px) {
+        .page-body {
+          grid-template-columns: 1fr;
+        }
+        .plan-panel {
+          order: 2;
+        }
+        .chart-wrapper {
+          order: 1;
+          min-height: 360px;
+        }
+      }
+
+      @media (max-width: 640px) {
+        .plan-header {
+          padding: 14px 16px 6px;
+        }
+        .timeframe-switcher {
+          padding: 0 16px 12px;
+        }
+        .page-body {
+          padding: 0 16px 16px;
+        }
+        .plan-panel__body {
+          padding: 0 16px 16px;
+        }
       }
     </style>
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
   </head>
   <body>
-    <div id="tv_chart_container"></div>
-    <aside id="plan_legend" class="plan-legend"></aside>
+    <div class="page">
+      <header class="plan-header">
+        <div>
+          <div class="plan-header__symbol" id="header_symbol">—</div>
+          <div class="plan-header__strategy" id="header_strategy"></div>
+        </div>
+        <div class="plan-header__metrics">
+          <span id="header_bias"></span>
+          <span id="header_confidence"></span>
+          <span id="header_rr"></span>
+        </div>
+        <div class="plan-header__duration">
+          <strong id="header_duration"></strong>
+          <span id="header_lastprice"></span>
+        </div>
+      </header>
+      <nav class="timeframe-switcher" id="timeframe_switcher"></nav>
+      <div class="page-body">
+        <details class="plan-panel" id="plan_panel" open>
+          <summary class="plan-panel__summary">Plan Details</summary>
+          <div class="plan-panel__body" id="plan_panel_body"></div>
+        </details>
+        <div class="chart-wrapper">
+          <div id="tv_chart_container"></div>
+        </div>
+      </div>
+    </div>
     <div id="debug_banner" class="debug-banner"></div>
     <script src="tradingview-init.js?v=20251017"></script>
   </body>

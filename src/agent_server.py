@@ -986,7 +986,20 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
     level_tokens = _extract_levels_for_chart(key_levels)
     if level_tokens:
         chart_params["levels"] = ",".join(level_tokens)
+    stats_payload = target_stats.get(stats_style_key) or {}
     chart_params["title"] = _format_chart_title(symbol, "long", "watch_plan")
+    chart_params["plan_meta"] = _plan_meta_payload(
+        symbol=symbol_upper,
+        style=style_normalized,
+        plan=plan_block,
+        runner=runner_cfg,
+        expected_move=expected_move,
+        horizon_minutes=stats_payload.get("horizon_minutes"),
+        extra={
+            "style_display": style_public,
+            "strategy_label": "Watch Plan",
+        },
+    )
     chart_links = None
     try:
         chart_links = await gpt_chart_url(ChartParams(**chart_params), request)
@@ -1738,13 +1751,15 @@ def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
     return f"{base}?{urlencode(query, safe=',|:;+-_() ')}"
 
 
-TV_SUPPORTED_RESOLUTIONS = ["1", "3", "5", "15", "30", "60", "120", "240", "1D"]
+TV_SUPPORTED_RESOLUTIONS = ["1", "3", "5", "10", "15", "30", "60", "120", "240", "1D", "1W"]
 
 
 def _resolution_to_timeframe(resolution: str) -> str | None:
     token = (resolution or "").strip().upper()
     if not token:
         return None
+    if token == "10":
+        return "5"
     if token.endswith("M") and token[:-1].isdigit():
         return token[:-1]
     if token.endswith("H") and token[:-1].isdigit():
@@ -1753,6 +1768,8 @@ def _resolution_to_timeframe(resolution: str) -> str | None:
         except Exception:
             return None
     if token.endswith("D"):
+        return "D"
+    if token.endswith("W"):
         return "D"
     if token.isdigit():
         return token
@@ -1764,6 +1781,9 @@ def _resolution_to_minutes(resolution: str) -> int:
     if token.endswith("D"):
         days = int("".join(ch for ch in token if ch.isdigit()) or "1")
         return days * 24 * 60
+    if token.endswith("W"):
+        weeks = int("".join(ch for ch in token if ch.isdigit()) or "1")
+        return weeks * 7 * 24 * 60
     if token.isdigit():
         return int(token)
     return 1
@@ -1824,6 +1844,45 @@ def _extract_levels_for_chart(key_levels: Dict[str, float]) -> List[str]:
         _append(numeric, label)
 
     return levels
+
+
+def _plan_meta_payload(
+    *,
+    symbol: str,
+    style: str | None,
+    plan: Dict[str, Any],
+    runner: Dict[str, Any] | None,
+    expected_move: float | None = None,
+    horizon_minutes: float | None = None,
+    extra: Dict[str, Any] | None = None,
+) -> str:
+    payload: Dict[str, Any] = {
+        "symbol": symbol.upper(),
+        "style": style,
+        "bias": plan.get("direction"),
+        "confidence": plan.get("confidence"),
+        "risk_reward": plan.get("risk_reward"),
+        "notes": plan.get("notes"),
+        "warnings": plan.get("warnings") or [],
+        "entry": plan.get("entry"),
+        "stop": plan.get("stop"),
+        "targets": plan.get("targets") or [],
+        "target_meta": plan.get("target_meta") or [],
+        "runner": runner,
+        "strategy": plan.get("setup") or plan.get("strategy"),
+        "atr": plan.get("atr"),
+        "expected_move": expected_move,
+        "horizon_minutes": horizon_minutes,
+    }
+    if extra:
+        payload.update({k: v for k, v in extra.items() if v is not None})
+    return json.dumps(payload, separators=(",", ":"), default=_json_safe_default)
+
+
+def _json_safe_default(value: Any) -> Any:
+    if isinstance(value, (np.floating, np.integer)):
+        return float(value)
+    return str(value)
 
 
 def _float_to_token(value: float | None) -> str | None:
@@ -2325,6 +2384,27 @@ async def tv_bars(
             return {"s": "no_data"}
 
     history = history.sort_index()
+    aggregate_resolution = (resolution or "").strip().upper()
+
+    def _resample_frame(frame: pd.DataFrame, rule: str) -> pd.DataFrame:
+        try:
+            resampled = (
+                frame[["open", "high", "low", "close", "volume"]]
+                .resample(rule, label="right", closed="right")
+                .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+            )
+            resampled = resampled.dropna(subset=["open", "high", "low", "close"])
+            if resampled.empty:
+                return frame
+            return resampled
+        except Exception:
+            return frame
+
+    if aggregate_resolution == "10" and src_tf in {"5", "3", "1"}:
+        history = _resample_frame(history, "10T")
+    elif aggregate_resolution == "1W":
+        history = _resample_frame(history, "W")
+
     # Compute window: allow unix seconds or milliseconds; allow missing values with range fallback
     now_sec = int(pd.Timestamp.utcnow().timestamp())
 
@@ -2653,6 +2733,34 @@ async def gpt_scan(
         chart_query["strategy"] = signal.strategy_id
         if bias_for_chart:
             chart_query["direction"] = bias_for_chart
+        if signal.plan is not None:
+            plan_meta_plan = {
+                "direction": plan_direction,
+                "entry": plan_entry,
+                "stop": plan_stop,
+                "targets": plan_targets,
+                "target_meta": plan_payload.get("target_meta") if isinstance(plan_payload, dict) else [],
+                "confidence": float(signal.plan.confidence) if signal.plan.confidence is not None else None,
+                "risk_reward": float(signal.plan.risk_reward) if signal.plan.risk_reward is not None else None,
+                "notes": plan_payload.get("notes") if isinstance(plan_payload, dict) else None,
+                "warnings": plan_payload.get("warnings") if isinstance(plan_payload, dict) else [],
+                "setup": signal.strategy_id,
+                "atr": float(signal.plan.atr) if signal.plan.atr is not None else None,
+            }
+            runner_meta = plan_payload.get("runner") if isinstance(plan_payload, dict) else None
+            expected_move_meta = plan_payload.get("expected_move") if isinstance(plan_payload, dict) else None
+            chart_query["plan_meta"] = _plan_meta_payload(
+                symbol=signal.symbol,
+                style=style,
+                plan=plan_meta_plan,
+                runner=runner_meta,
+                expected_move=expected_move_meta,
+                horizon_minutes=None,
+                extra={
+                    "style_display": public_style(style),
+                    "strategy_label": signal.strategy_id,
+                },
+            )
         atr_hint = snapshot.get("indicators", {}).get("atr14")
         if isinstance(atr_hint, (int, float)) and math.isfinite(atr_hint):
             chart_query["atr"] = f"{float(atr_hint):.4f}"
