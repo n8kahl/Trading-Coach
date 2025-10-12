@@ -1233,7 +1233,7 @@ def _is_stale_frame(frame: pd.DataFrame, timeframe: str) -> bool:
 
 
 async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None:
-    """Fetch recent OHLCV, preferring Polygon when available, else Yahoo Finance."""
+    """Fetch recent OHLCV data using Polygon only."""
     candidates = _data_symbol_candidates(symbol)
 
     # Try Polygon first for each candidate symbol
@@ -1252,83 +1252,15 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
         return fresh_polygon
 
     if stale_polygon is not None:
-        logger.warning("Polygon data is stale for %s; attempting Yahoo fallback.", symbol)
-
-    tf = timeframe or "5"
-    interval_map = {
-        "1": ("1d", "1m"),
-        "3": ("5d", "2m"),
-        "5": ("5d", "5m"),
-        "15": ("1mo", "15m"),
-        "30": ("1mo", "30m"),
-        "60": ("6mo", "60m"),
-        "120": ("1y", "2h"),
-        "240": ("2y", "4h"),
-        "D": ("1y", "1d"),
-    }
-    range_span, interval = interval_map.get(tf, ("5d", "5m"))
-    timeout = httpx.Timeout(6.0, connect=3.0)
-    for candidate in candidates:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{candidate}"
-        params = {"interval": interval, "range": range_span, "includePrePost": "false"}
-
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-            except httpx.HTTPError as exc:
-                logger.warning("Yahoo Finance fetch failed for %s: %s", candidate, exc)
-                continue
-
-        payload = response.json()
-        try:
-            chart = payload["chart"]
-            if chart.get("error"):
-                raise ValueError(chart["error"])
-            result = chart["result"][0]
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            logger.warning("Unexpected Yahoo Finance payload for %s: %s", candidate, exc)
-            continue
-
-        timestamps = result.get("timestamp")
-        if not timestamps:
-            logger.warning("Yahoo Finance returned no timestamps for %s", candidate)
-            continue
-
-        quote = result["indicators"]["quote"][0]
-        o = quote.get("open")
-        h = quote.get("high")
-        l = quote.get("low")
-        c = quote.get("close")
-        v = quote.get("volume")
-        if not all([o, h, l, c, v]):
-            logger.warning("Incomplete OHLCV data for %s", candidate)
-            continue
-
-        frame = pd.DataFrame(
-            {
-                "timestamp": [int(ts) for ts in timestamps],
-                "open": o,
-                "high": h,
-                "low": l,
-                "close": c,
-                "volume": v,
-            }
-        ).dropna()
-
-        frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="s", utc=True)
-        frame = frame.set_index("timestamp")
-        if not frame.empty:
-            return frame
-
-    if stale_polygon is not None:
+        logger.warning("Polygon data is stale for %s; returning last known data.", symbol)
         return stale_polygon
 
+    logger.warning("No Polygon data available for %s", symbol)
     return None
 
 
 async def _collect_market_data(tickers: List[str], timeframe: str = "5") -> Dict[str, pd.DataFrame]:
-    """Fetch OHLCV for a list of tickers from Polygon or Yahoo Finance."""
+    """Fetch OHLCV for a list of tickers from Polygon."""
     tasks = [_load_remote_ohlcv(ticker, timeframe) for ticker in tickers]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     market_data: Dict[str, pd.DataFrame] = {}
@@ -1357,7 +1289,7 @@ def _resample_ohlcv(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         minutes = int(tf)
         if minutes <= 1:
             return frame
-        rule = f"{minutes}T"
+        rule = f"{minutes}min"
     elif tf in {"d", "1d", "day"}:
         rule = "1D"
     else:
