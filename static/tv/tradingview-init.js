@@ -183,7 +183,11 @@
     plan.tps.forEach((tp, idx) => {
       if (!Number.isFinite(tp)) return;
       const meta = Array.isArray(plan.tpMeta) ? plan.tpMeta[idx] || {} : {};
-      const label = meta.label || `TP${idx + 1}`;
+      const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
+      let label = meta.label || `TP${sequence}`;
+      if (sequence >= 3) {
+        label = 'Runner';
+      }
       let details = tp.toFixed(2);
       if (meta.em_fraction && Number.isFinite(meta.em_fraction)) {
         details += ` (≈ ${Number(meta.em_fraction).toFixed(2)}×EM)`;
@@ -413,17 +417,16 @@
       addPriceLine(plan.entry, 'Entry', '#facc15', LightweightCharts.LineStyle.Solid, 2);
       addPriceLine(plan.stop, 'Stop', '#ef4444', LightweightCharts.LineStyle.Solid, 2);
       plan.tps.forEach((tp, idx) => {
-        if (!Number.isFinite(tp)) return;
-        const meta = Array.isArray(plan.tpMeta) ? plan.tpMeta[idx] || {} : {};
-        const label = meta.label || `TP${idx + 1}`;
+      if (!Number.isFinite(tp)) return;
+      const meta = Array.isArray(plan.tpMeta) ? plan.tpMeta[idx] || {} : {};
         const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
+        let label = meta.label || `TP${sequence}`;
         let color = '#22c55e';
         if (sequence >= 3 || /3/.test(label)) {
+          label = 'Runner';
           color = '#c084fc';
-        } else if (sequence === 2 || /2/.test(label)) {
-          color = '#f97316';
         }
-        addPriceLine(tp, label, color, LightweightCharts.LineStyle.Solid, 2);
+        addPriceLine(tp, label, color, LightweightCharts.LineStyle.Dashed, 2);
       });
       [...keyLevels]
         .filter((level) => Number.isFinite(level.price))
