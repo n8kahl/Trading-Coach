@@ -340,31 +340,24 @@
   const applyMarketStatus = (phase, note) => {
     if (typeof phase === 'string' && phase.trim()) {
       currentMarketPhase = phase.trim().toLowerCase();
-    } else {
-      currentMarketPhase = null;
+    } else if (!currentMarketPhase) {
+      currentMarketPhase = 'closed';
     }
-    const meta = currentMarketPhase ? MARKET_PHASE_META[currentMarketPhase] || MARKET_PHASE_META.closed : null;
+    const meta = MARKET_PHASE_META[currentMarketPhase] || MARKET_PHASE_META.closed;
     if (headerMarketEl) {
-      if (meta) {
-        headerMarketEl.textContent = meta.label;
-        headerMarketEl.className = `status-pill ${meta.className}`;
-      } else {
-        headerMarketEl.textContent = '';
-        headerMarketEl.className = 'status-pill';
-      }
+      headerMarketEl.textContent = meta.label;
+      headerMarketEl.className = `status-pill ${meta.className}`;
     }
     if (note && typeof note === 'string' && note.trim()) {
       latestMarketNote = note.trim();
-    } else if (meta) {
-      latestMarketNote = meta.note;
     } else {
-      latestMarketNote = null;
+      latestMarketNote = meta.note;
     }
     updateStatusNote();
   };
 
   applyPlanStatus(currentPlanStatus, latestPlanNote, latestNextStep, null);
-  applyMarketStatus(null, null);
+  applyMarketStatus('closed', 'Market closed — live updates limited.');
 
   const matchesPlan = (incomingPlanId) => {
     if (!planIdParam) return true;
