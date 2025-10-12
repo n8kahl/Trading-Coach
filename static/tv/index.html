@@ -307,7 +307,13 @@
         display: flex;
         flex-wrap: wrap;
         gap: 10px;
-        align-items: center;
+        align-items: flex-end;
+      }
+
+      .plan-replay__inputwrap {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
       }
 
       .plan-replay__input {
@@ -347,6 +353,13 @@
         opacity: 0.45;
         cursor: not-allowed;
         transform: none;
+      }
+
+      .plan-replay__label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: rgba(148, 163, 184, 0.7);
       }
 
       .plan-replay__status {
