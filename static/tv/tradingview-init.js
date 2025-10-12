@@ -335,8 +335,12 @@
       headerStrategyEl.textContent = [styleLabel, strategyLabel].filter(Boolean).join(' · ');
     }
     if (headerBiasEl) headerBiasEl.textContent = bias ? `Bias: ${bias === 'long' ? 'Long 🟢' : 'Short 🔴'}` : '';
-    const rawConfidence = toNumber(mergedPlanMeta.confidence);
-    const displayConfidence = rawConfidence !== null && rawConfidence > 0 ? rawConfidence : null;
+    const rawConfidence =
+      toNumber(mergedPlanMeta.confidence) ??
+      toNumber(planMeta.confidence_score) ??
+      toNumber(planMeta.plan_confidence) ??
+      paramConfidence;
+    const displayConfidence = rawConfidence !== null && rawConfidence >= 0 ? rawConfidence : null;
     if (headerConfidenceEl) {
       headerConfidenceEl.textContent = displayConfidence !== null ? `Confidence: ${(displayConfidence * 100).toFixed(0)}%` : '';
     }
@@ -387,8 +391,12 @@
       .map((warning) => `<li>${warning}</li>`)
       .join('');
 
-    const rawConfidence = toNumber(mergedPlanMeta.confidence);
-    const confidenceCopy = rawConfidence !== null && rawConfidence > 0 ? `${(rawConfidence * 100).toFixed(0)}%` : '—';
+    const rawConfidence =
+      toNumber(mergedPlanMeta.confidence) ??
+      toNumber(planMeta.confidence_score) ??
+      toNumber(planMeta.plan_confidence) ??
+      paramConfidence;
+    const confidenceCopy = rawConfidence !== null && rawConfidence >= 0 ? `${(rawConfidence * 100).toFixed(0)}%` : '—';
     const rrValue = toNumber(mergedPlanMeta.risk_reward);
     const rrFallback = (() => {
       const entry = mergedPlanMeta.entry;
@@ -408,14 +416,13 @@
 
     planPanelBodyEl.innerHTML = `
       <div class="plan-panel__section">
-        <h3>Trade Setup</h3>
-        <dl class="plan-panel__list">
-          <dt>Entry</dt><dd>${formatPrice(mergedPlanMeta.entry)}</dd>
-          <dt>Stop</dt><dd>${formatPrice(mergedPlanMeta.stop)}</dd>
-          <dt>Last Price</dt><dd>${lastPriceCopy}</dd>
-          <dt>Confidence</dt><dd>${confidenceCopy}</dd>
-          <dt>R:R (TP1)</dt><dd>${rrCopy}</dd>
-        </dl>
+        <div class="plan-metrics">
+          <span><small>Entry</small><strong>${formatPrice(mergedPlanMeta.entry)}</strong></span>
+          <span><small>Stop</small><strong>${formatPrice(mergedPlanMeta.stop)}</strong></span>
+          <span><small>Last Price</small><strong>${lastPriceCopy}</strong></span>
+          <span><small>Confidence</small><strong>${confidenceCopy}</strong></span>
+          <span><small>R:R (TP1)</small><strong>${rrCopy}</strong></span>
+        </div>
       </div>
       <div class="plan-panel__section">
         <h3>Targets</h3>
