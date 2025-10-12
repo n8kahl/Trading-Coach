@@ -328,6 +328,32 @@
     return clamped;
   };
 
+  const parseEventTimestamp = (payload) => {
+    if (!payload) return null;
+    const raw = payload.ts || payload.timestamp || payload.time || payload.t;
+    if (raw === null || raw === undefined) return null;
+    if (typeof raw === 'number') {
+      if (raw > 10_000_000_000) {
+        return Math.floor(raw / 1000);
+      }
+      return Math.floor(raw);
+    }
+    if (typeof raw === 'string') {
+      const num = Number(raw);
+      if (Number.isFinite(num)) {
+        return num > 10_000_000_000 ? Math.floor(num / 1000) : Math.floor(num);
+      }
+      const date = new Date(raw);
+      if (!Number.isNaN(date.getTime())) {
+        return Math.floor(date.getTime() / 1000);
+      }
+    }
+    if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
+      return Math.floor(raw.getTime() / 1000);
+    }
+    return null;
+  };
+
   const updateStatusNote = () => {
     if (!planStatusNoteEl) return;
     const parts = [];
@@ -435,6 +461,7 @@
     lastKnownPrice = price;
     updateHeaderPricing(price);
     updatePlanPanelLastPrice(price);
+    updateRealtimeBar(price, payload);
   };
 
   const connectStream = () => {
@@ -774,6 +801,65 @@
     lastEl.textContent = Number.isFinite(value) ? formatPrice(value) : '—';
   };
 
+  const updateRealtimeBar = (price, payload) => {
+    if (!latestCandleData.length || !Number.isFinite(price)) return;
+    const secondsPerBar = Math.max(resolutionToSeconds(currentResolution), 60);
+    const eventTs = parseEventTimestamp(payload) ?? Math.floor(Date.now() / 1000);
+    const bucketTime = Math.floor(eventTs / secondsPerBar) * secondsPerBar;
+
+    const lastIdx = latestCandleData.length - 1;
+    const lastBar = latestCandleData[lastIdx];
+    if (!lastBar || !Number.isFinite(lastBar?.time)) {
+      return;
+    }
+
+    if (bucketTime < lastBar.time) {
+      // Out-of-order tick; ignore to avoid rewinding the chart.
+      return;
+    }
+
+    if (bucketTime === lastBar.time) {
+      const updated = {
+        ...lastBar,
+        close: price,
+        high: Math.max(Number.isFinite(lastBar.high) ? lastBar.high : price, price),
+        low: Math.min(Number.isFinite(lastBar.low) ? lastBar.low : price, price),
+      };
+      latestCandleData[lastIdx] = updated;
+      candleSeries.update(updated);
+
+      const volBar = latestVolumeData[latestVolumeData.length - 1];
+      if (volBar) {
+        const updatedVol = {
+          ...volBar,
+          color: updated.close >= updated.open ? '#22c55e88' : '#ef444488',
+        };
+        latestVolumeData[latestVolumeData.length - 1] = updatedVol;
+        volumeSeries.update(updatedVol);
+      }
+      return;
+    }
+
+    // Advance to a new bar bucket.
+    const newBar = {
+      time: bucketTime,
+      open: price,
+      high: price,
+      low: price,
+      close: price,
+    };
+    latestCandleData.push(newBar);
+    candleSeries.update(newBar);
+
+    const newVolumeBar = {
+      time: bucketTime,
+      value: 0,
+      color: price >= newBar.open ? '#22c55e88' : '#ef444488',
+    };
+    latestVolumeData.push(newVolumeBar);
+    volumeSeries.update(newVolumeBar);
+  };
+
   const setReplayStatusMessage = (message) => {
     replayStatusMessage = message || '';
     if (replayStatusEl) {
@@ -1005,12 +1091,19 @@
       updateHeaderPricing(lastKnownPrice);
       updatePlanPanelLastPrice(lastKnownPrice);
       try {
-        chart.timeScale().setVisibleRange({
+        chart.timeScale().setVisibleRange(replaySavedVisibleRange || {
           from: replayQueue[0].time,
           to: replayQueue[replayQueue.length - 1].time,
         });
       } catch {
-        chart.timeScale().fitContent();
+        try {
+          chart.timeScale().setVisibleRange({
+            from: replayQueue[0].time,
+            to: replayQueue[replayQueue.length - 1].time,
+          });
+        } catch {
+          chart.timeScale().fitContent();
+        }
       }
 
       replayIndex = 1;
