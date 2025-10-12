@@ -5,6 +5,8 @@ import pandas as pd
 import pytest
 from starlette.requests import Request
 
+from urllib.parse import parse_qs, urlparse
+
 from src import agent_server
 
 
@@ -58,6 +60,10 @@ async def test_gpt_plan_includes_trade_detail(monkeypatch):
     assert response.idea_url == response.trade_detail, "legacy idea_url alias should mirror trade_detail"
     assert response.plan["trade_detail"] == response.trade_detail, "embedded plan must carry trade_detail"
     assert response.plan["idea_url"] == response.trade_detail, "embedded plan must keep idea_url alias"
+    parsed = urlparse(response.trade_detail)
+    params = parse_qs(parsed.query)
+    assert params.get("plan_id") == ["TSLA-SWING-20251010"]
+    assert params.get("plan_version") == [str(response.version)]
 
 
 @pytest.mark.asyncio

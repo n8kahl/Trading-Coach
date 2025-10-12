@@ -965,6 +965,27 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
     )
 
     calc_notes: Dict[str, Any] = {}
+    if not chart_url_value:
+        minimal_params = {
+            "symbol": symbol,
+            "interval": normalize_interval(plan.get("interval") or chart_params_payload.get("interval") or "15"),
+            "plan_id": plan_id,
+            "plan_version": str(version),
+        }
+        if entry_val is not None:
+            minimal_params["entry"] = f"{entry_val:.2f}"
+        if stop_val is not None:
+            minimal_params["stop"] = f"{stop_val:.2f}"
+        if targets_list:
+            minimal_params["tp"] = ",".join(f"{target:.2f}" for target in targets_list)
+        chart_url_value = _build_tv_chart_url(request, minimal_params)
+        charts_payload.setdefault("params", minimal_params)
+        charts_payload["interactive"] = chart_url_value
+
+    trade_detail_url = chart_url_value
+    plan["trade_detail"] = trade_detail_url
+    plan["idea_url"] = trade_detail_url
+
     atr_val = _safe_number(indicators.get("atr14"))
     if atr_val is not None:
         calc_notes["atr14"] = atr_val
@@ -2802,6 +2823,8 @@ async def gpt_scan(
         if level_tokens:
             chart_query["levels"] = ",".join(level_tokens)
         chart_query["strategy"] = signal.strategy_id
+        chart_query["plan_id"] = plan_id
+        chart_query["plan_version"] = version
         if bias_for_chart:
             chart_query["direction"] = bias_for_chart
         if signal.plan is not None:
@@ -2992,10 +3015,6 @@ async def gpt_plan(
     # If version not provided, bump based on snapshot store to ensure unique URLs
     if forced_plan_id:
         plan_id = forced_plan_id
-    if raw_version is None:
-        version = await _next_plan_version(plan_id)
-    trade_detail_url = _build_trade_detail_url(request, plan_id, version)
-
     plan["plan_id"] = plan_id
     plan["version"] = version
     updated_from_version = version - 1 if version > 1 else None
@@ -3003,8 +3022,6 @@ async def gpt_plan(
     plan.setdefault("symbol", symbol)
     plan.setdefault("style", first.get("style"))
     plan.setdefault("direction", plan.get("direction") or (snapshot.get("trend") or {}).get("direction_hint"))
-    plan["trade_detail"] = trade_detail_url
-    plan["idea_url"] = trade_detail_url  # legacy compatibility until all clients migrate
     first["plan"] = plan
     logger.info(
         "plan identity normalized",
@@ -3013,7 +3030,6 @@ async def gpt_plan(
             "requested_style": request_payload.style,
             "plan_id": plan_id,
             "version": version,
-            "trade_detail": trade_detail_url,
             "source_plan_keys": list(raw_plan.keys()),
         },
     )
@@ -3079,17 +3095,52 @@ async def gpt_plan(
             chart_params_payload.setdefault("offline_mode", "true")
         charts_payload["params"] = chart_params_payload
     if chart_url_value:
+        chart_url_value = _append_query_params(
+            chart_url_value,
+            {
+                "plan_id": plan_id,
+                "plan_version": str(version),
+            },
+        )
         if offline_mode:
             chart_url_value = _append_query_params(chart_url_value, {"offline_mode": "true"})
         charts_payload["interactive"] = chart_url_value
     elif chart_params_payload and {"direction", "entry", "stop", "tp"}.issubset(chart_params_payload.keys()):
         fallback_chart_url = _build_tv_chart_url(request, chart_params_payload)
+        fallback_chart_url = _append_query_params(
+            fallback_chart_url,
+            {
+                "plan_id": plan_id,
+                "plan_version": str(version),
+            },
+        )
         charts_payload["interactive"] = fallback_chart_url
         chart_url_value = fallback_chart_url
         logger.debug(
             "plan chart fallback used",
             extra={"symbol": symbol, "plan_id": plan_id, "url": fallback_chart_url},
         )
+
+    if not chart_url_value:
+        minimal_params = {
+            "symbol": symbol,
+            "interval": normalize_interval(plan.get("interval") or chart_params_payload.get("interval") or "15"),
+            "plan_id": plan_id,
+            "plan_version": str(version),
+        }
+        if entry_val is not None:
+            minimal_params["entry"] = f"{entry_val:.2f}"
+        if stop_val is not None:
+            minimal_params["stop"] = f"{stop_val:.2f}"
+        if targets_list:
+            minimal_params["tp"] = ",".join(f"{target:.2f}" for target in targets_list)
+        chart_url_value = _build_tv_chart_url(request, minimal_params)
+        charts_payload.setdefault("params", minimal_params)
+        charts_payload["interactive"] = chart_url_value
+
+    trade_detail_url = chart_url_value
+    plan["trade_detail"] = trade_detail_url
+    plan["idea_url"] = trade_detail_url
 
     atr_val = _safe_number(indicators.get("atr14"))
     calc_notes: Dict[str, Any] = {}
