@@ -240,7 +240,6 @@
   }, []);
 
   let vwapSeries = null;
-  let keyLevels = parseNamedLevels(params.get('levels'));
   const scalePlanToken = (params.get('scale_plan') || 'auto').toLowerCase();
 
   let lastKnownPrice = null;
