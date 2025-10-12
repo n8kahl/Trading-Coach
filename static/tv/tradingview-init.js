@@ -160,10 +160,6 @@
     showError(`Unhandled promise rejection: ${event.reason}`);
   });
 
-  if (window.console && console.debug) {
-    console.debug('Plan meta payload', mergedPlanMeta);
-  }
-
   const TIMEFRAMES = [
     { label: '1m', resolution: '1' },
     { label: '5m', resolution: '5' },
