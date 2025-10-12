@@ -102,12 +102,13 @@
     planMeta = {};
   }
 
+  const paramConfidence = parseNumber(params.get('confidence'));
   const mergedPlanMeta = {
     symbol,
     style: planMeta.style || params.get('style'),
     style_display: planMeta.style_display || null,
     bias: planMeta.bias || plan.direction || null,
-    confidence: toNumber(planMeta.confidence),
+    confidence: toNumber(planMeta.confidence) ?? paramConfidence,
     risk_reward: toNumber(planMeta.risk_reward ?? planMeta.rr_to_t1),
     notes: planMeta.notes || plan.notes || null,
     warnings: Array.isArray(planMeta.warnings) ? planMeta.warnings : [],
@@ -135,6 +136,16 @@
       })
       .filter(Boolean);
   }
+  const dedupedLevels = [];
+  const levelSet = new Set();
+  (keyLevels || []).forEach((item) => {
+    if (!item || !Number.isFinite(item.price)) return;
+    const token = `${item.label || ''}:${item.price.toFixed(4)}`;
+    if (levelSet.has(token)) return;
+    levelSet.add(token);
+    dedupedLevels.push(item);
+  });
+  keyLevels = dedupedLevels;
 
   const headerSymbolEl = document.getElementById('header_symbol');
   const headerStrategyEl = document.getElementById('header_strategy');
@@ -324,9 +335,10 @@
       headerStrategyEl.textContent = [styleLabel, strategyLabel].filter(Boolean).join(' · ');
     }
     if (headerBiasEl) headerBiasEl.textContent = bias ? `Bias: ${bias === 'long' ? 'Long 🟢' : 'Short 🔴'}` : '';
-    const confidenceValue = toNumber(mergedPlanMeta.confidence);
+    const rawConfidence = toNumber(mergedPlanMeta.confidence);
+    const displayConfidence = rawConfidence !== null && rawConfidence > 0 ? rawConfidence : null;
     if (headerConfidenceEl) {
-      headerConfidenceEl.textContent = confidenceValue !== null ? `Confidence: ${(confidenceValue * 100).toFixed(0)}%` : '';
+      headerConfidenceEl.textContent = displayConfidence !== null ? `Confidence: ${(displayConfidence * 100).toFixed(0)}%` : '';
     }
     const fallbackRRForHeader = (() => {
       const entry = mergedPlanMeta.entry;
@@ -375,8 +387,8 @@
       .map((warning) => `<li>${warning}</li>`)
       .join('');
 
-    const confidenceValue = toNumber(mergedPlanMeta.confidence);
-    const confidenceCopy = confidenceValue !== null ? `${(confidenceValue * 100).toFixed(0)}%` : '—';
+    const rawConfidence = toNumber(mergedPlanMeta.confidence);
+    const confidenceCopy = rawConfidence !== null && rawConfidence > 0 ? `${(rawConfidence * 100).toFixed(0)}%` : '—';
     const rrValue = toNumber(mergedPlanMeta.risk_reward);
     const rrFallback = (() => {
       const entry = mergedPlanMeta.entry;
@@ -616,24 +628,29 @@
         series.setData(values);
       });
 
-      const priceLines = [];
-      const clearPriceLines = () => {
-        while (priceLines.length) {
-          const line = priceLines.pop();
-          candleSeries.removePriceLine(line);
-        }
-      };
-      const addPriceLine = (price, title, color, style = LightweightCharts.LineStyle.Solid, width = 2) => {
-        if (!Number.isFinite(price)) return;
-        const line = candleSeries.createPriceLine({
-          price,
-          color,
-          title,
-          lineWidth: width,
-          lineStyle: style,
-        });
-        priceLines.push(line);
-      };
+  const priceLines = [];
+  const priceLineKeys = new Set();
+  const clearPriceLines = () => {
+    while (priceLines.length) {
+      const line = priceLines.pop();
+      candleSeries.removePriceLine(line);
+    }
+    priceLineKeys.clear();
+  };
+  const addPriceLine = (price, title, color, style = LightweightCharts.LineStyle.Solid, width = 2) => {
+    if (!Number.isFinite(price)) return;
+    const key = `${title || ''}:${price.toFixed(4)}`;
+    if (priceLineKeys.has(key)) return;
+    const line = candleSeries.createPriceLine({
+      price,
+      color,
+      title,
+      lineWidth: width,
+      lineStyle: style,
+    });
+    priceLines.push(line);
+    priceLineKeys.add(key);
+  };
 
       clearPriceLines();
       addPriceLine(plan.entry, 'Entry', '#facc15', LightweightCharts.LineStyle.Solid, 2);
