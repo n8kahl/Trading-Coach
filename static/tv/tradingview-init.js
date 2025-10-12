@@ -87,7 +87,7 @@
   const emaTokensInput = parseList(params.get('ema'));
   let keyLevels = parseNamedLevels(params.get('levels'));
   let overlayValues = [];
-  const scalePlanToken = (params.get('scale_plan') || 'off').toLowerCase();
+  const scalePlanToken = (params.get('scale_plan') || 'auto').toLowerCase();
   let emaSeries = [];
 
   const container = document.getElementById('tv_chart_container');
