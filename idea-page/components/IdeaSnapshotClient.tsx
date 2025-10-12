@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 
 import ChartEmbed from "@/components/ChartEmbed";
@@ -13,9 +13,11 @@ import Playbook from "@/components/Playbook";
 import Provenance from "@/components/Provenance";
 import QuickPlan from "@/components/QuickPlan";
 import SanityBanner from "@/components/SanityBanner";
+import NextStepCard from "@/components/NextStepCard";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { fetchIdea } from "@/lib/api";
+import { usePlanStream } from "@/hooks/usePlanStream";
 import type { TIdeaSnapshot } from "@/lib/types";
 
 type IdeaSnapshotClientProps = {
@@ -41,6 +43,35 @@ export default function IdeaSnapshotClient({ initialData, planId, version }: Ide
 
   const [highlightedRows, setHighlightedRows] = useState<Set<string>>(new Set());
   const previousSnapshot = useRef<TIdeaSnapshot | null>(initialData);
+
+  const activePlan = data?.plan ?? initialData.plan;
+  const baselinePlanState = useMemo(
+    () => ({
+      status: "intact" as const,
+      rrToT1: typeof activePlan?.rr_to_t1 === "number" ? activePlan.rr_to_t1 : null,
+      note: "Plan intact. Risk profile unchanged.",
+      nextStep: "hold_plan" as const,
+      breach: null,
+      timestamp: null,
+      lastPrice: null,
+      version: typeof activePlan?.version === "number" ? activePlan.version : null,
+    }),
+    [activePlan?.rr_to_t1, activePlan?.version],
+  );
+
+  const handlePlanFull = useCallback(
+    (payload: TIdeaSnapshot) => {
+      mutate(payload, { revalidate: false });
+    },
+    [mutate],
+  );
+
+  const { planState, setPlanState } = usePlanStream<TIdeaSnapshot>({
+    symbol: activePlan?.symbol,
+    planId,
+    initialState: baselinePlanState,
+    onPlanFull: handlePlanFull,
+  });
 
   useEffect(() => {
     if (!data?.options?.table) {
@@ -75,6 +106,21 @@ export default function IdeaSnapshotClient({ initialData, planId, version }: Ide
   }, [data]);
 
   const hasOptions = Boolean(data?.options?.table && data.options.table.length > 0);
+
+  const handleKeepPlan = useCallback(() => {
+    setPlanState((prev) => ({
+      ...prev,
+      status: "intact",
+      nextStep: "hold_plan",
+      breach: null,
+      note: "Continuing with current plan.",
+      timestamp: new Date().toISOString(),
+    }));
+  }, [setPlanState]);
+
+  const handleApplyUpdate = useCallback(() => {
+    void mutate();
+  }, [mutate]);
 
   if (error) {
     return (
@@ -115,6 +161,7 @@ export default function IdeaSnapshotClient({ initialData, planId, version }: Ide
       <IdeaHeader idea={data} isRefreshing={isValidating} />
       <SanityBanner plan={data.plan} />
       <QuickPlan idea={data} />
+      <NextStepCard planState={planState} onKeepPlan={handleKeepPlan} onApplyUpdate={handleApplyUpdate} disabled={isValidating} />
       <section className="grid gap-6 xl:grid-cols-[3fr,2fr]">
         <ChartEmbed chartUrl={data.chart_url} />
         <LiveCoaching idea={data} />

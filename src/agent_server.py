@@ -24,7 +24,7 @@ import copy
 import httpx
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AliasChoices
@@ -63,6 +63,7 @@ from .db import (
     store_idea_snapshot as db_store_idea_snapshot,
 )
 from .data_sources import fetch_polygon_ohlcv
+from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
 from zoneinfo import ZoneInfo
 
@@ -265,6 +266,7 @@ class ContractsRequest(BaseModel):
 class PlanRequest(BaseModel):
     symbol: str
     style: str | None = None
+    plan_id: str | None = None
 
 
 class PlanResponse(BaseModel):
@@ -309,6 +311,8 @@ class PlanResponse(BaseModel):
     data_quality: Dict[str, Any] | None = None
     debug: Dict[str, Any] | None = None
     runner: Dict[str, Any] | None = None
+    updated_from_version: int | None = None
+    update_reason: str | None = None
 
 
 class IdeaStoreRequest(BaseModel):
@@ -705,6 +709,24 @@ async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
             "persisted": persisted,
         },
     )
+    plan_block = snapshot.get("plan") or {}
+    symbol_for_event = (plan_block.get("symbol") or "").upper()
+    plan_full_event = None
+    try:
+        plan_state_event = await _LIVE_PLAN_ENGINE.register_snapshot(snapshot)
+    except Exception:
+        logger.exception("live plan engine snapshot registration failed", extra={"plan_id": plan_id})
+        plan_state_event = None
+    if symbol_for_event:
+        plan_full_event = {
+            "t": "plan_full",
+            "plan_id": plan_block.get("plan_id"),
+            "payload": snapshot,
+            "reason": (plan_state_event or {}).get("reason") if isinstance(plan_state_event, dict) else "snapshot_stored",
+        }
+        await _publish_stream_event(symbol_for_event, plan_full_event)
+    if plan_state_event and symbol_for_event:
+        await _publish_stream_event(symbol_for_event, plan_state_event)
 
 
 async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
@@ -720,6 +742,15 @@ async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
             except asyncio.QueueEmpty:
                 pass
             queue.put_nowait(payload)
+
+
+async def _ingest_stream_event(symbol: str, event: Dict[str, Any]) -> None:
+    """Push a raw market event through the live engine before fan-out."""
+
+    derived_events = await _LIVE_PLAN_ENGINE.handle_market_event(symbol, event)
+    await _publish_stream_event(symbol, event)
+    for derived in derived_events:
+        await _publish_stream_event(symbol, derived)
 
 
 async def _get_idea_snapshot(plan_id: str, version: Optional[int] = None) -> Dict[str, Any]:
@@ -2125,6 +2156,7 @@ _STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
 _STREAM_LOCK = asyncio.Lock()
 _IV_METRICS_CACHE_TTL = 120.0
 _IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_LIVE_PLAN_ENGINE = LivePlanEngine()
 
 
 async def _compute_iv_metrics(symbol: str) -> Dict[str, Any]:
@@ -2871,6 +2903,7 @@ async def gpt_plan(
     symbol = (request_payload.symbol or "").strip().upper()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
+    forced_plan_id = (request_payload.plan_id or "").strip()
     offline_mode = False
     offline_param = request.query_params.get("offline")
     if offline_param is not None:
@@ -2921,14 +2954,18 @@ async def gpt_plan(
         version = 1
     # Determine direction for slugging
     direction_hint = plan.get("direction") or (snapshot.get("trend") or {}).get("direction_hint")
-    plan_id = raw_plan_id or _generate_plan_slug(symbol, first.get("style"), direction_hint, snapshot)
+    plan_id = raw_plan_id or forced_plan_id or _generate_plan_slug(symbol, first.get("style"), direction_hint, snapshot)
     # If version not provided, bump based on snapshot store to ensure unique URLs
+    if forced_plan_id:
+        plan_id = forced_plan_id
     if raw_version is None:
         version = await _next_plan_version(plan_id)
     trade_detail_url = _build_trade_detail_url(request, plan_id, version)
 
     plan["plan_id"] = plan_id
     plan["version"] = version
+    updated_from_version = version - 1 if version > 1 else None
+    update_reason = "manual_refresh" if forced_plan_id else None
     plan.setdefault("symbol", symbol)
     plan.setdefault("style", first.get("style"))
     plan.setdefault("direction", plan.get("direction") or (snapshot.get("trend") or {}).get("direction_hint"))
@@ -3169,6 +3206,10 @@ async def gpt_plan(
     plan_core = _extract_plan_core(first, plan_id, version, decimals_value)
     plan_core["trade_detail"] = trade_detail_url
     plan_core["idea_url"] = trade_detail_url
+    if updated_from_version:
+        plan_core["updated_from_version"] = updated_from_version
+    if update_reason:
+        plan_core["update_reason"] = update_reason
     if plan_warnings:
         plan_core["warnings"] = plan_warnings
     summary_snapshot = _build_snapshot_summary(first)
@@ -3293,6 +3334,8 @@ async def gpt_plan(
         data_quality=data_quality,
         debug=debug_payload or None,
         runner=plan.get("runner") if plan else None,
+        updated_from_version=updated_from_version,
+        update_reason=update_reason,
     )
 
 @app.post("/internal/idea/store", include_in_schema=False, tags=["internal"])
@@ -3316,17 +3359,21 @@ async def internal_idea_store(payload: IdeaStoreRequest, request: Request) -> Id
 
 async def _ensure_snapshot(plan_id: str, version: Optional[int], request: Request) -> Dict[str, Any]:
     try:
-        return await _get_idea_snapshot(plan_id, version=version)
+        snapshot = await _get_idea_snapshot(plan_id, version=version)
     except HTTPException as exc:
         if exc.status_code != 404:
             raise
         slug_meta = _parse_plan_slug(plan_id)
         if not slug_meta:
             raise
-    regenerated = await _regenerate_snapshot_from_slug(plan_id, version, request, slug_meta)
-    if regenerated is None:
-        raise HTTPException(status_code=404, detail="Plan not found")
-    return regenerated
+        snapshot = await _regenerate_snapshot_from_slug(plan_id, version, request, slug_meta)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="Plan not found")
+    try:
+        await _LIVE_PLAN_ENGINE.register_snapshot(snapshot)
+    except Exception:
+        logger.exception("live plan engine registration failed during ensure", extra={"plan_id": plan_id})
+    return snapshot
 
 
 @app.get("/idea/{plan_id}")
@@ -3367,13 +3414,79 @@ async def get_plan_version(plan_id: str, version: int, request: Request) -> Any:
     return await _ensure_snapshot(plan_id, int(version), request)
 
 
+@app.post("/idea/{plan_id}/refresh")
+async def refresh_plan_snapshot(
+    plan_id: str,
+    request: Request,
+    user: AuthedUser = Depends(require_api_key),
+) -> PlanResponse:
+    snapshot = await _ensure_snapshot(plan_id, None, request)
+    plan_block = snapshot.get("plan") or {}
+    symbol = (plan_block.get("symbol") or "").strip()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Plan snapshot missing symbol")
+    style = plan_block.get("style")
+    plan_request = PlanRequest(symbol=symbol, style=style, plan_id=plan_id)
+    response = await gpt_plan(plan_request, request, user)
+    return response
+
+
 @app.get("/stream/market")
 async def stream_market(symbol: str = Query(..., min_length=1)) -> StreamingResponse:
     async def event_generator():
-        async for chunk in _stream_generator(symbol.upper()):
+        uppercase = symbol.upper()
+        initial_states = await _LIVE_PLAN_ENGINE.active_plan_states(uppercase)
+        if initial_states:
+            payload = json.dumps({"symbol": uppercase, "event": {"t": "plan_state", "plans": initial_states}})
+            yield f"data: {payload}\n\n"
+        async for chunk in _stream_generator(uppercase):
             yield chunk
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/stream/{symbol}")
+async def stream_symbol_sse(symbol: str) -> StreamingResponse:
+    async def event_generator():
+        uppercase = symbol.upper()
+        initial_states = await _LIVE_PLAN_ENGINE.active_plan_states(uppercase)
+        if initial_states:
+            payload = json.dumps({"symbol": uppercase, "event": {"t": "plan_state", "plans": initial_states}})
+            yield f"data: {payload}\n\n"
+        async for chunk in _stream_generator(uppercase):
+            yield chunk
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.websocket("/stream/{symbol}")
+async def stream_symbol_ws(websocket: WebSocket, symbol: str) -> None:
+    uppercase = symbol.upper()
+    await websocket.accept()
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+    async with _STREAM_LOCK:
+        _STREAM_SUBSCRIBERS.setdefault(uppercase, []).append(queue)
+    try:
+        initial_states = await _LIVE_PLAN_ENGINE.active_plan_states(uppercase)
+        if initial_states:
+            payload = json.dumps({"symbol": uppercase, "event": {"t": "plan_state", "plans": initial_states}})
+            await websocket.send_text(payload)
+        while True:
+            data = await queue.get()
+            await websocket.send_text(data)
+    except WebSocketDisconnect:
+        return
+    finally:
+        async with _STREAM_LOCK:
+            subscribers = _STREAM_SUBSCRIBERS.get(uppercase, [])
+            if queue in subscribers:
+                subscribers.remove(queue)
+            if not subscribers:
+                _STREAM_SUBSCRIBERS.pop(uppercase, None)
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
 
 
 @app.post("/internal/stream/push", include_in_schema=False, tags=["internal"])
@@ -3381,7 +3494,7 @@ async def internal_stream_push(payload: StreamPushRequest) -> Dict[str, str]:
     symbol = (payload.symbol or "").upper()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
-    await _publish_stream_event(symbol, payload.event or {})
+    await _ingest_stream_event(symbol, payload.event or {})
     return {"status": "ok"}
 
 
