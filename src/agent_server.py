@@ -823,6 +823,7 @@ async def _stream_generator(symbol: str) -> Any:
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
     async with _STREAM_LOCK:
         _STREAM_SUBSCRIBERS.setdefault(symbol, []).append(queue)
+    await _ensure_symbol_stream(symbol)
     try:
         while True:
             data = await queue.get()
@@ -965,44 +966,6 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
     )
 
     calc_notes: Dict[str, Any] = {}
-    if not chart_url_value:
-        minimal_params = {
-            "symbol": symbol,
-            "interval": normalize_interval(plan.get("interval") or chart_params_payload.get("interval") or "15"),
-            "plan_id": plan_id,
-            "plan_version": str(version),
-        }
-        if entry_val is not None:
-            minimal_params["entry"] = f"{entry_val:.2f}"
-        if stop_val is not None:
-            minimal_params["stop"] = f"{stop_val:.2f}"
-        if targets_list:
-            minimal_params["tp"] = ",".join(f"{target:.2f}" for target in targets_list)
-        chart_url_value = _build_tv_chart_url(request, minimal_params)
-        charts_payload.setdefault("params", minimal_params)
-        charts_payload["interactive"] = chart_url_value
-
-    trade_detail_url = chart_url_value
-    plan["trade_detail"] = trade_detail_url
-    plan["idea_url"] = trade_detail_url
-
-    atr_val = _safe_number(indicators.get("atr14"))
-    if atr_val is not None:
-        calc_notes["atr14"] = atr_val
-    calc_notes["stop_multiple"] = round(float(stop_multiple), 3)
-    calc_notes["min_rr"] = float(min_rr)
-    if expected_move is not None:
-        calc_notes["expected_move_horizon"] = expected_move
-    if tp_debug:
-        calc_notes["tp_logic"] = tp_debug
-    if target_meta:
-        calc_notes["target_meta"] = target_meta
-    calc_notes["rr_inputs"] = {
-        "entry": plan_block["entry"],
-        "stop": plan_block["stop"],
-        "tp1": plan_block["targets"][0],
-    }
-
     snapped_labels: List[str] = []
     tolerance = max(0.05, (atr or 0.0) * 0.25)
     for target in plan_block["targets"]:
@@ -1042,6 +1005,8 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "vwap": "1",
         "atr": f"{atr:.4f}" if atr else None,
     }
+    chart_params["plan_id"] = plan_id
+    chart_params["plan_version"] = str(version)
     if target_meta:
         chart_params["tp_meta"] = json.dumps(target_meta)
     if runner_cfg:
@@ -1074,9 +1039,35 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         charts_payload["interactive"] = chart_links.interactive
     else:
         fallback_chart_url = _build_tv_chart_url(request, chart_params)
+        fallback_chart_url = _append_query_params(
+            fallback_chart_url,
+            {
+                "plan_id": plan_id,
+                "plan_version": str(version),
+            },
+        )
         charts_payload["interactive"] = fallback_chart_url
         chart_links = None
     chart_url_value = charts_payload.get("interactive")
+
+    trade_detail_url = chart_url_value
+
+    atr_val = _safe_number(indicators.get("atr14"))
+    if atr_val is not None:
+        calc_notes["atr14"] = atr_val
+    calc_notes["stop_multiple"] = round(float(stop_multiple), 3)
+    calc_notes["min_rr"] = float(min_rr)
+    if expected_move is not None:
+        calc_notes["expected_move_horizon"] = expected_move
+    if tp_debug:
+        calc_notes["tp_logic"] = tp_debug
+    if target_meta:
+        calc_notes["target_meta"] = target_meta
+    calc_notes["rr_inputs"] = {
+        "entry": plan_block["entry"],
+        "stop": plan_block["stop"],
+        "tp1": plan_block["targets"][0],
+    }
 
     features = {
         "plan_entry": plan_block["entry"],
