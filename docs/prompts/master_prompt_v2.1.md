@@ -123,7 +123,7 @@ TradeTypes.md • TopLiquidityList.md • Plan_Math_Reference.pdf • MTF_Conflu
 openapi: 3.1.0
 info:
   title: Trading Coach GPT Actions
-  version: 1.9.6
+  version: 1.9.5
 
 servers:
   - url: https://trading-coach-production.up.railway.app
@@ -961,6 +961,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TargetMeta'
+        runner:
+          $ref: '#/components/schemas/RunnerConfig'
         rr_to_t1:
           type: number
         confidence:
@@ -1015,81 +1017,58 @@ components:
         debug:
           type: object
           additionalProperties: true
-        runner:
-          $ref: '#/components/schemas/RunnerConfig'
-
-        # strongly-typed options payload (required fields inside when present)
         options:
           type: object
-          properties:
-            table:
-              type: array
-              items:
-                $ref: '#/components/schemas/OptionContract'
-            side:
-              type: string
-              enum: ['call', 'put']
-            style:
-              type: string
-              enum: ['scalp', 'intraday', 'swing', 'leaps']
-          required: [table, side, style]
+          additionalProperties: true
 
     TargetMeta:
       type: object
       properties:
-        label:
-          type: string
         price:
           type: number
         distance:
           type: number
-        sequence:
-          type: integer
+          description: 'Absolute distance from entry (points)'
         rr:
           type: number
+          description: 'Risk/Reward at this TP'
         em_fraction:
           type: number
-        em_basis:
-          type: number
+          description: 'Fraction of expected move to this TP (0..1+)'
         mfe_quantile:
-          type: string
-        mfe_ratio:
           type: number
+          description: 'Historical MFE quantile reached by similar setups'
         prob_touch:
           type: number
-        prob_touch_flag:
+          description: 'Estimated probability of touch (0..1)'
+        label:
           type: string
-        source:
+        note:
           type: string
-        snap_tag:
-          type: string
-        optional:
-          type: boolean
-      required: [label, price, sequence]
 
     RunnerConfig:
       type: object
       properties:
         type:
           type: string
+          description: 'Trailing method identifier'
         timeframe:
           type: string
+          enum: ['1m', '5m', '15m', '1h', '4h', '1D', 'w']
         length:
           type: integer
         multiplier:
           type: number
-        label:
-          type: string
-        note:
-          type: string
         bias:
           type: string
           enum: ['long', 'short']
         anchor:
-          type: number
+          type: string
+          description: 'Reference (e.g., ATR, EMA, structure)'
         initial_stop:
           type: number
-      required: [type, timeframe, length, multiplier]
+        note:
+          type: string
 
     ChartsParams:
       type: object
