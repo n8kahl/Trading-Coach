@@ -53,42 +53,6 @@
     return Number.isFinite(num) ? num : null;
   };
 
-  let etFormatter = null;
-  const getEtSessionInfo = (epochSeconds) => {
-    try {
-      if (!etFormatter) {
-        etFormatter = new Intl.DateTimeFormat('en-US', {
-          timeZone: 'America/New_York',
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit',
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-        });
-      }
-      const partsArray = etFormatter.formatToParts(new Date(epochSeconds * 1000));
-      const parts = partsArray.reduce((acc, item) => {
-        if (item.type !== 'literal') acc[item.type] = item.value;
-        return acc;
-      }, {});
-      const hour = Number.parseInt(parts.hour, 10);
-      const minute = Number.parseInt(parts.minute, 10);
-      const minutes = hour * 60 + minute;
-      let label = 'rth';
-      if (minutes < 570) {
-        label = 'pre';
-      } else if (minutes >= 960) {
-        label = 'post';
-      }
-      const dateKey = `${parts.year}-${parts.month}-${parts.day}`;
-      return { sessionId: `${dateKey}-${label}`, label, dateKey };
-    } catch (err) {
-      const fallbackKey = new Date(epochSeconds * 1000).toISOString().slice(0, 10);
-      return { sessionId: `${fallbackKey}-rth`, label: 'rth', dateKey: fallbackKey };
-    }
-  };
-
   const symbol = (params.get('symbol') || 'AAPL').toUpperCase();
   const resolution = normalizeResolution(params.get('interval') || '15');
   const theme = params.get('theme') === 'light' ? 'light' : 'dark';
@@ -423,16 +387,16 @@
           const bar = candleData[i];
           const vol = volumeData[i]?.value || 0;
           const typical = (bar.high + bar.low + bar.close) / 3;
-          const { sessionId, label } = getEtSessionInfo(bar.time);
-          if (sessionId !== currentSession) {
-            currentSession = sessionId;
+          const sessionKey = new Date(bar.time * 1000).toISOString().slice(0, 10);
+          if (sessionKey !== currentSession) {
+            currentSession = sessionKey;
             cumulativePV = 0;
             cumulativeVol = 0;
           }
           cumulativePV += typical * vol;
           cumulativeVol += vol;
           const vwapValue = cumulativeVol > 0 ? cumulativePV / cumulativeVol : typical;
-          values.push({ time: bar.time, value: label === 'rth' ? vwapValue : null });
+          values.push({ time: bar.time, value: vwapValue });
         }
         vwapSeries.setData(values);
       }
