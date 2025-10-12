@@ -118,7 +118,21 @@
     strategy: planMeta.strategy_label || plan.strategy,
     expected_move: toNumber(planMeta.expected_move),
     horizon_minutes: toNumber(planMeta.horizon_minutes),
+    key_levels: planMeta.key_levels || null,
   };
+
+  if ((!keyLevels || !keyLevels.length) && mergedPlanMeta.key_levels) {
+    keyLevels = Object.entries(mergedPlanMeta.key_levels)
+      .map(([name, value]) => {
+        const numeric = toNumber(value);
+        if (!Number.isFinite(numeric)) return null;
+        const label = name
+          .replace(/_/g, ' ')
+          .replace(/\b([a-z])/g, (match) => match.toUpperCase());
+        return { price: numeric, label };
+      })
+      .filter(Boolean);
+  }
 
   const headerSymbolEl = document.getElementById('header_symbol');
   const headerStrategyEl = document.getElementById('header_strategy');
@@ -131,6 +145,10 @@
   const planPanelEl = document.getElementById('plan_panel');
   const planPanelBodyEl = document.getElementById('plan_panel_body');
   const debugEl = document.getElementById('debug_banner');
+
+  if (window.console && console.debug) {
+    console.debug('Plan meta payload', mergedPlanMeta);
+  }
 
   const TIMEFRAMES = [
     { label: '1m', resolution: '1' },
@@ -210,8 +228,8 @@
   }, []);
 
   let vwapSeries = null;
-  const keyLevels = parseNamedLevels(params.get('levels'));
-  const scalePlanToken = (params.get('scale_plan') || 'off').toLowerCase();
+  let keyLevels = parseNamedLevels(params.get('levels'));
+  const scalePlanToken = (params.get('scale_plan') || 'auto').toLowerCase();
 
   let lastKnownPrice = null;
 
@@ -295,13 +313,25 @@
       headerStrategyEl.textContent = [styleLabel, strategyLabel].filter(Boolean).join(' · ');
     }
     if (headerBiasEl) headerBiasEl.textContent = bias ? `Bias: ${bias === 'long' ? 'Long 🟢' : 'Short 🔴'}` : '';
+    const confidenceValue = toNumber(mergedPlanMeta.confidence);
     if (headerConfidenceEl) {
-      const confidenceValue = toNumber(mergedPlanMeta.confidence);
       headerConfidenceEl.textContent = confidenceValue !== null ? `Confidence: ${(confidenceValue * 100).toFixed(0)}%` : '';
     }
+    const fallbackRRForHeader = (() => {
+      const entry = mergedPlanMeta.entry;
+      const stop = mergedPlanMeta.stop;
+      const target = plan.tps?.[0];
+      const direction = (mergedPlanMeta.bias || plan.direction || 'long').toLowerCase();
+      if (!Number.isFinite(entry) || !Number.isFinite(stop) || !Number.isFinite(target)) return null;
+      const risk = direction === 'long' ? entry - stop : stop - entry;
+      const reward = direction === 'long' ? target - entry : entry - target;
+      if (risk <= 0 || reward <= 0) return null;
+      return reward / risk;
+    })();
     if (headerRREl) {
       const rrValue = toNumber(mergedPlanMeta.risk_reward);
-      headerRREl.textContent = rrValue !== null ? `R:R (TP1): ${rrValue.toFixed(2)}` : '';
+      const rrDisplay = rrValue !== null && rrValue > 0 ? rrValue : fallbackRRForHeader;
+      headerRREl.textContent = rrDisplay !== null ? `R:R (TP1): ${rrDisplay.toFixed(2)}` : '';
     }
     if (headerDurationEl) {
       headerDurationEl.textContent = estimateDuration() || '';
@@ -337,7 +367,18 @@
     const confidenceValue = toNumber(mergedPlanMeta.confidence);
     const confidenceCopy = confidenceValue !== null ? `${(confidenceValue * 100).toFixed(0)}%` : '—';
     const rrValue = toNumber(mergedPlanMeta.risk_reward);
-    const rrCopy = rrValue !== null ? rrValue.toFixed(2) : '—';
+    const rrFallback = (() => {
+      const entry = mergedPlanMeta.entry;
+      const stop = mergedPlanMeta.stop;
+      const target = plan.tps?.[0];
+      const direction = (mergedPlanMeta.bias || plan.direction || 'long').toLowerCase();
+      if (!Number.isFinite(entry) || !Number.isFinite(stop) || !Number.isFinite(target)) return null;
+      const risk = direction === 'long' ? entry - stop : stop - entry;
+      const reward = direction === 'long' ? target - entry : entry - target;
+      if (risk <= 0 || reward <= 0) return null;
+      return reward / risk;
+    })();
+    const rrCopy = rrValue !== null && rrValue > 0 ? rrValue.toFixed(2) : rrFallback !== null ? rrFallback.toFixed(2) : '—';
     const runnerNote = mergedPlanMeta.runner && mergedPlanMeta.runner.note ? mergedPlanMeta.runner.note : null;
 
     const lastPriceCopy = Number.isFinite(lastPrice) ? formatPrice(lastPrice) : '—';

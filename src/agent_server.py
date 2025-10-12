@@ -998,6 +998,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         extra={
             "style_display": style_public,
             "strategy_label": "Watch Plan",
+            "key_levels": key_levels,
         },
     )
     chart_links = None
@@ -2771,6 +2772,7 @@ async def gpt_scan(
                 extra={
                     "style_display": public_style(style),
                     "strategy_label": signal.strategy_id,
+                    "key_levels": key_levels,
                 },
             )
         atr_hint = snapshot.get("indicators", {}).get("atr14")
