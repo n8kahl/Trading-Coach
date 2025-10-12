@@ -15,6 +15,7 @@ Never make up trades, numbers, metrics, or hallucinate. All data comes from your
 * Deterministic: no follow-ups.
 * If symbol/style missing → run intraday scan then plan top 1–3. Never make up data.
 * Educational only — never financial advice or execution claims.
+* If TP metadata fields (EM/POT) are missing → state that they’re unavailable; never invent them.
 
 ---
 
@@ -25,8 +26,9 @@ Never make up trades, numbers, metrics, or hallucinate. All data comes from your
  Use `summary.confluence_score`, `trend_notes`, `expected_move_horizon`, `nearby_levels`, `volatility_regime`.
  If critical fields absent → **Watch Plan** (state what’s missing; no invented numbers).
 3️⃣ **PLAN** → prefer server plan; fallback to local (Plan Math Reference).
- Use `calc_notes` for ATR & R:R transparency.
- Print Idea Page if provided.
+  Use `calc_notes` for ATR & R:R transparency.
+ Quote `plan.target_meta` to describe each TP’s EM multiple + POT and note any structural snap tag; surface `plan.runner` (type, timeframe, multiplier, anchor) so the user understands runner management.
+  Print Idea Page if provided.
 4️⃣ **CHART** → validate host = `trading-coach-production.up.railway.app` path = `/tv`.
  Render exactly: 📈 Chart: [View Interactive Setup]({{interactive_url}})
  If invalid → show “Chart unavailable” + plan text.
@@ -51,6 +53,7 @@ Long → stop < entry < TP1 ≤ TP2 | Short → TP2 ≤ TP1 < entry < stop.
 Use ATR multipliers per style (see Plan Math Reference §1–3).
 If R:R (TP1) < min_rr → refine by ±0.15 × ATR or mark Watch Plan.
 Cap targets within `expected_move_horizon` unless strong HTF confluence justifies slight exceedance.
+When `plan.target_meta` omits a field (e.g., POT), say so plainly — never fabricate probabilities or EM multiples.
 
 ---
 
@@ -86,7 +89,8 @@ If macro/earnings today → add note “reduced confidence; defined-risk preferr
 **Title** — SYMBOL · Bias Long|Short (setup)
 **Entry** — price/trigger (rounded)
 **Stop** — invalidation ± ATR buffer
-**Targets** — TP1 / TP2 + R:R (TP1)
+**Targets** — TP1 / TP2 / TP3 (when provided) with EM multiple + POT (plan.target_meta) and R:R (TP1)
+**Runner** — trailing rule (type / timeframe / multiplier / anchor) from `plan.runner`
 **Confidence** — score + emoji
 **Confluence Metrics** — summary + vol regime + HTF bias + ATR multiple
 **Options Table** — ranked contracts
@@ -972,6 +976,10 @@ components:
           type: array
           items:
             type: number
+        target_meta:
+          type: array
+          items:
+            $ref: '#/components/schemas/TargetMeta'
         rr_to_t1:
           type: number
         confidence:
@@ -1026,6 +1034,8 @@ components:
         debug:
           type: object
           additionalProperties: true
+        runner:
+          $ref: '#/components/schemas/RunnerConfig'
 
         # strongly-typed options payload (required fields inside when present)
         options:
@@ -1042,6 +1052,63 @@ components:
               type: string
               enum: ['scalp', 'intraday', 'swing', 'leaps']
           required: [table, side, style]
+
+    TargetMeta:
+      type: object
+      properties:
+        label:
+          type: string
+        price:
+          type: number
+        distance:
+          type: number
+        sequence:
+          type: integer
+        rr:
+          type: number
+        em_fraction:
+          type: number
+        em_basis:
+          type: number
+        mfe_quantile:
+          type: string
+        mfe_ratio:
+          type: number
+        prob_touch:
+          type: number
+        prob_touch_flag:
+          type: string
+        source:
+          type: string
+        snap_tag:
+          type: string
+        optional:
+          type: boolean
+      required: [label, price, sequence]
+
+    RunnerConfig:
+      type: object
+      properties:
+        type:
+          type: string
+        timeframe:
+          type: string
+        length:
+          type: integer
+        multiplier:
+          type: number
+        label:
+          type: string
+        note:
+          type: string
+        bias:
+          type: string
+          enum: ['long', 'short']
+        anchor:
+          type: number
+        initial_stop:
+          type: number
+      required: [type, timeframe, length, multiplier]
 
     ChartsParams:
       type: object
@@ -1071,6 +1138,12 @@ components:
           type: string
         notes:
           type: string
+        tp_meta:
+          type: string
+          description: JSON-encoded array of per-target metadata
+        runner:
+          type: string
+          description: JSON-encoded runner trail configuration
 
     ChartUrlRequest:
       type: object
@@ -1102,6 +1175,12 @@ components:
           type: number
         notes:
           type: string
+        tp_meta:
+          type: string
+          description: JSON-encoded array of per-target metadata
+        runner:
+          type: string
+          description: JSON-encoded runner trail configuration
       required: [symbol, interval]
 
     ChartUrlResponse:

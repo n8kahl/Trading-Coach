@@ -58,6 +58,20 @@
   const theme = params.get('theme') === 'light' ? 'light' : 'dark';
   const baseUrl = `${window.location.protocol}//${window.location.host}`;
 
+  let tpMeta = [];
+  try {
+    tpMeta = JSON.parse(params.get('tp_meta') || '[]');
+  } catch (err) {
+    tpMeta = [];
+  }
+
+  let runnerConfig = null;
+  try {
+    runnerConfig = JSON.parse(params.get('runner') || 'null');
+  } catch (err) {
+    runnerConfig = null;
+  }
+
   const plan = {
     entry: parseNumber(params.get('entry')),
     stop: parseNumber(params.get('stop')),
@@ -67,6 +81,8 @@
     atr: parseNumber(params.get('atr')),
     notes: params.get('notes'),
     title: params.get('title'),
+    tpMeta,
+    runner: runnerConfig,
   };
   const emaTokensInput = parseList(params.get('ema'));
   let keyLevels = parseNamedLevels(params.get('levels'));
@@ -165,10 +181,21 @@
     if (Number.isFinite(plan.entry)) pushRow('Entry', plan.entry.toFixed(2));
     if (Number.isFinite(plan.stop)) pushRow('Stop', plan.stop.toFixed(2));
     plan.tps.forEach((tp, idx) => {
-      if (Number.isFinite(tp)) pushRow(`TP${idx + 1}`, tp.toFixed(2));
+      if (!Number.isFinite(tp)) return;
+      const meta = Array.isArray(plan.tpMeta) ? plan.tpMeta[idx] || {} : {};
+      const label = meta.label || `TP${idx + 1}`;
+      let details = tp.toFixed(2);
+      if (meta.em_fraction && Number.isFinite(meta.em_fraction)) {
+        details += ` (≈ ${Number(meta.em_fraction).toFixed(2)}×EM)`;
+      }
+      if (meta.prob_touch && Number.isFinite(meta.prob_touch)) {
+        details += ` · POT ${Math.round(meta.prob_touch * 100)}%`;
+      }
+      pushRow(label, details);
     });
     if (Number.isFinite(plan.atr)) pushRow('ATR', plan.atr.toFixed(4));
     if (plan.strategy) pushRow('Setup', plan.strategy);
+    if (plan.runner && plan.runner.note) pushRow('Runner', plan.runner.note);
     legendEl.innerHTML = `
       <h2>${plan.title || `${symbol} · ${resolution}`}</h2>
       <dl>${rows.join('')}</dl>
@@ -320,7 +347,11 @@
         plan.stop,
         ...plan.tps,
         ...keyLevels.map((lvl) => lvl.price),
-      ].filter((value) => Number.isFinite(value));
+      ];
+      if (plan.runner && Number.isFinite(plan.runner.anchor)) {
+        overlayValues.push(plan.runner.anchor);
+      }
+      overlayValues = overlayValues.filter((value) => Number.isFinite(value));
 
       const vwapRequested = (params.get('vwap') || '').toLowerCase() !== 'false';
       let vwapSeries = null;
@@ -373,7 +404,12 @@
       clearPriceLines();
       addPriceLine(plan.entry, 'Entry', '#facc15', LightweightCharts.LineStyle.Solid, 3);
       addPriceLine(plan.stop, 'Stop', '#ef4444', LightweightCharts.LineStyle.Solid, 3);
-      plan.tps.forEach((tp, idx) => addPriceLine(tp, `TP${idx + 1}`, '#7CFC00', LightweightCharts.LineStyle.Solid, 3));
+      plan.tps.forEach((tp, idx) => {
+        const meta = Array.isArray(plan.tpMeta) ? plan.tpMeta[idx] || {} : {};
+        const label = meta.label || `TP${idx + 1}`;
+        const color = meta.sequence === 3 ? '#c084fc' : '#7CFC00';
+        addPriceLine(tp, label, color, LightweightCharts.LineStyle.Solid, 3);
+      });
       [...keyLevels]
         .filter((level) => Number.isFinite(level.price))
         .sort((a, b) => b.price - a.price)
@@ -381,6 +417,10 @@
           const label = level.label ? level.label : `Level ${idx + 1}`;
           addPriceLine(level.price, label, '#94a3b8', LightweightCharts.LineStyle.Dotted);
         });
+      if (plan.runner && Number.isFinite(plan.runner.anchor)) {
+        const runnerLabel = plan.runner.label || 'Runner Trail';
+        addPriceLine(plan.runner.anchor, runnerLabel, '#ff4fa3', LightweightCharts.LineStyle.Dashed, 2);
+      }
 
       renderLegend(lastPrice);
       const priceScale = chart.priceScale('right');

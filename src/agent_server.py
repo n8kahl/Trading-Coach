@@ -41,6 +41,7 @@ from .scanner import (
     _apply_tp_logic,
     _base_targets_for_style,
     _normalize_trade_style,
+    _runner_config,
 )
 from .strategy_library import (
     normalize_style_input,
@@ -61,6 +62,8 @@ from .db import (
     fetch_idea_snapshot as db_fetch_idea_snapshot,
     store_idea_snapshot as db_store_idea_snapshot,
 )
+from .data_sources import fetch_polygon_ohlcv
+from .statistics import get_style_stats
 from zoneinfo import ZoneInfo
 
 
@@ -279,6 +282,7 @@ class PlanResponse(BaseModel):
     entry: float | None = None
     stop: float | None = None
     targets: List[float] | None = None
+    target_meta: List[Dict[str, Any]] | None = None
     rr_to_t1: float | None = None
     confidence: float | None = None
     confidence_factors: List[str] | None = None
@@ -304,6 +308,7 @@ class PlanResponse(BaseModel):
     decimals: int | None = None
     data_quality: Dict[str, Any] | None = None
     debug: Dict[str, Any] | None = None
+    runner: Dict[str, Any] | None = None
 
 
 class IdeaStoreRequest(BaseModel):
@@ -403,6 +408,11 @@ def _normalize_style(style: str | None) -> str | None:
     if token in {"power_hour", "powerhour", "power-hour", "power hour"}:
         token = "scalp"
     return normalize_style_input(token)
+
+
+def _canonical_style_token(style: str | None) -> str:
+    token = (_normalize_trade_style(style) or "intraday").lower()
+    return "leaps" if token == "leap" else token
 
 
 def _append_query_params(url: str, extra: Dict[str, str]) -> str:
@@ -587,10 +597,12 @@ def _extract_plan_core(first: Dict[str, Any], plan_id: str, version: int, decima
         "entry": plan_block.get("entry"),
         "stop": plan_block.get("stop"),
         "targets": plan_block.get("targets"),
+        "target_meta": plan_block.get("target_meta"),
         "rr_to_t1": plan_block.get("risk_reward"),
         "confidence": plan_block.get("confidence"),
         "decimals": decimals,
         "charts_params": charts.get("params") if isinstance(charts, dict) else None,
+        "runner": plan_block.get("runner"),
     }
     return core
 
@@ -842,8 +854,19 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "expected_move_horizon": expected_move,
         "atr": atr,
     }
+    stats_style_key = _canonical_style_token(style_normalized)
+    target_stats: Dict[str, Dict[str, Any]] = {}
+    if stats_style_key in {"scalp", "intraday", "swing", "leaps"}:
+        try:
+            stats_bundle = await get_style_stats(symbol_upper, stats_style_key)
+        except Exception as exc:
+            logger.debug("target stats fetch failed for %s/%s: %s", symbol_upper, stats_style_key, exc)
+            stats_bundle = None
+        if stats_bundle:
+            target_stats[stats_style_key] = stats_bundle
+    tp_ctx["target_stats"] = target_stats
 
-    targets, tp_warnings, tp_debug = _apply_tp_logic(
+    targets, target_meta, tp_warnings, tp_debug = _apply_tp_logic(
         symbol=symbol,
         style=style_normalized,
         bias="long",
@@ -859,6 +882,8 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
     if not targets:
         return None
     rr = (targets[0] - entry) / (entry - stop) if entry != stop else 0.0
+
+    runner_cfg = _runner_config(style_normalized, "long", entry, stop, targets)
 
     plan_id = uuid.uuid4().hex[:10]
     version = await _next_plan_version(plan_id)
@@ -881,6 +906,8 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "atr": round(atr, 4) if atr else None,
         "trade_detail": trade_detail_url,
         "idea_url": trade_detail_url,
+        "target_meta": target_meta,
+        "runner": runner_cfg,
     }
     logger.info(
         "watch plan generated",
@@ -905,6 +932,8 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         calc_notes["expected_move_horizon"] = expected_move
     if tp_debug:
         calc_notes["tp_logic"] = tp_debug
+    if target_meta:
+        calc_notes["target_meta"] = target_meta
     calc_notes["rr_inputs"] = {
         "entry": plan_block["entry"],
         "stop": plan_block["stop"],
@@ -950,6 +979,10 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "vwap": "1",
         "atr": f"{atr:.4f}" if atr else None,
     }
+    if target_meta:
+        chart_params["tp_meta"] = json.dumps(target_meta)
+    if runner_cfg:
+        chart_params["runner"] = json.dumps(runner_cfg)
     level_tokens = _extract_levels_for_chart(key_levels)
     if level_tokens:
         chart_params["levels"] = ",".join(level_tokens)
@@ -996,12 +1029,14 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
             "entry": plan_block["entry"],
             "stop": plan_block["stop"],
             "targets": plan_block["targets"],
+            "target_meta": plan_block.get("target_meta"),
             "rr_to_t1": plan_block["risk_reward"],
             "confidence": plan_block["confidence"],
             "decimals": decimals,
             "charts_params": chart_params,
             "trade_detail": trade_detail_url,
             "warnings": plan_block["warnings"],
+            "runner": plan_block.get("runner"),
         },
         "summary": summary,
         "volatility_regime": snapshot.get("volatility"),
@@ -1032,6 +1067,7 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         entry=plan_block["entry"],
         stop=plan_block["stop"],
         targets=plan_block["targets"],
+        target_meta=plan_block.get("target_meta"),
         rr_to_t1=plan_block["risk_reward"],
         confidence=plan_block["confidence"],
         notes=plan_block["notes"],
@@ -1045,11 +1081,12 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         market_snapshot=context.get("snapshot"),
         features=features,
         options=None,
+        runner=plan_block.get("runner"),
         calc_notes=calc_notes_output,
         htf=htf,
         decimals=decimals,
         data_quality=data_quality,
-        debug={"mode": "watch_plan"},
+        debug={"mode": "watch_plan", "tp_debug": tp_debug} if tp_debug else {"mode": "watch_plan"},
     )
 
 
@@ -1102,65 +1139,6 @@ async def _simulate_generator(symbol: str, params: Dict[str, Any]) -> Any:
 
 
 
-async def _fetch_polygon_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None:
-    """Fetch OHLCV from Polygon if `POLYGON_API_KEY` is configured.
-
-    timeframe: minutes string like '1','5','15','60' or 'D' for daily.
-    """
-    settings = get_settings()
-    api_key = settings.polygon_api_key
-    if not api_key:
-        return None
-
-    tf = (timeframe or "5").upper()
-    if tf == "D":
-        multiplier, timespan = 1, "day"
-        days_back = 120
-    else:
-        try:
-            minutes = int(tf)
-        except ValueError:
-            minutes = 5
-        multiplier, timespan = minutes, "minute"
-        total_minutes = max(minutes * 500, minutes * 5)
-        days_back = max(math.ceil(total_minutes / (60 * 6)) + 2, 5)
-
-    now = pd.Timestamp.utcnow()
-    end = now + pd.Timedelta(minutes=multiplier)
-    start = now - pd.Timedelta(days=days_back)
-    frm = start.normalize().date().isoformat()
-    to = (end.normalize() + pd.Timedelta(days=1)).date().isoformat()
-
-    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{frm}/{to}"
-    params = {
-        "adjusted": "true",
-        "sort": "desc",
-        "limit": 5000,
-        "apiKey": api_key,
-    }
-    timeout = httpx.Timeout(8.0, connect=4.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            logger.warning("Polygon fetch failed for %s(%s %s): %s", symbol, multiplier, timespan, exc)
-            return None
-
-    data = resp.json()
-    results = data.get("results")
-    if not results:
-        return None
-    frame = pd.DataFrame(results)
-    # Polygon keys: t (ms), o/h/l/c, v
-    frame = frame[["t", "o", "h", "l", "c", "v"]].rename(
-        columns={"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
-    )
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
-    frame = frame.set_index("timestamp").sort_index()
-    return frame.dropna()
-
-
 def _is_stale_frame(frame: pd.DataFrame, timeframe: str) -> bool:
     if frame.empty:
         return True
@@ -1187,7 +1165,7 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
     fresh_polygon: pd.DataFrame | None = None
     stale_polygon: pd.DataFrame | None = None
     for candidate in candidates:
-        poly = await _fetch_polygon_ohlcv(candidate, timeframe)
+        poly = await fetch_polygon_ohlcv(candidate, timeframe)
         if poly is None or poly.empty:
             continue
         if not _is_stale_frame(poly, timeframe):
@@ -2427,7 +2405,7 @@ async def gpt_health(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]
         if not settings.polygon_api_key:
             return {"status": "missing"}
         try:
-            sample = await _fetch_polygon_ohlcv("SPY", "5")
+            sample = await fetch_polygon_ohlcv("SPY", "5")
             if sample is None or sample.empty:
                 return {"status": "unavailable"}
             latest = sample.index[-1]
@@ -2662,6 +2640,13 @@ async def gpt_scan(
             plan_dict = signal.plan.as_dict()
             for key, value in plan_dict.items():
                 feature_payload[f"plan_{key}"] = value
+            if plan_dict.get("target_meta"):
+                try:
+                    chart_query["tp_meta"] = json.dumps(plan_dict["target_meta"])
+                except Exception:
+                    chart_query["tp_meta"] = json.dumps([])
+            if plan_dict.get("runner"):
+                chart_query["runner"] = json.dumps(plan_dict["runner"])
 
         chart_links = None
         required_chart_keys = {"direction", "entry", "stop", "tp"}
@@ -3135,6 +3120,7 @@ async def gpt_plan(
         entry=entry_output,
         stop=stop_output,
         targets=targets_output,
+        target_meta=plan.get("target_meta") if plan else None,
         rr_to_t1=rr_output,
         confidence=confidence_output,
         confidence_factors=confidence_factors,
@@ -3160,6 +3146,7 @@ async def gpt_plan(
         decimals=decimals_value,
         data_quality=data_quality,
         debug=debug_payload or None,
+        runner=plan.get("runner") if plan else None,
     )
 
 @app.post("/internal/idea/store", include_in_schema=False, tags=["internal"])

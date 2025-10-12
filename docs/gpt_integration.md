@@ -45,6 +45,7 @@ What’s included
 - `/gpt/plan`
   - Returns: `plan`, `charts`, `key_levels`, `market_snapshot`, `features`, `options`, `trade_detail`
   - Provenance: `calc_notes` (atr14, rr_inputs, em_cap_applied), `htf` (bias, snapped_targets), `debug.tp1` (when structural TP1 is used)
+  - Targets carry `plan.target_meta` (per-TP `price`, `distance`, `rr`, `em_fraction`, `mfe_quantile`, `prob_touch`, `source`, `snap_tag`, `optional`) and `plan.runner` (trailing-stop settings: `type`, `timeframe`, `length`, `multiplier`, `anchor`, `initial_stop`, `note`, `bias`).
 - `/gpt/multi-context`
   - Request: `include_series` (default false), `intervals` (aka `frames`)
   - Response: `contexts` (series trimmed when gated), `summary` (frames_used, confluence_score, trend_notes, volatility_regime+label, expected_move_horizon, nearby_levels), `decimals`, `data_quality`
@@ -52,6 +53,7 @@ What’s included
   - Response adds `table` rows with: `label`, `dte`, `strike`, `price`, `bid`, `ask`, `delta`, `theta`, `iv`, `spread_pct`, `oi`, `liquidity_score`
 - `/gpt/chart-url`
   - Server‑side validator: required fields, monotonic geometry, R:R gates, ATR distance w/ confluence override, whitelisted interval/view, percent‑encoding of notes/levels/strategy; BASE_URL respected verbatim; returns `/tv` link
+  - Accepts optional `tp_meta` (JSON array of per-target metadata) and `runner` (JSON plan trail config) query params for richer chart annotations.
 - `/gpt/sentiment`
   - Latest‑video sentiment + `tickers_detail` (price, change_pct, 15m EMA stack, ATR, range), robust to transcript issues; always JSON (204/502/503 on errors)
 
@@ -63,6 +65,7 @@ Planner internals
 Client guidance
 - Use `contracts.table` to render compact options; always show `bid`, `ask`, and `price`.
 - Use `plan.calc_notes`, `plan.trade_detail`, and `plan.htf.snapped_targets` in explanations; the model should not recompute these locally.
+- Leverage `plan.target_meta` (EM/MFE fractions, POT) and `plan.runner` notes to explain how the exit ladder and trail were derived; avoid fabricating probabilities.
 - For charts, always call `POST /gpt/chart-url` and validate the returned URL before rendering.
 
 This snapshot is the “last production point” before the upcoming significant change. Future updates may alter schemas and behaviors; use this section to maintain compatibility with current GPT prompts and tooling.
@@ -230,17 +233,105 @@ pre-baked trade levels.
       "plan_targets": [259.5, 260.4],
       "plan_confidence": 0.74,
       "plan_risk_reward": 1.63,
-      "plan_notes": "VWAP hold + range break alignment"
+      "plan_notes": "VWAP hold + range break alignment",
+      "plan_target_meta": [
+        {
+          "label": "TP1",
+          "price": 259.5,
+          "sequence": 1,
+          "em_fraction": 0.45,
+          "mfe_quantile": "q50",
+          "prob_touch": 0.68,
+          "rr": 1.63,
+          "source": "stats"
+        },
+        {
+          "label": "TP2",
+          "price": 260.4,
+          "sequence": 2,
+          "em_fraction": 0.78,
+          "mfe_quantile": "q70",
+          "prob_touch": 0.42,
+          "rr": 2.92,
+          "source": "stats"
+        },
+        {
+          "label": "TP3",
+          "price": 260.9,
+          "sequence": 3,
+          "em_fraction": 1.05,
+          "mfe_quantile": "q80",
+          "prob_touch": 0.28,
+          "rr": 3.76,
+          "source": "stats",
+          "snap_tag": "HTF_INTRADAY:PRIOR_HIGH"
+        }
+      ],
+      "plan_runner": {
+        "type": "chandelier",
+        "timeframe": "5m",
+        "length": 14,
+        "multiplier": 1.8,
+        "label": "Runner Trail",
+        "note": "Trail with 5m chandelier / EMA20",
+        "anchor": 260.9,
+        "initial_stop": 257.2
+      }
     },
     "plan": {
       "direction": "long",
       "entry": 258.6,
       "stop": 257.2,
-      "targets": [259.5, 260.4],
+      "targets": [259.5, 260.4, 260.9],
+      "target_meta": [
+        {
+          "label": "TP1",
+          "price": 259.5,
+          "sequence": 1,
+          "em_fraction": 0.45,
+          "mfe_quantile": "q50",
+          "prob_touch": 0.68,
+          "rr": 1.63,
+          "source": "stats"
+        },
+        {
+          "label": "TP2",
+          "price": 260.4,
+          "sequence": 2,
+          "em_fraction": 0.78,
+          "mfe_quantile": "q70",
+          "prob_touch": 0.42,
+          "rr": 2.92,
+          "source": "stats"
+        },
+        {
+          "label": "TP3",
+          "price": 260.9,
+          "sequence": 3,
+          "em_fraction": 1.05,
+          "mfe_quantile": "q80",
+          "prob_touch": 0.28,
+          "rr": 3.76,
+          "source": "stats",
+          "optional": true,
+          "snap_tag": "HTF_INTRADAY:PRIOR_HIGH"
+        }
+      ],
       "confidence": 0.74,
       "risk_reward": 1.63,
       "atr": 1.92,
-      "notes": "VWAP hold + range break alignment"
+      "notes": "VWAP hold + range break alignment",
+      "runner": {
+        "type": "chandelier",
+        "timeframe": "5m",
+        "length": 14,
+        "multiplier": 1.8,
+        "label": "Runner Trail",
+        "note": "Trail with 5m chandelier / EMA20",
+        "anchor": 260.9,
+        "initial_stop": 257.2,
+        "bias": "long"
+      }
     },
     "charts": {
       "params": {
@@ -253,11 +344,13 @@ pre-baked trade levels.
         "direction": "long",
         "entry": "258.60",
         "stop": "257.20",
-        "tp": "259.50,260.40",
+        "tp": "259.50,260.40,260.90",
         "atr": "1.9200",
         "vwap": "1",
         "theme": "dark",
-        "levels": "259.40,255.90,258.70,257.30,259.80,254.60,257.90"
+        "levels": "259.40,255.90,258.70,257.30,259.80,254.60,257.90",
+        "tp_meta": "[{\"label\":\"TP1\",\"price\":259.5,\"sequence\":1},{\"label\":\"TP2\",\"price\":260.4,\"sequence\":2},{\"label\":\"TP3\",\"price\":260.9,\"sequence\":3}]",
+        "runner": "{\"type\":\"chandelier\",\"timeframe\":\"5m\",\"length\":14,\"multiplier\":1.8,\"label\":\"Runner Trail\",\"note\":\"Trail with 5m chandelier / EMA20\",\"anchor\":260.9}"
       }
     },
     "data": {

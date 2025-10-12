@@ -13,6 +13,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+import json
+
 import numpy as np
 import pandas as pd
 
@@ -24,6 +26,7 @@ from .strategy_library import (
 )
 from .context_overlays import _volume_profile
 from .calculations import atr, ema, vwap, adx
+from .statistics import get_style_stats, estimate_probability
 
 TZ_ET = "America/New_York"
 RTH_START_MINUTE = 9 * 60 + 30
@@ -62,6 +65,128 @@ _PRICE_INCREMENT_OVERRIDES: Dict[str, float] = {
 }
 
 
+_TARGET_RULES: Dict[str, List[Dict[str, object]]] = {
+    "scalp": [
+        {"label": "TP1", "em_fraction": 0.33, "quantile_key": "q50", "pot_min": 0.55},
+        {"label": "TP2", "em_fraction": 0.62, "quantile_key": "q70", "pot_min": 0.4},
+        {"label": "TP3", "em_fraction": 0.85, "quantile_key": "q80", "pot_min": 0.25, "optional": True},
+    ],
+    "intraday": [
+        {"label": "TP1", "em_fraction": 0.45, "quantile_key": "q50", "pot_min": 0.6},
+        {"label": "TP2", "em_fraction": 0.75, "quantile_key": "q70", "pot_min": 0.4},
+        {"label": "TP3", "em_fraction": 1.05, "quantile_key": "q80", "pot_min": 0.3},
+    ],
+    "swing": [
+        {"label": "TP1", "em_fraction": 0.5, "quantile_key": "q50", "pot_min": 0.65},
+        {"label": "TP2", "em_fraction": 0.8, "quantile_key": "q80", "pot_min": 0.45},
+        {"label": "TP3", "em_fraction": 1.1, "quantile_key": "q90", "pot_min": 0.3},
+    ],
+    "leaps": [
+        {"label": "TP1", "em_fraction": 0.55, "quantile_key": "q50", "pot_min": 0.65},
+        {"label": "TP2", "em_fraction": 0.85, "quantile_key": "q80", "pot_min": 0.4},
+        {"label": "TP3", "em_fraction": 1.2, "quantile_key": "q90", "pot_min": 0.25},
+    ],
+}
+
+_RUNNER_RULES: Dict[str, Dict[str, Any]] = {
+    "0dte": {"type": "chandelier", "timeframe": "1m", "length": 10, "multiplier": 1.4, "label": "Runner Trail", "note": "Trail with 1m chandelier"},
+    "scalp": {"type": "chandelier", "timeframe": "1m", "length": 10, "multiplier": 1.4, "label": "Runner Trail", "note": "Trail with 1m chandelier"},
+    "intraday": {"type": "chandelier", "timeframe": "5m", "length": 14, "multiplier": 1.8, "label": "Runner Trail", "note": "Trail with 5m chandelier / EMA20"},
+    "swing": {"type": "chandelier", "timeframe": "4h", "length": 20, "multiplier": 2.3, "label": "Runner Trail", "note": "Trail below 4h swing lows"},
+    "leaps": {"type": "chandelier", "timeframe": "1D", "length": 20, "multiplier": 3.0, "label": "Runner Trail", "note": "Trail on daily swing structure"},
+}
+
+
+def _targets_from_stats(
+    *,
+    style_key: str,
+    bias: str,
+    entry: float,
+    min_distance: float,
+    em_limit: Optional[float],
+    stats: Dict[str, object] | None,
+) -> List[Dict[str, object]]:
+    if not stats:
+        return []
+    rules = _TARGET_RULES.get(style_key)
+    if not rules:
+        return []
+
+    dir_key = "long" if bias == "long" else "short"
+    dir_stats = stats.get(dir_key) if isinstance(stats, dict) else None
+    if not isinstance(dir_stats, dict):
+        return []
+    mfe_values = dir_stats.get("mfe")
+    quantiles = dir_stats.get("quantiles") or {}
+    if mfe_values is None or not isinstance(mfe_values, np.ndarray):
+        mfe_values = np.array([], dtype=float)
+
+    em_value = None
+    try:
+        em_value = float(stats.get("expected_move")) if stats.get("expected_move") is not None else None
+    except (TypeError, ValueError):
+        em_value = None
+
+    targets: List[Dict[str, object]] = []
+    for idx, rule in enumerate(rules, start=1):
+        label = str(rule.get("label") or f"TP{idx}")
+        em_frac = rule.get("em_fraction")
+        quantile_key = rule.get("quantile_key")
+        candidate_distances: List[float] = []
+        meta: Dict[str, object] = {"label": label}
+
+        if em_value and em_frac:
+            try:
+                em_offset = float(em_frac) * float(em_value)
+                if math.isfinite(em_offset) and em_offset > 0:
+                    candidate_distances.append(em_offset)
+                    meta["em_fraction"] = float(em_frac)
+                    meta["em_basis"] = float(em_value)
+            except (TypeError, ValueError):
+                pass
+
+        if quantile_key and quantile_key in quantiles:
+            try:
+                ratio = float(quantiles[quantile_key])
+                if math.isfinite(ratio) and ratio > 0 and entry > 0:
+                    candidate_distances.append(entry * ratio)
+                    meta["mfe_quantile"] = quantile_key
+                    meta["mfe_ratio"] = ratio
+            except (TypeError, ValueError):
+                pass
+
+        if not candidate_distances:
+            continue
+
+        distance = min(candidate_distances)
+        if em_limit is not None and em_limit > 0:
+            distance = min(distance, em_limit)
+        distance = max(distance, min_distance)
+
+        pot = estimate_probability(mfe_values, distance / entry) if entry > 0 else None
+        if pot is not None and not math.isnan(pot):
+            meta["prob_touch"] = float(pot)
+        pot_min = rule.get("pot_min")
+        optional = bool(rule.get("optional"))
+        if pot_min is not None and pot is not None and pot < float(pot_min):
+            if optional:
+                continue
+            meta["prob_touch_flag"] = "below_threshold"
+        meta["distance"] = float(distance)
+        meta["optional"] = optional
+        targets.append({"distance": distance, "meta": meta})
+
+    return targets
+
+
+def _runner_config(style_key: str, bias: str, entry: float, stop: float, targets: List[float]) -> Dict[str, Any]:
+    rule = dict(_RUNNER_RULES.get(style_key, _RUNNER_RULES["intraday"]))
+    rule["bias"] = bias
+    rule["anchor"] = float(targets[-1]) if targets else float(entry)
+    rule["initial_stop"] = float(stop)
+    return rule
+
+
 @dataclass(slots=True)
 class Plan:
     direction: str
@@ -70,6 +195,8 @@ class Plan:
     targets: List[float]
     confidence: float
     risk_reward: float
+    target_meta: List[Dict[str, Any]] = field(default_factory=list)
+    runner: Dict[str, Any] | None = None
     notes: str | None = None
     atr: float | None = None
     warnings: List[str] = field(default_factory=list)
@@ -80,6 +207,8 @@ class Plan:
             "entry": round(float(self.entry), 4),
             "stop": round(float(self.stop), 4),
             "targets": [round(float(t), 4) for t in self.targets],
+            "target_meta": self.target_meta,
+            "runner": self.runner,
             "confidence": round(float(self.confidence), 3),
             "risk_reward": round(float(self.risk_reward), 3),
             "atr": round(float(self.atr), 4) if self.atr is not None else None,
@@ -420,6 +549,135 @@ def _fib_candidate_list(style_key: str, bias: str, ctx: Dict[str, Any]) -> List[
     return results
 
 
+def _collect_priority_levels(entry: float, bias: str, ctx: Dict[str, Any]) -> List[Tuple[int, float, float, str]]:
+    levels: List[Tuple[int, float, float, str]] = []
+    symbol_levels: List[Dict[str, Any]] = []
+    if bias == "long":
+        symbol_levels.extend(_build_tp_candidates_long(entry, ctx))
+    else:
+        symbol_levels.extend(_build_tp_candidates_short(entry, ctx))
+
+    priority_map = {
+        "POC": 1,
+        "VAH": 1,
+        "VAL": 1,
+        "PRIOR_HIGH": 2,
+        "PRIOR_LOW": 2,
+        "ORB_HIGH": 2,
+        "ORB_LOW": 2,
+        "SESSION_HIGH": 2,
+        "SESSION_LOW": 2,
+        "WEEK_HIGH": 3,
+        "WEEK_LOW": 3,
+        "SWING_HIGH": 4,
+        "SWING_LOW": 4,
+        "VWAP": 4,
+        "EMA9": 4,
+        "EMA20": 4,
+        "EMA50": 4,
+    }
+
+    fib_tags = {"FIB0.618", "FIB0.786", "FIB1.0", "FIB1.272", "FIB1.618", "FIB2.0"}
+
+    for item in list(symbol_levels):
+        tag = (item.get("tag") or "").upper()
+        level_value = item.get("level")
+        if not isinstance(level_value, (int, float)):
+            continue
+        price = float(level_value)
+        if bias == "long" and price <= entry:
+            continue
+        if bias == "short" and price >= entry:
+            continue
+        priority = priority_map.get(tag, 5 if tag in fib_tags else 6)
+        distance = abs(price - entry)
+        levels.append((priority, distance, price, tag))
+
+    htf_levels = ctx.get("htf_levels") or []
+    for raw in htf_levels:
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if bias == "long" and price <= entry:
+            continue
+        if bias == "short" and price >= entry:
+            continue
+        distance = abs(price - entry)
+        levels.append((3, distance, price, "HTF"))
+
+    seen: set[float] = set()
+    unique_levels: List[Tuple[int, float, float, str]] = []
+    for priority, distance, price, tag in sorted(levels, key=lambda x: (x[0], x[1])):
+        key = round(price, 4)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_levels.append((priority, distance, price, tag))
+    if bias == "short":
+        unique_levels.sort(key=lambda x: (x[0], x[2]), reverse=False)
+    return unique_levels
+
+
+def _choose_snapped_target(
+    *,
+    base_price: float,
+    base_distance: float,
+    entry: float,
+    stop: float,
+    bias: str,
+    min_rr: float,
+    tick_size: float,
+    em_limit: float | None,
+    levels: List[Tuple[int, float, float, str]],
+    used_prices: List[float],
+    previous_price: float | None,
+    atr: float | None,
+) -> Tuple[float, str, bool] | None:
+    tolerance = max(tick_size * 0.6, 0.01)
+    strong_tags = {
+        "POC",
+        "VAH",
+        "VAL",
+        "PRIOR_HIGH",
+        "PRIOR_LOW",
+        "ORB_HIGH",
+        "ORB_LOW",
+        "SESSION_HIGH",
+        "SESSION_LOW",
+        "WEEK_HIGH",
+        "WEEK_LOW",
+    }
+    atr_cap = float(atr) * 1.75 if atr and atr > 0 else None
+    distance_cap = max(base_distance * 1.8, atr_cap or 0.0)
+    for _, _, price, tag in levels:
+        if any(abs(price - used) <= tolerance for used in used_prices):
+            continue
+        if bias == "long":
+            if price < base_price - tolerance:
+                continue
+            if previous_price is not None and price <= previous_price + tolerance:
+                continue
+            distance = price - entry
+        else:
+            if price > base_price + tolerance:
+                continue
+            if previous_price is not None and price >= previous_price - tolerance:
+                continue
+            distance = entry - price
+        if distance_cap and distance > distance_cap * 1.001:
+            continue
+        allow_extension = tag in strong_tags
+        if em_limit is not None:
+            limit_allowance = em_limit * (1.10 if allow_extension else 1.0)
+            if distance > limit_allowance * 1.001:
+                continue
+        if rr(entry, stop, price, bias) < float(min_rr) - 1e-6:
+            continue
+        return price, tag, allow_extension
+    return None
+
+
 def _structural_candidates(
     *,
     style_key: str,
@@ -514,6 +772,54 @@ def _apply_tp_logic(
         tick_size=tick_size,
     )
 
+    stats_bundle = (ctx.get("target_stats") or {}).get(style_key)
+    stats_targets = _targets_from_stats(
+        style_key=style_key,
+        bias=bias,
+        entry=entry,
+        min_distance=min_distance,
+        em_limit=em_limit,
+        stats=stats_bundle,
+    )
+
+    direction = 1 if bias == "long" else -1
+
+    seeds: List[Dict[str, Any]] = []
+
+    def _add_seed(base_price: float, meta: Dict[str, Any]) -> None:
+        if not math.isfinite(base_price):
+            return
+        meta = dict(meta)
+        meta["price_seed"] = float(base_price)
+        seeds.append({"base": float(base_price), "meta": meta})
+
+    if stats_targets:
+        for idx, info in enumerate(stats_targets, start=1):
+            distance_val = float(info["distance"])
+            base_price = entry + direction * distance_val
+            meta = dict(info["meta"])
+            meta.setdefault("label", f"TP{idx}")
+            meta.setdefault("source", "stats")
+            meta["distance"] = distance_val
+            meta["sequence"] = idx
+            _add_seed(base_price, meta)
+
+    fallback_targets = [float(t) for t in base_targets if math.isfinite(t)]
+    if not seeds:
+        fallback_targets = fallback_targets or [entry + direction * max(min_distance, tick_size)]
+    if len(seeds) < 2:
+        for offset, price in enumerate(fallback_targets, start=len(seeds) + 1):
+            meta = {"label": f"TP{offset}", "source": "fallback", "sequence": offset}
+            _add_seed(price, meta)
+            if len(seeds) >= 3:
+                break
+
+    while len(seeds) < 2:
+        offset = len(seeds) + 1
+        constructed_price = entry + direction * max(min_distance * offset, tick_size)
+        meta = {"label": f"TP{offset}", "source": "constructed", "sequence": offset}
+        _add_seed(constructed_price, meta)
+
     candidates = _structural_candidates(
         style_key=style_key,
         bias=bias,
@@ -522,13 +828,19 @@ def _apply_tp_logic(
         structural_hint=structural_tp1,
     )
 
-    selected: List[float] = []
-    selected_meta: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    if not seeds:
+        warnings.append("TP1 constructed using minimum distance guardrail (no structural levels).")
+        fallback_price = entry + direction * max(min_distance, tick_size)
+        fallback_price = _round_to_increment(fallback_price, tick_size)
+        fallback_price = _apply_limit_with_tick(entry, bias, fallback_price, em_limit, tick_size)
+        _add_seed(fallback_price, {"label": "TP1", "source": "constructed", "sequence": 1})
+
     used_prices: set[float] = set()
-    direction = 1 if bias == "long" else -1
+    levels = _collect_priority_levels(entry, bias, ctx)
 
     def _distance(target_price: float) -> float:
-        return (target_price - entry) if bias == "long" else (entry - target_price)
+        return abs(target_price - entry)
 
     def _within_em(distance_value: float, category: str) -> bool:
         if em_limit is None:
@@ -536,159 +848,116 @@ def _apply_tp_logic(
         allowance = 1.05 if category.startswith("htf") or "volume_profile" in category else 1.0
         return distance_value <= em_limit * allowance * 1.001
 
-    def _register(price: float, meta: Dict[str, Any]) -> None:
-        nonlocal selected, selected_meta, used_prices
-        rounded = round(price, 4)
-        if rounded in used_prices:
-            return
-        used_prices.add(rounded)
-        if len(selected) < 2:
-            selected.append(price)
-            selected_meta.append(meta)
-
-    for cand in candidates:
-        price = _round_to_increment(cand["price"], tick_size)
-        price = _apply_limit_with_tick(entry, bias, price, em_limit, tick_size)
-        if bias == "long" and price <= entry:
-            continue
-        if bias == "short" and price >= entry:
-            continue
-        distance = _distance(price)
-        if distance < min_distance - tick_size * 0.5:
-            continue
-        if not _within_em(distance, cand["category"]):
-            continue
-        rr_value = rr(entry, stop, price, bias)
-        if rr_value < float(min_rr) - 1e-6:
-            continue
-        meta = {
-            "price": price,
-            "category": cand["category"],
-            "tag": cand["tag"],
-            "distance": distance,
-            "rr": rr_value,
-        }
-        _register(price, meta)
-        if len(selected) >= 2:
-            break
-
-    def _extend_with_candidates(pool: Iterable[Dict[str, Any]]) -> None:
-        for cand in pool:
-            price = _round_to_increment(cand["price"], tick_size)
-            price = _apply_limit_with_tick(entry, bias, price, em_limit, tick_size)
-            if bias == "long" and price <= entry:
-                continue
-            if bias == "short" and price >= entry:
-                continue
-            distance = _distance(price)
-            if distance < min_distance - tick_size * 0.5:
-                continue
-            if not _within_em(distance, cand.get("category", "fallback")):
-                continue
-            rr_value = rr(entry, stop, price, bias)
-            if rr_value < float(min_rr) - 1e-6:
-                continue
-            meta = {
-                "price": price,
-                "category": cand.get("category", "fallback"),
-                "tag": cand.get("tag", "FALLBACK"),
-                "distance": distance,
-                "rr": rr_value,
-            }
-            _register(price, meta)
-            if len(selected) >= 2:
-                break
-
-    if len(selected) < 2 and base_targets:
-        fallback_candidates = []
-        for idx, base_target in enumerate(base_targets):
-            if not math.isfinite(base_target):
-                continue
-            fallback_candidates.append(
-                {
-                    "price": float(base_target),
-                    "tag": f"BASE_{idx + 1}",
-                    "category": "math_fallback",
-                }
-            )
-        _extend_with_candidates(fallback_candidates)
-
-    if len(selected) < 2:
-        fib_fallback = [
-            {"price": price, "tag": tag, "category": "fib_fallback"}
-            for tag, price in _fib_candidate_list(style_key, bias, ctx)
-        ]
-        _extend_with_candidates(fib_fallback)
-
-    warnings: List[str] = []
-
-    if not selected:
-        fallback_price = entry + direction * max(min_distance, tick_size)
-        fallback_price = _round_to_increment(fallback_price, tick_size)
-        fallback_price = _apply_limit_with_tick(entry, bias, fallback_price, em_limit, tick_size)
-        selected.append(fallback_price)
-        selected_meta.append(
-            {
-                "price": fallback_price,
-                "category": "constructed",
-                "tag": "MIN_DISTANCE",
-                "distance": _distance(fallback_price),
-                "rr": rr(entry, stop, fallback_price, bias),
-            }
-        )
-        warnings.append("TP1 constructed using minimum distance guardrail (no structural levels).")
-
-    if len(selected) == 1:
-        fallback_tp2 = selected[0] + direction * max(min_distance, tick_size)
-        fallback_tp2 = _round_to_increment(fallback_tp2, tick_size)
-        fallback_tp2 = _apply_limit_with_tick(entry, bias, fallback_tp2, em_limit, tick_size)
-        if (bias == "long" and fallback_tp2 <= selected[0]) or (bias == "short" and fallback_tp2 >= selected[0]):
-            fallback_tp2 = selected[0] + direction * max(tick_size, min_distance * 0.5)
-            fallback_tp2 = _round_to_increment(fallback_tp2, tick_size)
-            fallback_tp2 = _apply_limit_with_tick(entry, bias, fallback_tp2, em_limit, tick_size)
-        selected.append(fallback_tp2)
-        selected_meta.append(
-            {
-                "price": fallback_tp2,
-                "category": "constructed",
-                "tag": "MIN_DISTANCE_LADDER",
-                "distance": _distance(fallback_tp2),
-                "rr": rr(entry, stop, fallback_tp2, bias),
-            }
-        )
-        warnings.append("TP2 constructed using distance ladder fallback.")
-
-    if bias == "long":
-        selected = sorted(selected)
-    else:
-        selected = sorted(selected, reverse=True)
-
-    if len(selected) >= 2:
-        if bias == "long" and selected[1] <= selected[0]:
-            selected[1] = _round_to_increment(selected[0] + max(tick_size, min_distance * 0.4), tick_size)
-            selected[1] = _apply_limit_with_tick(entry, bias, selected[1], em_limit, tick_size)
-        if bias == "short" and selected[1] >= selected[0]:
-            selected[1] = _round_to_increment(selected[0] - max(tick_size, min_distance * 0.4), tick_size)
-            selected[1] = _apply_limit_with_tick(entry, bias, selected[1], em_limit, tick_size)
-
+    final_pairs: List[Tuple[float, Dict[str, Any]]] = []
     target_debug: Dict[str, Any] = {
         "style": style_key,
         "min_distance": min_distance,
         "em_limit": em_limit,
-        "selected_meta": selected_meta,
+        "stats_used": bool(stats_bundle),
+        "seed_count": len(seeds),
     }
 
-    rr_tp1 = rr(entry, stop, selected[0], bias)
+    for idx, seed in enumerate(seeds):
+        candidate = float(seed["base"])
+        meta = dict(seed["meta"])
+        meta.setdefault("sequence", idx + 1)
+        meta.setdefault("label", f"TP{idx + 1}")
+        base_distance = _distance(candidate)
+        if base_distance < min_distance:
+            base_distance = max(min_distance, tick_size)
+            candidate = entry + direction * base_distance
+        previous_price = final_pairs[-1][0] if final_pairs else None
+        snapped_choice = _choose_snapped_target(
+            base_price=candidate,
+            base_distance=_distance(candidate),
+            entry=entry,
+            stop=stop,
+            bias=bias,
+            min_rr=min_rr,
+            tick_size=tick_size,
+            em_limit=em_limit,
+            levels=levels,
+            used_prices=[price for price, _ in final_pairs],
+            previous_price=previous_price,
+            atr=atr,
+        )
+        snapped_price = None
+        snapped_tag = None
+        snapped_strong = False
+        if snapped_choice is not None:
+            snapped_price, snapped_tag, snapped_strong = snapped_choice
+
+        effective_limit = em_limit
+        if snapped_price is not None and em_limit is not None:
+            effective_limit = em_limit * (1.10 if snapped_strong else 1.0)
+        final_price = snapped_price if snapped_price is not None else candidate
+        final_price = _clamp_to_em(entry, final_price, bias, effective_limit)
+        final_price = _round_to_increment(final_price, tick_size)
+        final_price = _apply_limit_with_tick(entry, bias, final_price, effective_limit, tick_size)
+
+        rounded = round(final_price, 4)
+        if rounded in used_prices:
+            continue
+        used_prices.add(rounded)
+
+        distance_val = _distance(final_price)
+        if distance_val < min_distance:
+            distance_val = min_distance
+            final_price = entry + direction * distance_val
+            final_price = _round_to_increment(final_price, tick_size)
+
+        meta["price"] = final_price
+        meta["distance"] = distance_val
+        if snapped_tag:
+            meta["snap_tag"] = snapped_tag
+        meta["rr"] = rr(entry, stop, final_price, bias)
+        final_pairs.append((final_price, meta))
+
+    if not final_pairs:
+        warnings.append("No valid targets computed")
+        default_price = entry + direction * max(min_distance, tick_size)
+        final_pairs.append((default_price, {"label": "TP1", "price": default_price, "distance": max(min_distance, tick_size)}))
+
+    while len(final_pairs) < 2:
+        seq = len(final_pairs) + 1
+        extra_price = entry + direction * max(min_distance * seq, tick_size * seq)
+        extra_price = _round_to_increment(extra_price, tick_size)
+        extra_price = _apply_limit_with_tick(entry, bias, extra_price, em_limit, tick_size)
+        final_pairs.append((extra_price, {"label": f"TP{seq}", "price": extra_price, "distance": _distance(extra_price), "source": "constructed"}))
+
+    if bias == "long":
+        final_pairs.sort(key=lambda pair: pair[0])
+    else:
+        final_pairs.sort(key=lambda pair: pair[0], reverse=True)
+
+    results = [price for price, _ in final_pairs]
+    meta_list = [meta for _, meta in final_pairs]
+
+    if len(results) >= 2:
+        if bias == "long" and results[1] <= results[0]:
+            adjusted = _round_to_increment(results[0] + max(tick_size, min_distance * 0.4), tick_size)
+            adjusted = _apply_limit_with_tick(entry, bias, adjusted, em_limit, tick_size)
+            results[1] = adjusted
+            meta_list[1]["price"] = adjusted
+            meta_list[1]["distance"] = _distance(adjusted)
+        if bias == "short" and results[1] >= results[0]:
+            adjusted = _round_to_increment(results[0] - max(tick_size, min_distance * 0.4), tick_size)
+            adjusted = _apply_limit_with_tick(entry, bias, adjusted, em_limit, tick_size)
+            results[1] = adjusted
+            meta_list[1]["price"] = adjusted
+            meta_list[1]["distance"] = _distance(adjusted)
+
+    rr_tp1 = rr(entry, stop, results[0], bias)
     if rr_tp1 < float(min_rr) - 1e-6:
         atr_basis = _atr_for_style(style_key, ctx) or (atr if isinstance(atr, (int, float)) else None)
         risk = abs(entry - stop)
         nudge_basis = float(atr_basis) if atr_basis is not None else risk
         nudge = max(tick_size, nudge_basis * 0.15)
-        attempt = selected[0] + direction * nudge
+        attempt = results[0] + direction * nudge
         attempt = _round_to_increment(attempt, tick_size)
         attempt = _apply_limit_with_tick(entry, bias, attempt, em_limit, tick_size)
         if (bias == "long" and attempt <= entry) or (bias == "short" and attempt >= entry):
-            attempt = selected[0] + direction * max(tick_size, nudge * 0.5)
+            attempt = results[0] + direction * max(tick_size, nudge * 0.5)
             attempt = _round_to_increment(attempt, tick_size)
             attempt = _apply_limit_with_tick(entry, bias, attempt, em_limit, tick_size)
         attempt_rr = rr(entry, stop, attempt, bias)
@@ -699,18 +968,33 @@ def _apply_tp_logic(
             "nudge": nudge,
         }
         if attempt_rr >= float(min_rr) - 1e-6:
-            selected[0] = attempt
-            if len(selected) >= 2:
-                if bias == "long" and selected[1] <= selected[0]:
-                    selected[1] = _round_to_increment(selected[0] + max(tick_size, min_distance * 0.3), tick_size)
-                    selected[1] = _apply_limit_with_tick(entry, bias, selected[1], em_limit, tick_size)
-                if bias == "short" and selected[1] >= selected[0]:
-                    selected[1] = _round_to_increment(selected[0] - max(tick_size, min_distance * 0.3), tick_size)
-                    selected[1] = _apply_limit_with_tick(entry, bias, selected[1], em_limit, tick_size)
+            results[0] = attempt
+            meta_list[0]["price"] = attempt
+            meta_list[0]["distance"] = _distance(attempt)
+            meta_list[0]["rr"] = attempt_rr
+            if len(results) >= 2:
+                if bias == "long" and results[1] <= results[0]:
+                    adjusted = _round_to_increment(results[0] + max(tick_size, min_distance * 0.3), tick_size)
+                    adjusted = _apply_limit_with_tick(entry, bias, adjusted, em_limit, tick_size)
+                    results[1] = adjusted
+                    meta_list[1]["price"] = adjusted
+                    meta_list[1]["distance"] = _distance(adjusted)
+                if bias == "short" and results[1] >= results[0]:
+                    adjusted = _round_to_increment(results[0] - max(tick_size, min_distance * 0.3), tick_size)
+                    adjusted = _apply_limit_with_tick(entry, bias, adjusted, em_limit, tick_size)
+                    results[1] = adjusted
+                    meta_list[1]["price"] = adjusted
+                    meta_list[1]["distance"] = _distance(adjusted)
         else:
             warnings.append(f"TP1 R:R {attempt_rr:.2f} < {float(min_rr):.2f}; consider marking as watch plan")
 
-    return selected[:2], warnings, target_debug
+    for idx, meta in enumerate(meta_list):
+        meta["sequence"] = idx + 1
+        meta["rr"] = rr(entry, stop, results[idx], bias)
+
+    target_debug["meta"] = meta_list
+
+    return results, meta_list, warnings, target_debug
 
 
 def _strategy_min_rr(strategy_id: str) -> float:
@@ -778,6 +1062,8 @@ def _build_plan(
     stop: float,
     targets: List[float],
     *,
+    target_meta: List[Dict[str, Any]] | None,
+    runner: Dict[str, Any] | None,
     atr_value: float | None,
     notes: str | None,
     conditions: Iterable[bool],
@@ -832,8 +1118,10 @@ def _build_plan(
         entry=float(entry),
         stop=float(stop),
         targets=clean_targets,
+        target_meta=list(target_meta or [])[:len(clean_targets)],
         confidence=float(confidence),
         risk_reward=float(round(risk_reward, 3)),
+        runner=runner,
         notes=final_notes,
         atr=float(atr_value) if atr_value is not None and math.isfinite(atr_value) else None,
         warnings=warnings,
@@ -1496,7 +1784,7 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
             base_targets.append(base_targets[0] + (bump or 1.0))
         tp2_seed = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
         tp1_struct = _select_tp1_long(entry, stop, tp2_seed, style, ctx, min_rr)
-        targets, tp_warnings, tp_debug = _apply_tp_logic(
+        targets, target_meta, tp_warnings, tp_debug = _apply_tp_logic(
             symbol=symbol,
             style=style,
             bias="long",
@@ -1515,11 +1803,14 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
             tp1_dbg = {"picked": tp1_struct, "base_targets": base_targets[:2]}
         if not targets:
             return None
+        runner_cfg = _runner_config(style, "long", entry, stop, targets)
         plan = _build_plan(
             "long",
             entry,
             stop,
             targets,
+            target_meta=target_meta,
+            runner=runner_cfg,
             atr_value=atr_value,
             notes=f"Reclaimed OR high {or_high:.2f}; retest low {retest_low:.2f}",
             conditions=[ema_stack_long, adx_strong, volume_ok],
@@ -1527,6 +1818,8 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
         if plan:
             if tp_warnings:
                 plan.warnings.extend(tp_warnings)
+            plan.target_meta = target_meta
+            plan.runner = runner_cfg
             notes.append("Long OR retest validated")
 
     elif price < or_low and math.isfinite(retest_high) and abs(retest_high - or_low) <= tolerance:
@@ -1553,7 +1846,7 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
             base_targets.append(base_targets[0] - (bump or 1.0))
         tp2_seed = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
         tp1_struct = _select_tp1_short(entry, stop, tp2_seed, style, ctx, min_rr)
-        targets, tp_warnings, tp_debug = _apply_tp_logic(
+        targets, target_meta, tp_warnings, tp_debug = _apply_tp_logic(
             symbol=symbol,
             style=style,
             bias="short",
@@ -1572,11 +1865,14 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
             tp1_dbg = {"picked": tp1_struct, "base_targets": base_targets[:2]}
         if not targets:
             return None
+        runner_cfg = _runner_config(style, "short", entry, stop, targets)
         plan = _build_plan(
             "short",
             entry,
             stop,
             targets,
+            target_meta=target_meta,
+            runner=runner_cfg,
             atr_value=atr_value,
             notes=f"Rejected OR low {or_low:.2f}; retest high {retest_high:.2f}",
             conditions=[ema_stack_short, adx_strong, volume_ok],
@@ -1584,6 +1880,8 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
         if plan:
             if tp_warnings:
                 plan.warnings.extend(tp_warnings)
+            plan.target_meta = target_meta
+            plan.runner = runner_cfg
             notes.append("Short OR retest validated")
 
     if plan is None:
@@ -1604,6 +1902,8 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
         "plan_entry": plan.entry,
         "plan_stop": plan.stop,
         "plan_targets": plan.targets,
+        "plan_target_meta": plan.target_meta,
+        "plan_runner": plan.runner,
         "plan_confidence": plan.confidence,
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
@@ -1678,7 +1978,7 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
             base_targets.append(base_targets[0] + (bump or 1.0))
         tp2_seed = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
         tp1_struct = _select_tp1_long(entry, stop, tp2_seed, style, ctx, min_rr)
-        targets, tp_warnings, tp_debug = _apply_tp_logic(
+        targets, target_meta, tp_warnings, tp_debug = _apply_tp_logic(
             symbol=symbol,
             style=style,
             bias="long",
@@ -1697,17 +1997,23 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
             tp1_dbg_ph = {"picked": tp1_struct, "base_targets": base_targets[:2]}
         if not targets:
             return None
+        runner_cfg = _runner_config(style, "long", entry, stop, targets)
         plan = _build_plan(
             "long",
             entry,
             stop,
             targets,
+            target_meta=target_meta,
+            runner=runner_cfg,
             atr_value=atr_value,
             notes=f"VWAP support {ctx['vwap']:.2f}; afternoon range high {range_high:.2f}",
             conditions=[adx_strong, volume_ok, breakout_long],
         )
         if plan and tp_warnings:
             plan.warnings.extend(tp_warnings)
+        if plan:
+            plan.target_meta = target_meta
+            plan.runner = runner_cfg
     elif price < ctx["vwap"] and ema_stack_short and breakout_short:
         entry = price
         stop = max(range_high, float(session["high"].tail(10).max())) + atr_value * 0.25
@@ -1732,7 +2038,7 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
             base_targets.append(base_targets[0] - (bump or 1.0))
         tp2_seed = base_targets[1] if len(base_targets) >= 2 else base_targets[0]
         tp1_struct = _select_tp1_short(entry, stop, tp2_seed, style, ctx, min_rr)
-        targets, tp_warnings, tp_debug = _apply_tp_logic(
+        targets, target_meta, tp_warnings, tp_debug = _apply_tp_logic(
             symbol=symbol,
             style=style,
             bias="short",
@@ -1751,17 +2057,23 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
             tp1_dbg_ph = {"picked": tp1_struct, "base_targets": base_targets[:2]}
         if not targets:
             return None
+        runner_cfg = _runner_config(style, "short", entry, stop, targets)
         plan = _build_plan(
             "short",
             entry,
             stop,
             targets,
+            target_meta=target_meta,
+            runner=runner_cfg,
             atr_value=atr_value,
             notes=f"VWAP resistance {ctx['vwap']:.2f}; afternoon range low {range_low:.2f}",
             conditions=[adx_strong, volume_ok, breakout_short],
         )
         if plan and tp_warnings:
             plan.warnings.extend(tp_warnings)
+        if plan:
+            plan.target_meta = target_meta
+            plan.runner = runner_cfg
 
     if plan is None:
         return None
@@ -1780,6 +2092,8 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
         "plan_entry": plan.entry,
         "plan_stop": plan.stop,
         "plan_targets": plan.targets,
+        "plan_target_meta": plan.target_meta,
+        "plan_runner": plan.runner,
         "plan_confidence": plan.confidence,
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
@@ -1858,7 +2172,7 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
         if len(base_targets) == 1:
             bump = atr_value if atr_value and atr_value > 0 else abs(entry - stop)
             base_targets.append(base_targets[0] + (bump or 1.0))
-        targets, tp_warnings, tp_debug = _apply_tp_logic(
+        targets, target_meta, tp_warnings, tp_debug = _apply_tp_logic(
             symbol=symbol,
             style=style,
             bias="long",
@@ -1875,17 +2189,23 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
         tp_debug_info = tp_debug
         if not targets:
             return None
+        runner_cfg = _runner_config(style, "long", entry, stop, targets)
         plan = _build_plan(
             "long",
             entry,
             stop,
             targets,
+            target_meta=target_meta,
+            runner=runner_cfg,
             atr_value=atr_value,
             notes=f"Above VWAP cluster (~{cluster_mean:.2f}); spread {cluster_spread:.2f}",
             conditions=[cluster_tight, adx_ok],
         )
         if plan and tp_warnings_result:
             plan.warnings.extend(tp_warnings_result)
+        if plan:
+            plan.target_meta = target_meta
+            plan.runner = runner_cfg
     elif price < ctx["vwap"] and ema_stack_short and cluster_tight and price < cluster_mean:
         entry = price
         stop = max(cluster_mean, np.max(anchored_values)) + tolerance
@@ -1908,7 +2228,7 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
         if len(base_targets) == 1:
             bump = atr_value if atr_value and atr_value > 0 else abs(entry - stop)
             base_targets.append(base_targets[0] - (bump or 1.0))
-        targets, tp_warnings, tp_debug = _apply_tp_logic(
+        targets, target_meta, tp_warnings, tp_debug = _apply_tp_logic(
             symbol=symbol,
             style=style,
             bias="short",
@@ -1925,17 +2245,23 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
         tp_debug_info = tp_debug
         if not targets:
             return None
+        runner_cfg = _runner_config(style, "short", entry, stop, targets)
         plan = _build_plan(
             "short",
             entry,
             stop,
             targets,
+            target_meta=target_meta,
+            runner=runner_cfg,
             atr_value=atr_value,
             notes=f"Below VWAP cluster (~{cluster_mean:.2f}); spread {cluster_spread:.2f}",
             conditions=[cluster_tight, adx_ok],
         )
         if plan and tp_warnings_result:
             plan.warnings.extend(tp_warnings_result)
+        if plan:
+            plan.target_meta = target_meta
+            plan.runner = runner_cfg
 
     if plan is None:
         return None
@@ -1953,6 +2279,8 @@ def _detect_vwap_cluster(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -
         "plan_entry": plan.entry,
         "plan_stop": plan.stop,
         "plan_targets": plan.targets,
+        "plan_target_meta": plan.target_meta,
+        "plan_runner": plan.runner,
         "plan_confidence": plan.confidence,
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
@@ -2023,11 +2351,21 @@ def _detect_gap_fill(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> Si
         target_primary = prev_close
         target_secondary = prev_close + atr_value * 0.6
 
+    style_token = _style_for_strategy_id(strategy.id)
+    style_key = _canonical_style_token(style_token)
+    target_meta = [
+        {"label": "TP1", "price": target_primary, "sequence": 1, "source": "gap"},
+        {"label": "TP2", "price": target_secondary, "sequence": 2, "source": "gap"},
+    ]
+    runner_cfg = _runner_config(style_key, direction, entry, stop, [target_primary, target_secondary])
+
     plan = _build_plan(
         direction,
         entry,
         stop,
         [target_primary, target_secondary],
+        target_meta=target_meta,
+        runner=runner_cfg,
         atr_value=atr_value,
         notes=f"Gap {gap:+.2f} vs prev close {prev_close:.2f}; progress {progress:.2%}",
         conditions=[vwap_alignment, volume_ok, distance_to_close > atr_value * 0.2],
@@ -2048,6 +2386,8 @@ def _detect_gap_fill(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> Si
         "plan_entry": plan.entry,
         "plan_stop": plan.stop,
         "plan_targets": plan.targets,
+        "plan_target_meta": plan.target_meta,
+        "plan_runner": plan.runner,
         "plan_confidence": plan.confidence,
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
@@ -2102,11 +2442,20 @@ def _detect_midday_mean_revert(symbol: str, strategy: Strategy, ctx: Dict[str, A
         target_primary = ctx["vwap"]
         target_secondary = price - atr_value * 0.7
 
+    style_key = _canonical_style_token(_style_for_strategy_id(strategy.id))
+    target_meta = [
+        {"label": "TP1", "price": target_primary, "sequence": 1, "source": "vwap_mean"},
+        {"label": "TP2", "price": target_secondary, "sequence": 2, "source": "vwap_mean"},
+    ]
+    runner_cfg = _runner_config(style_key, direction, entry, stop, [target_primary, target_secondary])
+
     plan = _build_plan(
         direction,
         entry,
         stop,
         [target_primary, target_secondary],
+        target_meta=target_meta,
+        runner=runner_cfg,
         atr_value=atr_value,
         notes=f"VWAP {ctx['vwap']:.2f}; extension {extension:.2f} ({extension/atr_value:.2f}× ATR)",
         conditions=[adx_weak, range_contraction, volume_light],
@@ -2125,6 +2474,8 @@ def _detect_midday_mean_revert(symbol: str, strategy: Strategy, ctx: Dict[str, A
         "plan_entry": plan.entry,
         "plan_stop": plan.stop,
         "plan_targets": plan.targets,
+        "plan_target_meta": plan.target_meta,
+        "plan_runner": plan.runner,
         "plan_confidence": plan.confidence,
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
@@ -2167,11 +2518,20 @@ async def scan_market(tickers: List[str], market_data: Dict[str, pd.DataFrame]) 
             continue
 
         ctx = _build_context(frame)
+        ctx.setdefault("target_stats", {})
+        style_stats_cache: Dict[str, Dict[str, object] | None] = {}
 
         for strategy in strategies:
             detector = STRATEGY_DETECTORS.get(strategy.id)
             if detector is None:
                 continue
+            style_token = _style_for_strategy_id(strategy.id)
+            style_key = _canonical_style_token(style_token)
+            if style_key and style_key not in style_stats_cache:
+                style_stats_cache[style_key] = await get_style_stats(symbol, style_key)
+            stats_bundle = style_stats_cache.get(style_key)
+            if stats_bundle:
+                ctx["target_stats"][style_key] = stats_bundle
             signal = detector(symbol, strategy, ctx)
             if signal is None:
                 continue

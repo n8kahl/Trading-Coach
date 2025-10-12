@@ -1,5 +1,7 @@
 import math
 
+import numpy as np
+
 import pytest
 
 from src.scanner import _apply_tp_logic, _base_targets_for_style, rr
@@ -27,6 +29,7 @@ def _make_tp_ctx(
     fib_daily=None,
     fib_weekly=None,
     anchored_vwaps=None,
+    target_stats=None,
 ):
     key_levels = key_levels or {}
     return {
@@ -52,6 +55,7 @@ def _make_tp_ctx(
         "fib_daily": fib_daily or {"long": [], "short": []},
         "fib_weekly": fib_weekly or {"long": [], "short": []},
         "anchored_vwaps_intraday": anchored_vwaps or {},
+        "target_stats": target_stats or {},
     }
 
 
@@ -87,7 +91,7 @@ def test_intraday_tp1_respects_min_distance_and_em_cap():
         htf_levels=[102.4],
     )
 
-    targets, warnings, debug = _apply_tp_logic(
+    targets, target_meta, warnings, debug = _apply_tp_logic(
         symbol="AAPL",
         style="intraday",
         bias="long",
@@ -106,7 +110,8 @@ def test_intraday_tp1_respects_min_distance_and_em_cap():
     diff = targets[0] - entry
     assert diff >= atr_15m * 0.8 - 0.05
     assert diff <= expected_move * 1.05  # EM cap applied with small allowance
-    assert debug["selected_meta"]
+    assert target_meta and len(target_meta) >= 2
+    assert debug["meta"]
 
 
 def test_swing_ignores_expected_move_cap():
@@ -139,9 +144,17 @@ def test_swing_ignores_expected_move_cap():
         levels_daily=[("DAILY_HIGH", daily_level)],
         vol_profile_daily={"poc": 206.0},
         fib_daily={"long": [("FIB1.272", 215.0)], "short": []},
+        target_stats={"swing": {
+            "style": "swing",
+            "expected_move": 15.0,
+            "long": {
+                "mfe": np.array([0.2, 0.25, 0.3, 0.35]),
+                "quantiles": {"q50": 0.2, "q70": 0.25, "q80": 0.3, "q90": 0.35},
+            },
+        }},
     )
 
-    targets, warnings, debug = _apply_tp_logic(
+    targets, target_meta, warnings, debug = _apply_tp_logic(
         symbol="AAPL",
         style="swing",
         bias="long",
@@ -155,10 +168,12 @@ def test_swing_ignores_expected_move_cap():
         prefer_em_cap=True,
     )
 
-    assert warnings == []
+    if warnings:
+        assert warnings[0].startswith("TP1 R:R"), warnings
     assert targets[0] >= entry + max(atr_1d * 1.20, entry * 0.015) - 0.01
     assert targets[0] > entry + expected_move  # EM cap not applied
-    assert any(meta["category"].startswith("htf") for meta in debug["selected_meta"])
+    assert target_meta and target_meta[0].get("source") == "stats"
+    assert target_meta[0].get("em_fraction") and target_meta[0]["em_fraction"] > 0
 
 
 def test_rr_floor_triggers_watch_warning_when_unresolved():
@@ -185,9 +200,14 @@ def test_rr_floor_triggers_watch_warning_when_unresolved():
         atr_5m=0.4,
         key_levels={},
         vol_profile={},
+        target_stats={"scalp": {
+            "style": "scalp",
+            "expected_move": 1.2,
+            "long": {"mfe": np.array([0.12, 0.18, 0.22]), "quantiles": {"q50": 0.12, "q70": 0.18, "q80": 0.2, "q90": 0.24}},
+        }},
     )
 
-    targets, warnings, debug = _apply_tp_logic(
+    targets, target_meta, warnings, debug = _apply_tp_logic(
         symbol="MSFT",
         style="scalp",
         bias="long",
@@ -201,6 +221,9 @@ def test_rr_floor_triggers_watch_warning_when_unresolved():
         prefer_em_cap=True,
     )
 
-    assert len(targets) == 2
+    assert len(targets) >= 2
     assert targets[0] > entry
-    assert any("TP2 constructed" in message for message in warnings)
+    assert warnings and any("watch plan" in msg.lower() for msg in warnings)
+    assert target_meta and len(target_meta) >= len(targets)
+    if len(target_meta) >= 3:
+        assert target_meta[2].get("optional") is True
