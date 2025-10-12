@@ -57,17 +57,33 @@ function formatRR(value: number | null): string {
   return value.toFixed(2);
 }
 
+function formatPhase(phase: string | null): string {
+  if (!phase) return "";
+  return phase
+    .split("_")
+    .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+    .join(" ");
+}
+
 export default function NextStepCard({ planState, onKeepPlan, onApplyUpdate, disabled }: NextStepCardProps) {
   const statusMeta = STATUS_META[planState.status] ?? STATUS_META.intact;
   const lastUpdatedCopy = useMemo(() => formatTimestamp(planState.timestamp), [planState.timestamp]);
+  const phaseLabel = useMemo(() => formatPhase(planState.marketPhase), [planState.marketPhase]);
 
   return (
     <Card className="border border-primary/10 bg-primary/5">
       <CardContent className="flex flex-col gap-4 p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium ${statusMeta.badgeClass}`}>
-            {statusMeta.label}
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium ${statusMeta.badgeClass}`}>
+              {statusMeta.label}
+            </span>
+            {phaseLabel ? (
+              <span className="inline-flex items-center rounded-full border border-muted-foreground/20 bg-muted/10 px-3 py-1 text-xs font-medium text-muted-foreground">
+                {phaseLabel}
+              </span>
+            ) : null}
+          </div>
           {lastUpdatedCopy ? <span className="text-xs text-muted-foreground">Updated {lastUpdatedCopy}</span> : null}
         </div>
         {planState.note ? (
@@ -75,6 +91,7 @@ export default function NextStepCard({ planState, onKeepPlan, onApplyUpdate, dis
         ) : (
           <p className="text-sm text-muted-foreground">Awaiting live plan guidance.</p>
         )}
+        {planState.marketNote ? <p className="text-xs text-muted-foreground">{planState.marketNote}</p> : null}
         <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
           <span>
             <strong className="text-foreground">R:R (TP1):</strong> {formatRR(planState.rrToT1)}

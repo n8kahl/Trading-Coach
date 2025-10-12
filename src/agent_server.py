@@ -63,6 +63,7 @@ from .db import (
     store_idea_snapshot as db_store_idea_snapshot,
 )
 from .data_sources import fetch_polygon_ohlcv
+from .symbol_streamer import SymbolStreamCoordinator
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
 from zoneinfo import ZoneInfo
@@ -190,7 +191,7 @@ if APP_STATIC_DIR.exists():
 
 @app.on_event("startup")
 async def _startup_tasks() -> None:
-    global _IDEA_PERSISTENCE_ENABLED
+    global _IDEA_PERSISTENCE_ENABLED, _SYMBOL_STREAM_COORDINATOR
     persisted = await ensure_db_schema()
     if persisted:
         _IDEA_PERSISTENCE_ENABLED = True
@@ -198,6 +199,8 @@ async def _startup_tasks() -> None:
     else:
         _IDEA_PERSISTENCE_ENABLED = False
         logger.info("Idea snapshots will be cached in-memory (database unavailable or not configured)")
+    _SYMBOL_STREAM_COORDINATOR = SymbolStreamCoordinator(_symbol_stream_emit)
+    logger.info("Live symbol streamer initialized")
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +721,7 @@ async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
         logger.exception("live plan engine snapshot registration failed", extra={"plan_id": plan_id})
         plan_state_event = None
     if symbol_for_event:
+        await _ensure_symbol_stream(symbol_for_event)
         plan_full_event = {
             "t": "plan_full",
             "plan_id": plan_block.get("plan_id"),
@@ -2157,6 +2161,22 @@ _STREAM_LOCK = asyncio.Lock()
 _IV_METRICS_CACHE_TTL = 120.0
 _IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _LIVE_PLAN_ENGINE = LivePlanEngine()
+_SYMBOL_STREAM_COORDINATOR: Optional[SymbolStreamCoordinator] = None
+
+
+async def _symbol_stream_emit(symbol: str, event: Dict[str, Any]) -> None:
+    await _ingest_stream_event(symbol, event)
+
+
+async def _ensure_symbol_stream(symbol: str) -> None:
+    coordinator = _SYMBOL_STREAM_COORDINATOR
+    symbol_key = (symbol or "").upper()
+    if not coordinator or not symbol_key:
+        return
+    try:
+        await coordinator.ensure_symbol(symbol_key)
+    except Exception:
+        logger.exception("failed to ensure symbol streamer", extra={"symbol": symbol_key})
 
 
 async def _compute_iv_metrics(symbol: str) -> Dict[str, Any]:
@@ -3369,6 +3389,8 @@ async def _ensure_snapshot(plan_id: str, version: Optional[int], request: Reques
         snapshot = await _regenerate_snapshot_from_slug(plan_id, version, request, slug_meta)
         if snapshot is None:
             raise HTTPException(status_code=404, detail="Plan not found")
+    plan_block = snapshot.get("plan") or {}
+    await _ensure_symbol_stream(plan_block.get("symbol"))
     try:
         await _LIVE_PLAN_ENGINE.register_snapshot(snapshot)
     except Exception:
@@ -3435,6 +3457,7 @@ async def refresh_plan_snapshot(
 async def stream_market(symbol: str = Query(..., min_length=1)) -> StreamingResponse:
     async def event_generator():
         uppercase = symbol.upper()
+        await _ensure_symbol_stream(uppercase)
         initial_states = await _LIVE_PLAN_ENGINE.active_plan_states(uppercase)
         if initial_states:
             payload = json.dumps({"symbol": uppercase, "event": {"t": "plan_state", "plans": initial_states}})
@@ -3449,6 +3472,7 @@ async def stream_market(symbol: str = Query(..., min_length=1)) -> StreamingResp
 async def stream_symbol_sse(symbol: str) -> StreamingResponse:
     async def event_generator():
         uppercase = symbol.upper()
+        await _ensure_symbol_stream(uppercase)
         initial_states = await _LIVE_PLAN_ENGINE.active_plan_states(uppercase)
         if initial_states:
             payload = json.dumps({"symbol": uppercase, "event": {"t": "plan_state", "plans": initial_states}})
@@ -3463,6 +3487,7 @@ async def stream_symbol_sse(symbol: str) -> StreamingResponse:
 async def stream_symbol_ws(websocket: WebSocket, symbol: str) -> None:
     uppercase = symbol.upper()
     await websocket.accept()
+    await _ensure_symbol_stream(uppercase)
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
     async with _STREAM_LOCK:
         _STREAM_SUBSCRIBERS.setdefault(uppercase, []).append(queue)

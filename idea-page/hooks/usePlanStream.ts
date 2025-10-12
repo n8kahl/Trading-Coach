@@ -9,6 +9,8 @@ export type PlanStreamState = {
   timestamp: string | null;
   lastPrice: number | null;
   version: number | null;
+  marketPhase: string | null;
+  marketNote: string | null;
 };
 
 type UsePlanStreamOptions<TPlanPayload> = {
@@ -27,6 +29,8 @@ const STATUS_FALLBACK: PlanStreamState = {
   timestamp: null,
   lastPrice: null,
   version: null,
+  marketPhase: null,
+  marketNote: null,
 };
 
 function resolveBaseUrl(): string | null {
@@ -55,6 +59,8 @@ function normalizeState(current: PlanStreamState, changes: any): PlanStreamState
     timestamp: typeof changes.timestamp === "string" ? changes.timestamp : current.timestamp,
     lastPrice: typeof changes.last_price === "number" ? changes.last_price : current.lastPrice,
     version: typeof changes.version === "number" ? changes.version : current.version,
+    marketPhase: current.marketPhase,
+    marketNote: current.marketNote,
   };
 }
 
@@ -68,8 +74,31 @@ export function usePlanStream<TPlanPayload>({
   const baseUrlRef = useRef<string | null>(resolveBaseUrl());
 
   useEffect(() => {
-    setPlanState(initialState ?? STATUS_FALLBACK);
-  }, [initialState.status, initialState.rrToT1, initialState.note, initialState.nextStep, initialState.version]);
+    const next = initialState ?? STATUS_FALLBACK;
+    setPlanState((prev) => ({
+      ...prev,
+      status: next.status,
+      rrToT1: next.rrToT1,
+      note: next.note,
+      nextStep: next.nextStep,
+      breach: next.breach,
+      timestamp: next.timestamp,
+      lastPrice: next.lastPrice ?? prev.lastPrice,
+      version: next.version ?? prev.version,
+      marketPhase: next.marketPhase ?? prev.marketPhase,
+      marketNote: next.marketNote ?? prev.marketNote,
+    }));
+  }, [
+    initialState.status,
+    initialState.rrToT1,
+    initialState.note,
+    initialState.nextStep,
+    initialState.version,
+    initialState.marketPhase,
+    initialState.marketNote,
+    initialState.timestamp,
+    initialState.lastPrice,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -120,13 +149,14 @@ export function usePlanStream<TPlanPayload>({
           const version =
             typeof payload.plan.version === "number" ? payload.plan.version : prev.version;
           return {
+            ...prev,
             status: "intact",
             rrToT1: rrValue,
             note: "Plan intact. Risk profile unchanged.",
             nextStep: "hold_plan",
             breach: null,
             timestamp: new Date().toISOString(),
-            lastPrice: null,
+            lastPrice: prev.lastPrice,
             version,
           };
         });
@@ -134,6 +164,30 @@ export function usePlanStream<TPlanPayload>({
       if (payload && typeof onPlanFull === "function") {
         onPlanFull(payload);
       }
+    };
+
+    const applyTick = (event: any) => {
+      const price =
+        typeof event?.p === "number"
+          ? event.p
+          : typeof event?.close === "number"
+            ? event.close
+            : null;
+      if (price === null) return;
+      setPlanState((prev) => ({
+        ...prev,
+        lastPrice: price,
+      }));
+    };
+
+    const applyMarketStatus = (event: any) => {
+      const phase = typeof event?.phase === "string" ? event.phase : null;
+      const note = typeof event?.note === "string" ? event.note : null;
+      setPlanState((prev) => ({
+        ...prev,
+        marketPhase: phase ?? prev.marketPhase,
+        marketNote: note ?? prev.marketNote,
+      }));
     };
 
     const handleMessage = (raw: string) => {
@@ -150,6 +204,13 @@ export function usePlanStream<TPlanPayload>({
           break;
         case "plan_full":
           applyPlanFull(event);
+          break;
+        case "tick":
+        case "bar":
+          applyTick(event);
+          break;
+        case "market_status":
+          applyMarketStatus(event);
           break;
         default:
           break;
