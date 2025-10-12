@@ -441,11 +441,19 @@ pre-baked trade levels.
   the viewer rescale legacy entries/stops/targets/levels to the latest prices
   after splits or large gaps; set `scale_plan=off` to render the raw values or
   pass an explicit multiplier (e.g. `scale_plan=0.5`).
+- **`plan_meta` (optional)** packages plan metadata (confidence, R:R, runner note,
+  target meta, key levels). When present the `/tv` viewer renders the header badges,
+  multi-timeframe controls, and plan details drawer without extra wiring. If the
+  field is omitted the chart still renders but the plan panel falls back to generic
+  copy.
 - **Plan rescaling.** The viewer defaults to `scale_plan=auto`, which rescales
   entry/stop/targets/levels to the latest close when the plan was built on a
   different price basis (splits, stale snapshots, etc.). Add `scale_plan=off`
   to disable, or supply an explicit multiplier (e.g., `scale_plan=0.5`) when
   you know the adjustment factor.
+- **Pre-entry checklist.** The plan drawer renders any warnings emitted by the
+  scanner; when none are provided it falls back to the generic “confirm
+  structure/volume/trigger” guidance.
 - **Overlay rendering.** When `charts.params` includes `supply`, `demand`,
   `liquidity`, `fvg`, or `avwap`, the `/tv` viewer plots labeled horizontal
   bands/lines to represent higher-timeframe zones, liquidity pools, fair value

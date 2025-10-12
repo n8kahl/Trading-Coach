@@ -41,6 +41,8 @@ This document captures what is live, where the sharp edges are, and the near-ter
 - Rebuilt `/gpt/contracts` with liquidity gates, scenario P/L, and tradeability scoring that ignores budget caps.
 - Hardened IV metric calculations (safe `delta` coercion, better ATM IV detection).
 - Documentation overhaul for onboarding, GPT wiring, and roadmap tracking.
+- Refreshed the `/tv` viewer: multi-timeframe buttons, plan metadata banner, responsive drawer,
+  and deduplicated level labels so toggling frames no longer stacks annotations.
 
 ---
 
