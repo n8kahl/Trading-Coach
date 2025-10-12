@@ -378,6 +378,7 @@
         }
         series.setData(values);
       });
+      let lastVwap = null;
       if (vwapSeries) {
         const values = [];
         let cumulativePV = 0;
@@ -396,29 +397,39 @@
           cumulativePV += typical * vol;
           cumulativeVol += vol;
           const vwapValue = cumulativeVol > 0 ? cumulativePV / cumulativeVol : typical;
+          if (Number.isFinite(vwapValue)) {
+            lastVwap = vwapValue;
+          }
           values.push({ time: bar.time, value: vwapValue });
         }
         vwapSeries.setData(values);
       }
+      if (Number.isFinite(lastVwap)) {
+        addPriceLine(lastVwap, 'VWAP', '#ffffff', LightweightCharts.LineStyle.Solid, 2);
+      }
 
       clearPriceLines();
-      addPriceLine(plan.entry, 'Entry', '#facc15', LightweightCharts.LineStyle.Solid, 3);
-      addPriceLine(plan.stop, 'Stop', '#ef4444', LightweightCharts.LineStyle.Solid, 3);
+      addPriceLine(plan.entry, 'Entry', '#facc15', LightweightCharts.LineStyle.Solid, 2);
+      addPriceLine(plan.stop, 'Stop', '#ef4444', LightweightCharts.LineStyle.Solid, 2);
       plan.tps.forEach((tp, idx) => {
         if (!Number.isFinite(tp)) return;
         const meta = Array.isArray(plan.tpMeta) ? plan.tpMeta[idx] || {} : {};
         const label = meta.label || `TP${idx + 1}`;
         const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
-        const isStretch = sequence >= 3 || /3/.test(label);
-        const color = isStretch ? '#c084fc' : '#7CFC00';
-        addPriceLine(tp, label, color, LightweightCharts.LineStyle.Solid, 3);
+        let color = '#22c55e';
+        if (sequence >= 3 || /3/.test(label)) {
+          color = '#c084fc';
+        } else if (sequence === 2 || /2/.test(label)) {
+          color = '#f97316';
+        }
+        addPriceLine(tp, label, color, LightweightCharts.LineStyle.Solid, 2);
       });
       [...keyLevels]
         .filter((level) => Number.isFinite(level.price))
         .sort((a, b) => b.price - a.price)
         .forEach((level, idx) => {
           const label = level.label ? level.label : `Level ${idx + 1}`;
-          addPriceLine(level.price, label, '#94a3b8', LightweightCharts.LineStyle.Dotted);
+          addPriceLine(level.price, label, '#94a3b8', LightweightCharts.LineStyle.Dotted, 1);
         });
       if (plan.runner && Number.isFinite(plan.runner.anchor)) {
         const runnerLabel = plan.runner.label || 'Runner Trail';
