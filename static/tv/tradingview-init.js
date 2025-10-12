@@ -259,6 +259,27 @@
   let lastKnownPrice = null;
   let fetchToken = 0;
 
+  const priceLineMap = new Map();
+  const setPriceLine = (id, options) => {
+    if (!Number.isFinite(options.price)) return;
+    const existing = priceLineMap.get(id);
+    if (existing) {
+      existing.applyOptions(options);
+      return existing;
+    }
+    const line = candleSeries.createPriceLine(options);
+    priceLineMap.set(id, line);
+    return line;
+  };
+  const prunePriceLines = (activeIds) => {
+    for (const [id, line] of priceLineMap.entries()) {
+      if (!activeIds.has(id)) {
+        candleSeries.removePriceLine(line);
+        priceLineMap.delete(id);
+      }
+    }
+  };
+
   const setWatermark = () => {
     const tfLabel = activeTimeframe ? activeTimeframe.label : currentResolution;
     chart.applyOptions({
@@ -650,27 +671,6 @@
         }
         series.setData(values);
       });
-
-  const priceLineMap = new Map();
-  const setPriceLine = (id, options) => {
-    if (!Number.isFinite(options.price)) return;
-    const existing = priceLineMap.get(id);
-    if (existing) {
-      existing.applyOptions(options);
-      return existing;
-    }
-    const line = candleSeries.createPriceLine(options);
-    priceLineMap.set(id, line);
-    return line;
-  };
-  const prunePriceLines = (activeIds) => {
-    for (const [id, line] of priceLineMap.entries()) {
-      if (!activeIds.has(id)) {
-        candleSeries.removePriceLine(line);
-        priceLineMap.delete(id);
-      }
-    }
-  };
 
       const activeLineIds = new Set();
       const registerLine = (id, options) => {
