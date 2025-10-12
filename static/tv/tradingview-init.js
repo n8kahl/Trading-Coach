@@ -405,9 +405,12 @@
       addPriceLine(plan.entry, 'Entry', '#facc15', LightweightCharts.LineStyle.Solid, 3);
       addPriceLine(plan.stop, 'Stop', '#ef4444', LightweightCharts.LineStyle.Solid, 3);
       plan.tps.forEach((tp, idx) => {
+        if (!Number.isFinite(tp)) return;
         const meta = Array.isArray(plan.tpMeta) ? plan.tpMeta[idx] || {} : {};
         const label = meta.label || `TP${idx + 1}`;
-        const color = meta.sequence === 3 ? '#c084fc' : '#7CFC00';
+        const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
+        const isStretch = sequence >= 3 || /3/.test(label);
+        const color = isStretch ? '#c084fc' : '#7CFC00';
         addPriceLine(tp, label, color, LightweightCharts.LineStyle.Solid, 3);
       });
       [...keyLevels]
