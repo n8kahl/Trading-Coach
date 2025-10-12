@@ -581,13 +581,20 @@ def _parse_plan_slug(plan_id: str) -> Optional[Dict[str, str]]:
     parts = [chunk for chunk in token.split('-') if chunk]
     if len(parts) < 3:
         return None
-    symbol = parts[0].upper()
-    style = parts[1].lower()
-    direction = parts[2].lower()
+    start_idx = 0
+    if parts[0] in {"offline", "online", "live"} and len(parts) >= 4:
+        start_idx = 1
+    if len(parts) - start_idx < 2:
+        return None
+    symbol = parts[start_idx].upper()
+    style = parts[start_idx + 1].lower() if len(parts) - start_idx >= 2 else "unknown"
+    direction_token = parts[start_idx + 2].lower() if len(parts) - start_idx >= 3 else "unknown"
+    if direction_token.isdigit():
+        direction_token = "unknown"
     return {
         'symbol': symbol,
         'style': style,
-        'direction': direction,
+        'direction': direction_token,
     }
 
 
