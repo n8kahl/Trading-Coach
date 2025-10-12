@@ -156,7 +156,7 @@ function populate() {
   tp2El.textContent = formatNumber(targets[1], decimals);
   rrEl.textContent = formatNumber(planData.rr_to_t1, 2);
   const tradeDetailUrl = planData.trade_detail || planData.idea_url;
-  ideaUrlEl.href = tradeDetailUrl || '#';
+  ideaUrlEl.href = normalizeUrl(tradeDetailUrl) || '#';
   ideaUrlEl.classList.toggle('muted', !tradeDetailUrl);
 
   renderWarnings(planData.warnings || ideaSnapshot.warnings || []);
@@ -167,7 +167,7 @@ function populate() {
   renderEducationCards(ideaSnapshot);
   renderOptions(ideaSnapshot.options);
 
-  const chartUrl = ideaSnapshot.chart_url || plan.trade_detail || plan.idea_url;
+  const chartUrl = normalizeUrl(ideaSnapshot.chart_url || plan.trade_detail || plan.idea_url);
   if (chartUrl && chartUrl.includes('/tv')) {
     chartFrame.src = chartUrl;
     chartWarning.classList.add('hidden');
@@ -186,6 +186,25 @@ function populate() {
 
   ivSlider.addEventListener('input', updateOptionScenarios);
   slippageSlider.addEventListener('input', updateOptionScenarios);
+}
+
+function normalizeUrl(url) {
+  if (!url || typeof url !== 'string') return url;
+  let result = url.trim();
+  if (!result) return result;
+  if (typeof window !== 'undefined') {
+    const host = window.location.host;
+    if (result.startsWith('//')) {
+      result = `${window.location.protocol}${result}`;
+    }
+    if (result.startsWith('http://')) {
+      const httpsCandidate = result.replace(/^http:\/\//i, 'https://');
+      if (httpsCandidate.includes(host) || httpsCandidate.includes('trading-coach-production.up.railway.app')) {
+        result = httpsCandidate;
+      }
+    }
+  }
+  return result;
 }
 
 function renderWarnings(warnings) {
