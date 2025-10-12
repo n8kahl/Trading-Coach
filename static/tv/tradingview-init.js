@@ -254,6 +254,7 @@
   const scalePlanToken = (params.get('scale_plan') || 'auto').toLowerCase();
 
   let lastKnownPrice = null;
+  let fetchToken = 0;
 
   const setWatermark = () => {
     const tfLabel = activeTimeframe ? activeTimeframe.label : currentResolution;
@@ -339,8 +340,9 @@
       toNumber(mergedPlanMeta.confidence) ??
       toNumber(planMeta.confidence_score) ??
       toNumber(planMeta.plan_confidence) ??
+      toNumber(planMeta.plan?.confidence) ??
       paramConfidence;
-    const displayConfidence = rawConfidence !== null && rawConfidence >= 0 ? rawConfidence : null;
+    const displayConfidence = rawConfidence !== null && rawConfidence > 0 ? rawConfidence : null;
     if (headerConfidenceEl) {
       headerConfidenceEl.textContent = displayConfidence !== null ? `Confidence: ${(displayConfidence * 100).toFixed(0)}%` : '';
     }
@@ -395,8 +397,9 @@
       toNumber(mergedPlanMeta.confidence) ??
       toNumber(planMeta.confidence_score) ??
       toNumber(planMeta.plan_confidence) ??
+      toNumber(planMeta.plan?.confidence) ??
       paramConfidence;
-    const confidenceCopy = rawConfidence !== null && rawConfidence >= 0 ? `${(rawConfidence * 100).toFixed(0)}%` : '—';
+    const confidenceCopy = rawConfidence !== null && rawConfidence > 0 ? `${(rawConfidence * 100).toFixed(0)}%` : '—';
     const rrValue = toNumber(mergedPlanMeta.risk_reward);
     const rrFallback = (() => {
       const entry = mergedPlanMeta.entry;
@@ -503,6 +506,7 @@
   };
 
   const fetchBars = async () => {
+    const token = ++fetchToken;
     try {
       const now = Math.floor(Date.now() / 1000);
       const minSpan = resolutionToSeconds(currentResolution) * 200;
@@ -519,6 +523,9 @@
       if (!response.ok) throw new Error(`bars request failed (${response.status})`);
       const payload = await response.json();
       if (payload.s !== 'ok' || !payload.t?.length) throw new Error('No data');
+      if (token !== fetchToken) {
+        return;
+      }
 
       const bars = payload.t.map((time, idx) => ({
         time: payload.t[idx],
