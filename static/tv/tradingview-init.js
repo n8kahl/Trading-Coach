@@ -945,8 +945,12 @@
     replayIndex = 0;
 
     if (restoreChart && replaySavedCandleData.length) {
-      candleSeries.setData(replaySavedCandleData);
-      volumeSeries.setData(replaySavedVolumeData);
+      const restoredCandles = replaySavedCandleData.map((item) => ({ ...item }));
+      const restoredVolume = replaySavedVolumeData.map((item) => ({ ...item }));
+      candleSeries.setData(restoredCandles);
+      volumeSeries.setData(restoredVolume);
+      latestCandleData = restoredCandles.map((item) => ({ ...item }));
+      latestVolumeData = restoredVolume.map((item) => ({ ...item }));
       if (replaySavedVisibleRange) {
         try {
           chart.timeScale().setVisibleRange(replaySavedVisibleRange);
@@ -956,6 +960,19 @@
       } else {
         chart.timeScale().fitContent();
       }
+    } else if (restoreChart) {
+      const clonedCandles = latestCandleData.map((item) => ({ ...item }));
+      const clonedVolume = latestVolumeData.map((item) => ({ ...item }));
+      candleSeries.setData(clonedCandles);
+      volumeSeries.setData(clonedVolume);
+      latestCandleData = clonedCandles.map((item) => ({ ...item }));
+      latestVolumeData = clonedVolume.map((item) => ({ ...item }));
+    }
+    const restoredLast = latestCandleData.length ? latestCandleData[latestCandleData.length - 1].close : null;
+    if (Number.isFinite(restoredLast)) {
+      lastKnownPrice = restoredLast;
+      updateHeaderPricing(restoredLast);
+      updatePlanPanelLastPrice(restoredLast);
     }
     replaySavedCandleData = [];
     replaySavedVolumeData = [];
@@ -996,24 +1013,27 @@
       });
       return;
     }
-    const bar = replayQueue[replayIndex];
-    candleSeries.update({
-      time: bar.time,
-      open: bar.open,
-      high: bar.high,
-      low: bar.low,
-      close: bar.close,
-    });
-    volumeSeries.update({
-      time: bar.time,
-      value: bar.volume || 0,
-      color: bar.close >= bar.open ? '#22c55e88' : '#ef444488',
-    });
-    lastKnownPrice = bar.close;
+    const frame = replayQueue[replayIndex];
+    const candle = frame.candle;
+    candleSeries.update(candle);
+    latestCandleData.push({ ...candle });
+
+    const volumeValue = Number.isFinite(frame.volume) ? frame.volume : 0;
+    const volumeBar = {
+      time: candle.time,
+      value: volumeValue,
+      color: candle.close >= candle.open ? '#22c55e88' : '#ef444488',
+    };
+    latestVolumeData.push({ ...volumeBar });
+    volumeSeries.update(volumeBar);
+
+    lastKnownPrice = candle.close;
     updateHeaderPricing(lastKnownPrice);
     updatePlanPanelLastPrice(lastKnownPrice);
+    const total = replayQueue.length;
     replayIndex += 1;
-    setReplayStatusMessage(`Playing ${Math.min(replayIndex, replayQueue.length)}/${replayQueue.length}`);
+    const progress = Math.min(replayIndex, total);
+    setReplayStatusMessage(`Playing ${progress}/${total}`);
     syncReplayControls();
     replayTimer = window.setTimeout(playNextReplayBar, REPLAY_STEP_MS);
   };
@@ -1069,47 +1089,60 @@
         replaySavedVisibleRange = null;
       }
 
-      replayQueue = bars;
-      const firstBar = replayQueue[0];
-      candleSeries.setData([
-        {
-          time: firstBar.time,
-          open: firstBar.open,
-          high: firstBar.high,
-          low: firstBar.low,
-          close: firstBar.close,
+      const baselineCandles = replaySavedCandleData.map((item) => ({ ...item }));
+      const baselineVolume = replaySavedVolumeData.map((item) => ({ ...item }));
+      const replayFrames = bars.map((bar) => ({
+        candle: {
+          time: bar.time,
+          open: bar.open,
+          high: bar.high,
+          low: bar.low,
+          close: bar.close,
         },
-      ]);
-      volumeSeries.setData([
-        {
-          time: firstBar.time,
-          value: firstBar.volume || 0,
-          color: firstBar.close >= firstBar.open ? '#22c55e88' : '#ef444488',
-        },
-      ]);
-      lastKnownPrice = firstBar.close;
-      updateHeaderPricing(lastKnownPrice);
-      updatePlanPanelLastPrice(lastKnownPrice);
-      try {
-        chart.timeScale().setVisibleRange(replaySavedVisibleRange || {
-          from: replayQueue[0].time,
-          to: replayQueue[replayQueue.length - 1].time,
-        });
-      } catch {
-        try {
-          chart.timeScale().setVisibleRange({
-            from: replayQueue[0].time,
-            to: replayQueue[replayQueue.length - 1].time,
-          });
-        } catch {
-          chart.timeScale().fitContent();
-        }
+        volume: Number.isFinite(bar.volume) ? bar.volume : 0,
+      }));
+      if (!replayFrames.length) {
+        throw new Error('Replay preparation failed (no frames)');
       }
 
-      replayIndex = 1;
-      setReplayStatusMessage(`Playing ${Math.min(replayIndex, replayQueue.length)}/${replayQueue.length}`);
+      const baseLength = Math.max(baselineCandles.length - replayFrames.length, 0);
+      const initialCandles = baseLength ? baselineCandles.slice(0, baseLength) : [];
+      const initialVolume = baseLength ? baselineVolume.slice(0, baseLength) : [];
+
+      candleSeries.setData(initialCandles);
+      volumeSeries.setData(initialVolume);
+      latestCandleData = initialCandles.map((item) => ({ ...item }));
+      latestVolumeData = initialVolume.map((item) => ({ ...item }));
+
+      const priorClose = latestCandleData.length
+        ? latestCandleData[latestCandleData.length - 1].close
+        : replayFrames[0].candle.open;
+      if (Number.isFinite(priorClose)) {
+        lastKnownPrice = priorClose;
+        updateHeaderPricing(lastKnownPrice);
+        updatePlanPanelLastPrice(lastKnownPrice);
+      }
+
+      replayQueue = replayFrames;
+      try {
+        if (replaySavedVisibleRange) {
+          chart.timeScale().setVisibleRange(replaySavedVisibleRange);
+        } else if (initialCandles.length) {
+          chart.timeScale().setVisibleRange({
+            from: initialCandles[0].time,
+            to: replayFrames[replayFrames.length - 1].candle.time,
+          });
+        } else {
+          chart.timeScale().fitContent();
+        }
+      } catch {
+        chart.timeScale().fitContent();
+      }
+
+      replayIndex = 0;
+      setReplayStatusMessage(`Playing 0/${replayQueue.length}`);
       syncReplayControls();
-      replayTimer = window.setTimeout(playNextReplayBar, REPLAY_STEP_MS);
+      playNextReplayBar();
     } catch (err) {
       console.error('Market replay failed', err);
       stopMarketReplay({
