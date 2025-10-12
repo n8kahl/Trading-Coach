@@ -146,6 +146,20 @@
   const planPanelBodyEl = document.getElementById('plan_panel_body');
   const debugEl = document.getElementById('debug_banner');
 
+  const showError = (message) => {
+    if (!debugEl) return;
+    debugEl.style.display = 'block';
+    debugEl.textContent = message;
+  };
+
+  window.addEventListener('error', (event) => {
+    showError(`Runtime error: ${event.message}`);
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    showError(`Unhandled promise rejection: ${event.reason}`);
+  });
+
   if (window.console && console.debug) {
     console.debug('Plan meta payload', mergedPlanMeta);
   }
