@@ -1,7 +1,9 @@
 import asyncio
-from starlette.requests import Request
+import json
 
+import pandas as pd
 import pytest
+from starlette.requests import Request
 
 from src import agent_server
 
@@ -56,3 +58,29 @@ async def test_gpt_plan_includes_trade_detail(monkeypatch):
     assert response.idea_url == response.trade_detail, "legacy idea_url alias should mirror trade_detail"
     assert response.plan["trade_detail"] == response.trade_detail, "embedded plan must carry trade_detail"
     assert response.plan["idea_url"] == response.trade_detail, "embedded plan must keep idea_url alias"
+
+
+@pytest.mark.asyncio
+async def test_simulate_generator_serializes_timestamp(monkeypatch):
+    index = pd.date_range("2024-01-01", periods=1, freq="min", tz="UTC")
+    frame = pd.DataFrame(
+        {
+            "open": [1.0],
+            "high": [1.1],
+            "low": [0.9],
+            "close": [1.05],
+            "volume": [1000],
+        },
+        index=index,
+    )
+    frame["time"] = index
+
+    monkeypatch.setattr(agent_server, "get_candles", lambda symbol, interval, lookback=30: frame)
+
+    params = {"minutes": 5, "entry": 1.0, "stop": 0.9, "tp1": 1.1, "direction": "long"}
+    generator = agent_server._simulate_generator("AAPL", params)
+    chunk = await generator.__anext__()
+    assert chunk.startswith("data: ")
+    payload = json.loads(chunk[len("data: ") :].strip())
+    assert payload["time"].endswith("+00:00")
+    await generator.aclose()

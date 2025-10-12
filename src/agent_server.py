@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
 from urllib.parse import urlencode, quote, urlsplit, urlunsplit, parse_qsl
-from fastapi.responses import StreamingResponse, RedirectResponse
+from fastapi.responses import StreamingResponse
 
 from .config import get_settings
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
@@ -1164,11 +1164,18 @@ async def _simulate_generator(symbol: str, params: Dict[str, Any]) -> Any:
     state = "AWAIT_TRIGGER"
     for _, row in bars.iterrows():
         price = float(row["close"])
+        timestamp = row.get("time")
+        if isinstance(timestamp, pd.Timestamp):
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.tz_localize("UTC")
+            else:
+                timestamp = timestamp.tz_convert("UTC")
+            timestamp = timestamp.isoformat()
         event = {
             "type": "bar",
             "state": state,
             "price": price,
-            "time": row["time"],
+            "time": timestamp if timestamp is not None else None,
         }
         if state == "AWAIT_TRIGGER":
             if (direction == "long" and price >= entry) or (direction == "short" and price <= entry):
@@ -3045,6 +3052,10 @@ async def gpt_plan(
             "title",
             _format_chart_title(symbol, bias_token, first.get("strategy_id")),
         )
+        chart_params_payload.setdefault("plan_id", plan_id)
+        chart_params_payload.setdefault("plan_version", version)
+        chart_params_payload.setdefault("strategy", first.get("strategy_id") or plan.get("setup"))
+        chart_params_payload.setdefault("symbol", symbol)
         chart_params_payload.setdefault("range", _range_for_style(first.get("style")))
         if entry_val is not None or stop_val is not None or targets_list:
             default_note = _format_chart_note(symbol, first.get("style"), entry_val, stop_val, targets_list)
@@ -3407,20 +3418,12 @@ async def _ensure_snapshot(plan_id: str, version: Optional[int], request: Reques
 
 @app.get("/idea/{plan_id}")
 async def get_latest_idea(plan_id: str, request: Request) -> Any:
-    accept = (request.headers.get("accept") or "").lower()
-    if "text/html" in accept:
-        url = f"/app/idea.html?plan_id={quote(plan_id)}"
-        return RedirectResponse(url=url, status_code=302)
     snapshot = await _ensure_snapshot(plan_id, None, request)
     return snapshot
 
 
 @app.get("/idea/{plan_id}/{version}")
 async def get_idea_version(plan_id: str, version: int, request: Request) -> Any:
-    accept = (request.headers.get("accept") or "").lower()
-    if "text/html" in accept:
-        url = f"/app/idea.html?plan_id={quote(plan_id)}&v={int(version)}"
-        return RedirectResponse(url=url, status_code=302)
     snapshot = await _ensure_snapshot(plan_id, int(version), request)
     return snapshot
 
@@ -3428,18 +3431,12 @@ async def get_idea_version(plan_id: str, version: int, request: Request) -> Any:
 @app.get("/plan/{plan_id}")
 async def get_plan_latest(plan_id: str, request: Request) -> Any:
     """Alias for /idea/{plan_id} to support new frontend permalinks."""
-    accept = (request.headers.get("accept") or "").lower()
-    if "text/html" in accept:
-        return RedirectResponse(url=f"/idea/{quote(plan_id)}", status_code=302)
     return await _ensure_snapshot(plan_id, None, request)
 
 
 @app.get("/plan/{plan_id}/{version}")
 async def get_plan_version(plan_id: str, version: int, request: Request) -> Any:
     """Alias for /idea/{plan_id}/{version} to support new frontend permalinks."""
-    accept = (request.headers.get("accept") or "").lower()
-    if "text/html" in accept:
-        return RedirectResponse(url=f"/idea/{quote(plan_id)}/{int(version)}", status_code=302)
     return await _ensure_snapshot(plan_id, int(version), request)
 
 

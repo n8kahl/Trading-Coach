@@ -62,6 +62,8 @@
   let currentResolution = normalizeResolution(params.get('interval') || '15');
   const theme = params.get('theme') === 'light' ? 'light' : 'dark';
   const baseUrl = `${window.location.protocol}//${window.location.host}`;
+  const planIdParam = (params.get('plan_id') || '').trim() || null;
+  const planVersionParam = (params.get('plan_version') || '').trim() || null;
 
   const toNumber = (value) => {
     const num = Number(value);
@@ -157,6 +159,9 @@
   const headerRREl = document.getElementById('header_rr');
   const headerDurationEl = document.getElementById('header_duration');
   const headerLastPriceEl = document.getElementById('header_lastprice');
+  const headerPlanStatusEl = document.getElementById('header_planstatus');
+  const headerMarketEl = document.getElementById('header_market');
+  const planStatusNoteEl = document.getElementById('plan_status_note');
   const timeframeSwitcherEl = document.getElementById('timeframe_switcher');
   const planPanelEl = document.getElementById('plan_panel');
   const planPanelBodyEl = document.getElementById('plan_panel_body');
@@ -258,6 +263,211 @@
 
   let lastKnownPrice = null;
   let fetchToken = 0;
+  let currentPlanStatus = 'intact';
+  let latestPlanNote = 'Plan intact. Risk profile unchanged.';
+  let latestNextStep = 'hold_plan';
+  let latestMarketNote = null;
+  let currentMarketPhase = null;
+  let streamSource = null;
+
+  const PLAN_STATUS_META = {
+    intact: { label: 'Plan Intact', className: 'status-pill--intact' },
+    at_risk: { label: 'Plan At Risk', className: 'status-pill--risk' },
+    invalidated: { label: 'Plan Invalidated', className: 'status-pill--invalid' },
+    reversal: { label: 'Plan Reversal', className: 'status-pill--reversal' },
+  };
+
+  const NEXT_STEP_LABELS = {
+    hold_plan: 'Hold plan',
+    tighten_stop: 'Tighten stop',
+    plan_invalidated: 'Plan invalidated',
+    consider_reversal: 'Consider reversal',
+  };
+
+  const MARKET_PHASE_META = {
+    regular: { label: 'Market Open', className: 'status-pill--intact', note: 'Market open.' },
+    premarket: { label: 'Pre-Market', className: 'status-pill--risk', note: 'Pre-market session — liquidity thinner.' },
+    afterhours: { label: 'After Hours', className: 'status-pill--risk', note: 'After hours — liquidity thinner.' },
+    closed: { label: 'Market Closed', className: 'status-pill--invalid', note: 'Market closed — live updates limited.' },
+  };
+
+  const formatNextStep = (token) => {
+    if (!token) return null;
+    const normalized = token.toLowerCase();
+    if (NEXT_STEP_LABELS[normalized]) return NEXT_STEP_LABELS[normalized];
+    return normalized.replace(/_/g, ' ').replace(/\b\w/g, (ch) => ch.toUpperCase());
+  };
+
+  const updateStatusNote = () => {
+    if (!planStatusNoteEl) return;
+    const parts = [];
+    if (latestPlanNote) parts.push(latestPlanNote);
+    if (latestNextStep) {
+      const label = formatNextStep(latestNextStep);
+      if (label) parts.push(`Next: ${label}`);
+    }
+    if (latestMarketNote) parts.push(latestMarketNote);
+    if (parts.length) {
+      planStatusNoteEl.textContent = parts.join(' • ');
+      planStatusNoteEl.classList.add('active');
+    } else {
+      planStatusNoteEl.textContent = '';
+      planStatusNoteEl.classList.remove('active');
+    }
+  };
+
+  const applyPlanStatus = (status, note, nextStep, rrValue) => {
+    if (typeof status === 'string' && status) {
+      currentPlanStatus = status.toLowerCase();
+    }
+    if (typeof note === 'string' && note.trim()) {
+      latestPlanNote = note.trim();
+    }
+    if (typeof nextStep === 'string' && nextStep.trim()) {
+      latestNextStep = nextStep.trim();
+    }
+    const meta = PLAN_STATUS_META[currentPlanStatus] || PLAN_STATUS_META.intact;
+    if (headerPlanStatusEl) {
+      headerPlanStatusEl.textContent = meta.label;
+      headerPlanStatusEl.className = `status-pill ${meta.className}`;
+    }
+    if (typeof rrValue === 'number' && headerRREl) {
+      headerRREl.textContent = `R:R (TP1): ${rrValue.toFixed(2)}`;
+    }
+    updateStatusNote();
+  };
+
+  const applyMarketStatus = (phase, note) => {
+    if (typeof phase === 'string' && phase.trim()) {
+      currentMarketPhase = phase.trim().toLowerCase();
+    } else {
+      currentMarketPhase = null;
+    }
+    const meta = currentMarketPhase ? MARKET_PHASE_META[currentMarketPhase] || MARKET_PHASE_META.closed : null;
+    if (headerMarketEl) {
+      if (meta) {
+        headerMarketEl.textContent = meta.label;
+        headerMarketEl.className = `status-pill ${meta.className}`;
+      } else {
+        headerMarketEl.textContent = '';
+        headerMarketEl.className = 'status-pill';
+      }
+    }
+    if (note && typeof note === 'string' && note.trim()) {
+      latestMarketNote = note.trim();
+    } else if (meta) {
+      latestMarketNote = meta.note;
+    } else {
+      latestMarketNote = null;
+    }
+    updateStatusNote();
+  };
+
+  applyPlanStatus(currentPlanStatus, latestPlanNote, latestNextStep, null);
+  applyMarketStatus(null, null);
+
+  const matchesPlan = (incomingPlanId) => {
+    if (!planIdParam) return true;
+    return (incomingPlanId || '').trim() === planIdParam;
+  };
+
+  const handlePlanStateEvent = (plans) => {
+    if (!Array.isArray(plans) || plans.length === 0) return;
+    let candidate = null;
+    if (planIdParam) {
+      candidate = plans.find((item) => (item?.plan_id || '').trim() === planIdParam);
+    }
+    if (!candidate) {
+      candidate = plans[0];
+    }
+    if (!candidate) return;
+    applyPlanStatus(candidate.status || currentPlanStatus, candidate.note, candidate.next_step, candidate.rr_to_t1);
+  };
+
+  const handlePlanDeltaEvent = (payload) => {
+    if (!payload || !matchesPlan(payload.plan_id)) return;
+    const changes = payload.changes || {};
+    const statusToken = changes.status || payload.status || currentPlanStatus;
+    const rrValue = Number.isFinite(changes.rr_to_t1) ? changes.rr_to_t1 : null;
+    applyPlanStatus(statusToken, changes.note, changes.next_step, rrValue);
+    if (Number.isFinite(changes.last_price)) {
+      lastKnownPrice = changes.last_price;
+      updateHeaderPricing(lastKnownPrice);
+      renderPlanPanel(lastKnownPrice);
+    }
+  };
+
+  const handlePlanFullEvent = (payload) => {
+    if (!payload) return;
+    const planBlock = payload.plan || {};
+    if (!matchesPlan(planBlock.plan_id)) return;
+    applyPlanStatus('intact', 'Plan updated. Review levels.', 'hold_plan', planBlock.rr_to_t1);
+  };
+
+  const handleTickEvent = (payload) => {
+    if (!payload) return;
+    const price = Number.isFinite(payload.p) ? payload.p : Number.isFinite(payload.close) ? payload.close : null;
+    if (price === null) return;
+    lastKnownPrice = price;
+    updateHeaderPricing(price);
+    renderPlanPanel(price);
+  };
+
+  const connectStream = () => {
+    if (typeof EventSource === 'undefined') return;
+    const streamUrl = `${baseUrl}/stream/${symbol}`;
+    if (streamSource) {
+      streamSource.close();
+      streamSource = null;
+    }
+    try {
+      streamSource = new EventSource(streamUrl);
+      streamSource.onmessage = (msg) => {
+        if (!msg?.data) return;
+        let envelope;
+        try {
+          envelope = JSON.parse(msg.data);
+        } catch (err) {
+          console.warn('Failed to parse stream message', err);
+          return;
+        }
+        const event = envelope?.event;
+        if (!event || !event.t) return;
+        switch (event.t) {
+          case 'plan_state':
+            handlePlanStateEvent(event.plans);
+            break;
+          case 'plan_delta':
+            handlePlanDeltaEvent(event);
+            break;
+          case 'plan_full':
+            handlePlanFullEvent(event.payload);
+            break;
+          case 'tick':
+            handleTickEvent(event);
+            break;
+          case 'bar':
+            handleTickEvent(event);
+            break;
+          case 'market_status':
+            applyMarketStatus(event.phase, event.note);
+            break;
+          default:
+            break;
+        }
+      };
+      streamSource.onerror = () => {
+        if (streamSource) {
+          streamSource.close();
+          streamSource = null;
+        }
+        window.setTimeout(connectStream, 5000);
+      };
+    } catch (err) {
+      console.error('Stream connection failed', err);
+      window.setTimeout(connectStream, 5000);
+    }
+  };
 
   const priceLineMap = new Map();
   const setPriceLine = (id, options) => {
@@ -784,6 +994,7 @@
   initializeTimeframes();
   setWatermark();
   fetchBars();
+  connectStream();
   window.addEventListener('resize', () => {
     chart.resize(container.clientWidth, container.clientHeight);
     if (planPanelEl && window.innerWidth > 1024) {
@@ -792,4 +1003,13 @@
     renderPlanPanel(lastKnownPrice);
   });
   window.setInterval(fetchBars, TIMEFRAME_REFRESH_MS);
+  window.addEventListener('beforeunload', () => {
+    if (streamSource) {
+      try {
+        streamSource.close();
+      } catch (err) {
+        // ignore
+      }
+    }
+  });
 })();

@@ -87,6 +87,58 @@
         display: none;
       }
 
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        border: 1px solid transparent;
+      }
+
+      .status-pill--intact {
+        background: rgba(34, 197, 94, 0.18);
+        border-color: rgba(34, 197, 94, 0.35);
+        color: rgba(134, 239, 172, 0.9);
+      }
+
+      .status-pill--risk {
+        background: rgba(250, 204, 21, 0.18);
+        border-color: rgba(250, 204, 21, 0.35);
+        color: rgba(253, 230, 138, 0.9);
+      }
+
+      .status-pill--invalid {
+        background: rgba(248, 113, 113, 0.18);
+        border-color: rgba(248, 113, 113, 0.35);
+        color: rgba(254, 202, 202, 0.9);
+      }
+
+      .status-pill--reversal {
+        background: rgba(129, 140, 248, 0.18);
+        border-color: rgba(129, 140, 248, 0.35);
+        color: rgba(165, 180, 252, 0.9);
+      }
+
+      .plan-status-note {
+        margin: 0 clamp(16px, 3vw, 24px);
+        padding: 8px 14px;
+        border-radius: 12px;
+        background: rgba(59, 130, 246, 0.08);
+        border: 1px solid rgba(59, 130, 246, 0.15);
+        font-size: 13px;
+        letter-spacing: 0.02em;
+        color: rgba(226, 232, 240, 0.85);
+        display: none;
+      }
+
+      .plan-status-note.active {
+        display: block;
+      }
+
       .plan-header__duration {
         display: flex;
         flex-direction: column;
@@ -341,12 +393,15 @@
           <span id="header_bias"></span>
           <span id="header_confidence"></span>
           <span id="header_rr"></span>
+          <span id="header_planstatus" class="status-pill"></span>
+          <span id="header_market" class="status-pill"></span>
         </div>
         <div class="plan-header__duration">
           <strong id="header_duration"></strong>
           <span id="header_lastprice"></span>
         </div>
       </header>
+      <div class="plan-status-note" id="plan_status_note"></div>
       <nav class="timeframe-switcher" id="timeframe_switcher"></nav>
       <div class="page-body">
         <details class="plan-panel" id="plan_panel" open>
