@@ -797,12 +797,16 @@
 
   const fetchReplayBars = async (minutes) => {
     const minutesClamped = clampReplayMinutes(minutes);
+    const resolutionToken = currentResolution || '1';
+    const secondsPerBar = Math.max(resolutionToSeconds(resolutionToken), 60);
     const nowSec = Math.floor(Date.now() / 1000);
-    const spanSeconds = Math.max((minutesClamped + 1) * 60, 120);
+    const minBarCount = Math.max(Math.ceil((minutesClamped * 60) / secondsPerBar), 1);
+    const targetBarCount = Math.max(minBarCount, 2);
+    const spanSeconds = Math.max(secondsPerBar * (targetBarCount + 1), secondsPerBar * 2);
     const from = nowSec - spanSeconds;
     const qs = new URLSearchParams({
       symbol,
-      resolution: '1',
+      resolution: resolutionToken,
       from: String(from),
       to: String(nowSec),
     });
@@ -826,10 +830,16 @@
     const cutoff = nowSec - minutesClamped * 60;
     const recent = bars.filter((bar) => bar.time >= cutoff);
     if (recent.length >= 2) {
+      return recent.slice(-targetBarCount);
+    }
+    if (recent.length === 1) {
+      const lastIndex = bars.findIndex((bar) => bar.time === recent[0].time);
+      if (lastIndex > 0) {
+        return bars.slice(Math.max(0, lastIndex - (targetBarCount - 1)), lastIndex + 1);
+      }
       return recent;
     }
-    const fallbackCount = Math.max(Math.min(minutesClamped + 1, bars.length), Math.min(bars.length, 2));
-    return bars.slice(-fallbackCount);
+    return bars.slice(-targetBarCount);
   };
 
   const stopMarketReplay = ({
@@ -945,8 +955,9 @@
       }
       streamSource = null;
     }
-    applyMarketStatus('replay', `Replaying last ${minutes} minutes of price action.`);
-    setReplayStatusMessage('Preparing replay…');
+    const tfLabel = (activeTimeframe && activeTimeframe.label) || currentResolution || '1m';
+    applyMarketStatus('replay', `Replaying last ${minutes} minutes using ${tfLabel} bars.`);
+    setReplayStatusMessage(`Preparing ${tfLabel} replay…`);
     syncReplayControls();
 
     try {
