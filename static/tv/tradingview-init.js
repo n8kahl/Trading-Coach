@@ -68,7 +68,7 @@
     notes: params.get('notes'),
     title: params.get('title'),
   };
-  const emaTokens = parseList(params.get('ema'));
+  const emaTokensInput = parseList(params.get('ema'));
   let keyLevels = parseNamedLevels(params.get('levels'));
   let overlayValues = [];
   const scalePlanToken = (params.get('scale_plan') || 'auto').toLowerCase();
@@ -120,6 +120,7 @@
   });
 
   const emaPalette = ['#38bdf8', '#a855f7', '#facc15', '#f97316'];
+  const emaTokens = emaTokensInput.length ? emaTokensInput : ['9', '21', '50'];
   emaSeries = emaTokens.reduce((acc, token, idx) => {
     const span = parseInt(token, 10);
     if (!Number.isFinite(span) || span <= 0) return acc;
@@ -273,6 +274,45 @@
         if (Number.isFinite(plan.stop)) plan.stop *= scaleMultiplier;
         plan.tps = plan.tps.map((tp) => (Number.isFinite(tp) ? tp * scaleMultiplier : tp));
         keyLevels = keyLevels.map((lvl) => (Number.isFinite(lvl.price) ? { ...lvl, price: lvl.price * scaleMultiplier } : lvl));
+      }
+
+      const deriveSessionLevels = () => {
+        if (!bars.length) return [];
+        const latestTs = bars[bars.length - 1].time;
+        const latestDateKey = new Date(latestTs * 1000).toISOString().slice(0, 10);
+        const sessionBars = bars.filter((bar) => new Date(bar.time * 1000).toISOString().slice(0, 10) === latestDateKey);
+        if (sessionBars.length < 3) return [];
+
+        const levels = [];
+        const sessionHigh = Math.max(...sessionBars.map((bar) => bar.high).filter((val) => Number.isFinite(val)));
+        const sessionLow = Math.min(...sessionBars.map((bar) => bar.low).filter((val) => Number.isFinite(val)));
+        if (Number.isFinite(sessionHigh)) levels.push({ price: sessionHigh, label: 'Session High' });
+        if (Number.isFinite(sessionLow)) levels.push({ price: sessionLow, label: 'Session Low' });
+
+        const firstBar = sessionBars[0];
+        if (firstBar) {
+          const resolutionSeconds = resolutionToSeconds(resolution);
+          const openingRangeSpan = Math.max(15 * 60, resolutionSeconds * 3);
+          const orBars = sessionBars.filter((bar) => bar.time - firstBar.time <= openingRangeSpan);
+          if (orBars.length) {
+            const orHigh = Math.max(...orBars.map((bar) => bar.high).filter((val) => Number.isFinite(val)));
+            const orLow = Math.min(...orBars.map((bar) => bar.low).filter((val) => Number.isFinite(val)));
+            if (Number.isFinite(orHigh)) levels.push({ price: orHigh, label: 'OR High' });
+            if (Number.isFinite(orLow)) levels.push({ price: orLow, label: 'OR Low' });
+          }
+        }
+
+        const priorBars = bars.filter((bar) => new Date(bar.time * 1000).toISOString().slice(0, 10) < latestDateKey);
+        if (priorBars.length) {
+          const prevClose = priorBars[priorBars.length - 1].close;
+          if (Number.isFinite(prevClose)) levels.push({ price: prevClose, label: 'Prev Close' });
+        }
+
+        return levels;
+      };
+
+      if (!keyLevels.length) {
+        keyLevels = deriveSessionLevels();
       }
 
       overlayValues = [

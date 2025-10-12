@@ -137,3 +137,5 @@ Focus first on:
 With those in place we can move toward richer overlays and persistence. Reach out if you need the prior GPT prompt or Action configs—the latest schema reference is in `docs/gpt_integration.md`.
 
 Happy shipping!
+
+- 2025-10-12 00:41:19Z – Schema documentation synced to OpenAPI 1.9.6 (docs/prompts/master_prompt_v2.1.md, docs/gpt_integration.md).

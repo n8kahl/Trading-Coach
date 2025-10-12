@@ -138,7 +138,7 @@ Advanced → tactical string form.
 openapi: 3.1.0
 info:
   title: Trading Coach GPT Actions
-  version: 1.9.5
+  version: 1.9.6
 
 servers:
   - url: https://trading-coach-production.up.railway.app
@@ -920,7 +920,7 @@ components:
               default: false
       required: [symbol, style, snapshot, key_levels]
 
-    # Expanded PlanResponse (covers normal + watch-plan + offline)
+    # Expanded PlanResponse (normal + watch-plan + offline) with options bundle
     PlanResponse:
       type: object
       required: [symbol]
@@ -932,10 +932,14 @@ components:
         trade_detail:
           type: string
           format: uri
+        idea_url:
+          type: string
+          format: uri
         warnings:
           type: array
           items:
             type: string
+
         planning_context:
           type: string
           enum: [live, offline, backtest]
@@ -949,10 +953,12 @@ components:
               type: string
             expected_move_days:
               type: integer
+
         symbol:
           type: string
         style:
           type: string
+          enum: ['scalp', 'intraday', 'swing', 'leaps']
         bias:
           type: string
           enum: ['long', 'short']
@@ -976,6 +982,7 @@ components:
             type: string
         notes:
           type: string
+
         relevant_levels:
           type: object
           additionalProperties: true
@@ -993,15 +1000,6 @@ components:
         chart_url:
           type: string
           format: uri
-        strategy_id:
-          type: string
-        description:
-          type: string
-        score:
-          type: number
-        plan:
-          type: object
-          additionalProperties: true
         charts:
           $ref: '#/components/schemas/ChartsPayload'
         key_levels:
@@ -1011,7 +1009,7 @@ components:
         features:
           type: object
           additionalProperties: true
-        options:
+        plan:
           type: object
           additionalProperties: true
         calc_notes:
@@ -1028,6 +1026,22 @@ components:
         debug:
           type: object
           additionalProperties: true
+
+        # strongly-typed options payload (required fields inside when present)
+        options:
+          type: object
+          properties:
+            table:
+              type: array
+              items:
+                $ref: '#/components/schemas/OptionContract'
+            side:
+              type: string
+              enum: ['call', 'put']
+            style:
+              type: string
+              enum: ['scalp', 'intraday', 'swing', 'leaps']
+          required: [table, side, style]
 
     ChartsParams:
       type: object
@@ -1418,6 +1432,12 @@ components:
           type: array
           items:
             type: string
+        trade_detail:
+          type: string
+          format: uri
+        idea_url:
+          type: string
+          format: uri
       required:
         - plan_id
         - version
@@ -1432,6 +1452,8 @@ components:
         - confidence
         - decimals
         - charts_params
+        - trade_detail
+        - idea_url
 
     IdeaSnapshot:
       type: object
