@@ -269,6 +269,28 @@
   let latestMarketNote = null;
   let currentMarketPhase = null;
   let streamSource = null;
+  let latestCandleData = [];
+  let latestVolumeData = [];
+  const DEFAULT_REPLAY_MINUTES = 10;
+  const REPLAY_MAX_MINUTES = 180;
+  const REPLAY_STEP_MS = 750;
+  let isReplaying = false;
+  let replayQueue = [];
+  let replayIndex = 0;
+  let replayTimer = null;
+  let replayPrevPhase = null;
+  let replayPrevNote = null;
+  let replayHadStream = false;
+  let replayFetchToken = 0;
+  let replaySavedCandleData = [];
+  let replaySavedVolumeData = [];
+  let replaySavedVisibleRange = null;
+  let replayStatusEl = null;
+  let replayStartButton = null;
+  let replayStopButton = null;
+  let replayMinutesInput = null;
+  let replayStatusMessage = '';
+  const replayConfig = { minutes: DEFAULT_REPLAY_MINUTES };
 
   const PLAN_STATUS_META = {
     intact: { label: 'Plan Intact', className: 'status-pill--intact' },
@@ -289,6 +311,7 @@
     premarket: { label: 'Pre-Market', className: 'status-pill--risk', note: 'Pre-market session — liquidity thinner.' },
     afterhours: { label: 'After Hours', className: 'status-pill--risk', note: 'After hours — liquidity thinner.' },
     closed: { label: 'Market Closed', className: 'status-pill--invalid', note: 'Market closed — live updates limited.' },
+    replay: { label: 'Replay Mode', className: 'status-pill--risk', note: 'Replaying recent price action.' },
   };
 
   const formatNextStep = (token) => {
@@ -296,6 +319,13 @@
     const normalized = token.toLowerCase();
     if (NEXT_STEP_LABELS[normalized]) return NEXT_STEP_LABELS[normalized];
     return normalized.replace(/_/g, ' ').replace(/\b\w/g, (ch) => ch.toUpperCase());
+  };
+
+  const clampReplayMinutes = (value) => {
+    const num = Number.parseInt(value, 10);
+    if (!Number.isFinite(num)) return DEFAULT_REPLAY_MINUTES;
+    const clamped = Math.min(Math.max(num, 1), REPLAY_MAX_MINUTES);
+    return clamped;
   };
 
   const updateStatusNote = () => {
@@ -387,6 +417,7 @@
       lastKnownPrice = changes.last_price;
       updateHeaderPricing(lastKnownPrice);
       renderPlanPanel(lastKnownPrice);
+      updatePlanPanelLastPrice(lastKnownPrice);
     }
   };
 
@@ -398,16 +429,16 @@
   };
 
   const handleTickEvent = (payload) => {
-    if (!payload) return;
+    if (!payload || isReplaying) return;
     const price = Number.isFinite(payload.p) ? payload.p : Number.isFinite(payload.close) ? payload.close : null;
     if (price === null) return;
     lastKnownPrice = price;
     updateHeaderPricing(price);
-    renderPlanPanel(price);
+    updatePlanPanelLastPrice(price);
   };
 
   const connectStream = () => {
-    if (typeof EventSource === 'undefined') return;
+    if (isReplaying || typeof EventSource === 'undefined') return;
     const streamUrl = `${baseUrl}/stream/${symbol}`;
     if (streamSource) {
       streamSource.close();
@@ -660,13 +691,18 @@
     const runnerNote = mergedPlanMeta.runner && mergedPlanMeta.runner.note ? mergedPlanMeta.runner.note : null;
 
     const lastPriceCopy = Number.isFinite(lastPrice) ? formatPrice(lastPrice) : '—';
+    const replayMinutesValue = clampReplayMinutes(replayConfig.minutes);
+    replayConfig.minutes = replayMinutesValue;
+    const replayStatusText = replayStatusMessage || (isReplaying ? 'Replay in progress…' : '');
+    const startDisabledAttr = isReplaying ? 'disabled' : '';
+    const stopDisabledAttr = isReplaying ? '' : 'disabled';
 
     planPanelBodyEl.innerHTML = `
       <div class="plan-panel__section">
         <div class="plan-metrics">
           <span><small>Entry</small><strong>${formatPrice(mergedPlanMeta.entry)}</strong></span>
           <span><small>Stop</small><strong>${formatPrice(mergedPlanMeta.stop)}</strong></span>
-          <span><small>Last Price</small><strong>${lastPriceCopy}</strong></span>
+          <span><small>Last Price</small><strong id="plan_last_price_value">${lastPriceCopy}</strong></span>
           <span><small>Confidence</small><strong>${confidenceCopy}</strong></span>
           <span><small>R:R (TP1)</small><strong>${rrCopy}</strong></span>
         </div>
@@ -694,6 +730,24 @@
           }
         </ul>
       </div>
+      <div class="plan-panel__section plan-replay">
+        <h3>Market Replay</h3>
+        <div class="plan-replay__controls">
+          <input
+            id="market_replay_minutes"
+            class="plan-replay__input"
+            type="number"
+            min="1"
+            max="${REPLAY_MAX_MINUTES}"
+            step="1"
+            value="${replayMinutesValue}"
+            aria-label="Minutes to replay"
+          />
+          <button id="market_replay_start" type="button" class="plan-replay__button" ${startDisabledAttr}>Start Replay</button>
+          <button id="market_replay_stop" type="button" class="plan-replay__button" ${stopDisabledAttr}>Stop</button>
+        </div>
+        <p id="market_replay_status" class="plan-replay__status">${replayStatusText}</p>
+      </div>
       ${
         mergedPlanMeta.notes
           ? `<div class="plan-panel__section">
@@ -710,6 +764,295 @@
         planPanelEl.open = true;
       }
     }
+    attachReplayControls();
+    updatePlanPanelLastPrice(lastPrice);
+  };
+
+  const updatePlanPanelLastPrice = (value) => {
+    const lastEl = document.getElementById('plan_last_price_value');
+    if (!lastEl) return;
+    lastEl.textContent = Number.isFinite(value) ? formatPrice(value) : '—';
+  };
+
+  const setReplayStatusMessage = (message) => {
+    replayStatusMessage = message || '';
+    if (replayStatusEl) {
+      replayStatusEl.textContent = replayStatusMessage;
+    }
+  };
+
+  const syncReplayControls = () => {
+    if (replayMinutesInput) {
+      if (!isReplaying) {
+        replayMinutesInput.value = clampReplayMinutes(replayConfig.minutes);
+      }
+      replayMinutesInput.disabled = isReplaying;
+    }
+    if (replayStartButton) replayStartButton.disabled = isReplaying;
+    if (replayStopButton) replayStopButton.disabled = !isReplaying;
+    if (replayStatusEl) {
+      replayStatusEl.textContent = replayStatusMessage;
+    }
+  };
+
+  const fetchReplayBars = async (minutes) => {
+    const minutesClamped = clampReplayMinutes(minutes);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const spanSeconds = Math.max((minutesClamped + 1) * 60, 120);
+    const from = nowSec - spanSeconds;
+    const qs = new URLSearchParams({
+      symbol,
+      resolution: '1',
+      from: String(from),
+      to: String(nowSec),
+    });
+    const response = await fetch(`${baseUrl}/tv-api/bars?${qs.toString()}`, { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`Replay data request failed (${response.status})`);
+    }
+    const payload = await response.json();
+    if (payload.s !== 'ok' || !Array.isArray(payload.t) || !payload.t.length) {
+      return [];
+    }
+    const bars = payload.t.map((time, idx) => ({
+      time: payload.t[idx],
+      open: payload.o[idx],
+      high: payload.h[idx],
+      low: payload.l[idx],
+      close: payload.c[idx],
+      volume: Array.isArray(payload.v) ? payload.v[idx] || 0 : 0,
+    }));
+    bars.sort((a, b) => a.time - b.time);
+    const cutoff = nowSec - minutesClamped * 60;
+    const recent = bars.filter((bar) => bar.time >= cutoff);
+    if (recent.length >= 2) {
+      return recent;
+    }
+    const fallbackCount = Math.max(Math.min(minutesClamped + 1, bars.length), Math.min(bars.length, 2));
+    return bars.slice(-fallbackCount);
+  };
+
+  const stopMarketReplay = ({
+    restoreChart = true,
+    resumeStream = true,
+    message = '',
+    skipFetch = false,
+  } = {}) => {
+    if (replayTimer) {
+      window.clearTimeout(replayTimer);
+      replayTimer = null;
+    }
+    replayFetchToken += 1;
+    const wasReplaying = isReplaying;
+    isReplaying = false;
+    replayQueue = [];
+    replayIndex = 0;
+
+    if (restoreChart && replaySavedCandleData.length) {
+      candleSeries.setData(replaySavedCandleData);
+      volumeSeries.setData(replaySavedVolumeData);
+      if (replaySavedVisibleRange) {
+        try {
+          chart.timeScale().setVisibleRange(replaySavedVisibleRange);
+        } catch {
+          chart.timeScale().fitContent();
+        }
+      } else {
+        chart.timeScale().fitContent();
+      }
+    }
+    replaySavedCandleData = [];
+    replaySavedVolumeData = [];
+    replaySavedVisibleRange = null;
+
+    if (replayPrevPhase || replayPrevNote) {
+      applyMarketStatus(replayPrevPhase || 'closed', replayPrevNote || undefined);
+    }
+    replayPrevPhase = null;
+    replayPrevNote = null;
+
+    if (resumeStream && replayHadStream) {
+      connectStream();
+    }
+    replayHadStream = false;
+
+    if (message) {
+      setReplayStatusMessage(message);
+    } else if (wasReplaying) {
+      setReplayStatusMessage('');
+    } else {
+      setReplayStatusMessage(replayStatusMessage);
+    }
+    syncReplayControls();
+
+    if (!skipFetch) {
+      fetchBars();
+    }
+  };
+
+  const playNextReplayBar = () => {
+    if (!isReplaying) return;
+    if (replayIndex >= replayQueue.length) {
+      stopMarketReplay({
+        restoreChart: true,
+        resumeStream: true,
+        message: 'Replay complete. Resuming live stream…',
+      });
+      return;
+    }
+    const bar = replayQueue[replayIndex];
+    candleSeries.update({
+      time: bar.time,
+      open: bar.open,
+      high: bar.high,
+      low: bar.low,
+      close: bar.close,
+    });
+    volumeSeries.update({
+      time: bar.time,
+      value: bar.volume || 0,
+      color: bar.close >= bar.open ? '#22c55e88' : '#ef444488',
+    });
+    lastKnownPrice = bar.close;
+    updateHeaderPricing(lastKnownPrice);
+    updatePlanPanelLastPrice(lastKnownPrice);
+    replayIndex += 1;
+    setReplayStatusMessage(`Playing ${Math.min(replayIndex, replayQueue.length)}/${replayQueue.length}`);
+    syncReplayControls();
+    replayTimer = window.setTimeout(playNextReplayBar, REPLAY_STEP_MS);
+  };
+
+  const startMarketReplay = async () => {
+    if (isReplaying) return;
+    const minutesRaw = replayMinutesInput ? replayMinutesInput.value : replayConfig.minutes;
+    const minutes = clampReplayMinutes(minutesRaw);
+    replayConfig.minutes = minutes;
+    if (replayMinutesInput) replayMinutesInput.value = minutes;
+
+    replayFetchToken += 1;
+    const token = replayFetchToken;
+    isReplaying = true;
+    replayQueue = [];
+    replayIndex = 0;
+    replayPrevPhase = currentMarketPhase;
+    replayPrevNote = latestMarketNote;
+    replayHadStream = Boolean(streamSource);
+    if (streamSource) {
+      try {
+        streamSource.close();
+      } catch {
+        // ignore
+      }
+      streamSource = null;
+    }
+    applyMarketStatus('replay', `Replaying last ${minutes} minutes of price action.`);
+    setReplayStatusMessage('Preparing replay…');
+    syncReplayControls();
+
+    try {
+      const bars = await fetchReplayBars(minutes);
+      if (!isReplaying || token !== replayFetchToken) {
+        return;
+      }
+      if (!Array.isArray(bars) || bars.length === 0) {
+        stopMarketReplay({
+          restoreChart: true,
+          resumeStream: true,
+          message: 'No intraday data available for that window.',
+          skipFetch: true,
+        });
+        return;
+      }
+
+      replaySavedCandleData = latestCandleData.map((item) => ({ ...item }));
+      replaySavedVolumeData = latestVolumeData.map((item) => ({ ...item }));
+      try {
+        replaySavedVisibleRange = chart.timeScale().getVisibleRange();
+      } catch {
+        replaySavedVisibleRange = null;
+      }
+
+      replayQueue = bars;
+      const firstBar = replayQueue[0];
+      candleSeries.setData([
+        {
+          time: firstBar.time,
+          open: firstBar.open,
+          high: firstBar.high,
+          low: firstBar.low,
+          close: firstBar.close,
+        },
+      ]);
+      volumeSeries.setData([
+        {
+          time: firstBar.time,
+          value: firstBar.volume || 0,
+          color: firstBar.close >= firstBar.open ? '#22c55e88' : '#ef444488',
+        },
+      ]);
+      lastKnownPrice = firstBar.close;
+      updateHeaderPricing(lastKnownPrice);
+      updatePlanPanelLastPrice(lastKnownPrice);
+      try {
+        chart.timeScale().setVisibleRange({
+          from: replayQueue[0].time,
+          to: replayQueue[replayQueue.length - 1].time,
+        });
+      } catch {
+        chart.timeScale().fitContent();
+      }
+
+      replayIndex = 1;
+      setReplayStatusMessage(`Playing ${Math.min(replayIndex, replayQueue.length)}/${replayQueue.length}`);
+      syncReplayControls();
+      replayTimer = window.setTimeout(playNextReplayBar, REPLAY_STEP_MS);
+    } catch (err) {
+      console.error('Market replay failed', err);
+      stopMarketReplay({
+        restoreChart: true,
+        resumeStream: true,
+        message: `Replay failed: ${err.message || err}`,
+      });
+    }
+  };
+
+  const attachReplayControls = () => {
+    replayStatusEl = document.getElementById('market_replay_status');
+    replayStartButton = document.getElementById('market_replay_start');
+    replayStopButton = document.getElementById('market_replay_stop');
+    replayMinutesInput = document.getElementById('market_replay_minutes');
+
+    if (replayMinutesInput) {
+      replayMinutesInput.value = clampReplayMinutes(replayConfig.minutes);
+      replayMinutesInput.addEventListener('change', () => {
+        const updated = clampReplayMinutes(replayMinutesInput.value);
+        replayConfig.minutes = updated;
+        replayMinutesInput.value = updated;
+      });
+      replayMinutesInput.addEventListener('input', () => {
+        replayConfig.minutes = clampReplayMinutes(replayMinutesInput.value);
+      });
+    }
+
+    if (replayStartButton) {
+      replayStartButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        startMarketReplay();
+      });
+    }
+    if (replayStopButton) {
+      replayStopButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        if (isReplaying) {
+          stopMarketReplay({
+            restoreChart: true,
+            resumeStream: true,
+            message: 'Replay stopped. Resuming live stream…',
+          });
+        }
+      });
+    }
+    syncReplayControls();
   };
 
   const updateHeaderPricing = (lastPrice) => {
@@ -750,6 +1093,7 @@
   };
 
   const fetchBars = async () => {
+    if (isReplaying) return;
     const token = ++fetchToken;
     try {
       const now = Math.floor(Date.now() / 1000);
@@ -767,7 +1111,7 @@
       if (!response.ok) throw new Error(`bars request failed (${response.status})`);
       const payload = await response.json();
       if (payload.s !== 'ok' || !payload.t?.length) throw new Error('No data');
-      if (token !== fetchToken) {
+      if (token !== fetchToken || isReplaying) {
         return;
       }
 
@@ -790,6 +1134,7 @@
         close: bar.close,
       }));
       candleSeries.setData(candleData);
+      latestCandleData = candleData.map((bar) => ({ ...bar }));
 
       const volumeData = bars.map((bar) => ({
         time: bar.time,
@@ -797,6 +1142,7 @@
         color: bar.close >= bar.open ? '#22c55e88' : '#ef444488',
       }));
       volumeSeries.setData(volumeData);
+      latestVolumeData = volumeData.map((bar) => ({ ...bar }));
 
       const lastPrice = bars[bars.length - 1]?.close ?? null;
       lastKnownPrice = lastPrice;

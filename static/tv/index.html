@@ -297,6 +297,64 @@
         list-style: square;
       }
 
+      .plan-replay {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .plan-replay__controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .plan-replay__input {
+        width: 72px;
+        padding: 6px 10px;
+        border-radius: 10px;
+        border: 1px solid rgba(96, 123, 180, 0.4);
+        background: rgba(15, 23, 42, 0.6);
+        color: #f8fafc;
+        font-size: 13px;
+        outline: none;
+      }
+
+      .plan-replay__input:focus {
+        border-color: rgba(59, 130, 246, 0.55);
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.18);
+      }
+
+      .plan-replay__button {
+        background: rgba(59, 130, 246, 0.12);
+        border: 1px solid rgba(59, 130, 246, 0.35);
+        color: rgba(219, 234, 254, 0.9);
+        padding: 6px 14px;
+        border-radius: 999px;
+        font-size: 13px;
+        cursor: pointer;
+        transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+      }
+
+      .plan-replay__button:hover:not(:disabled) {
+        background: rgba(59, 130, 246, 0.18);
+        border-color: rgba(59, 130, 246, 0.48);
+        transform: translateY(-1px);
+      }
+
+      .plan-replay__button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+        transform: none;
+      }
+
+      .plan-replay__status {
+        margin: 0;
+        font-size: 12px;
+        color: rgba(148, 163, 184, 0.78);
+      }
+
       .chart-wrapper {
         position: relative;
         border-radius: 20px;
