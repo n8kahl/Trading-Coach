@@ -651,57 +651,104 @@
         series.setData(values);
       });
 
-  const priceLines = [];
-  const priceLineKeys = new Set();
-  const clearPriceLines = () => {
-    while (priceLines.length) {
-      const line = priceLines.pop();
-      candleSeries.removePriceLine(line);
+  const priceLineMap = new Map();
+  const setPriceLine = (id, options) => {
+    if (!Number.isFinite(options.price)) return;
+    const existing = priceLineMap.get(id);
+    if (existing) {
+      existing.applyOptions(options);
+      return existing;
     }
-    priceLineKeys.clear();
+    const line = candleSeries.createPriceLine(options);
+    priceLineMap.set(id, line);
+    return line;
   };
-  const addPriceLine = (price, title, color, style = LightweightCharts.LineStyle.Solid, width = 2) => {
-    if (!Number.isFinite(price)) return;
-    const key = `${title || ''}:${price.toFixed(4)}`;
-    if (priceLineKeys.has(key)) return;
-    const line = candleSeries.createPriceLine({
-      price,
-      color,
-      title,
-      lineWidth: width,
-      lineStyle: style,
-    });
-    priceLines.push(line);
-    priceLineKeys.add(key);
+  const prunePriceLines = (activeIds) => {
+    for (const [id, line] of priceLineMap.entries()) {
+      if (!activeIds.has(id)) {
+        candleSeries.removePriceLine(line);
+        priceLineMap.delete(id);
+      }
+    }
   };
 
-      clearPriceLines();
-      addPriceLine(planForFrame.entry, 'Entry', '#facc15', LightweightCharts.LineStyle.Solid, 2);
-      addPriceLine(planForFrame.stop, 'Stop', '#ef4444', LightweightCharts.LineStyle.Solid, 2);
+      const activeLineIds = new Set();
+      const registerLine = (id, options) => {
+        const line = setPriceLine(id, options);
+        if (line) {
+          activeLineIds.add(id);
+        }
+      };
+
+      registerLine('entry', {
+        price: planForFrame.entry,
+        color: '#facc15',
+        title: 'Entry',
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Solid,
+      });
+
+      registerLine('stop', {
+        price: planForFrame.stop,
+        color: '#ef4444',
+        title: 'Stop',
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Solid,
+      });
+
       planForFrame.tps.forEach((tp, idx) => {
         if (!Number.isFinite(tp)) return;
         const meta = Array.isArray(mergedPlanMeta.target_meta) ? mergedPlanMeta.target_meta[idx] || {} : {};
         const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
-        let label = meta.label || `TP${sequence}`;
-        if (sequence >= 3) {
-          label = 'Runner';
-        }
-        addPriceLine(tp, label, '#22c55e', LightweightCharts.LineStyle.Dashed, 2);
+        const isRunner = sequence >= 3;
+        const label = isRunner ? 'Runner' : meta.label || `TP${sequence}`;
+        const color = isRunner ? '#c084fc' : '#22c55e';
+        const id = isRunner ? 'runner-tp' : `tp:${sequence}`;
+        registerLine(id, {
+          price: tp,
+          color,
+          title: label,
+          lineWidth: 2,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+        });
       });
+
       if (Number.isFinite(lastVwap)) {
-        addPriceLine(lastVwap, 'VWAP', '#f8fafc', LightweightCharts.LineStyle.Solid, 2);
+        registerLine('vwap', {
+          price: lastVwap,
+          color: '#f8fafc',
+          title: 'VWAP',
+          lineWidth: 2,
+          lineStyle: LightweightCharts.LineStyle.Solid,
+        });
       }
+
       [...keyLevels]
         .filter((level) => Number.isFinite(level.price))
         .sort((a, b) => b.price - a.price)
         .forEach((level, idx) => {
           const label = level.label ? level.label : `Level ${idx + 1}`;
-          addPriceLine(level.price, label, '#94a3b8', LightweightCharts.LineStyle.Dotted, 1);
+          const key = `level:${label}:${level.price.toFixed(4)}`;
+          registerLine(key, {
+            price: level.price,
+            color: '#94a3b8',
+            title: label,
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+          });
         });
       if (planForFrame.runner && Number.isFinite(planForFrame.runner.anchor)) {
         const runnerLabel = planForFrame.runner.label || 'Runner Trail';
-        addPriceLine(planForFrame.runner.anchor, runnerLabel, '#ff4fa3', LightweightCharts.LineStyle.Dashed, 2);
+        registerLine('runner-anchor', {
+          price: planForFrame.runner.anchor,
+          color: '#ff4fa3',
+          title: runnerLabel,
+          lineWidth: 2,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+        });
       }
+
+      prunePriceLines(activeLineIds);
 
       candleSeries.setMarkers([]);
 
