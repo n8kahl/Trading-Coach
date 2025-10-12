@@ -166,10 +166,22 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+        cursor: pointer;
       }
 
       .plan-panel__summary::-webkit-details-marker {
         display: none;
+      }
+
+      .plan-panel__summary::after {
+        content: '▾';
+        font-size: 16px;
+        color: rgba(148, 163, 184, 0.8);
+        transition: transform 0.2s ease;
+      }
+
+      .plan-panel:not([open]) .plan-panel__summary::after {
+        transform: rotate(-90deg);
       }
 
       .plan-panel__body {
@@ -269,12 +281,12 @@
         .page-body {
           grid-template-columns: 1fr;
         }
-        .chart-wrapper {
-          order: 1;
-          min-height: 360px;
-        }
         .plan-panel {
+          order: 1;
+        }
+        .chart-wrapper {
           order: 2;
+          min-height: 360px;
         }
       }
 
@@ -347,6 +359,6 @@
       </div>
     </div>
     <div id="debug_banner" class="debug-banner"></div>
-    <script src="tradingview-init.js?v=20251025"></script>
+    <script src="tradingview-init.js?v=20251026"></script>
   </body>
 </html>

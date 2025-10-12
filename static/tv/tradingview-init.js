@@ -68,7 +68,7 @@
     return Number.isFinite(num) ? num : null;
   };
 
-  const plan = {
+  const basePlan = {
     entry: parseNumber(params.get('entry')),
     stop: parseNumber(params.get('stop')),
     tps: parseFloatList(params.get('tp')),
@@ -93,6 +93,9 @@
     })(),
   };
 
+  const clonePlan = () => JSON.parse(JSON.stringify(basePlan));
+  let currentPlan = clonePlan();
+
   let keyLevels = parseNamedLevels(params.get('levels'));
 
   let planMeta = {};
@@ -107,18 +110,18 @@
     symbol,
     style: planMeta.style || params.get('style'),
     style_display: planMeta.style_display || null,
-    bias: planMeta.bias || plan.direction || null,
+    bias: planMeta.bias || basePlan.direction || null,
     confidence: toNumber(planMeta.confidence) ?? paramConfidence,
     risk_reward: toNumber(planMeta.risk_reward ?? planMeta.rr_to_t1),
-    notes: planMeta.notes || plan.notes || null,
+    notes: planMeta.notes || params.get('notes') || null,
     warnings: Array.isArray(planMeta.warnings) ? planMeta.warnings : [],
-    runner: planMeta.runner || plan.runner,
-    targets: Array.isArray(planMeta.targets) && planMeta.targets.length ? planMeta.targets : plan.tps,
-    target_meta: Array.isArray(planMeta.target_meta) && planMeta.target_meta.length ? planMeta.target_meta : plan.tpMeta,
-    entry: toNumber(planMeta.entry) ?? plan.entry,
-    stop: toNumber(planMeta.stop) ?? plan.stop,
-    atr: toNumber(planMeta.atr) ?? plan.atr,
-    strategy: planMeta.strategy_label || plan.strategy,
+    runner: planMeta.runner || basePlan.runner,
+    targets: Array.isArray(planMeta.targets) && planMeta.targets.length ? planMeta.targets : basePlan.tps,
+    target_meta: Array.isArray(planMeta.target_meta) && planMeta.target_meta.length ? planMeta.target_meta : basePlan.tpMeta,
+    entry: toNumber(planMeta.entry) ?? basePlan.entry,
+    stop: toNumber(planMeta.stop) ?? basePlan.stop,
+    atr: toNumber(planMeta.atr) ?? basePlan.atr,
+    strategy: planMeta.strategy_label || basePlan.strategy,
     expected_move: toNumber(planMeta.expected_move),
     horizon_minutes: toNumber(planMeta.horizon_minutes),
     key_levels: planMeta.key_levels || null,
@@ -328,11 +331,11 @@
   };
 
   const renderHeader = () => {
-    const bias = (mergedPlanMeta.bias || plan.direction || '').toLowerCase();
+    const bias = (mergedPlanMeta.bias || currentPlan.direction || '').toLowerCase();
     if (headerSymbolEl) headerSymbolEl.textContent = symbol;
     if (headerStrategyEl) {
       const styleLabel = mergedPlanMeta.style_display || (mergedPlanMeta.style || '').toUpperCase();
-      const strategyLabel = mergedPlanMeta.strategy || plan.strategy || '';
+      const strategyLabel = mergedPlanMeta.strategy || currentPlan.strategy || '';
       headerStrategyEl.textContent = [styleLabel, strategyLabel].filter(Boolean).join(' · ');
     }
     if (headerBiasEl) headerBiasEl.textContent = bias ? `Bias: ${bias === 'long' ? 'Long 🟢' : 'Short 🔴'}` : '';
@@ -349,8 +352,8 @@
     const fallbackRRForHeader = (() => {
       const entry = mergedPlanMeta.entry;
       const stop = mergedPlanMeta.stop;
-      const target = plan.tps?.[0];
-      const direction = (mergedPlanMeta.bias || plan.direction || 'long').toLowerCase();
+      const target = currentPlan.tps?.[0];
+      const direction = (mergedPlanMeta.bias || currentPlan.direction || 'long').toLowerCase();
       if (!Number.isFinite(entry) || !Number.isFinite(stop) || !Number.isFinite(target)) return null;
       const risk = direction === 'long' ? entry - stop : stop - entry;
       const reward = direction === 'long' ? target - entry : entry - target;
@@ -369,11 +372,10 @@
 
   const renderPlanPanel = (lastPrice) => {
     if (!planPanelBodyEl) return;
-    const bias = (mergedPlanMeta.bias || plan.direction || '').toLowerCase();
     const targetsMeta = Array.isArray(mergedPlanMeta.target_meta) ? mergedPlanMeta.target_meta : [];
     const warnings = Array.isArray(mergedPlanMeta.warnings) ? mergedPlanMeta.warnings : [];
 
-    const targetsList = plan.tps
+    const targetsList = currentPlan.tps
       .map((tp, idx) => {
         if (!Number.isFinite(tp)) return null;
         const meta = targetsMeta[idx] || {};
@@ -404,8 +406,8 @@
     const rrFallback = (() => {
       const entry = mergedPlanMeta.entry;
       const stop = mergedPlanMeta.stop;
-      const target = plan.tps?.[0];
-      const direction = (mergedPlanMeta.bias || plan.direction || 'long').toLowerCase();
+      const target = currentPlan.tps?.[0];
+      const direction = (mergedPlanMeta.bias || currentPlan.direction || 'long').toLowerCase();
       if (!Number.isFinite(entry) || !Number.isFinite(stop) || !Number.isFinite(target)) return null;
       const risk = direction === 'long' ? entry - stop : stop - entry;
       const reward = direction === 'long' ? target - entry : entry - target;
@@ -536,6 +538,8 @@
         volume: payload.v[idx] || 0,
       }));
 
+      const planForFrame = clonePlan();
+
       const candleData = bars.map((bar) => ({
         time: bar.time,
         open: bar.open,
@@ -560,8 +564,8 @@
       let scaleMultiplier = 1;
       if (scalePlanToken !== 'off') {
         if (scalePlanToken === 'auto') {
-          if (Number.isFinite(plan.entry) && Number.isFinite(lastPrice) && plan.entry && lastPrice) {
-            const ratio = lastPrice / plan.entry;
+          if (Number.isFinite(planForFrame.entry) && Number.isFinite(lastPrice) && planForFrame.entry && lastPrice) {
+            const ratio = lastPrice / planForFrame.entry;
             if (ratio > 1.2 || ratio < 0.8) {
               scaleMultiplier = ratio;
             }
@@ -575,15 +579,20 @@
       }
 
       if (scaleMultiplier !== 1 && Number.isFinite(scaleMultiplier) && scaleMultiplier > 0) {
-        if (Number.isFinite(plan.entry)) plan.entry *= scaleMultiplier;
-        if (Number.isFinite(plan.stop)) plan.stop *= scaleMultiplier;
-        plan.tps = plan.tps.map((tp) => (Number.isFinite(tp) ? tp * scaleMultiplier : tp));
+        if (Number.isFinite(planForFrame.entry)) planForFrame.entry *= scaleMultiplier;
+        if (Number.isFinite(planForFrame.stop)) planForFrame.stop *= scaleMultiplier;
+        planForFrame.tps = planForFrame.tps.map((tp) => (Number.isFinite(tp) ? tp * scaleMultiplier : tp));
+        if (planForFrame.runner && Number.isFinite(planForFrame.runner.anchor)) {
+          planForFrame.runner.anchor *= scaleMultiplier;
+        }
       }
 
+      currentPlan = planForFrame;
+
       const overlayValues = [
-        plan.entry,
-        plan.stop,
-        ...plan.tps,
+        planForFrame.entry,
+        planForFrame.stop,
+        ...planForFrame.tps,
         ...keyLevels.map((lvl) => lvl.price),
       ].filter((value) => Number.isFinite(value));
 
@@ -667,9 +676,9 @@
   };
 
       clearPriceLines();
-      addPriceLine(plan.entry, 'Entry', '#facc15', LightweightCharts.LineStyle.Solid, 2);
-      addPriceLine(plan.stop, 'Stop', '#ef4444', LightweightCharts.LineStyle.Solid, 2);
-      plan.tps.forEach((tp, idx) => {
+      addPriceLine(planForFrame.entry, 'Entry', '#facc15', LightweightCharts.LineStyle.Solid, 2);
+      addPriceLine(planForFrame.stop, 'Stop', '#ef4444', LightweightCharts.LineStyle.Solid, 2);
+      planForFrame.tps.forEach((tp, idx) => {
         if (!Number.isFinite(tp)) return;
         const meta = Array.isArray(mergedPlanMeta.target_meta) ? mergedPlanMeta.target_meta[idx] || {} : {};
         const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
@@ -689,9 +698,9 @@
           const label = level.label ? level.label : `Level ${idx + 1}`;
           addPriceLine(level.price, label, '#94a3b8', LightweightCharts.LineStyle.Dotted, 1);
         });
-      if (plan.runner && Number.isFinite(plan.runner.anchor)) {
-        const runnerLabel = plan.runner.label || 'Runner Trail';
-        addPriceLine(plan.runner.anchor, runnerLabel, '#ff4fa3', LightweightCharts.LineStyle.Dashed, 2);
+      if (planForFrame.runner && Number.isFinite(planForFrame.runner.anchor)) {
+        const runnerLabel = planForFrame.runner.label || 'Runner Trail';
+        addPriceLine(planForFrame.runner.anchor, runnerLabel, '#ff4fa3', LightweightCharts.LineStyle.Dashed, 2);
       }
 
       candleSeries.setMarkers([]);
