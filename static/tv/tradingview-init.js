@@ -93,6 +93,8 @@
     })(),
   };
 
+  let keyLevels = parseNamedLevels(params.get('levels'));
+
   let planMeta = {};
   try {
     planMeta = JSON.parse(params.get('plan_meta') || '{}');
