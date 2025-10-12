@@ -371,9 +371,21 @@
       headerConfidenceEl.textContent = displayConfidence !== null ? `Confidence: ${(displayConfidence * 100).toFixed(0)}%` : '';
     }
     const fallbackRRForHeader = (() => {
-      const entry = mergedPlanMeta.entry;
-      const stop = mergedPlanMeta.stop;
-      const target = currentPlan.tps?.[0];
+      const entry =
+        Number.isFinite(currentPlan.entry) && Number.isFinite(currentPlan.stop)
+          ? currentPlan.entry
+          : mergedPlanMeta.entry;
+      const stop =
+        Number.isFinite(currentPlan.entry) && Number.isFinite(currentPlan.stop)
+          ? currentPlan.stop
+          : mergedPlanMeta.stop;
+      const targetsSource =
+        Number.isFinite(currentPlan.entry) && Number.isFinite(currentPlan.stop)
+          ? currentPlan.tps
+          : Array.isArray(mergedPlanMeta.targets)
+            ? mergedPlanMeta.targets
+            : [];
+      const target = targetsSource?.find((value) => Number.isFinite(value));
       const direction = (mergedPlanMeta.bias || currentPlan.direction || 'long').toLowerCase();
       if (!Number.isFinite(entry) || !Number.isFinite(stop) || !Number.isFinite(target)) return null;
       const risk = direction === 'long' ? entry - stop : stop - entry;
@@ -425,9 +437,15 @@
     const confidenceCopy = rawConfidence !== null && rawConfidence > 0 ? `${(rawConfidence * 100).toFixed(0)}%` : '—';
     const rrValue = toNumber(mergedPlanMeta.risk_reward);
     const rrFallback = (() => {
-      const entry = mergedPlanMeta.entry;
-      const stop = mergedPlanMeta.stop;
-      const target = currentPlan.tps?.[0];
+      const useScaled = Number.isFinite(currentPlan.entry) && Number.isFinite(currentPlan.stop);
+      const entry = useScaled ? currentPlan.entry : mergedPlanMeta.entry;
+      const stop = useScaled ? currentPlan.stop : mergedPlanMeta.stop;
+      const targetPool = useScaled
+        ? currentPlan.tps
+        : Array.isArray(mergedPlanMeta.targets)
+          ? mergedPlanMeta.targets
+          : [];
+      const target = targetPool?.find((value) => Number.isFinite(value));
       const direction = (mergedPlanMeta.bias || currentPlan.direction || 'long').toLowerCase();
       if (!Number.isFinite(entry) || !Number.isFinite(stop) || !Number.isFinite(target)) return null;
       const risk = direction === 'long' ? entry - stop : stop - entry;
