@@ -391,47 +391,6 @@
     }
   };
 
-  const buildMarkers = (bars) => {
-    if (!bars.length) return [];
-    const markerTime = bars[bars.length - 1].time;
-    if (!Number.isFinite(markerTime)) return [];
-    const direction = (mergedPlanMeta.bias || plan.direction || 'long').toLowerCase();
-    const markers = [];
-    if (Number.isFinite(plan.entry)) {
-      markers.push({
-        time: markerTime,
-        position: direction === 'long' ? 'belowBar' : 'aboveBar',
-        color: '#facc15',
-        shape: direction === 'long' ? 'arrowUp' : 'arrowDown',
-        text: `Entry ${formatPrice(plan.entry)}`,
-      });
-    }
-    if (Number.isFinite(plan.stop)) {
-      markers.push({
-        time: markerTime,
-        position: direction === 'long' ? 'aboveBar' : 'belowBar',
-        color: '#ef4444',
-        shape: direction === 'long' ? 'arrowDown' : 'arrowUp',
-        text: `Stop ${formatPrice(plan.stop)}`,
-      });
-    }
-    const metaList = Array.isArray(mergedPlanMeta.target_meta) ? mergedPlanMeta.target_meta : [];
-    plan.tps.forEach((tp, idx) => {
-      if (!Number.isFinite(tp)) return;
-      const meta = metaList[idx] || {};
-      const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
-      const label = sequence >= 3 ? 'Runner' : `TP${sequence}`;
-      markers.push({
-        time: markerTime,
-        position: direction === 'long' ? 'aboveBar' : 'belowBar',
-        color: sequence >= 3 ? '#c084fc' : '#22c55e',
-        shape: 'circle',
-        text: `${label} ${formatPrice(tp)}`,
-      });
-    });
-    return markers;
-  };
-
   const rangeTokenRaw = (params.get('range') || '').toLowerCase();
 
   const resolveSpanSeconds = () => {
@@ -643,11 +602,7 @@
         addPriceLine(plan.runner.anchor, runnerLabel, '#ff4fa3', LightweightCharts.LineStyle.Dashed, 2);
       }
 
-      if (mergedPlanMeta.bias && plan.tps.length) {
-        candleSeries.setMarkers(buildMarkers(bars));
-      } else {
-        candleSeries.setMarkers([]);
-      }
+      candleSeries.setMarkers([]);
 
       const priceScale = chart.priceScale('right');
       if (overlayValues.length) {
