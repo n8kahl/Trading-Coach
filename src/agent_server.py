@@ -944,7 +944,8 @@ async def _build_watch_plan(symbol: str, style: Optional[str], request: Request)
         "stop": plan_block["stop"],
         "tp": ",".join(str(t) for t in plan_block["targets"]),
         "notes": "Watch plan: market closed; review before open.",
-        "view": "1d",
+        "view": _view_for_style(style),
+        "range": _range_for_style(style),
         "ema": "9,20,50",
         "vwap": "1",
         "atr": f"{atr:.4f}" if atr else None,
@@ -1656,8 +1657,19 @@ def _timeframe_for_style(style: str | None) -> str:
 
 def _view_for_style(style: str | None) -> str:
     normalized = _normalize_style(style) or ""
-    mapping = {"scalp": "30m", "intraday": "1d", "swing": "5d", "leap": "fit"}
+    mapping = {"scalp": "1d", "intraday": "5d", "swing": "3M", "leap": "1Y"}
     return mapping.get(normalized, "fit")
+
+
+def _range_for_style(style: str | None) -> str:
+    normalized = _normalize_style(style) or ""
+    mapping = {
+        "scalp": "5d",
+        "intraday": "15d",
+        "swing": "6m",
+        "leap": "1y",
+    }
+    return mapping.get(normalized, "30d")
 
 
 def _humanize_strategy(strategy_id: str | None) -> str:
@@ -2620,6 +2632,7 @@ async def gpt_scan(
             chart_query.setdefault("direction", signal.plan.direction)
             if signal.plan.atr and "atr" not in chart_query:
                 chart_query["atr"] = f"{float(signal.plan.atr):.4f}"
+        chart_query["range"] = _range_for_style(style)
         bias_for_chart = plan_direction or direction_hint
         chart_query["title"] = _format_chart_title(signal.symbol, bias_for_chart, signal.strategy_id)
         chart_note = None
@@ -2837,6 +2850,7 @@ async def gpt_plan(
             "title",
             _format_chart_title(symbol, bias_token, first.get("strategy_id")),
         )
+        chart_params_payload.setdefault("range", _range_for_style(first.get("style")))
         if entry_val is not None or stop_val is not None or targets_list:
             default_note = _format_chart_note(symbol, first.get("style"), entry_val, stop_val, targets_list)
             if default_note and not chart_params_payload.get("notes"):

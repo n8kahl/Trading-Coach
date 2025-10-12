@@ -176,10 +176,43 @@
     legendEl.classList.add('visible');
   };
 
+  const rangeTokenRaw = (params.get('range') || '').toLowerCase();
+
+  const resolveSpanSeconds = () => {
+    const base = resolutionToSeconds(resolution) * 600;
+    if (!rangeTokenRaw) return base;
+
+    if (/^\d+$/.test(rangeTokenRaw)) {
+      const barsCount = parseInt(rangeTokenRaw, 10);
+      if (Number.isFinite(barsCount) && barsCount > 0) {
+        return resolutionToSeconds(resolution) * barsCount;
+      }
+    }
+
+    const match = rangeTokenRaw.match(/^(\d+)([dwmy])$/);
+    if (match) {
+      const value = parseInt(match[1], 10);
+      const unit = match[2];
+      const UNIT_SECONDS = { d: 86400, w: 604800, m: 2629800, y: 31557600 };
+      const mult = UNIT_SECONDS[unit];
+      if (mult && Number.isFinite(value) && value > 0) {
+        return value * mult;
+      }
+    }
+
+    if (rangeTokenRaw === 'fit') {
+      return base;
+    }
+
+    return base;
+  };
+
   const fetchBars = async () => {
     try {
       const now = Math.floor(Date.now() / 1000);
-      const span = Math.min(resolutionToSeconds(resolution) * 600, 60 * 60 * 24 * 365);
+      const minSpan = resolutionToSeconds(resolution) * 200;
+      const maxSpan = 60 * 60 * 24 * 365 * 2; // cap at ~2 years
+      const span = Math.min(Math.max(resolveSpanSeconds(), minSpan), maxSpan);
       const from = now - span;
       const qs = new URLSearchParams({
         symbol,
