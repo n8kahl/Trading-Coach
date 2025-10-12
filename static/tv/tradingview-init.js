@@ -407,9 +407,7 @@
       plan.tps.forEach((tp, idx) => {
         const meta = Array.isArray(plan.tpMeta) ? plan.tpMeta[idx] || {} : {};
         const label = meta.label || `TP${idx + 1}`;
-        const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
-        const isStretchTarget = sequence >= 3 || /3/.test(label);
-        const color = isStretchTarget ? '#c084fc' : '#7CFC00';
+        const color = meta.sequence === 3 ? '#c084fc' : '#7CFC00';
         addPriceLine(tp, label, color, LightweightCharts.LineStyle.Solid, 3);
       });
       [...keyLevels]
