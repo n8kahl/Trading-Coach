@@ -18,7 +18,7 @@ focuses on data prep; the agent performs the higher-level reasoning.
 
 - Master prompt (**approved v2.1**): [`docs/prompts/master_prompt_v2.1.md`](prompts/master_prompt_v2.1.md)
 - API schema (**OpenAPI 1.9.6**): mirrors `https://trading-coach-production.up.railway.app/openapi.json`
-- Deployment status: **Production ready & approved** (2025-10-10 refresh)
+- Deployment status: **Production ready & approved** (2025-10-10 refresh; commit `23a45da`)
 - Persistent storage: set `DB_URL` (Postgres) so `/gpt/plan` snapshots and idea permalinks survive restarts.
 
 ---

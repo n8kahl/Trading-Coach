@@ -139,3 +139,5 @@ With those in place we can move toward richer overlays and persistence. Reach ou
 Happy shipping!
 
 - 2025-10-12 00:41:19Z – Schema documentation synced to OpenAPI 1.9.6 (docs/prompts/master_prompt_v2.1.md, docs/gpt_integration.md).
+
+- 2025-10-11T20:37:56.623921-05:00 – Marked commit 23a45da as production ready baseline (docs/gpt_integration.md).
