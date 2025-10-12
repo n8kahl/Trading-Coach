@@ -1792,13 +1792,37 @@ def _extract_levels_for_chart(key_levels: Dict[str, float]) -> List[str]:
         ("prev_close", "Prev Close"),
         ("gap_fill", "Gap Fill"),
     ]
+    included: set[str] = set()
     levels: List[str] = []
+
+    def _append(value: Any, label: str) -> None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(numeric):
+            return
+        token = f"{numeric:.2f}|{label}"
+        if token not in levels:
+            levels.append(token)
+
     for key, label in order:
-        value = key_levels.get(key)
-        if value is None:
+        if key in key_levels:
+            _append(key_levels.get(key), label)
+            included.add(key)
+
+    for key, value in key_levels.items():
+        if key in included:
             continue
-        if isinstance(value, (int, float)) and math.isfinite(float(value)):
-            levels.append(f"{float(value):.2f}|{label}")
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric):
+            continue
+        label = key.replace("_", " ").title()
+        _append(numeric, label)
+
     return levels
 
 

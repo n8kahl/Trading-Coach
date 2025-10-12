@@ -358,7 +358,7 @@
       if (vwapRequested) {
         vwapSeries = chart.addLineSeries({
           lineWidth: 2,
-          color: '#ffffff',
+          color: '#f8fafc',
           title: 'VWAP',
         });
       }
@@ -405,7 +405,8 @@
         vwapSeries.setData(values);
       }
       if (Number.isFinite(lastVwap)) {
-        addPriceLine(lastVwap, 'VWAP', '#ffffff', LightweightCharts.LineStyle.Solid, 2);
+        addPriceLine(lastVwap, 'VWAP', '#f8fafc', LightweightCharts.LineStyle.Solid, 2);
+        overlayValues.push(lastVwap);
       }
 
       clearPriceLines();
