@@ -1856,12 +1856,16 @@ def _plan_meta_payload(
     horizon_minutes: float | None = None,
     extra: Dict[str, Any] | None = None,
 ) -> str:
+    risk_reward = plan.get("risk_reward")
+    if risk_reward is None:
+        risk_reward = plan.get("rr_to_t1")
+
     payload: Dict[str, Any] = {
         "symbol": symbol.upper(),
         "style": style,
         "bias": plan.get("direction"),
         "confidence": plan.get("confidence"),
-        "risk_reward": plan.get("risk_reward"),
+        "risk_reward": risk_reward,
         "notes": plan.get("notes"),
         "warnings": plan.get("warnings") or [],
         "entry": plan.get("entry"),
@@ -2741,7 +2745,15 @@ async def gpt_scan(
                 "targets": plan_targets,
                 "target_meta": plan_payload.get("target_meta") if isinstance(plan_payload, dict) else [],
                 "confidence": float(signal.plan.confidence) if signal.plan.confidence is not None else None,
-                "risk_reward": float(signal.plan.risk_reward) if signal.plan.risk_reward is not None else None,
+                "risk_reward": (
+                    float(signal.plan.risk_reward)
+                    if signal.plan.risk_reward is not None
+                    else (
+                        float(plan_payload.get("rr_to_t1"))
+                        if isinstance(plan_payload, dict) and plan_payload.get("rr_to_t1") is not None
+                        else None
+                    )
+                ),
                 "notes": plan_payload.get("notes") if isinstance(plan_payload, dict) else None,
                 "warnings": plan_payload.get("warnings") if isinstance(plan_payload, dict) else [],
                 "setup": signal.strategy_id,

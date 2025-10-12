@@ -63,6 +63,11 @@
   const theme = params.get('theme') === 'light' ? 'light' : 'dark';
   const baseUrl = `${window.location.protocol}//${window.location.host}`;
 
+  const toNumber = (value) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  };
+
   const plan = {
     entry: parseNumber(params.get('entry')),
     stop: parseNumber(params.get('stop')),
@@ -100,19 +105,19 @@
     style: planMeta.style || params.get('style'),
     style_display: planMeta.style_display || null,
     bias: planMeta.bias || plan.direction || null,
-    confidence: planMeta.confidence,
-    risk_reward: planMeta.risk_reward,
+    confidence: toNumber(planMeta.confidence),
+    risk_reward: toNumber(planMeta.risk_reward ?? planMeta.rr_to_t1),
     notes: planMeta.notes || plan.notes || null,
     warnings: Array.isArray(planMeta.warnings) ? planMeta.warnings : [],
     runner: planMeta.runner || plan.runner,
     targets: Array.isArray(planMeta.targets) && planMeta.targets.length ? planMeta.targets : plan.tps,
     target_meta: Array.isArray(planMeta.target_meta) && planMeta.target_meta.length ? planMeta.target_meta : plan.tpMeta,
-    entry: Number.isFinite(planMeta.entry) ? planMeta.entry : plan.entry,
-    stop: Number.isFinite(planMeta.stop) ? planMeta.stop : plan.stop,
-    atr: Number.isFinite(planMeta.atr) ? planMeta.atr : plan.atr,
+    entry: toNumber(planMeta.entry) ?? plan.entry,
+    stop: toNumber(planMeta.stop) ?? plan.stop,
+    atr: toNumber(planMeta.atr) ?? plan.atr,
     strategy: planMeta.strategy_label || plan.strategy,
-    expected_move: planMeta.expected_move,
-    horizon_minutes: planMeta.horizon_minutes,
+    expected_move: toNumber(planMeta.expected_move),
+    horizon_minutes: toNumber(planMeta.horizon_minutes),
   };
 
   const headerSymbolEl = document.getElementById('header_symbol');
@@ -249,11 +254,15 @@
   };
 
   const formatPrice = (value) => (Number.isFinite(value) ? value.toFixed(2) : '—');
-  const formatPercentage = (value) => (Number.isFinite(value) ? `${(value * 100).toFixed(0)}%` : '—');
+  const formatPercentage = (value) => {
+    const num = toNumber(value);
+    return num !== null ? `${(num * 100).toFixed(0)}%` : '—';
+  };
 
   const formatProbability = (value) => {
-    if (!Number.isFinite(value)) return null;
-    return `${Math.round(value * 100)}% POT`;
+    const num = toNumber(value);
+    if (num === null) return null;
+    return `${Math.round(num * 100)}% POT`;
   };
 
   const estimateDuration = () => {
@@ -287,14 +296,12 @@
     }
     if (headerBiasEl) headerBiasEl.textContent = bias ? `Bias: ${bias === 'long' ? 'Long 🟢' : 'Short 🔴'}` : '';
     if (headerConfidenceEl) {
-      headerConfidenceEl.textContent = Number.isFinite(mergedPlanMeta.confidence)
-        ? `Confidence: ${(mergedPlanMeta.confidence * 100).toFixed(0)}%`
-        : '';
+      const confidenceValue = toNumber(mergedPlanMeta.confidence);
+      headerConfidenceEl.textContent = confidenceValue !== null ? `Confidence: ${(confidenceValue * 100).toFixed(0)}%` : '';
     }
     if (headerRREl) {
-      headerRREl.textContent = Number.isFinite(mergedPlanMeta.risk_reward)
-        ? `R:R (TP1): ${mergedPlanMeta.risk_reward.toFixed(2)}`
-        : '';
+      const rrValue = toNumber(mergedPlanMeta.risk_reward);
+      headerRREl.textContent = rrValue !== null ? `R:R (TP1): ${rrValue.toFixed(2)}` : '';
     }
     if (headerDurationEl) {
       headerDurationEl.textContent = estimateDuration() || '';
@@ -313,9 +320,11 @@
         const meta = targetsMeta[idx] || {};
         const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
         const label = sequence >= 3 ? 'Runner' : `TP${sequence}`;
-        const rr = Number.isFinite(meta.rr) ? ` · R:R ${meta.rr.toFixed(2)}` : '';
+        const rrVal = toNumber(meta.rr);
+        const rr = rrVal !== null ? ` · R:R ${rrVal.toFixed(2)}` : '';
         const pot = formatProbability(meta.prob_touch);
-        const em = Number.isFinite(meta.em_fraction) ? ` · ${meta.em_fraction.toFixed(2)}×EM` : '';
+        const emVal = toNumber(meta.em_fraction);
+        const em = emVal !== null ? ` · ${emVal.toFixed(2)}×EM` : '';
         return `<li><strong>${label}:</strong> ${formatPrice(tp)}${em}${pot ? ` · ${pot}` : ''}${rr}</li>`;
       })
       .filter(Boolean)
@@ -325,10 +334,10 @@
       .map((warning) => `<li>${warning}</li>`)
       .join('');
 
-    const confidenceCopy = Number.isFinite(mergedPlanMeta.confidence)
-      ? `${(mergedPlanMeta.confidence * 100).toFixed(0)}%`
-      : '—';
-    const rrCopy = Number.isFinite(mergedPlanMeta.risk_reward) ? mergedPlanMeta.risk_reward.toFixed(2) : '—';
+    const confidenceValue = toNumber(mergedPlanMeta.confidence);
+    const confidenceCopy = confidenceValue !== null ? `${(confidenceValue * 100).toFixed(0)}%` : '—';
+    const rrValue = toNumber(mergedPlanMeta.risk_reward);
+    const rrCopy = rrValue !== null ? rrValue.toFixed(2) : '—';
     const runnerNote = mergedPlanMeta.runner && mergedPlanMeta.runner.note ? mergedPlanMeta.runner.note : null;
 
     const lastPriceCopy = Number.isFinite(lastPrice) ? formatPrice(lastPrice) : '—';
@@ -604,30 +613,7 @@
 
       candleSeries.setMarkers([]);
 
-      const priceScale = chart.priceScale('right');
-      if (overlayValues.length) {
-        const dataLows = bars.map((bar) => bar.low).filter((val) => Number.isFinite(val));
-        const dataHighs = bars.map((bar) => bar.high).filter((val) => Number.isFinite(val));
-        const dataMin = dataLows.length ? Math.min(...dataLows) : null;
-        const dataMax = dataHighs.length ? Math.max(...dataHighs) : null;
-        const overlayMin = Math.min(...overlayValues);
-        const overlayMax = Math.max(...overlayValues);
-        const combinedMin = [overlayMin, dataMin]
-          .filter((val) => val !== null && val !== undefined)
-          .reduce((acc, val) => Math.min(acc, val));
-        const combinedMax = [overlayMax, dataMax]
-          .filter((val) => val !== null && val !== undefined)
-          .reduce((acc, val) => Math.max(acc, val));
-        if (Number.isFinite(combinedMin) && Number.isFinite(combinedMax) && combinedMax > combinedMin) {
-          const padding = Math.max((combinedMax - combinedMin) * 0.1, 0.01);
-          priceScale.setAutoScale(false);
-          priceScale.setPriceRange({ minValue: combinedMin - padding, maxValue: combinedMax + padding });
-        } else {
-          priceScale.setAutoScale(true);
-        }
-      } else {
-        priceScale.setAutoScale(true);
-      }
+      chart.priceScale('right').applyOptions({ autoScale: true });
 
       debugEl.style.display = 'none';
       debugEl.textContent = '';

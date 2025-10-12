@@ -17,83 +17,93 @@
         padding: 0;
         height: 100%;
         width: 100%;
-        font-family: "Inter", "Segoe UI", sans-serif;
-        background: #070b10;
-        color: #e6edf3;
+        font-family: 'Inter', 'Segoe UI', sans-serif;
+        background: radial-gradient(circle at top, #111827 0%, #05070c 60%, #020409 100%);
+        color: #e8f1ff;
       }
       .page {
         min-height: 100%;
         display: flex;
         flex-direction: column;
-        background: #070b10;
+        backdrop-filter: blur(6px);
       }
       .plan-header {
-        padding: 16px 20px 8px;
+        padding: 20px clamp(16px, 4vw, 24px) 12px;
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 12px;
+        gap: 16px;
         align-items: end;
       }
       .plan-header__symbol {
-        font-size: 26px;
+        font-size: clamp(24px, 3vw, 32px);
         font-weight: 700;
         letter-spacing: 0.08em;
+        color: #f8fafc;
       }
       .plan-header__strategy {
         font-size: 14px;
-        opacity: 0.7;
-        margin-top: 4px;
+        opacity: 0.65;
+        margin-top: 6px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
       }
       .plan-header__metrics {
         display: flex;
         flex-wrap: wrap;
         gap: 12px;
         font-size: 13px;
-        opacity: 0.85;
+        color: rgba(226, 232, 240, 0.9);
       }
       .plan-header__metrics span {
         display: inline-flex;
         gap: 4px;
         align-items: center;
+        padding: 4px 8px;
+        border-radius: 6px;
+        background: rgba(148, 163, 184, 0.12);
       }
       .plan-header__duration {
         font-size: 13px;
-        opacity: 0.85;
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 6px;
         justify-content: flex-end;
         align-items: flex-end;
+        color: rgba(226, 232, 240, 0.8);
       }
       .plan-header__duration strong {
         font-weight: 600;
+        color: #facc15;
       }
 
       .timeframe-switcher {
         display: flex;
         gap: 8px;
-        padding: 0 20px 12px;
+        padding: 0 clamp(16px, 4vw, 24px) 16px;
         overflow-x: auto;
         scrollbar-width: thin;
       }
       .timeframe-button {
-        background: rgba(148, 163, 184, 0.16);
-        border: none;
-        color: #e6edf3;
-        padding: 6px 12px;
+        background: rgba(59, 130, 246, 0.12);
+        border: 1px solid rgba(59, 130, 246, 0.25);
+        color: #dbeafe;
+        padding: 6px 14px;
         border-radius: 999px;
         font-size: 13px;
         cursor: pointer;
-        transition: background 0.2s ease, color 0.2s ease;
+        transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
         white-space: nowrap;
       }
       .timeframe-button:hover {
-        background: rgba(148, 163, 184, 0.24);
+        background: rgba(59, 130, 246, 0.2);
+        border-color: rgba(59, 130, 246, 0.35);
       }
       .timeframe-button.active {
-        background: #2563eb;
+        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+        border-color: transparent;
         color: #f8fafc;
         font-weight: 600;
+        box-shadow: 0 8px 18px rgba(37, 99, 235, 0.28);
       }
 
       .page-body {
@@ -101,48 +111,58 @@
         min-height: 0;
         display: grid;
         grid-template-columns: minmax(260px, 320px) 1fr;
-        gap: 16px;
-        padding: 0 20px 20px;
+        gap: clamp(14px, 3vw, 22px);
+        padding: 0 clamp(16px, 4vw, 24px) clamp(18px, 4vw, 28px);
       }
 
       .plan-panel {
-        background: rgba(15, 23, 42, 0.92);
-        border-radius: 12px;
-        border: 1px solid rgba(148, 163, 184, 0.15);
+        background: linear-gradient(160deg, rgba(8, 11, 19, 0.96), rgba(11, 17, 31, 0.88));
+        border-radius: 16px;
+        border: 1px solid rgba(100, 116, 139, 0.25);
+        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.45);
         overflow: hidden;
+        transition: transform 0.2s ease, border-color 0.2s ease;
+      }
+      .plan-panel:focus-within,
+      .plan-panel:hover {
+        border-color: rgba(59, 130, 246, 0.35);
+        transform: translateY(-1px);
       }
       .plan-panel__summary {
-        padding: 14px 18px;
+        padding: 16px 20px;
         font-size: 15px;
         font-weight: 600;
         cursor: pointer;
         list-style: none;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
       }
       .plan-panel__summary::-webkit-details-marker {
         display: none;
       }
       .plan-panel__body {
-        padding: 0 18px 18px;
+        padding: 0 20px 20px;
         display: flex;
         flex-direction: column;
-        gap: 18px;
+        gap: 20px;
         font-size: 13px;
       }
       .plan-panel__section h3 {
-        margin: 12px 0 6px;
-        font-size: 13px;
+        margin: 14px 0 6px;
+        font-size: 12px;
         text-transform: uppercase;
-        letter-spacing: 0.06em;
-        opacity: 0.7;
+        letter-spacing: 0.12em;
+        opacity: 0.68;
       }
       .plan-panel__list {
         display: grid;
         grid-template-columns: max-content 1fr;
-        gap: 6px 12px;
+        gap: 6px 14px;
         margin: 0;
       }
       .plan-panel__list dt {
-        opacity: 0.7;
+        opacity: 0.66;
       }
       .plan-panel__targets,
       .plan-panel__warnings {
@@ -152,18 +172,19 @@
         flex-direction: column;
         gap: 6px;
       }
-      .plan-panel__targets li {
-        list-style: disc;
+      .plan-panel__targets li::marker {
+        color: #22c55e;
       }
-      .plan-panel__warnings li {
-        list-style: square;
+      .plan-panel__warnings li::marker {
+        color: #f97316;
       }
 
       .chart-wrapper {
         position: relative;
-        background: #0f172a;
-        border-radius: 12px;
-        border: 1px solid rgba(148, 163, 184, 0.1);
+        background: radial-gradient(circle at top left, rgba(30, 64, 175, 0.15), rgba(2, 6, 23, 0.95));
+        border-radius: 16px;
+        border: 1px solid rgba(94, 106, 133, 0.18);
+        box-shadow: 0 22px 44px rgba(8, 12, 22, 0.55);
         overflow: hidden;
       }
       #tv_chart_container {
@@ -173,18 +194,19 @@
 
       .debug-banner {
         position: fixed;
-        bottom: 12px;
-        left: 12px;
+        bottom: 18px;
+        left: 18px;
         max-width: 70%;
         font-size: 12px;
         line-height: 1.4;
-        padding: 10px 12px;
-        border-radius: 8px;
-        background: rgba(255, 196, 44, 0.12);
-        color: #ffcc66;
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: rgba(255, 196, 44, 0.16);
+        color: #ffd166;
         display: none;
         white-space: pre-wrap;
         z-index: 10;
+        box-shadow: 0 12px 30px rgba(255, 196, 44, 0.18);
       }
 
       @media (max-width: 1024px) {
@@ -202,16 +224,16 @@
 
       @media (max-width: 640px) {
         .plan-header {
-          padding: 14px 16px 6px;
+          padding: 18px 16px 8px;
         }
         .timeframe-switcher {
-          padding: 0 16px 12px;
+          padding: 0 16px 16px;
         }
         .page-body {
-          padding: 0 16px 16px;
+          padding: 0 16px 20px;
         }
         .plan-panel__body {
-          padding: 0 16px 16px;
+          padding: 0 16px 18px;
         }
       }
     </style>
@@ -246,6 +268,6 @@
       </div>
     </div>
     <div id="debug_banner" class="debug-banner"></div>
-    <script src="tradingview-init.js?v=20251017"></script>
+    <script src="tradingview-init.js?v=20251018"></script>
   </body>
 </html>
