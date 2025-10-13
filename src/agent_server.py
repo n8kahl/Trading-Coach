@@ -68,6 +68,7 @@ from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
 from zoneinfo import ZoneInfo
 
+from .market_clock import MarketClock
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,27 @@ _FUTURES_PROXY_MAP: Dict[str, str] = {
 }
 
 _FUTURES_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}
+
+_MARKET_CLOCK = MarketClock()
+
+
+def _market_snapshot_payload() -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
+    snapshot = _MARKET_CLOCK.snapshot()
+    as_of_dt = _MARKET_CLOCK.last_rth_close()
+    frozen = snapshot.status != "open"
+    market_payload = {
+        "status": snapshot.status,
+        "session": snapshot.session,
+        "now_et": snapshot.now_et.isoformat(),
+        "next_open_et": snapshot.next_open_et.isoformat() if snapshot.next_open_et else None,
+        "next_close_et": snapshot.next_close_et.isoformat() if snapshot.next_close_et else None,
+    }
+    data_payload = {
+        "as_of_ts": int(as_of_dt.timestamp() * 1000),
+        "frozen": frozen,
+        "ok": True,
+    }
+    return market_payload, data_payload, as_of_dt, not frozen
 
 
 def _data_symbol_candidates(symbol: str) -> List[str]:
@@ -279,7 +301,6 @@ class PlanResponse(BaseModel):
     idea_url: str | None = None
     warnings: List[str] | None = None
     planning_context: str | None = None
-    offline_basis: Dict[str, Any] | None = None
     symbol: str
     style: str | None = None
     bias: str | None = None
@@ -316,6 +337,8 @@ class PlanResponse(BaseModel):
     runner: Dict[str, Any] | None = None
     updated_from_version: int | None = None
     update_reason: str | None = None
+    market: Dict[str, Any] | None = None
+    data: Dict[str, Any] | None = None
 
 
 class IdeaStoreRequest(BaseModel):
@@ -431,21 +454,6 @@ def _append_query_params(url: str, extra: Dict[str, str]) -> str:
     existing.update({k: v for k, v in extra.items() if v is not None})
     new_query = urlencode(existing, doseq=True)
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
-
-
-async def _gather_offline_basis(symbol: str) -> Dict[str, Any]:
-    try:
-        daily_context = await _build_interval_context(symbol, "d", 260)
-    except Exception:
-        return {}
-    snapshot = (daily_context or {}).get("snapshot") or {}
-    volatility = snapshot.get("volatility") or {}
-    basis = {
-        "htf_snapshot_time": snapshot.get("timestamp_utc"),
-        "volatility_regime": volatility.get("regime_label"),
-        "expected_move_days": 5,
-    }
-    return {k: v for k, v in basis.items() if v is not None}
 
 
 def _market_phase_chicago(now: Optional[datetime] = None) -> str:
@@ -840,322 +848,8 @@ async def _stream_generator(symbol: str) -> Any:
 
 
 async def _build_watch_plan(symbol: str, style: Optional[str], request: Request) -> PlanResponse | None:
-    try:
-        context = await _build_interval_context(symbol, "15", 200)
-    except Exception:
-        return None
-    snapshot = context.get("snapshot") or {}
-    indicators = snapshot.get("indicators") or {}
-    atr = float(indicators.get("atr14") or 0.0)
-    price_info = snapshot.get("price") or {}
-    entry = float(price_info.get("close") or 0.0)
-    if entry <= 0:
-        return None
-    decimals = 2
-    stop_multiple = 0.5
-    stop = entry - atr * stop_multiple if atr else entry * 0.998
-    style_normalized = _normalize_trade_style(style)
-    style_public = public_style(style_normalized) or "intraday"
-    symbol_upper = symbol.upper()
-    index_symbols = {"SPY", "QQQ", "IWM", "ES", "NQ", "YM", "RTY"}
-    is_index = symbol_upper in index_symbols
-    min_rr = 1.5 if style_normalized in {"scalp", "intraday"} and is_index else 1.2
-
-    volatility_block = snapshot.get("volatility") or {}
-    expected_move = _safe_number(volatility_block.get("expected_move_horizon"))
-
-    base_targets = _base_targets_for_style(
-        style=style_normalized,
-        bias="long",
-        entry=entry,
-        stop=stop,
-        atr=atr if atr > 0 else None,
-        expected_move=expected_move,
-        min_rr=min_rr,
-        prefer_em_cap=True,
-    )
-    if not base_targets:
-        fallback_span = atr if atr > 0 else max(entry * 0.01, abs(entry - stop), 0.5)
-        base_targets = [entry + fallback_span, entry + fallback_span * 1.5]
-    if len(base_targets) == 1:
-        bump = atr if atr > 0 else max(abs(entry - stop), entry * 0.01, 0.5)
-        base_targets.append(base_targets[0] + bump)
-
-    key_levels = context.get("key_levels") or {}
-    levels_numeric = [float(val) for val in key_levels.values() if isinstance(val, (int, float))]
-    indicator_block = snapshot.get("indicators") or {}
-    tp_ctx = {
-        "key": {name: float(val) for name, val in key_levels.items() if isinstance(val, (int, float))},
-        "vol_profile": {},
-        "vwap": _safe_number(indicator_block.get("vwap")),
-        "ema9": _safe_number(indicator_block.get("ema9")),
-        "ema20": _safe_number(indicator_block.get("ema20")),
-        "ema50": _safe_number(indicator_block.get("ema50")),
-        "fib_up": {},
-        "fib_down": {},
-        "htf_levels": levels_numeric,
-        "expected_move_horizon": expected_move,
-        "atr": atr,
-    }
-    stats_style_key = _canonical_style_token(style_normalized)
-    target_stats: Dict[str, Dict[str, Any]] = {}
-    if stats_style_key in {"scalp", "intraday", "swing", "leaps"}:
-        try:
-            stats_bundle = await get_style_stats(symbol_upper, stats_style_key)
-        except Exception as exc:
-            logger.debug("target stats fetch failed for %s/%s: %s", symbol_upper, stats_style_key, exc)
-            stats_bundle = None
-        if stats_bundle:
-            target_stats[stats_style_key] = stats_bundle
-    tp_ctx["target_stats"] = target_stats
-
-    targets, target_meta, tp_warnings, tp_debug = _apply_tp_logic(
-        symbol=symbol,
-        style=style_normalized,
-        bias="long",
-        entry=entry,
-        stop=stop,
-        base_targets=base_targets,
-        ctx=tp_ctx,
-        min_rr=min_rr,
-        atr=atr,
-        expected_move=expected_move,
-        prefer_em_cap=True,
-    )
-    if not targets:
-        return None
-    rr = (targets[0] - entry) / (entry - stop) if entry != stop else 0.0
-
-    runner_cfg = _runner_config(style_normalized, "long", entry, stop, targets)
-
-    plan_id = uuid.uuid4().hex[:10]
-    version = await _next_plan_version(plan_id)
-    trade_detail_url = _build_trade_detail_url(request, plan_id, version)
-
-    rounded_targets = [round(tp, decimals) for tp in targets]
-    plan_warnings = ["Market closed — treat as next-session watch plan"]
-    if tp_warnings:
-        plan_warnings.extend(tp_warnings)
-
-    plan_block = {
-        "direction": "long",
-        "entry": round(entry, decimals),
-        "stop": round(stop, decimals),
-        "targets": rounded_targets,
-        "confidence": 0.32,
-        "risk_reward": round(rr, 2),
-        "notes": "Watch plan: market closed; awaiting next session trigger.",
-        "warnings": plan_warnings,
-        "atr": round(atr, 4) if atr else None,
-        "trade_detail": trade_detail_url,
-        "idea_url": trade_detail_url,
-        "target_meta": target_meta,
-        "runner": runner_cfg,
-    }
-    logger.info(
-        "watch plan generated",
-        extra={
-            "symbol": symbol,
-            "style": style_public,
-            "plan_id": plan_id,
-            "trade_detail": trade_detail_url,
-            "idea_url": trade_detail_url,
-            "targets": targets[:2],
-            "tp_debug": tp_debug,
-        },
-    )
-
-    calc_notes: Dict[str, Any] = {}
-    snapped_labels: List[str] = []
-    tolerance = max(0.05, (atr or 0.0) * 0.25)
-    for target in plan_block["targets"]:
-        label = None
-        for name, val in key_levels.items():
-            if not isinstance(val, (int, float)):
-                continue
-            if abs(float(val) - target) <= tolerance:
-                label = f"{name}:{round(float(val), decimals)}"
-                break
-        if label:
-            snapped_labels.append(label)
-
-    htf = {
-        "bias": (snapshot.get("trend") or {}).get("ema_stack") or "neutral",
-        "snapped_targets": snapped_labels,
-    }
-    data_quality = {
-        "series_present": bool(context.get("bars")),
-        "iv_present": False,
-        "earnings_present": True,
-    }
-
-    key_levels = context.get("key_levels") or {}
-    chart_params = {
-        "symbol": symbol,
-        "interval": "15m",
-        "direction": "long",
-        "strategy": "watch_plan",
-        "entry": plan_block["entry"],
-        "stop": plan_block["stop"],
-        "tp": ",".join(str(t) for t in plan_block["targets"]),
-        "notes": "Watch plan: market closed; review before open.",
-        "view": _view_for_style(style),
-        "range": _range_for_style(style),
-        "ema": "9,20,50",
-        "vwap": "1",
-        "atr": f"{atr:.4f}" if atr else None,
-    }
-    chart_params["plan_id"] = plan_id
-    chart_params["plan_version"] = str(version)
-    if target_meta:
-        chart_params["tp_meta"] = json.dumps(target_meta)
-    if runner_cfg:
-        chart_params["runner"] = json.dumps(runner_cfg)
-    level_tokens = _extract_levels_for_chart(key_levels)
-    if level_tokens:
-        chart_params["levels"] = ",".join(level_tokens)
-    stats_payload = target_stats.get(stats_style_key) or {}
-    chart_params["title"] = _format_chart_title(symbol, "long", "watch_plan")
-    chart_params["plan_meta"] = _plan_meta_payload(
-        symbol=symbol_upper,
-        style=style_normalized,
-        plan=plan_block,
-        runner=runner_cfg,
-        expected_move=expected_move,
-        horizon_minutes=stats_payload.get("horizon_minutes"),
-        extra={
-            "style_display": style_public,
-            "strategy_label": "Watch Plan",
-            "key_levels": key_levels,
-        },
-    )
-    chart_links = None
-    try:
-        chart_links = await gpt_chart_url(ChartParams(**chart_params), request)
-    except Exception:
-        chart_links = None
-    charts_payload: Dict[str, Any] = {"params": chart_params}
-    if chart_links:
-        charts_payload["interactive"] = chart_links.interactive
-    else:
-        fallback_chart_url = _build_tv_chart_url(request, chart_params)
-        fallback_chart_url = _append_query_params(
-            fallback_chart_url,
-            {
-                "plan_id": plan_id,
-                "plan_version": str(version),
-            },
-        )
-        charts_payload["interactive"] = fallback_chart_url
-        chart_links = None
-    chart_url_value = charts_payload.get("interactive")
-
-    trade_detail_url = chart_url_value
-
-    atr_val = _safe_number(indicators.get("atr14"))
-    if atr_val is not None:
-        calc_notes["atr14"] = atr_val
-    calc_notes["stop_multiple"] = round(float(stop_multiple), 3)
-    calc_notes["min_rr"] = float(min_rr)
-    if expected_move is not None:
-        calc_notes["expected_move_horizon"] = expected_move
-    if tp_debug:
-        calc_notes["tp_logic"] = tp_debug
-    if target_meta:
-        calc_notes["target_meta"] = target_meta
-    calc_notes["rr_inputs"] = {
-        "entry": plan_block["entry"],
-        "stop": plan_block["stop"],
-        "tp1": plan_block["targets"][0],
-    }
-
-    features = {
-        "plan_entry": plan_block["entry"],
-        "plan_stop": plan_block["stop"],
-        "plan_targets": plan_block["targets"],
-        "plan_confidence": plan_block["confidence"],
-        "plan_risk_reward": plan_block["risk_reward"],
-        "plan_notes": plan_block["notes"],
-        "plan_warnings": plan_block["warnings"],
-    }
-
-    summary = {
-        "confluence_score": 0.0,
-        "frames_used": [context.get("interval")],
-        "trend_notes": {"primary": htf["bias"]},
-        "expected_move_horizon": snapshot.get("volatility", {}).get("expected_move_horizon"),
-    }
-
-    idea_payload = {
-        "plan": {
-            "plan_id": plan_id,
-            "version": version,
-            "symbol": symbol,
-            "style": style or "intraday",
-            "bias": plan_block["direction"],
-            "setup": "watch_plan",
-            "entry": plan_block["entry"],
-            "stop": plan_block["stop"],
-            "targets": plan_block["targets"],
-            "target_meta": plan_block.get("target_meta"),
-            "rr_to_t1": plan_block["risk_reward"],
-            "confidence": plan_block["confidence"],
-            "decimals": decimals,
-            "charts_params": chart_params,
-            "trade_detail": trade_detail_url,
-            "warnings": plan_block["warnings"],
-            "runner": plan_block.get("runner"),
-        },
-        "summary": summary,
-        "volatility_regime": snapshot.get("volatility"),
-        "htf": htf,
-        "data_quality": data_quality,
-        "chart_url": chart_url_value,
-        "options": None,
-        "why_this_works": ["Watch-only plan generated during market closure."],
-        "invalidation": ["Price gaps beyond stop on open"],
-        "risk_note": "Market closed; re-validate levels pre-open.",
-    }
-    await _store_idea_snapshot(plan_id, idea_payload)
-
-    relevant_levels = context.get("key_levels") or {}
-    expected_move_basis = "expected_move_horizon" if snapshot.get("volatility", {}).get("expected_move_horizon") else None
-    calc_notes_output = calc_notes or None
-
-    return PlanResponse(
-        plan_id=plan_id,
-        version=version,
-        trade_detail=trade_detail_url,
-        idea_url=trade_detail_url,
-        warnings=plan_block["warnings"],
-        symbol=symbol,
-        style=style_public,
-        bias=plan_block["direction"],
-        setup="watch_plan",
-        entry=plan_block["entry"],
-        stop=plan_block["stop"],
-        targets=plan_block["targets"],
-        target_meta=plan_block.get("target_meta"),
-        rr_to_t1=plan_block["risk_reward"],
-        confidence=plan_block["confidence"],
-        notes=plan_block["notes"],
-        relevant_levels=relevant_levels or None,
-        expected_move_basis=expected_move_basis,
-        charts_params=chart_params,
-        chart_url=chart_url_value,
-        plan=plan_block,
-        charts=charts_payload,
-        key_levels=relevant_levels,
-        market_snapshot=context.get("snapshot"),
-        features=features,
-        options=None,
-        runner=plan_block.get("runner"),
-        calc_notes=calc_notes_output,
-        htf=htf,
-        decimals=decimals,
-        data_quality=data_quality,
-        debug={"mode": "watch_plan", "tp_debug": tp_debug} if tp_debug else {"mode": "watch_plan"},
-    )
+    logger.debug("watch plan builder deprecated for %s", symbol)
+    return None
 
 
 async def _simulate_generator(symbol: str, params: Dict[str, Any]) -> Any:
@@ -1259,7 +953,12 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
     return None
 
 
-async def _collect_market_data(tickers: List[str], timeframe: str = "5") -> Dict[str, pd.DataFrame]:
+async def _collect_market_data(
+    tickers: List[str],
+    timeframe: str = "5",
+    *,
+    as_of: datetime | None = None,
+) -> Dict[str, pd.DataFrame]:
     """Fetch OHLCV for a list of tickers from Polygon."""
     tasks = [_load_remote_ohlcv(ticker, timeframe) for ticker in tickers]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1274,6 +973,12 @@ async def _collect_market_data(tickers: List[str], timeframe: str = "5") -> Dict
         if frame is None:
             logger.warning("No market data available for %s", ticker)
             continue
+        if as_of is not None:
+            cutoff = pd.Timestamp(as_of).tz_convert("UTC")
+            frame = frame.loc[frame.index <= cutoff]
+            if frame.empty:
+                logger.warning("No market data available for %s up to %s", ticker, cutoff)
+                continue
         market_data[ticker] = frame
 
     return market_data
@@ -2416,7 +2121,7 @@ async def tv_bars(
             return frame
 
     if aggregate_resolution == "10" and src_tf in {"5", "3", "1"}:
-        history = _resample_frame(history, "10T")
+        history = _resample_frame(history, "10min")
     elif aggregate_resolution == "1W":
         history = _resample_frame(history, "W")
 
@@ -2598,6 +2303,7 @@ async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict
 
 
 @gpt.post("/scan", summary="Rank trade setups across a list of tickers")
+@gpt.post('/scan', summary='Rank trade setups across a list of tickers')
 async def gpt_scan(
     universe: ScanUniverse,
     request: Request,
@@ -2606,11 +2312,17 @@ async def gpt_scan(
     if not universe.tickers:
         raise HTTPException(status_code=400, detail="No tickers provided")
 
+    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload()
+
     style_filter = _normalize_style(universe.style)
     data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}.get(style_filter, "5")
 
     settings = get_settings()
-    market_data = await _collect_market_data(universe.tickers, timeframe=data_timeframe)
+    market_data = await _collect_market_data(
+        universe.tickers,
+        timeframe=data_timeframe,
+        as_of=None if is_open else as_of_dt,
+    )
     if not market_data:
         raise HTTPException(status_code=502, detail="No market data available for the requested tickers.")
     signals = await scan_market(universe.tickers, market_data)
@@ -2628,6 +2340,56 @@ async def gpt_scan(
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Benchmark data fetch failed for %s: %s", benchmark_symbol, exc)
             benchmark_history = None
+    if benchmark_history is not None and as_of_dt is not None and not is_open:
+        cutoff = pd.Timestamp(as_of_dt).tz_convert("UTC")
+        benchmark_history = benchmark_history.loc[benchmark_history.index <= cutoff]
+        if benchmark_history.empty:
+            benchmark_history = None
+
+    symbol_freshness: Dict[str, float] = {}
+    data_meta.setdefault("ok", True)
+    if is_open:
+        now_utc = pd.Timestamp.utcnow()
+        for symbol_key, frame in market_data.items():
+            last_ts = frame.index[-1]
+            age_ms = max((now_utc - last_ts).total_seconds() * 1000.0, 0.0)
+            symbol_freshness[symbol_key] = age_ms
+        if symbol_freshness:
+            stale_symbols = [sym for sym, age in symbol_freshness.items() if age > 2000]
+            if stale_symbols:
+                refreshed = False
+                for sym in stale_symbols:
+                    try:
+                        refreshed_frame = await _load_remote_ohlcv(sym, data_timeframe)
+                    except Exception as exc:
+                        logger.warning("Refresh fetch failed for %s: %s", sym, exc)
+                        continue
+                    if refreshed_frame is None or refreshed_frame.empty:
+                        continue
+                    market_data[sym] = refreshed_frame
+                    last_ts = refreshed_frame.index[-1]
+                    symbol_freshness[sym] = max((now_utc - last_ts).total_seconds() * 1000.0, 0.0)
+                    refreshed = True
+                if refreshed:
+                    logger.info("Refreshed %d symbols due to stale feed", len(stale_symbols))
+            if symbol_freshness:
+                max_age = max(symbol_freshness.values())
+                data_meta["data_freshness_ms"] = int(max_age)
+                if max_age > 2000:
+                    logger.warning("Detected stale market data during RTH (max age %.0f ms)", max_age)
+                    data_meta["ok"] = False
+                    data_meta["error"] = "stale_feed"
+                else:
+                    data_meta.pop("error", None)
+            else:
+                data_meta["data_freshness_ms"] = None
+        else:
+            data_meta["data_freshness_ms"] = None
+            data_meta.pop("error", None)
+    else:
+        data_meta.pop("data_freshness_ms", None)
+        data_meta["ok"] = True
+        data_meta.pop("error", None)
 
     polygon_chains: Dict[str, pd.DataFrame] = {}
     if unique_symbols and polygon_enabled:
@@ -2665,6 +2427,12 @@ async def gpt_scan(
         if style_filter and style_filter != style:
             continue
         history = market_data[signal.symbol]
+        if not is_open and as_of_dt is not None:
+            cutoff = pd.Timestamp(as_of_dt).tz_convert("UTC")
+            history = history.loc[history.index <= cutoff]
+            if history.empty:
+                logger.warning("No market data available for %s at %s", signal.symbol, cutoff)
+                continue
         latest_row = history.iloc[-1]
         entry_price = float(latest_row["close"])
         key_levels = _extract_key_levels(history)
@@ -2859,8 +2627,13 @@ async def gpt_scan(
                 **({"plan": plan_payload} if plan_payload else {}),
                 "warnings": plan_payload.get("warnings") if plan_payload else [],
                 "data": {
-                    "bars": f"{base_url}/gpt/context/{signal.symbol}?interval={interval}&lookback=300"
+                    **data_meta,
+                    "bars": f"{base_url}/gpt/context/{signal.symbol}?interval={interval}&lookback=300",
+                    "symbol_freshness_ms": (
+                        int(symbol_freshness.get(signal.symbol, 0.0)) if symbol_freshness else None
+                    ),
                 },
+                "market": dict(market_meta),
                 "context_overlays": enhancements,
                 **({"options": polygon_bundle} if polygon_bundle else {}),
             }
@@ -2871,6 +2644,7 @@ async def gpt_scan(
 
 
 @gpt.post("/plan", summary="Return a single trade plan for a symbol", response_model=PlanResponse)
+@gpt.post('/plan', summary='Return a single trade plan for a symbol', response_model=PlanResponse)
 async def gpt_plan(
     request_payload: PlanRequest,
     request: Request,
@@ -2884,25 +2658,17 @@ async def gpt_plan(
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
     forced_plan_id = (request_payload.plan_id or "").strip()
-    offline_mode = False
-    offline_param = request.query_params.get("offline")
-    if offline_param is not None:
-        offline_mode = offline_param.strip().lower() in {"1", "true", "yes", "on"}
     logger.info(
         "gpt_plan received",
         extra={
             "symbol": symbol,
             "style": request_payload.style,
             "user_id": getattr(user, "user_id", None),
-            "offline": offline_mode,
         },
     )
     universe = ScanUniverse(tickers=[symbol], style=request_payload.style)
     results = await gpt_scan(universe, request, user)
     if not results:
-        fallback = await _build_watch_plan(symbol, request_payload.style, request)
-        if fallback:
-            return fallback
         raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
     logger.info(
@@ -2919,10 +2685,6 @@ async def gpt_plan(
     snapshot = first.get("market_snapshot") or {}
     indicators = (snapshot.get("indicators") or {})
     volatility = (snapshot.get("volatility") or {})
-    session_phase = str(((snapshot.get("session") or {}).get("phase") or "").lower())
-    if not offline_mode and session_phase in {"off", "postmarket", "premarket", "closed"}:
-        offline_mode = True
-
     # Build calc_notes + htf from available payload
     raw_plan = first.get("plan") or {}
     plan: Dict[str, Any] = dict(raw_plan)
@@ -3014,8 +2776,6 @@ async def gpt_plan(
 
     charts_payload: Dict[str, Any] = {}
     if chart_params_payload:
-        if offline_mode:
-            chart_params_payload.setdefault("offline_mode", "true")
         charts_payload["params"] = chart_params_payload
     if chart_url_value:
         chart_url_value = _append_query_params(
@@ -3025,8 +2785,6 @@ async def gpt_plan(
                 "plan_version": str(version),
             },
         )
-        if offline_mode:
-            chart_url_value = _append_query_params(chart_url_value, {"offline_mode": "true"})
         charts_payload["interactive"] = chart_url_value
     elif chart_params_payload and {"direction", "entry", "stop", "tp"}.issubset(chart_params_payload.keys()):
         fallback_chart_url = _build_tv_chart_url(request, chart_params_payload)
@@ -3161,14 +2919,12 @@ async def gpt_plan(
         plan_warnings = [str(raw_warnings)]
     else:
         plan_warnings = []
+    plan_warnings = [w for w in plan_warnings if "watch plan" not in str(w).lower()]
     planning_context_value: str | None = None
-    offline_basis: Dict[str, Any] | None = None
-    if offline_mode:
-        planning_context_value = "offline"
-        offline_basis = await _gather_offline_basis(symbol)
-        offline_notice = "Offline Planning Mode — Market Closed; using last valid HTF data."
-        if offline_notice not in plan_warnings:
-            plan_warnings.append(offline_notice)
+    market_meta_context = first.get("market") or first.get("meta")
+    data_meta_context = first.get("data") or first.get("meta")
+    if isinstance(market_meta_context, dict) and market_meta_context.get("status") != "open":
+        planning_context_value = "frozen"
 
     style_token = plan.get("style") or first.get("style") or request_payload.style
     style_public = public_style(style_token) or "intraday"
@@ -3198,13 +2954,6 @@ async def gpt_plan(
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("contract lookup error for %s: %s", symbol, exc)
 
-    if offline_mode and options_payload:
-        closed_note = "Options quotes reflect last available prices with the market closed."
-        if isinstance(options_payload, dict):
-            options_payload.setdefault("note", closed_note)
-        if closed_note not in plan_warnings:
-            plan_warnings.append(closed_note)
-
     price_close = snapshot.get("price", {}).get("close")
     decimals_value = 2
     if isinstance(price_close, (int, float)):
@@ -3216,6 +2965,13 @@ async def gpt_plan(
             decimals_value = 2
 
     plan_core = _extract_plan_core(first, plan_id, version, decimals_value)
+    if plan_core.get("setup") in {"watch_plan", "offline"}:
+        inferred_setup = first.get("strategy_id") or plan.get("setup")
+        plan_core["setup"] = inferred_setup
+        plan["setup"] = inferred_setup
+    else:
+        plan_core.setdefault("setup", first.get("strategy_id"))
+        plan.setdefault("setup", plan_core.get("setup"))
     plan_core["trade_detail"] = trade_detail_url
     plan_core["idea_url"] = trade_detail_url
     if updated_from_version:
@@ -3267,7 +3023,10 @@ async def gpt_plan(
     rr_output = plan.get("risk_reward")
     confidence_output = plan.get("confidence")
     notes_output = (plan.get("notes") or "").strip() if plan else ""
-    if not notes_output:
+    if plan and "watch plan" in notes_output.lower():
+        plan["notes"] = None
+        notes_output = ""
+    elif "watch plan" in notes_output.lower():
         notes_output = ""
     bias_output = plan.get("direction") or ((snapshot.get("trend") or {}).get("direction_hint"))
     relevant_levels = first.get("key_levels") or {}
@@ -3290,6 +3049,22 @@ async def gpt_plan(
     charts_field = charts_payload or None
     charts_params_output = chart_params_payload or None
     chart_url_output = chart_url_value or None
+    market_meta = market_meta_context if isinstance(market_meta_context, dict) else None
+    data_meta = data_meta_context if isinstance(data_meta_context, dict) else None
+    if market_meta is None or data_meta is None:
+        fallback_market, fallback_data, _, _ = _market_snapshot_payload()
+        if market_meta is None:
+            market_meta = fallback_market
+        if data_meta is None:
+            data_meta = fallback_data
+        else:
+            data_meta.setdefault("as_of_ts", fallback_data["as_of_ts"])
+            data_meta.setdefault("frozen", fallback_data["frozen"])
+            data_meta.setdefault("ok", fallback_data.get("ok", True))
+    if planning_context_value is None:
+        planning_context_value = "live"
+    if planning_context_value is None:
+        planning_context_value = "live"
 
     logger.info(
         "plan response ready",
@@ -3300,7 +3075,6 @@ async def gpt_plan(
             "planning_context": planning_context_value,
             "trade_detail": trade_detail_url,
             "idea_url": trade_detail_url,
-            "offline_basis_keys": sorted((offline_basis or {}).keys()) if offline_basis else None,
         },
     )
 
@@ -3310,8 +3084,7 @@ async def gpt_plan(
         trade_detail=trade_detail_url,
         idea_url=trade_detail_url,
         warnings=plan_warnings or None,
-        planning_context=planning_context_value,
-        offline_basis=offline_basis,
+        planning_context="frozen" if market_meta.get("status") != "open" else "live",
         symbol=first.get("symbol"),
         style=first.get("style"),
         bias=bias_output,
@@ -3348,6 +3121,8 @@ async def gpt_plan(
         runner=plan.get("runner") if plan else None,
         updated_from_version=updated_from_version,
         update_reason=update_reason,
+        market=market_meta,
+        data=data_meta,
     )
 
 @app.post("/internal/idea/store", include_in_schema=False, tags=["internal"])

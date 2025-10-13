@@ -271,7 +271,7 @@
   let streamSource = null;
   let latestCandleData = [];
   let latestVolumeData = [];
-  const DEFAULT_REPLAY_MINUTES = 60;
+  const DEFAULT_REPLAY_MINUTES = 10;
   const REPLAY_MAX_MINUTES = 180;
   const REPLAY_STEP_MS = 750;
   let isReplaying = false;
@@ -760,19 +760,16 @@
       <div class="plan-panel__section plan-replay">
         <h3>Market Replay</h3>
         <div class="plan-replay__controls">
-          <div class="plan-replay__inputwrap">
-            <span class="plan-replay__label">Minutes</span>
-            <input
-              id="market_replay_minutes"
-              class="plan-replay__input"
-              type="number"
-              min="1"
-              max="${REPLAY_MAX_MINUTES}"
-              step="1"
-              value="${replayMinutesValue}"
-              aria-label="Minutes to replay"
-            />
-          </div>
+          <input
+            id="market_replay_minutes"
+            class="plan-replay__input"
+            type="number"
+            min="1"
+            max="${REPLAY_MAX_MINUTES}"
+            step="1"
+            value="${replayMinutesValue}"
+            aria-label="Minutes to replay"
+          />
           <button id="market_replay_start" type="button" class="plan-replay__button" ${startDisabledAttr}>Start Replay</button>
           <button id="market_replay_stop" type="button" class="plan-replay__button" ${stopDisabledAttr}>Stop</button>
         </div>
@@ -802,73 +799,6 @@
     const lastEl = document.getElementById('plan_last_price_value');
     if (!lastEl) return;
     lastEl.textContent = Number.isFinite(value) ? formatPrice(value) : '—';
-  };
-
-  const recomputeIndicatorSeries = (candleData, volumeData) => {
-    if (!Array.isArray(candleData) || !candleData.length) {
-      if (vwapSeries) vwapSeries.setData([]);
-      emaSeries.forEach(({ series }) => series.setData([]));
-      return null;
-    }
-
-    let lastVwapValue = null;
-    if (vwapSeries) {
-      const vwapValues = [];
-      let cumulativePV = 0;
-      let cumulativeVol = 0;
-      let currentSession = null;
-      for (let i = 0; i < candleData.length; i += 1) {
-        const bar = candleData[i];
-        const vol = volumeData[i]?.value || 0;
-        const typical = (bar.high + bar.low + bar.close) / 3;
-        const sessionKey = new Date(bar.time * 1000).toISOString().slice(0, 10);
-        if (sessionKey !== currentSession) {
-          currentSession = sessionKey;
-          cumulativePV = 0;
-          cumulativeVol = 0;
-        }
-        cumulativePV += typical * vol;
-        cumulativeVol += vol;
-        const vwapPoint = cumulativeVol > 0 ? cumulativePV / cumulativeVol : typical;
-        if (Number.isFinite(vwapPoint)) {
-          lastVwapValue = vwapPoint;
-        }
-        vwapValues.push({ time: bar.time, value: vwapPoint });
-      }
-      vwapSeries.setData(vwapValues);
-    }
-
-    emaSeries.forEach(({ span, series }) => {
-      const values = [];
-      const weight = 2 / (span + 1);
-      let emaValue = null;
-      for (let i = 0; i < candleData.length; i += 1) {
-        const close = candleData[i]?.close;
-        if (close == null) continue;
-        if (emaValue === null) {
-          emaValue = close;
-        } else {
-          emaValue = close * weight + emaValue * (1 - weight);
-        }
-        values.push({ time: candleData[i].time, value: emaValue });
-      }
-      series.setData(values);
-    });
-
-    return Number.isFinite(lastVwapValue) ? lastVwapValue : null;
-  };
-
-  const applyIndicatorUpdates = () => {
-    const lastVwap = recomputeIndicatorSeries(latestCandleData, latestVolumeData);
-    if (Number.isFinite(lastVwap)) {
-      setPriceLine('vwap', {
-        price: lastVwap,
-        color: '#f8fafc',
-        title: 'VWAP',
-        lineWidth: 2,
-        lineStyle: LightweightCharts.LineStyle.Solid,
-      });
-    }
   };
 
   const updateRealtimeBar = (price, payload) => {
@@ -907,7 +837,6 @@
         latestVolumeData[latestVolumeData.length - 1] = updatedVol;
         volumeSeries.update(updatedVol);
       }
-      applyIndicatorUpdates();
       return;
     }
 
@@ -929,8 +858,6 @@
     };
     latestVolumeData.push(newVolumeBar);
     volumeSeries.update(newVolumeBar);
-
-    applyIndicatorUpdates();
   };
 
   const setReplayStatusMessage = (message) => {
@@ -1047,7 +974,6 @@
       updateHeaderPricing(restoredLast);
       updatePlanPanelLastPrice(restoredLast);
     }
-    applyIndicatorUpdates();
     replaySavedCandleData = [];
     replaySavedVolumeData = [];
     replaySavedVisibleRange = null;
@@ -1104,7 +1030,6 @@
     lastKnownPrice = candle.close;
     updateHeaderPricing(lastKnownPrice);
     updatePlanPanelLastPrice(lastKnownPrice);
-    applyIndicatorUpdates();
     const total = replayQueue.length;
     replayIndex += 1;
     const progress = Math.min(replayIndex, total);
@@ -1188,7 +1113,6 @@
       volumeSeries.setData(initialVolume);
       latestCandleData = initialCandles.map((item) => ({ ...item }));
       latestVolumeData = initialVolume.map((item) => ({ ...item }));
-      applyIndicatorUpdates();
 
       const priorClose = latestCandleData.length
         ? latestCandleData[latestCandleData.length - 1].close
@@ -1390,6 +1314,13 @@
 
       currentPlan = planForFrame;
 
+      const overlayValues = [
+        planForFrame.entry,
+        planForFrame.stop,
+        ...planForFrame.tps,
+        ...keyLevels.map((lvl) => lvl.price),
+      ].filter((value) => Number.isFinite(value));
+
       const vwapRequested = (params.get('vwap') || '').toLowerCase() !== 'false';
       if (vwapRequested && !vwapSeries) {
         vwapSeries = chart.addLineSeries({
@@ -1398,15 +1329,52 @@
           title: 'VWAP',
         });
       }
-      const lastVwap = recomputeIndicatorSeries(latestCandleData, latestVolumeData);
+      let lastVwap = null;
+      if (vwapSeries) {
+        const values = [];
+        let cumulativePV = 0;
+        let cumulativeVol = 0;
+        let currentSession = null;
+        for (let i = 0; i < candleData.length; i += 1) {
+          const bar = candleData[i];
+          const vol = volumeData[i]?.value || 0;
+          const typical = (bar.high + bar.low + bar.close) / 3;
+          const sessionKey = new Date(bar.time * 1000).toISOString().slice(0, 10);
+          if (sessionKey !== currentSession) {
+            currentSession = sessionKey;
+            cumulativePV = 0;
+            cumulativeVol = 0;
+          }
+          cumulativePV += typical * vol;
+          cumulativeVol += vol;
+          const vwapValue = cumulativeVol > 0 ? cumulativePV / cumulativeVol : typical;
+          if (Number.isFinite(vwapValue)) {
+            lastVwap = vwapValue;
+          }
+          values.push({ time: bar.time, value: vwapValue });
+        }
+        vwapSeries.setData(values);
+      }
+      if (Number.isFinite(lastVwap)) {
+        overlayValues.push(lastVwap);
+      }
 
-      const overlayValues = [
-        planForFrame.entry,
-        planForFrame.stop,
-        ...planForFrame.tps,
-        ...keyLevels.map((lvl) => lvl.price),
-        Number.isFinite(lastVwap) ? lastVwap : null,
-      ].filter((value) => Number.isFinite(value));
+      emaSeries.forEach(({ span, series }) => {
+        const values = [];
+        const weight = 2 / (span + 1);
+        let emaValue = null;
+        for (let i = 0; i < candleData.length; i += 1) {
+          const close = candleData[i].close;
+          if (close == null) continue;
+          if (emaValue === null) {
+            emaValue = close;
+          } else {
+            emaValue = close * weight + emaValue * (1 - weight);
+          }
+          values.push({ time: candleData[i].time, value: emaValue });
+        }
+        series.setData(values);
+      });
 
       const activeLineIds = new Set();
       const registerLine = (id, options) => {
