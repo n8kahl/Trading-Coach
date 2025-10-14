@@ -1,8 +1,19 @@
 # GPT Integration Cheat Sheet
 
-This backend now serves raw market context so that your GPT agent can make the
-final trading decisions (entries, stops, targets, position sizing). The server
-focuses on data prep; the agent performs the higher-level reasoning.
+> **v3.0 – Pro Upgrade** (macro/sector/internals context, probability decomposition, advanced risk, historical edge, adaptive plan evolution)
+
+This backend now returns richer context so your GPT agent can deliver
+deterministic, production-ready trade plans. The server handles data prep,
+scoring, risk math, and streaming updates; the model focuses on reasoning.
+
+## What's New in v3.0
+
+- Context providers for macro events, sector strength, and market internals with a blended `context_score`.
+- Probability decomposition (`probability_components`) and deterministic trade quality grading.
+- Advanced risk model output (`expected_value_r`, scaled `kelly_fraction`, MFE projection).
+- Historical edge layer linking pattern IDs to cached win-rate statistics.
+- Adaptive plan evolution streamed over `/ws/plans` (`price`, `hit`, `plan_update`).
+- New debug endpoints: `GET /api/v1/context`, `GET /api/v1/patterns/{pattern_id}/stats`.
 
 ## Production Endpoint
 
@@ -16,9 +27,9 @@ focuses on data prep; the agent performs the higher-level reasoning.
 
 ## Prompt & Schema (Live)
 
-- Master prompt (**approved v2.1**): [`docs/prompts/master_prompt_v2.1.md`](prompts/master_prompt_v2.1.md)
-- API schema (**OpenAPI 1.9.6**): mirrors `https://trading-coach-production.up.railway.app/openapi.json`
-- Deployment status: **Production ready & approved** (2025-10-10 refresh; commit `23a45da`)
+- Master prompt (**active v3.0**): [`docs/prompts/master_prompt_v3.0.md`](prompts/master_prompt_v3.0.md)
+- API schema (**OpenAPI 3.0**): mirrors `https://trading-coach-production.up.railway.app/openapi.json`
+- Deployment status: **Production ready & approved** (2025-10-13 refresh; commit `feat/v3.0-pro-upgrade`)
 - Persistent storage: set `DB_URL` (Postgres) so `/gpt/plan` snapshots and idea permalinks survive restarts.
 
 ---
@@ -34,7 +45,7 @@ focuses on data prep; the agent performs the higher-level reasoning.
   - Chart URLs gain `offline_mode=true` query param (watermark rendered client-side).
 - Prefer enabling only when the user explicitly asks for night / weekend plans.
 
-## Production Snapshot (Frozen)
+## Legacy Snapshot (Frozen v2.x)
 
 This section captures the exact surface area and behaviors considered “production ready” prior to the next significant change. Treat this as the last known‑good integration point.
 

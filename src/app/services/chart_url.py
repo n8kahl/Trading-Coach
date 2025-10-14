@@ -43,6 +43,7 @@ def build_chart_url(
     entry: Dict[str, object] | object,
     stop: float,
     targets: Sequence[float] | None = None,
+    plan_version: str | None = None,
 ) -> str:
     """Fancy Trader canonical chart URL with overlays & freeze-as-of."""
 
@@ -66,6 +67,8 @@ def build_chart_url(
         "freeze": "1",  # instruct renderer to freeze tape at as_of
         "theme": "dark",  # optional UX flag
     }
+    if plan_version is not None:
+        query["plan_version"] = plan_version
     compact = {key: value for key, value in query.items() if value is not None}
     return f"{base_token}?{_u.urlencode(compact)}"
 

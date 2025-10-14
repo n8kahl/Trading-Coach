@@ -1,6 +1,6 @@
 # Progress Log – Trading Coach Charts + GPT
 
-**Last updated:** 2025‑10‑10  
+**Last updated:** 2025‑10‑13  
 Primary maintainer: _handoff to new developer_
 
 This document captures what is live, where the sharp edges are, and the near-term roadmap. Treat it as the onboarding cheat sheet before diving into the code.
@@ -34,6 +34,8 @@ This document captures what is live, where the sharp edges are, and the near-ter
   - `README.md` now includes onboarding steps, architecture overview, and troubleshooting.
 
 ### 1.2 Recent enhancements (Oct 2025)
+
+- v3.0 “Pro Upgrade”: context providers, probability decomposition, risk modelling, historical pattern edge, adaptive `/ws/plans` events, and canonical chart URL enforcement.
 
 - Replaced the stubbed scanner with plan-aware detectors and confidence scoring.
 - Added overlay parsing/rendering in `/tv` (supply/demand bands, liquidity pools, FVGs, AVWAP).
