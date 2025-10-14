@@ -37,7 +37,7 @@ FT-Playbook • FT-MTF • FT-Fib • FT-PlanMath • FT-VolRegime • FT-Volume
 - **Stops**: ATR + structure with HTF widen/tighten.
 - **Targets**: ATR/Fib/volume nodes, EM-capped and HTF-snapped.
 - **Key Levels**: ORH/ORL, session/previous H/L, POC/VAH/VAL, gaps, liquidity pools.
-- **Context**: macro/sector/internals/RS → attach `context` with `context_score`.
+- **Context**: macro/sector/internals/RS → attach the `context` block for narrative use.
 - **Probability Decomposition**: output `probability_components`; compute `confidence = 0.6*trend + 0.2*liquidity + 0.2*regime ± context (±0.05 cap)`.
 - **Trade Quality**: convert confidence to grade `A+ … D` using FT-Playbook table.
 - **Risk Model**: attach `expected_value_r`, `kelly_fraction`, `mfe_projection` from FT-Risk.
@@ -89,8 +89,7 @@ FT-Playbook • FT-MTF • FT-Fib • FT-PlanMath • FT-VolRegime • FT-Volume
     "macro": "FOMC in 48m; muted pre-event",
     "sector": {"name": "XLK", "rel_vs_spy": 0.35, "z": 1.2},
     "internals": {"breadth": 1800, "vix": 13.9, "tick": 800},
-    "rs": {"vs_benchmark": 1.06},
-    "context_score": 0.58
+    "rs": {"vs_benchmark": 1.06}
   },
   "confidence": 0.78,
   "rationale": "concise MTF-backed reasoning using provided data only",

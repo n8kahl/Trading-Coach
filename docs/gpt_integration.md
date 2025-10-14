@@ -8,7 +8,7 @@ scoring, risk math, and streaming updates; the model focuses on reasoning.
 
 ## What's New in v3.0
 
-- Context providers for macro events, sector strength, and market internals with a blended `context_score`.
+- Context providers for macro events, sector strength, and market internals surfaced in the `context` block (no scoring penalty applied).
 - Probability decomposition (`probability_components`) and deterministic trade quality grading.
 - Advanced risk model output (`expected_value_r`, scaled `kelly_fraction`, MFE projection).
 - Adaptive plan evolution streamed over `/ws/plans` (`price`, `hit`, `plan_update`).

@@ -29,15 +29,14 @@ def score_components(inputs: Mapping[str, Any]) -> Dict[str, float]:
     }
 
 
-def overall_confidence(components: Mapping[str, Any], context_score: float = 0.0) -> float:
-    """Blend component scores and context into a confidence value."""
+def overall_confidence(components: Mapping[str, Any]) -> float:
+    """Blend component scores into a confidence value."""
 
     trend = _extract_score(components, "trend_alignment")
     liquidity = _extract_score(components, "liquidity_structure")
     volatility = _extract_score(components, "volatility_regime")
     base = 0.6 * trend + 0.2 * liquidity + 0.2 * volatility
-    adjustment = min(0.05, max(-0.05, float(context_score) - 0.5))
-    return max(0.0, min(1.0, base + adjustment))
+    return max(0.0, min(1.0, base))
 
 
 def quality_grade(confidence: float) -> str:

@@ -67,7 +67,6 @@ export interface ContextBlock {
   sector?: { name?: string; rel_vs_spy?: number; z?: number };
   internals?: { breadth?: number; vix?: number; tick?: number };
   rs?: { vs_benchmark?: number };
-  context_score?: number;
 }
 
 export interface Probabilities {

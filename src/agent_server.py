@@ -1125,8 +1125,7 @@ def _build_setup_from_plan_response(plan_resp: PlanResponse, session_info: Dict[
         "volatility_regime": 0.5,
     }
     components = score_components(component_inputs)
-    context_score = float(context_block.get("context_score", 0.5))
-    component_confidence = overall_confidence(components, context_score)
+    component_confidence = overall_confidence(components)
     base_confidence = _clamp_confidence(plan_resp.confidence)
     confidence_value = max(0.0, min(1.0, (base_confidence + component_confidence) / 2.0))
     trade_quality = quality_grade(confidence_value)
