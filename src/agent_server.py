@@ -16,6 +16,7 @@ import logging
 import time
 import uuid
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Literal
@@ -76,6 +77,7 @@ from .market_clock import MarketClock
 from .app.services import session_now, parse_session_as_of
 from .app.engine import TargetEngineResult, build_structured_plan
 from .app.engine.events import apply_event_gating
+from .app.engine.options_select import best_contract_example
 from .app.engine.options_select import build_example_leg, score_contract
 
 logger = logging.getLogger(__name__)
@@ -559,7 +561,7 @@ class SetupMeta(BaseModel):
     invalid: Optional[float] = None
     stop: float
     targets: List[float]
-    probabilities: Optional[Dict[str, Any]] = None
+    probabilities: Optional[Dict[str, float]] = None
     runner: Optional[Dict[str, Any]] = None
     confluence: Optional[List[str]] = None
     confidence: float = Field(ge=0.0, le=1.0)
@@ -580,9 +582,12 @@ class ExecResponse(BaseModel):
 
 
 class ExecRequest(BaseModel):
-    tickers: List[str] = Field(default_factory=list)
-    style: Optional[str] = None
-    limit: Optional[int] = None
+    symbols: Optional[List[str]] = None
+    style: Optional[Literal["scalp", "intraday", "swing", "leap"]] = None
+    limit: Optional[int] = 3
+    ui_mode: Optional[Literal["api", "chat"]] = "api"
+    include_series: Optional[Literal["none", "compact", "full"]] = "none"
+    user_prefs: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -3121,28 +3126,13 @@ async def gpt_plan(
             chart_url_value = None
 
     charts_payload: Dict[str, Any] = {}
+    minimal_params: Dict[str, Any] | None = None
     if chart_params_payload:
         charts_payload["params"] = chart_params_payload
     if chart_url_value:
-        chart_url_value = _append_query_params(
-            chart_url_value,
-            {
-                "plan_id": plan_id,
-                "plan_version": str(version),
-                **({"as_of": session_info["as_of"]} if session_info.get("as_of") else {}),
-            },
-        )
         charts_payload["interactive"] = chart_url_value
     elif chart_params_payload and {"direction", "entry", "stop", "tp"}.issubset(chart_params_payload.keys()):
         fallback_chart_url = _build_tv_chart_url(request, chart_params_payload)
-        fallback_chart_url = _append_query_params(
-            fallback_chart_url,
-            {
-                "plan_id": plan_id,
-                "plan_version": str(version),
-                **({"as_of": session_info["as_of"]} if session_info.get("as_of") else {}),
-            },
-        )
         charts_payload["interactive"] = fallback_chart_url
         chart_url_value = fallback_chart_url
         logger.debug(
@@ -3168,6 +3158,20 @@ async def gpt_plan(
         chart_url_value = _build_tv_chart_url(request, minimal_params)
         charts_payload.setdefault("params", minimal_params)
         charts_payload["interactive"] = chart_url_value
+
+    params_for_chart = dict(charts_payload.get("params") or minimal_params or {})
+    if not params_for_chart:
+        params_for_chart = {
+            "symbol": symbol.upper(),
+            "interval": normalize_interval(plan.get("interval") or "15"),
+        }
+    params_for_chart.setdefault("symbol", symbol.upper())
+    params_for_chart.setdefault("plan_id", plan_id)
+    params_for_chart.setdefault("plan_version", str(version))
+    if session_info.get("as_of"):
+        params_for_chart["as_of"] = session_info["as_of"]
+    chart_url_value = _canonical_chart_url_from_params(params_for_chart)
+    charts_payload["interactive"] = chart_url_value
 
     trade_detail_url = chart_url_value
     plan["trade_detail"] = trade_detail_url
@@ -3231,6 +3235,22 @@ async def gpt_plan(
         session=session_info,
         confluence=confluence_tags,
     )
+    if not canonical_chart_url(structured_plan.get("chart_url")):
+        params_for_chart = charts_payload.get("params") or minimal_params or {
+            "symbol": symbol,
+            "interval": normalize_interval(plan.get("interval") or "15"),
+        }
+        fallback_url = _build_tv_chart_url(request, params_for_chart)
+        fallback_url = _append_query_params(
+            fallback_url,
+            {
+                "plan_id": plan_id,
+                "plan_version": str(version),
+                **({"as_of": session_info["as_of"]} if session_info.get("as_of") else {}),
+            },
+        )
+        structured_plan["chart_url"] = fallback_url
+        chart_url_value = fallback_url
     _validate_chart_url(structured_plan.get("chart_url"))
     events_block = first.get("events")
     gating_decision = apply_event_gating(_coalesce_events(events_block))
@@ -4650,29 +4670,21 @@ app.include_router(gpt_sentiment_router)
 # ---------------------------------------------------------------------------
 
 
-def _allowed_chart_host() -> Optional[str]:
-    settings = get_settings()
-    base_url = getattr(settings, "chart_base_url", None)
-    if not base_url:
-        return None
-    try:
-        parsed = urlsplit(base_url)
-    except Exception:
-        return None
-    return parsed.netloc.lower() if parsed.netloc else None
+CANONICAL_CHART_PREFIX = "https://app.fancytrader.io/chart?"
+
+
+def canonical_chart_url(url: Optional[str]) -> bool:
+    return bool(isinstance(url, str) and url.startswith(CANONICAL_CHART_PREFIX))
+
+
+def _canonical_chart_url_from_params(params: Dict[str, Any]) -> str:
+    cleaned = {k: v for k, v in params.items() if v is not None}
+    return CANONICAL_CHART_PREFIX + urlencode(cleaned, doseq=True)
 
 
 def _validate_chart_url(url: Optional[str]) -> None:
-    if not url:
-        raise HTTPException(status_code=502, detail="Chart URL unavailable")
-    try:
-        parsed = urlsplit(url)
-    except Exception:
-        raise HTTPException(status_code=502, detail="Invalid chart URL")
-    host = parsed.netloc.lower()
-    allowed = _allowed_chart_host()
-    if allowed and host != allowed:
-        raise HTTPException(status_code=502, detail="Chart URL host mismatch")
+    if not canonical_chart_url(url):
+        raise HTTPException(status_code=502, detail="chart_url must reference canonical FancyTrader chart")
 
 
 def _parse_symbol_query(symbols: Optional[str]) -> List[str]:
@@ -4694,6 +4706,56 @@ def _parse_cursor(cursor: Optional[str]) -> Optional[pd.Timestamp]:
     else:
         ts = ts.tz_convert("UTC")
     return ts
+
+
+def _confidence_value(value: Any) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.5
+    return max(0.0, min(1.0, numeric))
+
+
+def _compact_guard(setups: List[Dict[str, Any]], budget_kb: int = 80) -> List[Dict[str, Any]]:
+    import json as _json
+
+    def fits(payload: Dict[str, Any]) -> bool:
+        try:
+            return len(_json.dumps(payload)) < budget_kb * 1024
+        except Exception:
+            return True
+
+    payload = {"setups": setups}
+    if fits(payload):
+        return setups
+    trimmed = [dict(item) for item in setups]
+    for item in trimmed:
+        item.pop("rationale", None)
+    if fits({"setups": trimmed}):
+        return trimmed
+    for item in trimmed:
+        item.pop("confluence", None)
+    return trimmed
+
+
+async def _attach_options_example_dict(setup: Dict[str, Any]) -> Dict[str, Any]:
+    options_block = setup.get("options") or {}
+    if options_block.get("example"):
+        return setup
+    try:
+        example = await best_contract_example(
+            symbol=setup.get("symbol"),
+            style=setup.get("style"),
+            as_of=setup.get("as_of"),
+        )
+    except Exception:
+        example = None
+    if example:
+        options_block.setdefault("style_horizon_applied", setup.get("style"))
+        options_block.setdefault("dte_window", "auto")
+        options_block["example"] = example
+        setup["options"] = options_block
+    return setup
 
 
 def _maybe_create_hedge(setup: SetupMeta) -> Optional[SetupMeta]:
@@ -4740,7 +4802,7 @@ def _maybe_create_hedge(setup: SetupMeta) -> Optional[SetupMeta]:
 async def exec_assistant(
     request_payload: ExecRequest,
     request: Request,
-    format: str = Query(default="text"),
+    format: str = Query(default="json"),
     style: Optional[str] = Query(default=None),
     limit: int = Query(default=3, ge=1, le=10),
     symbols: Optional[str] = Query(default=None),
@@ -4749,7 +4811,7 @@ async def exec_assistant(
     user: AuthedUser = Depends(require_api_key),
 ) -> Any:
     query_symbols = _parse_symbol_query(symbols)
-    body_symbols = [token.upper() for token in request_payload.tickers]
+    body_symbols = [token.upper() for token in (request_payload.symbols or [])]
     tickers = query_symbols or body_symbols
     tickers = [t for t in tickers if t]
     if not tickers:
@@ -4757,6 +4819,9 @@ async def exec_assistant(
 
     style_param = style or request_payload.style
     limit_param = max(1, min(limit, request_payload.limit or limit))
+    ui_mode = request_payload.ui_mode or ("chat" if format.lower() == "text" else "api")
+
+    include_series = "none"
     session_state = session_now()
     session_info = session_state.to_dict()
     session_meta = SessionMeta.model_validate(session_info)
@@ -4775,7 +4840,7 @@ async def exec_assistant(
     filtered_results = [item for item in scan_results if _matches_style(item)]
     selected_results = filtered_results[:limit_param]
 
-    setups: List[SetupMeta] = []
+    setup_dicts: List[Dict[str, Any]] = []
     for result in selected_results:
         symbol = (result.get("symbol") or "").upper()
         if not symbol:
@@ -4787,22 +4852,23 @@ async def exec_assistant(
         except HTTPException:
             continue
         try:
-            _validate_chart_url(plan_response.chart_url or plan_response.trade_detail)
-            setup = _build_setup_from_plan_response(plan_response, session_info)
-            _validate_chart_url(setup.chart_url)
-        except HTTPException:
-            raise
+            main_setup = _build_setup_from_plan_response(plan_response, session_info)
         except Exception:
             logger.exception("failed to build setup for %s", symbol)
             continue
-        setups.append(setup)
-        hedge = _maybe_create_hedge(setup)
-        if hedge:
-            setups.append(hedge)
+        for candidate in filter(None, [main_setup, _maybe_create_hedge(main_setup)]):
+            data = candidate.model_dump()
+            data["as_of"] = session_meta.as_of
+            data = await _attach_options_example_dict(data)
+            _validate_chart_url(data.get("chart_url"))
+            setup_dicts.append(data)
 
-    exec_payload = ExecResponse(session=session_meta, count=len(setups), setups=setups)
+    setup_dicts = _compact_guard(setup_dicts)
+    setup_models = [SetupMeta.model_validate(item) for item in setup_dicts]
 
-    if format.lower() == "json":
+    exec_payload = ExecResponse(session=session_meta, count=len(setup_models), setups=setup_models)
+
+    if format.lower() == "json" and ui_mode != "chat":
         return exec_payload
 
     lines: List[str] = []
@@ -4810,8 +4876,8 @@ async def exec_assistant(
     lines.append(f"{banner_text} (as_of {session_meta.as_of})")
     summary_style = style_token or "mixed"
     lines.append(f"{exec_payload.count} setups returned (style={summary_style}).")
-    for setup in exec_payload.setups:
-        lines.append(json.dumps(setup.model_dump(), separators=(",", ":"), sort_keys=True))
+    for setup in setup_dicts:
+        lines.append(json.dumps(setup, separators=(",", ":"), sort_keys=True))
     lines.append("Notes: Charts generated by Trading Coach backend; all times ET.")
     return PlainTextResponse("\n".join(lines))
 

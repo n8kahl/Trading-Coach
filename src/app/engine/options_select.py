@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from datetime import datetime
+from typing import Any, Dict, Optional, Tuple
+
+import pandas as pd
+
+from src.tradier import TradierNotConfiguredError, fetch_option_chain_cached
 
 
 SEVERITY_WEIGHTS = {
@@ -145,3 +150,66 @@ def build_example_leg(contract: Dict[str, float | int | str]) -> Dict[str, float
         "composite_score": contract.get("liquidity_score"),
         "tradeability": contract.get("tradeability"),
     }
+
+
+async def best_contract_example(symbol: str, style: Optional[str], as_of: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Return the top-scoring contract example for a symbol/style."""
+
+    try:
+        chain = await fetch_option_chain_cached(symbol)
+    except TradierNotConfiguredError:
+        return None
+    except Exception:
+        return None
+    if chain is None or chain.empty:
+        return None
+
+    df = chain.copy()
+    if "spread_pct" not in df.columns:
+        bid = df.get("bid")
+        ask = df.get("ask")
+        if bid is not None and ask is not None:
+            mid = (df["bid"] + df["ask"]) / 2.0
+            df["spread_pct"] = (df["ask"] - df["bid"]) / mid.replace(0, pd.NA)
+        else:
+            df["spread_pct"] = pd.NA
+
+    prefer_delta_map = {
+        "scalp": 0.55,
+        "intraday": 0.50,
+        "swing": 0.45,
+        "leap": 0.35,
+    }
+    style_key = (style or "intraday").lower()
+    prefer_delta = prefer_delta_map.get(style_key, 0.5)
+
+    candidates: list[Dict[str, Any]] = []
+    for _, row in df.iterrows():
+        try:
+            contract = {
+                "symbol": row.get("symbol"),
+                "option_type": row.get("option_type"),
+                "strike": row.get("strike"),
+                "expiration_date": row.get("expiration_date"),
+                "bid": row.get("bid"),
+                "ask": row.get("ask"),
+                "spread_pct": row.get("spread_pct"),
+                "volume": row.get("volume"),
+                "open_interest": row.get("open_interest"),
+                "delta": row.get("delta"),
+            }
+        except Exception:
+            continue
+        score = score_contract(contract, prefer_delta=prefer_delta)
+        contract["liquidity_score"] = score.score
+        contract["liquidity_components"] = score.components
+        contract["open_interest"] = row.get("open_interest")
+        contract["volume"] = row.get("volume")
+        contract["tradeability"] = int(round(score.score * 100))
+        candidates.append(contract)
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item.get("liquidity_score", 0.0), reverse=True)
+    top = candidates[0]
+    return build_example_leg(top)
