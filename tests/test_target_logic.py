@@ -227,3 +227,54 @@ def test_rr_floor_triggers_watch_warning_when_unresolved():
     assert target_meta and len(target_meta) >= len(targets)
     if len(target_meta) >= 3:
         assert target_meta[2].get("optional") is True
+
+
+def test_intraday_targets_respect_min_spacing():
+    entry = 429.51
+    stop = 426.56
+    atr = 1.6312
+    expected_move = 3.5
+    min_rr = 1.3
+
+    base_targets = _base_targets_for_style(
+        style="intraday",
+        bias="long",
+        entry=entry,
+        stop=stop,
+        atr=atr,
+        expected_move=expected_move,
+        min_rr=min_rr,
+        prefer_em_cap=True,
+    )
+
+    ctx = _make_tp_ctx(
+        atr=atr,
+        expected_move=expected_move,
+        key_levels={
+            "session_high": 430.8,
+            "opening_range_high": 430.6,
+            "opening_range_low": 428.5,
+        },
+        vol_profile={"poc": 430.4, "vah": 431.0},
+        anchored_vwaps={"from_open": 430.2},
+    )
+
+    targets, target_meta, warnings, debug = _apply_tp_logic(
+        symbol="TSLA",
+        style="intraday",
+        bias="long",
+        entry=entry,
+        stop=stop,
+        base_targets=base_targets,
+        ctx=ctx,
+        min_rr=min_rr,
+        atr=atr,
+        expected_move=expected_move,
+        prefer_em_cap=True,
+    )
+
+    assert len(targets) >= 2
+    spacing = debug["min_spacing"]
+    assert spacing > 0
+    gap = targets[1] - targets[0]
+    assert gap >= spacing - 1e-6

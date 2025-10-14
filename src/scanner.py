@@ -360,6 +360,25 @@ def _expected_move_limit(expected_move: float | None, prefer_em_cap: bool) -> fl
     return em_val * (1.0 if prefer_em_cap else 1.10)
 
 
+def _minimum_target_spacing(
+    *,
+    style_key: str,
+    atr: float | None,
+    entry: float,
+    min_distance: float,
+    tick_size: float,
+) -> float:
+    atr_component = 0.0
+    if isinstance(atr, (int, float)) and atr > 0:
+        atr_component = float(atr) * (0.35 if style_key in {"swing", "leaps"} else 0.25)
+    percent_component = abs(entry) * (0.0025 if style_key in {"swing", "leaps"} else 0.0015)
+    distance_component = max(min_distance * 0.5, tick_size * 2.0)
+
+    candidates = [value for value in (atr_component, percent_component, distance_component) if value and value > 0]
+    spacing = max(candidates) if candidates else distance_component
+    return max(spacing, tick_size * 2.0)
+
+
 def _clamp_to_em(entry: float, candidate: float, bias: str, em_limit: float | None) -> float:
     if em_limit is None:
         return candidate
@@ -856,6 +875,14 @@ def _apply_tp_logic(
         "stats_used": bool(stats_bundle),
         "seed_count": len(seeds),
     }
+    min_spacing = _minimum_target_spacing(
+        style_key=style_key,
+        atr=atr,
+        entry=entry,
+        min_distance=min_distance,
+        tick_size=tick_size,
+    )
+    target_debug["min_spacing"] = min_spacing
 
     for idx, seed in enumerate(seeds):
         candidate = float(seed["base"])
@@ -890,10 +917,30 @@ def _apply_tp_logic(
         effective_limit = em_limit
         if snapped_price is not None and em_limit is not None:
             effective_limit = em_limit * (1.10 if snapped_strong else 1.0)
+        base_choice_price = candidate
         final_price = snapped_price if snapped_price is not None else candidate
         final_price = _clamp_to_em(entry, final_price, bias, effective_limit)
         final_price = _round_to_increment(final_price, tick_size)
         final_price = _apply_limit_with_tick(entry, bias, final_price, effective_limit, tick_size)
+
+        previous_price = final_pairs[-1][0] if final_pairs else None
+        if previous_price is not None:
+            gap = final_price - previous_price if bias == "long" else previous_price - final_price
+            if gap < min_spacing - 1e-9:
+                if snapped_price is not None:
+                    fallback_price = _clamp_to_em(entry, base_choice_price, bias, effective_limit)
+                    fallback_price = _round_to_increment(fallback_price, tick_size)
+                    fallback_price = _apply_limit_with_tick(entry, bias, fallback_price, effective_limit, tick_size)
+                    gap = fallback_price - previous_price if bias == "long" else previous_price - fallback_price
+                    if gap >= min_spacing - 1e-9:
+                        final_price = fallback_price
+                gap = final_price - previous_price if bias == "long" else previous_price - final_price
+                if gap < min_spacing - 1e-9:
+                    adjusted = previous_price + direction * max(min_spacing, tick_size)
+                    adjusted = _clamp_to_em(entry, adjusted, bias, effective_limit)
+                    adjusted = _round_to_increment(adjusted, tick_size)
+                    adjusted = _apply_limit_with_tick(entry, bias, adjusted, effective_limit, tick_size)
+                    final_price = adjusted
 
         rounded = round(final_price, 4)
         if rounded in used_prices:
@@ -910,6 +957,7 @@ def _apply_tp_logic(
         meta["distance"] = distance_val
         if snapped_tag:
             meta["snap_tag"] = snapped_tag
+        meta["min_spacing"] = min_spacing
         meta["rr"] = rr(entry, stop, final_price, bias)
         final_pairs.append((final_price, meta))
 
