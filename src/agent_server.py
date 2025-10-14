@@ -18,7 +18,7 @@ import uuid
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Literal
 import copy
 
 import httpx
@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
 from urllib.parse import urlencode, quote, urlsplit, urlunsplit, parse_qsl
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse
 
 from .config import get_settings
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
@@ -515,6 +515,76 @@ class MultiContextResponse(BaseModel):
     session: Dict[str, Any] | None = None
 
 
+class SessionMeta(BaseModel):
+    status: Literal["open", "closed"]
+    as_of: str
+    next_open: Optional[str] = None
+    tz: Optional[str] = None
+    banner: Optional[str] = None
+
+
+class EntryMeta(BaseModel):
+    type: Literal["break", "retest", "limit"] = "limit"
+    level: float
+
+
+class OptionExample(BaseModel):
+    type: Literal["call", "put"]
+    expiry: str
+    delta: Optional[float] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    spread_pct: Optional[float] = None
+    spread_stability: Optional[float] = None
+    oi: Optional[int] = None
+    volume: Optional[int] = None
+    iv_percentile: Optional[float] = None
+    composite_score: Optional[float] = None
+    tradeability: Optional[int] = None
+
+
+class OptionsBlockMeta(BaseModel):
+    style_horizon_applied: Optional[str] = None
+    dte_window: Optional[str] = None
+    example: Optional[OptionExample] = None
+    note: Optional[str] = None
+
+
+class SetupMeta(BaseModel):
+    plan_id: str
+    symbol: str
+    style: Literal["scalp", "intraday", "swing", "leap"]
+    direction: Literal["long", "short"]
+    entry: EntryMeta
+    invalid: Optional[float] = None
+    stop: float
+    targets: List[float]
+    probabilities: Optional[Dict[str, Any]] = None
+    runner: Optional[Dict[str, Any]] = None
+    confluence: Optional[List[str]] = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    rationale: Optional[str] = None
+    options: Optional[OptionsBlockMeta] = None
+    em_used: Optional[float] = None
+    atr_used: Optional[float] = None
+    style_horizon_applied: Optional[str] = None
+    chart_url: str
+    as_of: str
+
+
+class ExecResponse(BaseModel):
+    ok: bool = True
+    session: SessionMeta
+    count: int
+    setups: List[SetupMeta]
+
+
+class ExecRequest(BaseModel):
+    tickers: List[str] = Field(default_factory=list)
+    style: Optional[str] = None
+    limit: Optional[int] = None
+
+
 # ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
@@ -893,6 +963,108 @@ async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
                 pass
             queue.put_nowait(payload)
     await _publish_plan_event(symbol, event)
+
+
+def _output_style_token(style: Optional[str]) -> str:
+    token = (_normalize_trade_style(style) or "intraday").lower()
+    if token == "leaps":
+        return "leap"
+    return token
+
+
+def _clamp_confidence(value: Any) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.5
+    return max(0.0, min(1.0, numeric))
+
+
+def _build_options_block_meta(options_payload: Any, structured_plan: Dict[str, Any]) -> Optional[OptionsBlockMeta]:
+    if not isinstance(options_payload, dict):
+        return None
+    style_applied = options_payload.get("style_horizon_applied") or structured_plan.get("style_horizon_applied")
+    filters = options_payload.get("filters") if isinstance(options_payload.get("filters"), dict) else {}
+    dte_window = None
+    min_dte = filters.get("min_dte") if isinstance(filters, dict) else None
+    max_dte = filters.get("max_dte") if isinstance(filters, dict) else None
+    if isinstance(min_dte, (int, float)) and isinstance(max_dte, (int, float)):
+        dte_window = f"{int(min_dte)}–{int(max_dte)}d"
+
+    example_payload = options_payload.get("example") or options_payload.get("example_leg")
+    option_example: Optional[OptionExample] = None
+    if isinstance(example_payload, dict):
+        ex = dict(example_payload)
+        if "expiry" not in ex and "expiration" in ex:
+            ex["expiry"] = ex.pop("expiration")
+        if "spread_stability" not in ex:
+            components = options_payload.get("liquidity_components")
+            if isinstance(components, dict):
+                ex["spread_stability"] = components.get("spread_stability")
+        if "composite_score" not in ex and "score" in ex:
+            ex["composite_score"] = ex.get("score")
+        if "tradeability" in ex and isinstance(ex["tradeability"], float):
+            ex["tradeability"] = int(round(ex["tradeability"]))
+        option_example = OptionExample.model_validate(ex)
+
+    return OptionsBlockMeta(
+        style_horizon_applied=style_applied,
+        dte_window=dte_window,
+        example=option_example,
+        note=options_payload.get("note"),
+    )
+
+
+def _build_setup_from_plan_response(plan_resp: PlanResponse, session_info: Dict[str, Any]) -> SetupMeta:
+    structured = plan_resp.structured_plan or {}
+    entry_block = structured.get("entry") or {}
+    entry_level = plan_resp.entry if plan_resp.entry is not None else entry_block.get("level")
+    if entry_level is None:
+        entry_level = (plan_resp.plan or {}).get("entry") if plan_resp.plan else 0.0
+    entry_meta = EntryMeta(type=entry_block.get("type", "limit"), level=float(entry_level))
+
+    direction = plan_resp.bias or (plan_resp.plan or {}).get("direction") or structured.get("direction") or "long"
+    style_token = _output_style_token(plan_resp.style or structured.get("style") or (plan_resp.plan or {}).get("style"))
+    direction_token = str(direction).lower()
+
+    targets = plan_resp.targets or structured.get("targets") or []
+    probabilities = None
+    profile_dict = plan_resp.target_profile or structured.get("probabilities")
+    if isinstance(profile_dict, dict):
+        probabilities = {k: float(v) for k, v in profile_dict.items() if isinstance(v, (int, float))}
+
+    options_block = _build_options_block_meta(plan_resp.options, structured)
+
+    chart_url = plan_resp.chart_url or structured.get("chart_url") or plan_resp.trade_detail
+    as_of = structured.get("as_of") or session_info.get("as_of")
+
+    confluence = structured.get("confluence") if isinstance(structured.get("confluence"), list) else None
+
+    plan_identifier = plan_resp.plan_id or (plan_resp.plan or {}).get("plan_id")
+    if not plan_identifier:
+        plan_identifier = f"{plan_resp.symbol}-{uuid.uuid4().hex[:8]}"
+
+    return SetupMeta(
+        plan_id=plan_identifier,
+        symbol=plan_resp.symbol,
+        style=style_token,  # type: ignore[arg-type]
+        direction=direction_token,  # type: ignore[arg-type]
+        entry=entry_meta,
+        invalid=None,
+        stop=float(plan_resp.stop) if plan_resp.stop is not None else float(structured.get("stop") or 0.0),
+        targets=[float(t) for t in targets],
+        probabilities=probabilities,
+        runner=plan_resp.runner,
+        confluence=confluence,
+        confidence=_clamp_confidence(plan_resp.confidence),
+        rationale=plan_resp.notes or structured.get("rationale"),
+        options=options_block,
+        em_used=structured.get("em_used") or plan_resp.calc_notes.get("expected_move") if plan_resp.calc_notes else None,
+        atr_used=plan_resp.calc_notes.get("atr14") if plan_resp.calc_notes else structured.get("atr_used"),
+        style_horizon_applied=structured.get("style_horizon_applied"),
+        chart_url=chart_url,
+        as_of=as_of or session_info.get("as_of"),
+    )
 
 
 async def _ingest_stream_event(symbol: str, event: Dict[str, Any]) -> None:
@@ -3919,6 +4091,7 @@ def _screen_contracts(
             "dte": dte_int,
             "strike": row.get("strike"),
             "type": row_type.upper() if row_type else None,
+            "option_type": row_type.lower() if isinstance(row_type, str) else None,
             "price": round(price, 2),
             "bid": float(bid) if isinstance(bid, (int, float)) else None,
             "ask": float(ask) if isinstance(ask, (int, float)) else None,
@@ -4148,6 +4321,7 @@ async def gpt_contracts(
         "alternatives": alternatives,
         "table": table_rows,
         "example_leg": example_leg,
+        "example": example_leg,
     }
     payload["session"] = session_info
     if underlying_price_asof is not None:
@@ -4465,6 +4639,73 @@ app.include_router(gpt_sentiment_router)
 # ---------------------------------------------------------------------------
 # Platform health endpoints
 # ---------------------------------------------------------------------------
+
+
+@app.post("/api/v1/assistant/exec")
+async def exec_assistant(
+    request_payload: ExecRequest,
+    request: Request,
+    format: str = Query(default="text"),
+    style: Optional[str] = Query(default=None),
+    limit: int = Query(default=3, ge=1, le=10),
+    user: AuthedUser = Depends(require_api_key),
+) -> Any:
+    tickers = request_payload.tickers
+    if not tickers:
+        raise HTTPException(status_code=400, detail="At least one ticker is required")
+
+    style_param = style or request_payload.style
+    limit_param = request_payload.limit or limit
+    session_state = session_now()
+    session_info = session_state.to_dict()
+    session_meta = SessionMeta.model_validate(session_info)
+
+    universe = ScanUniverse(tickers=tickers, style=style_param)
+    scan_results = await gpt_scan(universe, request, user)
+
+    style_token = _output_style_token(style_param) if style_param else None
+
+    def _matches_style(result: Dict[str, Any]) -> bool:
+        if style_token is None:
+            return True
+        result_style = result.get("style") or ((result.get("plan") or {}).get("style"))
+        return _output_style_token(result_style) == style_token
+
+    filtered_results = [item for item in scan_results if _matches_style(item)]
+    selected_results = filtered_results[:limit_param]
+
+    setups: List[SetupMeta] = []
+    for result in selected_results:
+        symbol = (result.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        plan_block = result.get("plan") or {}
+        plan_request = PlanRequest(symbol=symbol, style=style_param or result.get("style"), plan_id=plan_block.get("plan_id"))
+        try:
+            plan_response = await gpt_plan(plan_request, request, user)
+        except HTTPException:
+            continue
+        try:
+            setup = _build_setup_from_plan_response(plan_response, session_info)
+        except Exception:
+            logger.exception("failed to build setup for %s", symbol)
+            continue
+        setups.append(setup)
+
+    exec_payload = ExecResponse(session=session_meta, count=len(setups), setups=setups)
+
+    if format.lower() == "json":
+        return exec_payload
+
+    lines: List[str] = []
+    banner_text = session_info.get("banner") or f"Session status: {session_meta.status}"
+    lines.append(f"{banner_text} (as_of {session_meta.as_of})")
+    summary_style = style_token or "mixed"
+    lines.append(f"{exec_payload.count} setups returned (style={summary_style}).")
+    for setup in exec_payload.setups:
+        lines.append(json.dumps(setup.model_dump(), separators=(",", ":"), sort_keys=True))
+    lines.append("Notes: Charts generated by Trading Coach backend; all times ET.")
+    return PlainTextResponse("\n".join(lines))
 
 
 @app.get("/healthz", summary="Readiness probe used by Railway")

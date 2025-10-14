@@ -124,15 +124,24 @@ def score_contract(
 def build_example_leg(contract: Dict[str, float | int | str]) -> Dict[str, float | int | str]:
     """Return a compact example leg description for response payloads."""
 
+    opt_type = contract.get("option_type") or contract.get("type")
+    if isinstance(opt_type, str):
+        opt_type = opt_type.lower()
     return {
         "symbol": contract.get("symbol"),
-        "type": contract.get("option_type"),
+        "type": opt_type,
         "strike": contract.get("strike"),
-        "expiration": contract.get("expiration_date"),
+        "expiry": contract.get("expiration_date"),
         "delta": contract.get("delta"),
         "bid": contract.get("bid"),
         "ask": contract.get("ask"),
         "spread_pct": contract.get("spread_pct"),
-        "score": contract.get("liquidity_score"),
+        "spread_stability": contract.get("liquidity_components", {}).get("spread_stability")
+        if isinstance(contract.get("liquidity_components"), dict)
+        else None,
+        "oi": contract.get("open_interest") or contract.get("oi"),
+        "volume": contract.get("volume"),
+        "iv_percentile": contract.get("iv_percentile"),
+        "composite_score": contract.get("liquidity_score"),
+        "tradeability": contract.get("tradeability"),
     }
-

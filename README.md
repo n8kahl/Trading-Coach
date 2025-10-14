@@ -13,6 +13,7 @@ A lightweight FastAPI service that prepares market data, trading plans, volatili
 | Endpoint | Purpose | Notes |
 | --- | --- | --- |
 | `POST /gpt/scan` | Evaluate strategy playbooks (ORB retest, VWAP cluster, gap fill, midday fade, etc.) on any ticker list and return grounded plans (entry/stop/targets/confidence) plus overlays and indicators. | No stub logic remains—scores reflect real market structure. |
+| `POST /api/v1/assistant/exec` | Produce fully structured setups (JSON or terse text) for downstream GPT prompts, with style/limit filters. | Pass `format=json` to bypass LLM rendering; each setup includes canonical chart URLs and option examples. |
 | `GET /gpt/context/{symbol}` | Stream the latest OHLCV bars + indicator series for a single interval. | Use when the GPT needs extra bars for bespoke analysis. |
 | `POST /gpt/multi-context` | Fetch multiple intervals in one call (e.g., `["5m","1h","4h","1D"]`) and attach a volatility regime block (ATM IV, IV rank/percentile, HV20/60/120, IV↔HV ratio). | Responses are cached for 30 s per symbol+interval+lookback. |
 | `POST /gpt/contracts` | Rank Tradier option contracts with composite liquidity scoring (spread, Δ proximity, IV percentile, volume/OI) and compute scenario P/L using plan anchors (delta/gamma/vega/theta). | `risk_amount` (defaults $100) is used only for sizing projections; no budget filtering occurs; response includes `example_leg` and score components. |

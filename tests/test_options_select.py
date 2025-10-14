@@ -40,4 +40,4 @@ def test_build_example_leg_returns_compact_payload():
     assert leg["symbol"] == contract["symbol"]
     assert leg["type"] == "call"
     assert leg["strike"] == contract["strike"]
-    assert leg["score"] == contract["liquidity_score"]
+    assert leg["composite_score"] == contract["liquidity_score"]
