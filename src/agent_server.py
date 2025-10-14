@@ -4504,9 +4504,17 @@ async def gpt_context(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    session_info = _session_block()
+    as_of_ts = _session_asof_timestamp(session_info)
+
     frame = get_candles(symbol, interval_normalized, lookback=lookback)
     if frame.empty:
         raise HTTPException(status_code=502, detail=f"No market data available for {symbol.upper()} ({interval_normalized}).")
+
+    if session_info.get("status") != "open" and as_of_ts is not None:
+        limited = frame[frame["time"] <= as_of_ts]
+        if not limited.empty:
+            frame = limited
 
     df = frame.copy()
     df["time"] = pd.to_datetime(df["time"], utc=True)

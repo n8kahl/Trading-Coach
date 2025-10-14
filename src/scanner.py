@@ -1227,10 +1227,13 @@ def _infer_bar_minutes(index: pd.Index) -> float | None:
 def _resample_ohlcv(frame: pd.DataFrame, rule: str, min_length: int = 20) -> pd.DataFrame | None:
     if frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
         return None
+    rule_token = rule
+    if isinstance(rule_token, str) and rule_token.endswith("T"):
+        rule_token = f"{rule_token[:-1]}min"
     try:
         resampled = (
             frame[["open", "high", "low", "close", "volume"]]
-            .resample(rule, label="right", closed="right")
+            .resample(rule_token, label="right", closed="right")
             .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
         )
     except Exception:
