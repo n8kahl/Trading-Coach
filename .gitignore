@@ -22,6 +22,7 @@ var/
 .installed.cfg
 *.egg
 !idea-page/lib/
+!trade-coach-ui/src/lib/
 
 # Virtual environment
 .venv/

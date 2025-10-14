@@ -1,0 +1,21 @@
+const DEFAULT_API = process.env.NEXT_PUBLIC_API_BASE_URL ?? process.env.TRADE_COACH_API_BASE_URL ?? "http://localhost:8000";
+
+export const API_BASE_URL = DEFAULT_API.replace(/\/$/, "");
+
+const explicitWsBase = process.env.NEXT_PUBLIC_WS_BASE_URL ?? process.env.TRADE_COACH_WS_BASE_URL;
+
+export const WS_BASE_URL = explicitWsBase
+  ? explicitWsBase.replace(/\/$/, "")
+  : API_BASE_URL.replace(/^http/i, (match) => (match.toLowerCase() === "https" ? "wss" : "ws"));
+
+export const API_KEY_HEADER = process.env.NEXT_PUBLIC_BACKEND_API_KEY ?? process.env.TRADE_COACH_API_KEY ?? "";
+
+export function withAuthHeaders(headers: HeadersInit = {}): HeadersInit {
+  if (!API_KEY_HEADER) {
+    return headers;
+  }
+  return {
+    ...headers,
+    Authorization: `Bearer ${API_KEY_HEADER}`,
+  };
+}

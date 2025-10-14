@@ -92,6 +92,38 @@ Use `pytest` to run the current unit test suite (indicator maths only right now)
 
 ---
 
+## Live plan console (Next.js)
+
+The new coach UI lives in [`trade-coach-ui/`](trade-coach-ui/) and ships a reactive Next.js experience with Polygon streaming, plan deltas, and coaching timelines.
+
+```
+cd trade-coach-ui
+npm install
+npm run dev
+```
+
+Environment variables (optional):
+
+```
+NEXT_PUBLIC_API_BASE_URL=https://trading-coach-production.up.railway.app
+NEXT_PUBLIC_WS_BASE_URL=wss://trading-coach-production.up.railway.app
+# Only set the API key if your backend requires it—never expose secrets in client builds
+NEXT_PUBLIC_BACKEND_API_KEY=optional-bearer-token
+```
+
+The root `package.json` exposes helper scripts:
+
+```
+npm run dev        # trade-coach-ui dev server
+npm run dev:legacy # legacy idea-page dev server
+npm run build      # build both frontends
+npm run start      # start the live plan console (Next.js) on $PORT
+```
+
+`trade-coach-ui` renders live plan data by calling `/idea/{plan_id}` for the initial snapshot, `/ws/plans/{plan_id}` for coaching deltas, and `/stream/{symbol}` for price ticks. As you extend the TradeFollower, the UI will automatically surface trail-stop adjustments and auto-replan events.
+
+---
+
 ## Architecture primer
 
 - **FastAPI app (`src/agent_server.py`)** – hosts GPT endpoints, the `/tv` viewer, and a `/tv-api` datafeed. Uses async helpers for I/O.

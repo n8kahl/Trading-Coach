@@ -3,8 +3,12 @@
   "private": true,
   "description": "Root package for coordinating Next.js frontend builds.",
   "scripts": {
-    "build": "npm --prefix idea-page ci && npm --prefix idea-page run build",
-    "start": "npm --prefix idea-page run start -- --hostname 0.0.0.0 --port ${PORT:-3000}",
-    "dev": "npm --prefix idea-page run dev"
+    "build": "npm run build:legacy && npm run build:coach",
+    "build:legacy": "npm --prefix idea-page ci && npm --prefix idea-page run build",
+    "build:coach": "npm --prefix trade-coach-ui ci && npm --prefix trade-coach-ui run build",
+    "start": "npm run start:coach",
+    "start:coach": "npm --prefix trade-coach-ui run start -- --hostname 0.0.0.0 --port ${PORT:-3000}",
+    "dev": "npm --prefix trade-coach-ui run dev",
+    "dev:legacy": "npm --prefix idea-page run dev"
   }
 }
