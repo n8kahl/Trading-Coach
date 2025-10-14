@@ -1,6 +1,6 @@
 # Fancy Trader 2.0 Delivery Plan
 
-_Last updated: 2025-10-13_
+_Last updated: 2025-10-14_
 
 ## Overview
 
@@ -53,6 +53,7 @@ The work is split into the stages below so that the codebase remains deployable 
 
 - ✅ Added unit coverage for option scoring (`tests/test_options_select.py`) and event gating (`tests/test_event_gating.py`), expanding regression coverage beyond indicator math.
 - ✅ Instrumented plan gating and WebSocket lifecycle logging to aid observability during staging/production rollouts.
+- ✅ Delivered the compact `/api/v1/assistant/exec` JSON workflow (canonical chart URLs, optional hedges, options examples) plus `/api/v1/symbol/*` diagnostics; UI no longer parses prose.
 - ⬜ Load/soak harness + CI schema diff remain future enhancements (documented in roadmap).
 
 ### Stage 7 – Release & Documentation
@@ -70,5 +71,5 @@ The work is split into the stages below so that the codebase remains deployable 
 ## Next Steps
 
 1. Fold closed-session and streaming regression tests into the expanded Stage 6 suite.
-2. Implement Stage 6 observability/test automation while monitoring the new option scoring + plan streams in staging.
+2. Implement Stage 6 observability/test automation while monitoring the new option scoring + plan streams in staging, including assistant exec JSON contract under load.
 3. Continue updating this document as subsequent stages progress.

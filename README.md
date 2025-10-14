@@ -13,14 +13,14 @@ A lightweight FastAPI service that prepares market data, trading plans, volatili
 | Endpoint | Purpose | Notes |
 | --- | --- | --- |
 | `POST /gpt/scan` | Evaluate strategy playbooks (ORB retest, VWAP cluster, gap fill, midday fade, etc.) on any ticker list and return grounded plans (entry/stop/targets/confidence) plus overlays and indicators. | No stub logic remains—scores reflect real market structure. |
-| `POST /api/v1/assistant/exec` | Produce fully structured setups (JSON or terse text) for downstream GPT prompts, with style/limit filters. | Pass `format=json` to bypass LLM rendering; each setup includes canonical chart URLs and option examples. |
+| `POST /api/v1/assistant/exec` | Produce fully structured setups (JSON or terse text) for downstream GPT prompts, with style/limit filters. | Pass `format=json` for compact API responses (session + setups only); each setup includes canonical Fancy Trader chart URLs and option examples. |
 | `GET /gpt/context/{symbol}` | Stream the latest OHLCV bars + indicator series for a single interval. | Use when the GPT needs extra bars for bespoke analysis. |
 | `POST /gpt/multi-context` | Fetch multiple intervals in one call (e.g., `["5m","1h","4h","1D"]`) and attach a volatility regime block (ATM IV, IV rank/percentile, HV20/60/120, IV↔HV ratio). | Responses are cached for 30 s per symbol+interval+lookback. |
 | `POST /gpt/contracts` | Rank Tradier option contracts with composite liquidity scoring (spread, Δ proximity, IV percentile, volume/OI) and compute scenario P/L using plan anchors (delta/gamma/vega/theta). | `risk_amount` (defaults $100) is used only for sizing projections; no budget filtering occurs; response includes `example_leg` and score components. |
 | `POST /gpt/chart-url` | Normalise chart parameters and return a `/tv` URL containing plan lines, overlays, and metadata. | Supports plan rescaling, supply/demand zones, liquidity pools, FVG bands, and anchored VWAPs. |
 | `GET /tv` | Serves the TradingView Advanced UI when bundled; otherwise falls back to Lightweight Charts with EMA labels, white VWAP, plan bands, and overlay lines. | `scale_plan=auto` rescales historic plans to current price regimes. |
 
-Support routes: `/tv-api/*` (Lightweight Charts datafeed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html|png` (static renderer), `/ws/plans` (plan-scoped WebSocket stream).
+Support routes: `/tv-api/*` (Lightweight Charts datafeed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html|png` (static renderer), `/ws/plans` (plan-scoped WebSocket stream), `/api/v1/symbol/{symbol}/series`, `/api/v1/symbol/{symbol}/indicators` (paginated diagnostics).
 
 Authentication is optional. Set `BACKEND_API_KEY` to require Bearer tokens; include `X-User-Id` to scope data per user.
 
@@ -97,8 +97,23 @@ Use `pytest` to run the current unit test suite (indicator maths only right now)
 
 - **FastAPI app (`src/agent_server.py`)** – hosts GPT endpoints, the `/tv` viewer, and a `/tv-api` datafeed. Uses async helpers for I/O.
 - **Market data** – Polygon aggregates with Yahoo fallback for OHLCV; Tradier chains & quotes (batched + cached for 15 s) provide option prices, greeks, and IV. Polygon option snapshots are best-effort; failures simply fall back to Tradier.
-- **Strategy engine (`scanner.py`)** – builds real trade plans from intraday context (anchored VWAPs, ATR, EMA alignment, breakout checks). Plans include direction, entry, stop, target ladder, confidence, ATR, notes, R:R, and overlays; event gating automatically marks high-risk windows as defined-risk or suppressed.
-- **Volatility & risk** – `_compute_iv_metrics` caches IV metrics while `app/engine/events.py` guards plans during high-impact events and `/ws/plans` streams live plan deltas (price hits, replans, notes) to clients.
+- **Strategy engine (`scanner.py`)** – builds real trade plans from intraday context (anchored VWAPs, ATR, EMA alignment, breakout checks). Plans include direction, entry, stop, target ladder, confidence, ATR, notes, R:R, and overlays; event gating automatically marks high-risk windows as defined-risk or suppressed and `/api/v1/assistant/exec` auto-appends hedge setups when needed.
+- **Volatility & risk** – `_compute_iv_metrics` caches IV metrics while `app/engine/events.py` guards plans during high-impact events and `/ws/plans` streams live plan deltas (price hits, replans, notes) to clients. `/api/v1/assistant/exec` emits canonical JSON (session + setups) so UI layers no longer parse prose.
+
+### Assistant Exec quick start
+
+```
+POST /api/v1/assistant/exec?format=json&style=intraday&limit=3
+{
+  "symbols": ["SPY"],
+  "ui_mode": "api",
+  "include_series": "none"
+}
+```
+
+- JSON response: `session` metadata + compact `setups[]` (entry/stop/targets, probabilities, canonical `chart_url`, `options.example`, `em_used`, `atr_used`).
+- Hedge plans appear automatically when a mirror direction is prudent.
+- Text mode remains available for conversational tooling: `format=text&ui_mode=chat`.
 - **Chart renderer (`static/tv`)** – Lightweight Charts fallback draws labelled EMAs, white VWAP, plan lines, supply/demand bands, liquidity pools, fair value gaps, and anchored VWAPs. Autoscale + plan rescaling keep everything on-screen.
 - **Caching** – Multi-context responses (30 s), IV metrics (120 s), Tradier chains/quotes (15 s). All caches are in-memory; restart clears them.
 
