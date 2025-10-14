@@ -1856,8 +1856,8 @@ def _autofill_symbols(style: Optional[str]) -> Tuple[List[str], Dict[str, Any]]:
     settings = get_settings()
     api_key = settings.polygon_api_key
     if not api_key:
-        metadata["large_cap"] = _DEFAULT_TOP_SYMBOLS[:5]
-        metadata["mid_cap"] = _DEFAULT_TOP_SYMBOLS[5:10]
+        metadata["large_cap"] = _DEFAULT_TOP_SYMBOLS[:100]
+        metadata["mid_cap"] = _DEFAULT_TOP_SYMBOLS[100:200]
         return list(_DEFAULT_TOP_SYMBOLS), metadata
 
     combined: List[Dict[str, Any]] = []
@@ -1884,35 +1884,37 @@ def _autofill_symbols(style: Optional[str]) -> Tuple[List[str], Dict[str, Any]]:
         except (TypeError, ValueError):
             continue
         if price_val >= 75 or volume_val >= 15_000_000:
-            if len(large) < 20:
+            if len(large) < 150:
                 large.append(ticker)
-        elif 10 <= price_val <= 75 and volume_val >= 2_000_000:
-            if len(mid) < 20:
+        elif 5 <= price_val <= 75 and volume_val >= 1_500_000:
+            if len(mid) < 150:
                 mid.append(ticker)
 
     if not large and not mid:
-        metadata["large_cap"] = _DEFAULT_TOP_SYMBOLS[:5]
-        metadata["mid_cap"] = _DEFAULT_TOP_SYMBOLS[5:10]
+        metadata["large_cap"] = _DEFAULT_TOP_SYMBOLS[:100]
+        metadata["mid_cap"] = _DEFAULT_TOP_SYMBOLS[100:200]
         return list(_DEFAULT_TOP_SYMBOLS), metadata
 
     style_token = (_normalize_trade_style(style) or "intraday").lower()
     selection: List[str] = []
+    large_pool = large[:120]
+    mid_pool = [sym for sym in mid if sym not in large_pool][:120]
     if style_token in {"scalp", "intraday"}:
-        selection.extend(large[:5])
-        selection.extend([symbol for symbol in mid if symbol not in selection][:5])
+        selection.extend(large_pool[:12])
+        selection.extend([symbol for symbol in mid_pool if symbol not in selection][:8])
     elif style_token in {"swing", "leaps"}:
-        selection.extend(large[:7])
-        selection.extend([symbol for symbol in mid if symbol not in selection][:3])
+        selection.extend(large_pool[:15])
+        selection.extend([symbol for symbol in mid_pool if symbol not in selection][:5])
     else:
-        selection.extend(large[:5])
-        selection.extend([symbol for symbol in mid if symbol not in selection][:5])
+        selection.extend(large_pool[:10])
+        selection.extend([symbol for symbol in mid_pool if symbol not in selection][:10])
 
     if not selection:
-        selection = (large or mid or list(_DEFAULT_TOP_SYMBOLS))[:10]
+        selection = (large_pool or mid_pool or list(_DEFAULT_TOP_SYMBOLS))[:20]
 
     metadata["source"] = "polygon"
-    metadata["large_cap"] = large[:10]
-    metadata["mid_cap"] = mid[:10]
+    metadata["large_cap"] = large_pool[:200]
+    metadata["mid_cap"] = mid_pool[:200]
     return selection, metadata
 
 
@@ -5171,14 +5173,16 @@ async def exec_assistant(
     body_symbols = [token.upper() for token in (request_payload.symbols or [])]
     tickers = query_symbols or body_symbols
     tickers = [t for t in tickers if t]
+    style_param = style or request_payload.style
     auto_universe = False
     auto_meta: Dict[str, Any] = {}
     if not tickers:
         tickers, auto_meta = _autofill_symbols(style_param)
         auto_universe = True
-        logger.info("No symbols supplied; using default universe", extra={"symbols": tickers, "style": style_param})
-
-    style_param = style or request_payload.style
+        logger.info(
+            "No symbols supplied; using auto universe",
+            extra={"symbols": tickers, "style": style_param, "meta": auto_meta},
+        )
     limit_param = max(1, min(limit, request_payload.limit or limit))
     ui_mode = request_payload.ui_mode or ("chat" if format.lower() == "text" else "api")
 
