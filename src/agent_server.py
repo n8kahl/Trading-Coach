@@ -3203,12 +3203,18 @@ async def gpt_scan(
         plan_stop = None
         plan_targets: List[float] = []
         plan_direction = direction_hint
+        version = 1
+        plan_id = _generate_plan_slug(signal.symbol, style, plan_direction, snapshot)
         if signal.plan is not None:
             plan_payload = signal.plan.as_dict()
             plan_entry = float(signal.plan.entry)
             plan_stop = float(signal.plan.stop)
             plan_targets = [float(target) for target in signal.plan.targets]
             plan_direction = signal.plan.direction or plan_direction
+            version = int(plan_payload.get("version") or version)
+            slug_hint = plan_payload.get("plan_id") if isinstance(plan_payload, dict) else None
+            if slug_hint:
+                plan_id = str(slug_hint)
             chart_query["entry"] = f"{signal.plan.entry:.2f}"
             chart_query["stop"] = f"{signal.plan.stop:.2f}"
             chart_query["tp"] = ",".join(f"{target:.2f}" for target in signal.plan.targets)
