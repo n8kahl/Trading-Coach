@@ -1,18 +1,8 @@
 # GPT Integration Cheat Sheet
 
-> **v3.0 – Pro Upgrade** (macro/sector/internals context, probability decomposition, advanced risk, adaptive plan evolution)
-
-This backend now returns richer context so your GPT agent can deliver
-deterministic, production-ready trade plans. The server handles data prep,
-scoring, risk math, and streaming updates; the model focuses on reasoning.
-
-## What's New in v3.0
-
-- Context providers for macro events, sector strength, and market internals surfaced in the `context` block (no scoring penalty applied).
-- Probability decomposition (`probability_components`) and deterministic trade quality grading.
-- Advanced risk model output (`expected_value_r`, scaled `kelly_fraction`, MFE projection).
-- Adaptive plan evolution streamed over `/ws/plans` (`price`, `hit`, `plan_update`).
-- New debug endpoint: `GET /api/v1/context`.
+This backend now serves raw market context so that your GPT agent can make the
+final trading decisions (entries, stops, targets, position sizing). The server
+focuses on data prep; the agent performs the higher-level reasoning.
 
 ## Production Endpoint
 
@@ -26,10 +16,9 @@ scoring, risk math, and streaming updates; the model focuses on reasoning.
 
 ## Prompt & Schema (Live)
 
-- Master prompt (**active v3.0**): [`docs/prompts/master_prompt_v3.0.md`](prompts/master_prompt_v3.0.md)
-- API schema (**OpenAPI 3.0**): mirrors `https://trading-coach-production.up.railway.app/openapi.json`
-- Deployment status: **Production ready & approved** (2025-10-13 refresh; commit `feat/v3.0-pro-upgrade`)
-- Default universe (when `symbols` omitted): the server pulls Polygon snapshots for most-active/gainers/losers, builds two lists (high-liquidity “large cap” and faster mid-cap movers), and scans the top 10 combined. If Polygon is unavailable it falls back to `[SPY, QQQ, AAPL, MSFT, NVDA, AMZN, META, TSLA, IWM, DIA]`.
+- Master prompt (**approved v2.1**): [`docs/prompts/master_prompt_v2.1.md`](prompts/master_prompt_v2.1.md)
+- API schema (**OpenAPI 1.9.6**): mirrors `https://trading-coach-production.up.railway.app/openapi.json`
+- Deployment status: **Production ready & approved** (2025-10-10 refresh; commit `23a45da`)
 - Persistent storage: set `DB_URL` (Postgres) so `/gpt/plan` snapshots and idea permalinks survive restarts.
 
 ---
@@ -45,7 +34,7 @@ scoring, risk math, and streaming updates; the model focuses on reasoning.
   - Chart URLs gain `offline_mode=true` query param (watermark rendered client-side).
 - Prefer enabling only when the user explicitly asks for night / weekend plans.
 
-## Legacy Snapshot (Frozen v2.x)
+## Production Snapshot (Frozen)
 
 This section captures the exact surface area and behaviors considered “production ready” prior to the next significant change. Treat this as the last known‑good integration point.
 

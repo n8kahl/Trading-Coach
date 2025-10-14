@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, time, timezone
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
 
 from .config import get_settings
-
-_ET = ZoneInfo("America/New_York")
 
 
 async def fetch_polygon_ohlcv(symbol: str, timeframe: str, *, max_days: Optional[int] = None) -> pd.DataFrame | None:
@@ -71,39 +67,3 @@ async def fetch_polygon_ohlcv(symbol: str, timeframe: str, *, max_days: Optional
     frame = frame.set_index("timestamp").sort_index()
     return frame
 
-
-async def last_price_asof(symbol: str, as_of: datetime) -> Optional[float]:
-    """Return the last Polygon close on or before the provided timestamp."""
-
-    if as_of is None:
-        return None
-
-    if as_of.tzinfo is None:
-        as_of = as_of.replace(tzinfo=_ET)
-    as_of_utc = as_of.astimezone(timezone.utc)
-    day_start_et = datetime.combine(as_of.astimezone(_ET).date(), time(0, 0), tzinfo=_ET)
-    day_start_utc = day_start_et.astimezone(timezone.utc)
-
-    intraday = await fetch_polygon_ohlcv(symbol, "1", max_days=7)
-    if intraday is not None and not intraday.empty:
-        window = intraday[(intraday.index >= day_start_utc) & (intraday.index <= as_of_utc)]
-        if not window.empty:
-            try:
-                return float(window["close"].iloc[-1])
-            except Exception:
-                pass
-
-    # Fallback to the most recent daily close on or before as_of
-    daily = await fetch_polygon_ohlcv(symbol, "D", max_days=10)
-    if daily is None or daily.empty:
-        return None
-    recent = daily[daily.index <= as_of_utc]
-    if recent.empty:
-        try:
-            return float(daily["close"].iloc[-1])
-        except Exception:
-            return None
-    try:
-        return float(recent["close"].iloc[-1])
-    except Exception:
-        return None

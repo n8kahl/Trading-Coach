@@ -13,14 +13,12 @@ import asyncio
 import json
 import math
 import logging
-import os
 import time
 import uuid
 import re
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from typing import Any, Dict, List, Optional, Tuple
 import copy
 
 import httpx
@@ -32,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
 from urllib.parse import urlencode, quote, urlsplit, urlunsplit, parse_qsl
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse
 
 from .config import get_settings
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
@@ -57,34 +55,20 @@ from .tradier import (
     fetch_option_quotes,
     select_tradier_contract,
 )
-from .polygon_options import (
-    fetch_polygon_option_chain,
-    fetch_polygon_option_chain_asof,
-    summarize_polygon_chain,
-)
+from .polygon_options import fetch_polygon_option_chain, summarize_polygon_chain
 from .context_overlays import compute_context_overlays
 from .db import (
     ensure_schema as ensure_db_schema,
     fetch_idea_snapshot as db_fetch_idea_snapshot,
     store_idea_snapshot as db_store_idea_snapshot,
 )
-from .data_sources import fetch_polygon_ohlcv, last_price_asof
+from .data_sources import fetch_polygon_ohlcv
 from .symbol_streamer import SymbolStreamCoordinator
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
 from zoneinfo import ZoneInfo
 
 from .market_clock import MarketClock
-from .app.services import session_now, parse_session_as_of, build_chart_url
-from .app.engine import TargetEngineResult, build_structured_plan
-from .app.engine.context import build_context as build_context_block
-from .app.engine.evolve import evolve_plan
-from .app.engine.events import apply_event_gating
-from .app.engine.options_select import best_contract_example
-from .app.engine.options_select import build_example_leg, score_contract
-from .app.engine.risk import risk_model_payload
-from .app.engine.scoring import overall_confidence, quality_grade, score_components
-from .app.routers.validators import canonical_chart_url
 
 logger = logging.getLogger(__name__)
 
@@ -136,151 +120,6 @@ _FUTURES_PROXY_MAP: Dict[str, str] = {
 _FUTURES_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}
 
 _MARKET_CLOCK = MarketClock()
-
-
-def _session_block() -> Dict[str, Any]:
-    """Return a session dictionary safe for inclusion in responses."""
-    try:
-        session = session_now()
-        return session.to_dict()
-    except Exception:  # pragma: no cover - defensive logging
-        logger.exception("session_now failed; defaulting to closed session banner")
-        return {
-            "status": "closed",
-            "as_of": "",
-            "next_open": "",
-            "tz": "America/New_York",
-            "banner": "Session status unavailable",
-        }
-
-
-def _session_asof_timestamp(session: Dict[str, Any]) -> Optional[pd.Timestamp]:
-    dt = parse_session_as_of(session)
-    if dt is None:
-        return None
-    ts = pd.Timestamp(dt)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
-    else:
-        ts = ts.tz_convert("UTC")
-    return ts
-
-
-def _coalesce_events(block: Any) -> List[Dict[str, Any]]:
-    if block is None:
-        return []
-    if isinstance(block, list):
-        return [dict(item) for item in block if isinstance(item, dict)]
-    if isinstance(block, dict):
-        collected: List[Dict[str, Any]] = []
-        for key in ("items", "events", "upcoming", "data"):
-            value = block.get(key)
-            if isinstance(value, list):
-                collected.extend([dict(item) for item in value if isinstance(item, dict)])
-        if not collected:
-            collected.append({k: v for k, v in block.items() if k in {"severity", "minutes_to_event", "label", "type"}})
-        return [item for item in collected if item]
-    return []
-
-
-def _plan_stream_key(symbol: str, plan_id: str) -> str:
-    return f"{symbol.upper()}::{plan_id}"
-
-
-def _transform_plan_event(symbol: str, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    plan_id = event.get("plan_id")
-    if not plan_id:
-        return None
-    payload: Dict[str, Any] = {
-        "symbol": symbol.upper(),
-        "plan_id": plan_id,
-    }
-    event_type = event.get("t") or "note"
-    if event_type == "price":
-        payload.update({
-            "type": "price",
-            "price": event.get("price"),
-            "ts": event.get("ts"),
-        })
-        return payload
-    if event_type == "plan_update":
-        payload.update({
-            "type": "update",
-            "setup": event.get("setup"),
-            "ts": event.get("ts"),
-        })
-        return payload
-    if event_type == "hit":
-        payload.update({
-            "type": "hit",
-            "hit": event.get("level"),
-            "price": event.get("price"),
-            "ts": event.get("ts"),
-        })
-        return payload
-    if event_type in {"stop", "invalidate", "reverse"}:
-        payload.update({
-            "type": event_type,
-            "ts": event.get("ts"),
-            "price": event.get("price"),
-            "reason": event.get("reason"),
-        })
-        return payload
-    if event_type == "plan_delta":
-        changes = event.get("changes") or {}
-        payload.update({
-            "type": "price",
-            "changes": changes,
-            "raw": event,
-        })
-        breach = str(changes.get("breach") or "").lower()
-        status = str(changes.get("status") or "").lower()
-        if breach in {"stop_hit", "tp1_hit", "tp2_hit"}:
-            payload["type"] = "hit"
-            payload["hit"] = breach
-        elif status == "invalidated":
-            payload["type"] = "hit"
-            payload["hit"] = "invalid"
-        if "last_price" in changes:
-            payload["price"] = changes["last_price"]
-        if "note" in changes:
-            payload.setdefault("note", changes.get("note"))
-    elif event_type == "plan_full":
-        payload.update({
-            "type": "replan",
-            "plan": event.get("payload"),
-        })
-    else:
-        payload.update({
-            "type": "note",
-            "event": event,
-        })
-    return payload
-
-
-async def _publish_plan_event(symbol: str, event: Dict[str, Any]) -> None:
-    plan_id = event.get("plan_id")
-    if not plan_id:
-        return
-    key = _plan_stream_key(symbol, plan_id)
-    async with _PLAN_STREAM_LOCK:
-        queues = list(_PLAN_STREAM_SUBSCRIBERS.get(key, []))
-    if not queues:
-        return
-    payload = _transform_plan_event(symbol, event) or event
-    try:
-        message = json.dumps({"symbol": symbol.upper(), "plan_id": plan_id, "event": payload})
-    except TypeError:
-        return
-    for queue in queues:
-        try:
-            queue.put_nowait(message)
-        except asyncio.QueueFull:
-            try:
-                queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-            queue.put_nowait(message)
 
 
 def _market_snapshot_payload() -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
@@ -345,13 +184,12 @@ class ChartParams(BaseModel):
 
 class ChartLinks(BaseModel):
     interactive: str
-    session: Dict[str, Any] | None = None
 
 
 app = FastAPI(
     title="Trading Coach GPT Backend",
     description="Backend utilities for a custom GPT that offers trading guidance.",
-    version="3.0.0",
+    version="0.2.0",
 )
 
 app.add_middleware(
@@ -428,7 +266,7 @@ class ScanUniverse(BaseModel):
     tickers: List[str] = Field(..., description="Ticker symbols to analyse")
     style: str | None = Field(
         default=None,
-        description="Optional style filter: 'scalp', 'intraday', 'swing', or 'leaps'.",
+        description="Optional style filter: 'scalp', 'intraday', 'swing', or 'leap'.",
     )
 
 
@@ -501,9 +339,6 @@ class PlanResponse(BaseModel):
     update_reason: str | None = None
     market: Dict[str, Any] | None = None
     data: Dict[str, Any] | None = None
-    session: Dict[str, Any] | None = None
-    target_profile: Dict[str, Any] | None = None
-    structured_plan: Dict[str, Any] | None = None
 
 
 class IdeaStoreRequest(BaseModel):
@@ -550,87 +385,6 @@ class MultiContextResponse(BaseModel):
     decimals: int | None = None
     data_quality: Dict[str, Any] | None = None
     contexts: List[Dict[str, Any]] | None = None  # backward compatibility
-    session: Dict[str, Any] | None = None
-
-
-class SessionMeta(BaseModel):
-    status: Literal["open", "closed"]
-    as_of: str
-    next_open: Optional[str] = None
-    tz: Optional[str] = None
-    banner: Optional[str] = None
-
-
-class EntryMeta(BaseModel):
-    type: Literal["break", "retest", "limit"] = "limit"
-    level: float
-
-
-class OptionExample(BaseModel):
-    type: Literal["call", "put"]
-    expiry: str
-    delta: Optional[float] = None
-    bid: Optional[float] = None
-    ask: Optional[float] = None
-    spread_pct: Optional[float] = None
-    spread_stability: Optional[float] = None
-    oi: Optional[int] = None
-    volume: Optional[int] = None
-    iv_percentile: Optional[float] = None
-    composite_score: Optional[float] = None
-    tradeability: Optional[int] = None
-
-
-class OptionsBlockMeta(BaseModel):
-    style_horizon_applied: Optional[str] = None
-    dte_window: Optional[str] = None
-    example: Optional[OptionExample] = None
-    note: Optional[str] = None
-
-
-class SetupMeta(BaseModel):
-    plan_id: str
-    symbol: str
-    style: Literal["scalp", "intraday", "swing", "leaps"]
-    direction: Literal["long", "short"]
-    version: Optional[int] = None
-    entry: EntryMeta
-    invalid: Optional[float] = None
-    stop: float
-    targets: List[float]
-    probabilities: Optional[Dict[str, float]] = None
-    probability_components: Optional[Dict[str, float]] = None
-    trade_quality_score: Optional[str] = None
-    runner: Optional[Dict[str, Any]] = None
-    confluence: Optional[List[str]] = None
-    key_levels: Optional[Dict[str, Any]] = None
-    mtf_analysis: Optional[Dict[str, Any]] = None
-    confidence: float = Field(ge=0.0, le=1.0)
-    rationale: Optional[str] = None
-    options: Optional[OptionsBlockMeta] = None
-    context: Optional[Dict[str, Any]] = None
-    em_used: Optional[float] = None
-    atr_used: Optional[float] = None
-    style_horizon_applied: Optional[str] = None
-    risk_model: Optional[Dict[str, Any]] = None
-    chart_url: str
-    as_of: str
-
-
-class ExecResponse(BaseModel):
-    ok: bool = True
-    session: SessionMeta
-    count: int
-    setups: List[SetupMeta]
-
-
-class ExecRequest(BaseModel):
-    symbols: Optional[List[str]] = None
-    style: Optional[Literal["scalp", "intraday", "swing", "leap", "leaps"]] = None
-    limit: Optional[int] = 3
-    ui_mode: Optional[Literal["api", "chat"]] = "api"
-    include_series: Optional[Literal["none", "compact", "full"]] = "none"
-    user_prefs: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -997,10 +751,7 @@ async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
 async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
     async with _STREAM_LOCK:
         queues = list(_STREAM_SUBSCRIBERS.get(symbol, []))
-    try:
-        payload = json.dumps({"symbol": symbol, "event": event})
-    except TypeError:
-        payload = json.dumps({"symbol": symbol, "event": "unserializable"})
+    payload = json.dumps({"symbol": symbol, "event": event})
     for queue in queues:
         try:
             queue.put_nowait(payload)
@@ -1010,173 +761,6 @@ async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
             except asyncio.QueueEmpty:
                 pass
             queue.put_nowait(payload)
-    await _publish_plan_event(symbol, event)
-
-
-def _output_style_token(style: Optional[str]) -> str:
-    token = (_normalize_trade_style(style) or "intraday").lower()
-    if token == "leap":
-        return "leaps"
-    return token
-
-
-def _clamp_confidence(value: Any) -> float:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return 0.5
-    return max(0.0, min(1.0, numeric))
-
-
-def _build_options_block_meta(options_payload: Any, structured_plan: Dict[str, Any]) -> Optional[OptionsBlockMeta]:
-    if not isinstance(options_payload, dict):
-        return None
-    style_applied = options_payload.get("style_horizon_applied") or structured_plan.get("style_horizon_applied")
-    filters = options_payload.get("filters") if isinstance(options_payload.get("filters"), dict) else {}
-    dte_window = None
-    min_dte = filters.get("min_dte") if isinstance(filters, dict) else None
-    max_dte = filters.get("max_dte") if isinstance(filters, dict) else None
-    if isinstance(min_dte, (int, float)) and isinstance(max_dte, (int, float)):
-        dte_window = f"{int(min_dte)}–{int(max_dte)}d"
-
-    example_payload = options_payload.get("example") or options_payload.get("example_leg")
-    option_example: Optional[OptionExample] = None
-    if isinstance(example_payload, dict):
-        ex = dict(example_payload)
-        if "expiry" not in ex and "expiration" in ex:
-            ex["expiry"] = ex.pop("expiration")
-        if "spread_stability" not in ex:
-            components = options_payload.get("liquidity_components")
-            if isinstance(components, dict):
-                ex["spread_stability"] = components.get("spread_stability")
-        if "composite_score" not in ex and "score" in ex:
-            ex["composite_score"] = ex.get("score")
-        if "tradeability" in ex and isinstance(ex["tradeability"], float):
-            ex["tradeability"] = int(round(ex["tradeability"]))
-        option_example = OptionExample.model_validate(ex)
-
-    return OptionsBlockMeta(
-        style_horizon_applied=style_applied,
-        dte_window=dte_window,
-        example=option_example,
-        note=options_payload.get("note"),
-    )
-
-
-def _build_setup_from_plan_response(plan_resp: PlanResponse, session_info: Dict[str, Any]) -> SetupMeta:
-    structured = plan_resp.structured_plan or {}
-    entry_block = structured.get("entry") or {}
-    entry_level = plan_resp.entry if plan_resp.entry is not None else entry_block.get("level")
-    if entry_level is None:
-        entry_level = (plan_resp.plan or {}).get("entry") if plan_resp.plan else 0.0
-    entry_meta = EntryMeta(type=entry_block.get("type", "limit"), level=float(entry_level))
-
-    direction = plan_resp.bias or (plan_resp.plan or {}).get("direction") or structured.get("direction") or "long"
-    style_token = _output_style_token(plan_resp.style or structured.get("style") or (plan_resp.plan or {}).get("style"))
-    direction_token = str(direction).lower()
-
-    targets = plan_resp.targets or structured.get("targets") or []
-    probabilities = None
-    profile_dict = plan_resp.target_profile or structured.get("probabilities")
-    if isinstance(profile_dict, dict):
-        probabilities = {k: float(v) for k, v in profile_dict.items() if isinstance(v, (int, float))}
-
-    options_block = _build_options_block_meta(plan_resp.options, structured)
-
-    stop_value = float(plan_resp.stop) if plan_resp.stop is not None else float(structured.get("stop") or 0.0)
-    targets_clean = [float(t) for t in targets]
-
-    chart_url = plan_resp.chart_url or structured.get("chart_url") or plan_resp.trade_detail
-    as_of = structured.get("as_of") or session_info.get("as_of")
-    as_of_value = as_of or session_info.get("as_of") or ""
-
-    confluence = structured.get("confluence") if isinstance(structured.get("confluence"), list) else None
-
-    plan_identifier = plan_resp.plan_id or (plan_resp.plan or {}).get("plan_id")
-    if not plan_identifier:
-        plan_identifier = f"{plan_resp.symbol}-{uuid.uuid4().hex[:8]}"
-    plan_version = str(plan_resp.version) if plan_resp.version is not None else None
-
-    entry_dict = entry_meta.model_dump()
-    if not canonical_chart_url(chart_url):
-        chart_url = build_chart_url(
-            CHART_BASE,
-            symbol=plan_resp.symbol,
-            plan_id=plan_identifier,
-            as_of=as_of_value,
-            entry=entry_dict,
-            stop=stop_value,
-            targets=targets_clean,
-            plan_version=plan_version,
-        )
-
-    htf_block = plan_resp.htf if isinstance(plan_resp.htf, dict) else {}
-    key_levels = plan_resp.key_levels if isinstance(plan_resp.key_levels, dict) else None
-    mtf_analysis = plan_resp.mtf_analysis if isinstance(getattr(plan_resp, "mtf_analysis", None), dict) else None
-    if mtf_analysis is None and htf_block:
-        mtf_analysis = {"1h": htf_block}
-
-    context_block = build_context_block(plan_resp.symbol, as_of_value)
-    confluence_count = len(confluence or [])
-    component_inputs = {
-        "trend_alignment": 0.6 if str(htf_block.get("bias") or "").lower().startswith(direction_token[:1]) else 0.5,
-        "liquidity_structure": max(0.0, min(1.0, 0.5 + confluence_count * 0.04)),
-        "momentum_signal": 0.55 if (plan_resp.features or {}).get("momentum") else 0.5,
-        "volatility_regime": 0.5,
-    }
-    components = score_components(component_inputs)
-    component_confidence = overall_confidence(components)
-    base_confidence = _clamp_confidence(plan_resp.confidence)
-    confidence_value = max(0.0, min(1.0, (base_confidence + component_confidence) / 2.0))
-    trade_quality = quality_grade(confidence_value)
-
-    def _extract_float(value: Any) -> Optional[float]:
-        try:
-            if value is None:
-                return None
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    atr_used_value = _extract_float(plan_resp.calc_notes.get("atr14")) if plan_resp.calc_notes else _extract_float(structured.get("atr_used"))
-    probabilities_payload = probabilities or {}
-    risk_payload = risk_model_payload(
-        entry=float(entry_meta.level),
-        stop=stop_value,
-        targets=targets_clean,
-        probabilities=probabilities_payload,
-        direction=direction_token,
-        atr_used=atr_used_value,
-        style=style_token,
-    )
-    return SetupMeta(
-        plan_id=plan_identifier,
-        symbol=plan_resp.symbol,
-        style=style_token,  # type: ignore[arg-type]
-        direction=direction_token,  # type: ignore[arg-type]
-        entry=entry_meta,
-        invalid=None,
-        stop=stop_value,
-        targets=targets_clean,
-        probabilities=probabilities,
-        probability_components=components,
-        trade_quality_score=trade_quality,
-        runner=plan_resp.runner,
-        confluence=confluence,
-        key_levels=key_levels,
-        mtf_analysis=mtf_analysis,
-        confidence=confidence_value,
-        rationale=plan_resp.notes or structured.get("rationale"),
-        options=options_block,
-        context=context_block,
-        em_used=structured.get("em_used") or plan_resp.calc_notes.get("expected_move") if plan_resp.calc_notes else None,
-        atr_used=atr_used_value,
-        style_horizon_applied=structured.get("style_horizon_applied"),
-        risk_model=risk_payload,
-        chart_url=chart_url,
-        as_of=as_of_value,
-        version=int(plan_resp.version) if plan_resp.version is not None else None,
-    )
 
 
 async def _ingest_stream_event(symbol: str, event: Dict[str, Any]) -> None:
@@ -1186,46 +770,6 @@ async def _ingest_stream_event(symbol: str, event: Dict[str, Any]) -> None:
     await _publish_stream_event(symbol, event)
     for derived in derived_events:
         await _publish_stream_event(symbol, derived)
-    if event.get("t") == "tick":
-        symbol_key = symbol.upper()
-        async with _ACTIVE_SETUPS_LOCK:
-            active = [dict(value) for value in _ACTIVE_SETUPS.values() if value.get("symbol", "").upper() == symbol_key]
-        updates: List[Dict[str, Any]] = []
-        for setup in active:
-            evolved = evolve_plan(setup, event, event.get("ts"))
-            if evolved:
-                updates.append(evolved)
-        if updates:
-            async with _ACTIVE_SETUPS_LOCK:
-                for payload in updates:
-                    _ACTIVE_SETUPS[payload["plan_id"]] = dict(payload)
-            for payload in updates:
-                ts = event.get("ts") or event.get("timestamp")
-                price_event = {
-                    "plan_id": payload["plan_id"],
-                    "t": "price",
-                    "price": event.get("p"),
-                    "ts": ts,
-                }
-                await _publish_plan_event(symbol, price_event)
-                update_event = {
-                    "plan_id": payload["plan_id"],
-                    "t": "plan_update",
-                    "setup": payload,
-                    "ts": ts,
-                }
-                await _publish_plan_event(symbol, update_event)
-                hit_block = payload.get("event")
-                if isinstance(hit_block, dict) and hit_block.get("type") == "hit":
-                    for level in hit_block.get("levels", []):
-                        hit_event = {
-                            "plan_id": payload["plan_id"],
-                            "t": "hit",
-                            "level": f"tp{level}",
-                            "price": event.get("p"),
-                            "ts": ts,
-                        }
-                        await _publish_plan_event(symbol, hit_event)
 
 
 async def _get_idea_snapshot(plan_id: str, version: Optional[int] = None) -> Dict[str, Any]:
@@ -1728,196 +1272,6 @@ def _build_market_snapshot(history: pd.DataFrame, key_levels: Dict[str, float]) 
     return snapshot
 
 
-def _fallback_scan_payload(
-    tickers: List[str],
-    market_data: Dict[str, pd.DataFrame],
-    *,
-    style_token: str,
-    session_info: Dict[str, Any],
-    market_meta: Dict[str, Any],
-    data_meta: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-    """Construct deterministic fallback setups when scan_market yields nothing."""
-
-    fallback: List[Dict[str, Any]] = []
-    primary_style = style_token or "intraday"
-    interval_map = {
-        "scalp": "5",
-        "intraday": "15",
-        "swing": "60",
-        "leaps": "1D",
-    }
-    interval_token = interval_map.get(primary_style, "15")
-
-    for symbol in tickers:
-        history = market_data.get(symbol)
-        if history is None or history.empty:
-            continue
-        df = history.sort_index()
-        last = df.iloc[-1]
-        close_price = float(last["close"])
-        high = df["high"]
-        low = df["low"]
-        close = df["close"]
-        atr_series = atr(high, low, close, period=14)
-        atr_value = float(atr_series.iloc[-1]) if not atr_series.empty else float("nan")
-        if not math.isfinite(atr_value) or atr_value <= 0:
-            atr_value = max(close_price * 0.01, 0.5)
-        ema20_series = ema(close, 20) if len(close) >= 20 else None
-        direction = "long"
-        if ema20_series is not None and not ema20_series.empty:
-            ema20_val = float(ema20_series.iloc[-1])
-            if math.isfinite(ema20_val) and close_price < ema20_val:
-                direction = "short"
-        stop = close_price - atr_value if direction == "long" else close_price + atr_value
-        targets: List[float] = []
-        for mult in (1.0, 2.0, 3.0):
-            level = close_price + atr_value * mult if direction == "long" else close_price - atr_value * mult
-            targets.append(round(level, 4))
-        key_levels = _extract_key_levels(df)
-        snapshot = _build_market_snapshot(df, key_levels)
-        plan_id = f"{symbol}-{primary_style}-fallback"
-        plan_payload = {
-            "plan_id": plan_id,
-            "symbol": symbol,
-            "style": primary_style,
-            "direction": direction,
-            "entry": round(close_price, 4),
-            "stop": round(stop, 4),
-            "targets": targets,
-            "confidence": 0.65,
-            "risk_reward": 2.0,
-            "notes": "Fallback ATR ladder generated automatically.",
-            "warnings": ["Fallback plan generated because no live strategy qualified."],
-        }
-        chart_entry_payload = {"type": "limit", "level": plan_payload["entry"]}
-        chart_url = build_chart_url(
-            CHART_BASE,
-            symbol=symbol,
-            plan_id=plan_id,
-            as_of=session_info.get("as_of") or "",
-            entry=chart_entry_payload,
-            stop=plan_payload["stop"],
-            targets=targets,
-            plan_version="0",
-        )
-        charts_params = {
-            "symbol": symbol,
-            "interval": normalize_interval(interval_token),
-            "direction": direction,
-            "entry": f"{plan_payload['entry']:.2f}",
-            "stop": f"{plan_payload['stop']:.2f}",
-            "tp": ",".join(f"{t:.2f}" for t in targets),
-        }
-        charts_payload = {"params": charts_params, "interactive": chart_url}
-        fallback.append(
-            {
-                "symbol": symbol,
-                "style": primary_style,
-                "strategy_id": "fallback_atr",
-                "description": "Fallback ATR ladder (auto-generated)",
-                "score": min(0.6, max(0.1, atr_value / max(close_price, 1e-6))),
-                "contract_suggestion": None,
-                "direction_hint": direction,
-                "key_levels": key_levels,
-                "market_snapshot": snapshot,
-                "charts": charts_payload,
-                "features": {"atr14": atr_value},
-                "plan": plan_payload,
-                "warnings": ["fallback_setup"],
-                "data": dict(data_meta),
-                "market": dict(market_meta),
-                "options": None,
-                "session": session_info,
-            }
-        )
-
-    fallback.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-    return fallback[:3]
-
-
-def _polygon_snapshot_list(kind: str, api_key: str) -> List[Dict[str, Any]]:
-    url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{kind}"
-    params = {"apiKey": api_key}
-    try:
-        with httpx.Client(timeout=5.0) as client:
-            resp = client.get(url, params=params)
-            resp.raise_for_status()
-            payload = resp.json()
-    except httpx.HTTPError:
-        return []
-    return payload.get("results") or payload.get("tickers") or []
-
-
-def _autofill_symbols(style: Optional[str]) -> Tuple[List[str], Dict[str, Any]]:
-    """Return an auto-generated universe for day-trading scans."""
-
-    metadata: Dict[str, Any] = {"source": "static"}
-    settings = get_settings()
-    api_key = settings.polygon_api_key
-    if not api_key:
-        metadata["large_cap"] = _DEFAULT_TOP_SYMBOLS[:100]
-        metadata["mid_cap"] = _DEFAULT_TOP_SYMBOLS[100:200]
-        return list(_DEFAULT_TOP_SYMBOLS), metadata
-
-    combined: List[Dict[str, Any]] = []
-    for endpoint in ("most_actives", "gainers", "losers"):
-        combined.extend(_polygon_snapshot_list(endpoint, api_key))
-
-    seen: set[str] = set()
-    large: List[str] = []
-    mid: List[str] = []
-    for item in combined:
-        ticker = item.get("ticker")
-        if not ticker or ticker in seen:
-            continue
-        seen.add(ticker)
-        last_trade = item.get("lastTrade") or {}
-        price = last_trade.get("p") or last_trade.get("price")
-        day = item.get("day") or {}
-        volume = day.get("v") or day.get("volume")
-        if price is None or volume is None:
-            continue
-        try:
-            price_val = float(price)
-            volume_val = float(volume)
-        except (TypeError, ValueError):
-            continue
-        if price_val >= 75 or volume_val >= 15_000_000:
-            if len(large) < 150:
-                large.append(ticker)
-        elif 5 <= price_val <= 75 and volume_val >= 1_500_000:
-            if len(mid) < 150:
-                mid.append(ticker)
-
-    if not large and not mid:
-        metadata["large_cap"] = _DEFAULT_TOP_SYMBOLS[:100]
-        metadata["mid_cap"] = _DEFAULT_TOP_SYMBOLS[100:200]
-        return list(_DEFAULT_TOP_SYMBOLS), metadata
-
-    style_token = (_normalize_trade_style(style) or "intraday").lower()
-    selection: List[str] = []
-    large_pool = large[:120]
-    mid_pool = [sym for sym in mid if sym not in large_pool][:120]
-    if style_token in {"scalp", "intraday"}:
-        selection.extend(large_pool[:12])
-        selection.extend([symbol for symbol in mid_pool if symbol not in selection][:8])
-    elif style_token in {"swing", "leaps"}:
-        selection.extend(large_pool[:15])
-        selection.extend([symbol for symbol in mid_pool if symbol not in selection][:5])
-    else:
-        selection.extend(large_pool[:10])
-        selection.extend([symbol for symbol in mid_pool if symbol not in selection][:10])
-
-    if not selection:
-        selection = (large_pool or mid_pool or list(_DEFAULT_TOP_SYMBOLS))[:20]
-
-    metadata["source"] = "polygon"
-    metadata["large_cap"] = large_pool[:200]
-    metadata["mid_cap"] = mid_pool[:200]
-    return selection, metadata
-
-
 def _serialize_features(features: Dict[str, Any]) -> Dict[str, Any]:
     serialized: Dict[str, Any] = {}
     for key, value in features.items():
@@ -1987,13 +1341,13 @@ def _indicators_for_strategy(strategy_id: str) -> List[str]:
 
 def _timeframe_for_style(style: str | None) -> str:
     normalized = _normalize_style(style) or ""
-    mapping = {"scalp": "1", "intraday": "5", "swing": "60", "leaps": "1D", "leap": "1D"}
+    mapping = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "1D"}
     return mapping.get(normalized, "5")
 
 
 def _view_for_style(style: str | None) -> str:
     normalized = _normalize_style(style) or ""
-    mapping = {"scalp": "1d", "intraday": "5d", "swing": "3M", "leaps": "1Y", "leap": "1Y"}
+    mapping = {"scalp": "1d", "intraday": "5d", "swing": "3M", "leap": "1Y"}
     return mapping.get(normalized, "fit")
 
 
@@ -2003,7 +1357,7 @@ def _range_for_style(style: str | None) -> str:
         "scalp": "5d",
         "intraday": "15d",
         "swing": "6m",
-        "leaps": "1y",
+        "leap": "1y",
     }
     return mapping.get(normalized, "30d")
 
@@ -2467,26 +1821,10 @@ _MAX_IDEA_CACHE_VERSIONS = 20
 _IDEA_PERSISTENCE_ENABLED = False
 _STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
 _STREAM_LOCK = asyncio.Lock()
-_PLAN_STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
-_PLAN_STREAM_LOCK = asyncio.Lock()
 _IV_METRICS_CACHE_TTL = 120.0
 _IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _LIVE_PLAN_ENGINE = LivePlanEngine()
 _SYMBOL_STREAM_COORDINATOR: Optional[SymbolStreamCoordinator] = None
-_ACTIVE_SETUPS: Dict[str, Dict[str, Any]] = {}
-_ACTIVE_SETUPS_LOCK = asyncio.Lock()
-_DEFAULT_TOP_SYMBOLS: List[str] = [
-    "SPY",
-    "QQQ",
-    "AAPL",
-    "MSFT",
-    "NVDA",
-    "AMZN",
-    "META",
-    "TSLA",
-    "IWM",
-    "DIA",
-]
 
 
 async def _symbol_stream_emit(symbol: str, event: Dict[str, Any]) -> None:
@@ -2622,18 +1960,6 @@ async def _build_interval_context(symbol: str, interval: str, lookback: int) -> 
     if frame.empty:
         raise HTTPException(status_code=502, detail=f"No market data available for {symbol.upper()} ({interval}).")
 
-    session_info = _session_block()
-    underlying_price_asof = None
-    if session_info.get("status") != "open":
-        as_of_dt = parse_session_as_of(session_info)
-        if as_of_dt is not None:
-            underlying_price_asof = await last_price_asof(symbol, as_of_dt)
-    as_of_ts = _session_asof_timestamp(session_info)
-    if session_info.get("status") != "open" and as_of_ts is not None:
-        limited = frame[frame["time"] <= as_of_ts]
-        if not limited.empty:
-            frame = limited
-
     df = frame.copy()
     df["time"] = pd.to_datetime(df["time"], utc=True)
     history = df.set_index("time")
@@ -2682,7 +2008,6 @@ async def _build_interval_context(symbol: str, interval: str, lookback: int) -> 
         "snapshot": snapshot,
         "indicators": indicators,
         "cached": False,
-        "session": session_info,
     }
 
     _MULTI_CONTEXT_CACHE[cache_key] = (now, dict(payload))
@@ -2937,15 +2262,13 @@ async def gpt_health(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]
 
     polygon_status, tradier_status = await asyncio.gather(_check_polygon(), _check_tradier())
 
-    payload = {
+    return {
         "status": "ok",
         "services": {
             "polygon": polygon_status,
             "tradier": tradier_status,
         },
     }
-    payload["session"] = _session_block()
-    return payload
 
 
 @gpt.get("/futures-snapshot", summary="Overnight/offsessions market tape (ETF proxies via Finnhub)")
@@ -2956,7 +2279,6 @@ async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict
     if cached and (now_ts - ts < 180):
         payload = {k: (dict(v) if isinstance(v, dict) else v) for k, v in cached.items()}
         payload["stale_seconds"] = int(now_ts - ts)
-        payload["session"] = _session_block()
         return payload
 
     settings = get_settings()
@@ -2975,64 +2297,35 @@ async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict
     payload: Dict[str, Any] = dict(quotes)
     payload["market_phase"] = _market_phase_chicago()
     payload["stale_seconds"] = 0
-    payload["session"] = _session_block()
     _FUTURES_CACHE["data"] = copy.deepcopy(payload)
     _FUTURES_CACHE["ts"] = now_ts
     return payload
 
 
 @gpt.post("/scan", summary="Rank trade setups across a list of tickers")
+@gpt.post('/scan', summary='Rank trade setups across a list of tickers')
 async def gpt_scan(
     universe: ScanUniverse,
     request: Request,
     user: AuthedUser = Depends(require_api_key),
-    auto_universe: bool = False,
-    auto_meta: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     if not universe.tickers:
         raise HTTPException(status_code=400, detail="No tickers provided")
 
     market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload()
-    session_info = _session_block()
-    session_as_of = parse_session_as_of(session_info)
-    if session_as_of is not None:
-        as_of_dt = session_as_of
-    as_of_ts = None
-    if as_of_dt is not None:
-        as_of_ts = pd.Timestamp(as_of_dt)
-        if as_of_ts.tzinfo is None:
-            as_of_ts = as_of_ts.tz_localize("UTC")
-        else:
-            as_of_ts = as_of_ts.tz_convert("UTC")
 
     style_filter = _normalize_style(universe.style)
-    data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leaps": "D", "leap": "D"}.get(style_filter, "5")
+    data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}.get(style_filter, "5")
 
     settings = get_settings()
     market_data = await _collect_market_data(
         universe.tickers,
         timeframe=data_timeframe,
-        as_of=None if is_open else (as_of_ts.to_pydatetime() if as_of_ts is not None else None),
+        as_of=None if is_open else as_of_dt,
     )
     if not market_data:
         raise HTTPException(status_code=502, detail="No market data available for the requested tickers.")
     signals = await scan_market(universe.tickers, market_data)
-
-    if not signals:
-        logger.info(
-            "No qualifying signals detected; generating fallback setups",
-            extra={"tickers": universe.tickers, "style": style_filter},
-        )
-        fallback_payload = _fallback_scan_payload(
-            universe.tickers,
-            market_data,
-            style_token=style_filter or "intraday",
-            session_info=session_info,
-            market_meta=market_meta,
-            data_meta=data_meta,
-        )
-        if fallback_payload:
-            return fallback_payload
 
     unique_symbols = sorted({signal.symbol for signal in signals})
 
@@ -3047,19 +2340,14 @@ async def gpt_scan(
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Benchmark data fetch failed for %s: %s", benchmark_symbol, exc)
             benchmark_history = None
-    if benchmark_history is not None and as_of_ts is not None and not is_open:
-        cutoff = as_of_ts
+    if benchmark_history is not None and as_of_dt is not None and not is_open:
+        cutoff = pd.Timestamp(as_of_dt).tz_convert("UTC")
         benchmark_history = benchmark_history.loc[benchmark_history.index <= cutoff]
         if benchmark_history.empty:
             benchmark_history = None
 
     symbol_freshness: Dict[str, float] = {}
     data_meta.setdefault("ok", True)
-    data_meta["auto_universe"] = auto_universe
-    if auto_universe and auto_meta:
-        data_meta["auto_universe_source"] = auto_meta.get("source")
-        data_meta["auto_universe_large"] = auto_meta.get("large_cap")
-        data_meta["auto_universe_mid"] = auto_meta.get("mid_cap")
     if is_open:
         now_utc = pd.Timestamp.utcnow()
         for symbol_key, frame in market_data.items():
@@ -3106,10 +2394,7 @@ async def gpt_scan(
     polygon_chains: Dict[str, pd.DataFrame] = {}
     if unique_symbols and polygon_enabled:
         try:
-            if not is_open and as_of_ts is not None:
-                tasks = [fetch_polygon_option_chain_asof(symbol, as_of_ts.to_pydatetime()) for symbol in unique_symbols]
-            else:
-                tasks = [fetch_polygon_option_chain(symbol) for symbol in unique_symbols]
+            tasks = [fetch_polygon_option_chain(symbol) for symbol in unique_symbols]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for symbol, result in zip(unique_symbols, results):
                 if isinstance(result, Exception):
@@ -3181,8 +2466,6 @@ async def gpt_scan(
             "vwap": "1",
             "theme": "dark",
         }
-        if session_info.get("as_of"):
-            chart_query["as_of"] = session_info["as_of"]
         plan_payload: Dict[str, Any] | None = None
         enhancements: Dict[str, Any] | None = None
         chain = polygon_chains.get(signal.symbol)
@@ -3202,18 +2485,12 @@ async def gpt_scan(
         plan_stop = None
         plan_targets: List[float] = []
         plan_direction = direction_hint
-        version = 1
-        plan_id = _generate_plan_slug(signal.symbol, style, plan_direction, snapshot)
         if signal.plan is not None:
             plan_payload = signal.plan.as_dict()
             plan_entry = float(signal.plan.entry)
             plan_stop = float(signal.plan.stop)
             plan_targets = [float(target) for target in signal.plan.targets]
             plan_direction = signal.plan.direction or plan_direction
-            version = int(plan_payload.get("version") or version)
-            slug_hint = plan_payload.get("plan_id") if isinstance(plan_payload, dict) else None
-            if slug_hint:
-                plan_id = str(slug_hint)
             chart_query["entry"] = f"{signal.plan.entry:.2f}"
             chart_query["stop"] = f"{signal.plan.stop:.2f}"
             chart_query["tp"] = ",".join(f"{target:.2f}" for target in signal.plan.targets)
@@ -3359,18 +2636,15 @@ async def gpt_scan(
                 "market": dict(market_meta),
                 "context_overlays": enhancements,
                 **({"options": polygon_bundle} if polygon_bundle else {}),
-                "session": session_info,
             }
         )
 
     logger.info("scan universe=%s user=%s results=%d", universe.tickers, user.user_id, len(payload))
-    for item in payload:
-        if isinstance(item, dict):
-            item.setdefault("session", session_info)
     return payload
 
 
 @gpt.post("/plan", summary="Return a single trade plan for a symbol", response_model=PlanResponse)
+@gpt.post('/plan', summary='Return a single trade plan for a symbol', response_model=PlanResponse)
 async def gpt_plan(
     request_payload: PlanRequest,
     request: Request,
@@ -3397,7 +2671,6 @@ async def gpt_plan(
     if not results:
         raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
-    session_info = first.get("session") if isinstance(first.get("session"), dict) else _session_block()
     logger.info(
         "gpt_plan raw result received",
         extra={
@@ -3485,8 +2758,6 @@ async def gpt_plan(
         chart_params_payload.setdefault("strategy", first.get("strategy_id") or plan.get("setup"))
         chart_params_payload.setdefault("symbol", symbol)
         chart_params_payload.setdefault("range", _range_for_style(first.get("style")))
-        if session_info.get("as_of"):
-            chart_params_payload.setdefault("as_of", session_info["as_of"])
         if entry_val is not None or stop_val is not None or targets_list:
             default_note = _format_chart_note(symbol, first.get("style"), entry_val, stop_val, targets_list)
             if default_note and not chart_params_payload.get("notes"):
@@ -3504,13 +2775,26 @@ async def gpt_plan(
             chart_url_value = None
 
     charts_payload: Dict[str, Any] = {}
-    minimal_params: Dict[str, Any] | None = None
     if chart_params_payload:
         charts_payload["params"] = chart_params_payload
     if chart_url_value:
+        chart_url_value = _append_query_params(
+            chart_url_value,
+            {
+                "plan_id": plan_id,
+                "plan_version": str(version),
+            },
+        )
         charts_payload["interactive"] = chart_url_value
     elif chart_params_payload and {"direction", "entry", "stop", "tp"}.issubset(chart_params_payload.keys()):
         fallback_chart_url = _build_tv_chart_url(request, chart_params_payload)
+        fallback_chart_url = _append_query_params(
+            fallback_chart_url,
+            {
+                "plan_id": plan_id,
+                "plan_version": str(version),
+            },
+        )
         charts_payload["interactive"] = fallback_chart_url
         chart_url_value = fallback_chart_url
         logger.debug(
@@ -3531,138 +2815,15 @@ async def gpt_plan(
             minimal_params["stop"] = f"{stop_val:.2f}"
         if targets_list:
             minimal_params["tp"] = ",".join(f"{target:.2f}" for target in targets_list)
-        if session_info.get("as_of"):
-            minimal_params["as_of"] = session_info["as_of"]
         chart_url_value = _build_tv_chart_url(request, minimal_params)
         charts_payload.setdefault("params", minimal_params)
         charts_payload["interactive"] = chart_url_value
-
-    atr_val = _safe_number(indicators.get("atr14"))
-
-    profile_dict = plan.get("target_profile") or {}
-    try:
-        target_profile_obj = TargetEngineResult(
-            entry=float(profile_dict.get("entry", entry_output or plan.get("entry") or 0.0)),
-            stop=float(profile_dict.get("stop", stop_output or plan.get("stop") or 0.0)),
-            targets=[float(t) for t in profile_dict.get("targets", plan.get("targets") or targets_list or [])],
-            probabilities={k: float(v) for k, v in (profile_dict.get("probabilities") or {}).items()},
-            em_used=profile_dict.get("em_used"),
-            atr_used=profile_dict.get("atr_used", indicators.get("atr14")),
-            snap_trace=[dict(item) for item in profile_dict.get("snap_trace", []) if isinstance(item, dict)],
-            meta=[dict(item) for item in profile_dict.get("meta", []) if isinstance(item, dict)],
-            warnings=[str(w) for w in profile_dict.get("warnings", plan_warnings or [])],
-            runner=plan.get("runner"),
-            bias=plan.get("direction"),
-            style=plan.get("style"),
-            expected_move=profile_dict.get("expected_move"),
-        )
-    except Exception:
-        target_profile_obj = TargetEngineResult(
-            entry=float(plan.get("entry") or entry_val or 0.0),
-            stop=float(plan.get("stop") or stop_val or 0.0),
-            targets=[float(t) for t in (plan.get("targets") or targets_list or [])],
-            probabilities={},
-            em_used=None,
-            atr_used=atr_val,
-            snap_trace=[],
-            meta=[],
-            warnings=[str(w) for w in (plan.get("warnings") or [])],
-            runner=plan.get("runner"),
-            bias=plan.get("direction"),
-            style=plan.get("style"),
-            expected_move=None,
-        )
-    plan["target_profile"] = target_profile_obj.to_dict()
-
-    entry_type_token = None
-    if isinstance(chart_params_payload, dict):
-        entry_type_token = chart_params_payload.get("entry_type")
-    entry_type_token = plan.get("entry_type") or entry_type_token or "limit"
-    if isinstance(entry_type_token, str):
-        entry_type_token = entry_type_token.lower()
-    chart_entry_payload = {
-        "type": entry_type_token,
-        "level": target_profile_obj.entry,
-    }
-    chart_targets_payload = target_profile_obj.targets or targets_list
-    chart_stop_value = target_profile_obj.stop
-    chart_url_value = build_chart_url(
-        CHART_BASE,
-        symbol=symbol,
-        plan_id=plan_id,
-        as_of=session_info.get("as_of") or "",
-        entry=chart_entry_payload,
-        stop=chart_stop_value,
-        targets=chart_targets_payload,
-        plan_version=str(version),
-    )
-    charts_payload["interactive"] = chart_url_value
 
     trade_detail_url = chart_url_value
     plan["trade_detail"] = trade_detail_url
     plan["idea_url"] = trade_detail_url
 
-    confluence_tags = []
-    for meta_entry in target_profile_obj.meta:
-        tag = meta_entry.get("snap_tag") or meta_entry.get("tag")
-        if tag:
-            token = str(tag)
-            if token not in confluence_tags:
-                confluence_tags.append(token)
-
-    structured_plan = build_structured_plan(
-        plan_id=plan_id,
-        symbol=symbol,
-        style=plan.get("style"),
-        direction=plan.get("direction"),
-        profile=target_profile_obj,
-        confidence=plan.get("confidence"),
-        rationale=plan.get("notes"),
-        options_block=first.get("options"),
-        chart_url=chart_url_value,
-        session=session_info,
-        confluence=confluence_tags,
-    )
-    _validate_chart_url(structured_plan.get("chart_url"))
-    events_block = first.get("events")
-    gating_decision = apply_event_gating(_coalesce_events(events_block))
-    if gating_decision.action == "suppress":
-        structured_plan["status"] = "suppressed"
-        plan_warnings.append(
-            f"Plan suppressed due to upcoming event ({gating_decision.reason})"
-        )
-        logger.info(
-            "plan gating suppress",
-            extra={
-                "symbol": symbol,
-                "plan_id": plan_id,
-                "events": gating_decision.triggered,
-                "reason": gating_decision.reason,
-            },
-        )
-    elif gating_decision.action == "defined_risk":
-        structured_plan["defined_risk_only"] = True
-        plan_warnings.append(
-            f"Defined-risk only: upcoming event ({gating_decision.reason})"
-        )
-        logger.info(
-            "plan gating defined-risk",
-            extra={
-                "symbol": symbol,
-                "plan_id": plan_id,
-                "events": gating_decision.triggered,
-                "reason": gating_decision.reason,
-            },
-        )
-
-    plan["structured_plan"] = structured_plan
-    first["structured_plan"] = structured_plan
-    first["target_profile"] = plan["target_profile"]
-    if isinstance(first.get("features"), dict):
-        first["features"]["target_profile"] = plan["target_profile"]
-        first["features"]["structured_plan"] = structured_plan
-        first["features"]["event_gating"] = gating_decision.to_dict()
-
+    atr_val = _safe_number(indicators.get("atr14"))
     calc_notes: Dict[str, Any] = {}
     if atr_val is not None:
         calc_notes["atr14"] = atr_val
@@ -3962,9 +3123,6 @@ async def gpt_plan(
         update_reason=update_reason,
         market=market_meta,
         data=data_meta,
-        session=session_info,
-        target_profile=plan.get("target_profile") if plan else None,
-        structured_plan=plan.get("structured_plan") if plan else None,
     )
 
 @app.post("/internal/idea/store", include_in_schema=False, tags=["internal"])
@@ -4109,56 +3267,6 @@ async def stream_symbol_ws(websocket: WebSocket, symbol: str) -> None:
             pass
 
 
-@app.websocket("/ws/plans")
-async def stream_plan_ws(
-    websocket: WebSocket,
-    symbol: str = Query(...),
-    plan_id: str = Query(...),
-) -> None:
-    uppercase = (symbol or "").upper()
-    target_plan = (plan_id or "").strip()
-    if not uppercase or not target_plan:
-        await websocket.close(code=4000)
-        return
-    await websocket.accept()
-    logger.info("plan websocket connected", extra={"symbol": uppercase, "plan_id": target_plan})
-    await _ensure_symbol_stream(uppercase)
-    key = _plan_stream_key(uppercase, target_plan)
-    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
-    async with _PLAN_STREAM_LOCK:
-        _PLAN_STREAM_SUBSCRIBERS.setdefault(key, []).append(queue)
-    try:
-        initial_states = await _LIVE_PLAN_ENGINE.active_plan_states(uppercase)
-        snapshot = next((state for state in initial_states if state.get("plan_id") == target_plan), None)
-        if snapshot:
-            await websocket.send_text(
-                json.dumps(
-                    {
-                        "symbol": uppercase,
-                        "plan_id": target_plan,
-                        "event": {"type": "state", "state": snapshot},
-                    }
-                )
-            )
-        while True:
-            data = await queue.get()
-            await websocket.send_text(data)
-    except WebSocketDisconnect:
-        return
-    finally:
-        async with _PLAN_STREAM_LOCK:
-            subscribers = _PLAN_STREAM_SUBSCRIBERS.get(key, [])
-            if queue in subscribers:
-                subscribers.remove(queue)
-            if not subscribers:
-                _PLAN_STREAM_SUBSCRIBERS.pop(key, None)
-        try:
-            await websocket.close()
-        except RuntimeError:
-            pass
-        logger.info("plan websocket disconnected", extra={"symbol": uppercase, "plan_id": target_plan})
-
-
 @app.post("/internal/stream/push", include_in_schema=False, tags=["internal"])
 async def internal_stream_push(payload: StreamPushRequest) -> Dict[str, str]:
     symbol = (payload.symbol or "").upper()
@@ -4205,7 +3313,6 @@ async def gpt_multi_context(
     if not request_payload.intervals:
         raise HTTPException(status_code=400, detail="At least one interval is required")
 
-    session_info = _session_block()
     contexts: List[Dict[str, Any]] = []
     seen: set[str] = set()
     lookback = int(request_payload.lookback or 300)
@@ -4360,7 +3467,6 @@ async def gpt_multi_context(
         decimals=decimals,
         data_quality=data_quality,
         contexts=contexts,
-        session=session_info,
     )
 
 
@@ -4484,7 +3590,6 @@ def _screen_contracts(
             "dte": dte_int,
             "strike": row.get("strike"),
             "type": row_type.upper() if row_type else None,
-            "option_type": row_type.lower() if isinstance(row_type, str) else None,
             "price": round(price, 2),
             "bid": float(bid) if isinstance(bid, (int, float)) else None,
             "ask": float(ask) if isinstance(ask, (int, float)) else None,
@@ -4620,8 +3725,6 @@ async def gpt_contracts(
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
 
-    session_info = _session_block()
-
     try:
         chain = await fetch_option_chain_cached(symbol, request_payload.expiry)
     except TradierNotConfiguredError as exc:
@@ -4662,18 +3765,9 @@ async def gpt_contracts(
     else:
         filters = filters
 
-    prefer_delta = float(request_payload.max_delta or 0.55)
-    scored_candidates: List[Dict[str, Any]] = []
-    for contract in candidates:
-        result = score_contract(contract, prefer_delta=prefer_delta)
-        contract["liquidity_score"] = round(result.score, 4)
-        contract["liquidity_components"] = {k: round(v, 4) for k, v in result.components.items()}
-        scored_candidates.append(contract)
-    scored_candidates.sort(key=lambda item: item.get("liquidity_score", 0.0), reverse=True)
-
     plan_anchor = getattr(request_payload, "plan_anchor", None)
-    best = [_enrich_contract_with_plan(dict(contract), plan_anchor, risk_amount) for contract in scored_candidates[:3]]
-    alternatives = [_enrich_contract_with_plan(dict(contract), plan_anchor, risk_amount) for contract in scored_candidates[3:10]]
+    best = [_enrich_contract_with_plan(contract, plan_anchor, risk_amount) for contract in candidates[:3]]
+    alternatives = [_enrich_contract_with_plan(contract, plan_anchor, risk_amount) for contract in candidates[3:10]]
 
     # Compact table view for UI rendering
     table_rows: List[Dict[str, Any]] = []
@@ -4696,14 +3790,12 @@ async def gpt_contracts(
                 "iv": row.get("implied_volatility") or row.get("iv"),
                 "spread_pct": row.get("spread_pct"),
                 "oi": row.get("open_interest") or row.get("oi"),
-                "liquidity_score": row.get("liquidity_score") or row.get("tradeability"),
+                "liquidity_score": row.get("tradeability") or row.get("liquidity_score"),
             })
         except Exception:
             continue
 
-    example_leg = build_example_leg(scored_candidates[0]) if scored_candidates else None
-
-    payload = {
+    return {
         "symbol": symbol,
         "side": side,
         "style": style,
@@ -4713,13 +3805,7 @@ async def gpt_contracts(
         "best": best,
         "alternatives": alternatives,
         "table": table_rows,
-        "example_leg": example_leg,
-        "example": example_leg,
     }
-    payload["session"] = session_info
-    if underlying_price_asof is not None:
-        payload["underlying_price_asof"] = underlying_price_asof
-    return payload
 
 
 @gpt.post("/chart-url", summary="Build a canonical chart URL from params", response_model=ChartLinks)
@@ -4737,9 +3823,6 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
     # Collect raw data, preserving extras
     data: Dict[str, Any] = dict(payload.model_extra or {})
-    session_info = _session_block()
-    if not data.get("as_of") and session_info.get("as_of"):
-        data["as_of"] = session_info["as_of"]
     raw_symbol = str(payload.symbol or "").strip()
     raw_interval = str(payload.interval or "").strip()
     direction = (str(data.get("direction") or "").strip().lower())
@@ -4882,7 +3965,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
     encoded = urlencode(query, doseq=False, safe=",", quote_via=quote)
     url = f"{base}?{encoded}" if encoded else base
-    return ChartLinks(interactive=url, session=session_info)
+    return ChartLinks(interactive=url)
 
 
 @gpt.get("/context/{symbol}", summary="Return recent market context for a ticker")
@@ -4897,17 +3980,9 @@ async def gpt_context(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    session_info = _session_block()
-    as_of_ts = _session_asof_timestamp(session_info)
-
     frame = get_candles(symbol, interval_normalized, lookback=lookback)
     if frame.empty:
         raise HTTPException(status_code=502, detail=f"No market data available for {symbol.upper()} ({interval_normalized}).")
-
-    if session_info.get("status") != "open" and as_of_ts is not None:
-        limited = frame[frame["time"] <= as_of_ts]
-        if not limited.empty:
-            frame = limited
 
     df = frame.copy()
     df["time"] = pd.to_datetime(df["time"], utc=True)
@@ -4955,10 +4030,6 @@ async def gpt_context(
             bench_frame = get_candles("SPY", interval_normalized, lookback=lookback)
             bench_frame = bench_frame.copy()
             bench_frame["time"] = pd.to_datetime(bench_frame["time"], utc=True)
-            if session_info.get("status") != "open" and as_of_ts is not None:
-                limited_bench = bench_frame[bench_frame["time"] <= as_of_ts]
-                if not limited_bench.empty:
-                    bench_frame = limited_bench
             benchmark_history = bench_frame.set_index("time")
         except HTTPException:
             benchmark_history = None
@@ -4967,10 +4038,7 @@ async def gpt_context(
     polygon_bundle: Dict[str, Any] | None = None
     settings = get_settings()
     if settings.polygon_api_key:
-        if session_info.get("status") != "open" and as_of_ts is not None:
-            chain_df = await fetch_polygon_option_chain_asof(symbol, as_of_ts.to_pydatetime())
-        else:
-            chain_df = await fetch_polygon_option_chain(symbol)
+        chain_df = await fetch_polygon_option_chain(symbol)
         if chain_df is not None and not chain_df.empty:
             polygon_bundle = summarize_polygon_chain(chain_df, rules=None, top_n=3)
 
@@ -5008,25 +4076,20 @@ async def gpt_context(
     }
     if level_tokens:
         chart_params["levels"] = ",".join(level_tokens)
-    if session_info.get("as_of"):
-        chart_params["as_of"] = session_info["as_of"]
     response["charts"] = {"params": {key: str(value) for key, value in chart_params.items()}}
-    response["session"] = session_info
     return response
 
 
 @gpt.get("/widgets/{kind}", summary="Generate lightweight dashboard widgets")
 async def gpt_widget(kind: str, symbol: str | None = None, user: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
     if kind == "ticker_wedge" and symbol:
-        payload = {
+        return {
             "type": "ticker_wedge",
             "symbol": symbol.upper(),
             "pattern": "rising_wedge",
             "confidence": 0.72,
             "levels": {"support": 98.4, "resistance": 102.6},
         }
-        payload["session"] = _session_block()
-        return payload
     raise HTTPException(status_code=404, detail="Unknown widget kind or missing params")
 
 
@@ -5038,357 +4101,18 @@ app.include_router(gpt_sentiment_router)
 
 
 # ---------------------------------------------------------------------------
-# Platform health endpoints & Assistant API
+# Platform health endpoints
 # ---------------------------------------------------------------------------
 
 
-CHART_BASE = os.getenv("CHART_BASE", "https://app.fancytrader.io/chart").split("?", 1)[0].rstrip("?")
-
-
-def _validate_chart_url(url: Optional[str]) -> None:
-    if not canonical_chart_url(url):
-        raise HTTPException(status_code=500, detail="chart_url must be canonical.")
-
-
-def _parse_symbol_query(symbols: Optional[str]) -> List[str]:
-    if not symbols:
-        return []
-    tokens = [token.strip().upper() for token in symbols.split(",") if token.strip()]
-    return list(dict.fromkeys(tokens))
-
-
-def _parse_cursor(cursor: Optional[str]) -> Optional[pd.Timestamp]:
-    if not cursor:
-        return None
-    try:
-        ts = pd.Timestamp(cursor)
-    except Exception:
-        return None
-    if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
-    else:
-        ts = ts.tz_convert("UTC")
-    return ts
-
-
-def _confidence_value(value: Any) -> float:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return 0.5
-    return max(0.0, min(1.0, numeric))
-
-
-def _compact_guard(setups: List[Dict[str, Any]], budget_kb: int = 80) -> List[Dict[str, Any]]:
-    import json as _json
-
-    def fits(payload: Dict[str, Any]) -> bool:
-        try:
-            return len(_json.dumps(payload)) < budget_kb * 1024
-        except Exception:
-            return True
-
-    payload = {"setups": setups}
-    if fits(payload):
-        return setups
-    trimmed = [dict(item) for item in setups]
-    for item in trimmed:
-        item.pop("rationale", None)
-    if fits({"setups": trimmed}):
-        return trimmed
-    for item in trimmed:
-        item.pop("confluence", None)
-    return trimmed
-
-
-async def _attach_options_example_dict(setup: Dict[str, Any]) -> Dict[str, Any]:
-    options_block = setup.get("options") or {}
-    if options_block.get("example"):
-        return setup
-    try:
-        example = await best_contract_example(
-            symbol=setup.get("symbol"),
-            style=setup.get("style"),
-            as_of=setup.get("as_of"),
-        )
-    except Exception:
-        example = None
-    if example:
-        options_block.setdefault("style_horizon_applied", setup.get("style"))
-        options_block.setdefault("dte_window", "auto")
-        options_block["example"] = example
-        setup["options"] = options_block
-    return setup
-
-
-def _maybe_create_hedge(setup: SetupMeta) -> Optional[SetupMeta]:
-    if setup.direction == "long":
-        if setup.stop is None or not setup.targets:
-            return None
-        atr = setup.atr_used or 0.0
-        entry = setup.entry.level
-        stop_break = setup.stop - max(0.1, atr * 0.2)
-        first_target = setup.targets[0] if setup.targets else entry - max(0.5, atr)
-        hedge = setup.model_copy(update={
-            "plan_id": f"{setup.plan_id}-H",
-            "direction": "short",
-            "entry": EntryMeta(type="break", level=round(stop_break, 2)),
-            "stop": round(entry + max(0.1, (first_target - setup.stop) * 0.5), 2),
-            "targets": [round(first_target, 2)],
-            "confidence": min(0.5, setup.confidence * 0.8),
-            "rationale": f"Hedge: break below {setup.stop:.2f} invalidates long structure",
-            "options": None,
-        })
-        return hedge
-    if setup.direction == "short":
-        if setup.stop is None or not setup.targets:
-            return None
-        atr = setup.atr_used or 0.0
-        entry = setup.entry.level
-        stop_break = setup.stop + max(0.1, atr * 0.2)
-        first_target = setup.targets[0] if setup.targets else entry + max(0.5, atr)
-        hedge = setup.model_copy(update={
-            "plan_id": f"{setup.plan_id}-H",
-            "direction": "long",
-            "entry": EntryMeta(type="break", level=round(stop_break, 2)),
-            "stop": round(entry - max(0.1, (setup.stop - first_target) * 0.5), 2),
-            "targets": [round(first_target, 2)],
-            "confidence": min(0.5, setup.confidence * 0.8),
-            "rationale": f"Hedge: reclaim above {setup.stop:.2f} invalidates short structure",
-            "options": None,
-        })
-        return hedge
-    return None
-
-
-@app.post("/api/v1/assistant/exec")
-async def exec_assistant(
-    request_payload: ExecRequest,
-    request: Request,
-    format: str = Query(default="json"),
-    style: Optional[str] = Query(default=None),
-    limit: int = Query(default=3, ge=1, le=10),
-    symbols: Optional[str] = Query(default=None),
-    include_series: str = Query(default="none"),
-    include_inputs: str = Query(default="compact"),
-    user: AuthedUser = Depends(require_api_key),
-) -> Any:
-    query_symbols = _parse_symbol_query(symbols)
-    body_symbols = [token.upper() for token in (request_payload.symbols or [])]
-    tickers = query_symbols or body_symbols
-    tickers = [t for t in tickers if t]
-    style_param = style or request_payload.style
-    auto_universe = False
-    auto_meta: Dict[str, Any] = {}
-    if not tickers:
-        tickers, auto_meta = _autofill_symbols(style_param)
-        auto_universe = True
-        logger.info(
-            "No symbols supplied; using auto universe",
-            extra={"symbols": tickers, "style": style_param, "meta": auto_meta},
-        )
-    limit_param = max(1, min(limit, request_payload.limit or limit))
-    ui_mode = request_payload.ui_mode or ("chat" if format.lower() == "text" else "api")
-
-    include_series = "none"
-    session_state = session_now()
-    session_info = session_state.to_dict()
-    session_meta = SessionMeta.model_validate(session_info)
-
-    universe = ScanUniverse(tickers=tickers, style=style_param)
-    scan_results = await gpt_scan(
-        universe,
-        request,
-        user,
-        auto_universe=auto_universe,
-        auto_meta=auto_meta,
-    )
-
-    style_token = _output_style_token(style_param) if style_param else None
-
-    def _matches_style(result: Dict[str, Any]) -> bool:
-        if style_token is None:
-            return True
-        result_style = result.get("style") or ((result.get("plan") or {}).get("style"))
-        return _output_style_token(result_style) == style_token
-
-    filtered_results = [item for item in scan_results if _matches_style(item)]
-    selected_results = filtered_results[:limit_param]
-
-    setup_dicts: List[Dict[str, Any]] = []
-    for result in selected_results:
-        symbol = (result.get("symbol") or "").upper()
-        if not symbol:
-            continue
-        plan_block = result.get("plan") or {}
-        plan_request = PlanRequest(symbol=symbol, style=style_param or result.get("style"), plan_id=plan_block.get("plan_id"))
-        try:
-            plan_response = await gpt_plan(plan_request, request, user)
-        except HTTPException:
-            continue
-        try:
-            main_setup = _build_setup_from_plan_response(plan_response, session_info)
-        except Exception:
-            logger.exception("failed to build setup for %s", symbol)
-            continue
-        for candidate in filter(None, [main_setup, _maybe_create_hedge(main_setup)]):
-            data = candidate.model_dump()
-            data["as_of"] = session_meta.as_of
-            entry_payload = data.get("entry") or {}
-            stop_value = data.get("stop")
-            plan_version = data.get("version")
-            data["chart_url"] = build_chart_url(
-                CHART_BASE,
-                symbol=data.get("symbol"),
-                plan_id=data.get("plan_id"),
-                as_of=data.get("as_of"),
-                entry=entry_payload,
-                stop=float(stop_value) if stop_value is not None else 0.0,
-                targets=data.get("targets"),
-                plan_version=str(plan_version) if plan_version is not None else None,
-            )
-            data = await _attach_options_example_dict(data)
-            _validate_chart_url(data.get("chart_url"))
-            setup_dicts.append(data)
-            async with _ACTIVE_SETUPS_LOCK:
-                _ACTIVE_SETUPS[data["plan_id"]] = dict(data)
-
-    setup_dicts = _compact_guard(setup_dicts)
-    setup_models = [SetupMeta.model_validate(item) for item in setup_dicts]
-
-    exec_payload = ExecResponse(session=session_meta, count=len(setup_models), setups=setup_models)
-
-    if format.lower() == "json" and ui_mode != "chat":
-        return exec_payload
-
-    lines: List[str] = []
-    banner_text = session_info.get("banner") or f"Session status: {session_meta.status}"
-    lines.append(f"{banner_text} (as_of {session_meta.as_of})")
-    summary_style = style_token or "mixed"
-    lines.append(f"{exec_payload.count} setups returned (style={summary_style}).")
-    for setup in setup_dicts:
-        lines.append(json.dumps(setup, separators=(",", ":"), sort_keys=True))
-        chart_url = setup.get("chart_url")
-        if isinstance(chart_url, str) and chart_url:
-            lines.append(f"Open chart: {chart_url}")
-    lines.append("Notes: Charts generated by Trading Coach backend; all times ET.")
-    return PlainTextResponse("\n".join(lines))
-
-
-@app.get("/api/v1/context")
-async def context_snapshot(
-    symbol: str = Query(..., min_length=1),
-    as_of: Optional[str] = Query(default=None),
-) -> Dict[str, Any]:
-    session_state = session_now()
-    as_of_value = as_of or session_state.as_of
-    context = build_context_block(symbol, as_of_value)
-    return {
-        "symbol": symbol.upper(),
-        "as_of": as_of_value,
-        "context": context,
-    }
-
-
-@app.get("/api/v1/symbol/{symbol}/series")
-async def symbol_series(
-    symbol: str,
-    tf: str = Query("1m"),
-    limit: int = Query(1500, ge=50, le=5000),
-    cursor: Optional[str] = Query(default=None),
-) -> Dict[str, Any]:
-    interval = normalize_interval(tf)
-    frame = get_candles(symbol, interval, lookback=max(limit * 2, 200))
-    if frame.empty:
-        raise HTTPException(status_code=404, detail="No data available")
-    df = frame.copy()
-    df["time"] = pd.to_datetime(df["time"], utc=True)
-    df = df.set_index("time").sort_index()
-    cursor_ts = _parse_cursor(cursor)
-    if cursor_ts is not None:
-        df = df.loc[df.index < cursor_ts]
-    if df.empty:
-        return {"symbol": symbol.upper(), "interval": interval, "bars": [], "next_cursor": None}
-    window = df.tail(limit)
-    bars = [
-        {
-            "time": idx.isoformat(),
-            "open": float(row["open"]),
-            "high": float(row["high"]),
-            "low": float(row["low"]),
-            "close": float(row["close"]),
-            "volume": float(row.get("volume") or 0.0),
-        }
-        for idx, row in window.iterrows()
-    ]
-    next_cursor = None
-    if len(window) == limit and len(df) > limit:
-        next_cursor = window.index[0].isoformat()
-    return {
-        "symbol": symbol.upper(),
-        "interval": interval,
-        "count": len(bars),
-        "bars": bars,
-        "next_cursor": next_cursor,
-    }
-
-
-@app.get("/api/v1/symbol/{symbol}/indicators")
-async def symbol_indicators(
-    symbol: str,
-    tf: str = Query("1m"),
-    limit: int = Query(1500, ge=50, le=5000),
-    cursor: Optional[str] = Query(default=None),
-) -> Dict[str, Any]:
-    interval = normalize_interval(tf)
-    frame = get_candles(symbol, interval, lookback=max(limit * 2, 200))
-    if frame.empty:
-        raise HTTPException(status_code=404, detail="No data available")
-    df = frame.copy()
-    df["time"] = pd.to_datetime(df["time"], utc=True)
-    df = df.set_index("time").sort_index()
-    cursor_ts = _parse_cursor(cursor)
-    if cursor_ts is not None:
-        df = df.loc[df.index < cursor_ts]
-    if df.empty:
-        return {"symbol": symbol.upper(), "interval": interval, "series": [], "next_cursor": None}
-    window = df.tail(limit)
-    ema9_series = ema(window["close"], 9) if len(window) >= 9 else pd.Series(dtype=float)
-    ema20_series = ema(window["close"], 20) if len(window) >= 20 else pd.Series(dtype=float)
-    ema50_series = ema(window["close"], 50) if len(window) >= 50 else pd.Series(dtype=float)
-    vwap_series = vwap(window["close"], window["volume"])
-    atr_series = atr(window["high"], window["low"], window["close"], 14)
-    adx_series = adx(window["high"], window["low"], window["close"], 14)
-    indicators = {
-        "ema9": _series_points(ema9_series),
-        "ema20": _series_points(ema20_series),
-        "ema50": _series_points(ema50_series),
-        "vwap": _series_points(vwap_series),
-        "atr14": _series_points(atr_series),
-        "adx14": _series_points(adx_series),
-    }
-    next_cursor = None
-    if len(window) == limit and len(df) > limit:
-        next_cursor = window.index[0].isoformat()
-    return {
-        "symbol": symbol.upper(),
-        "interval": interval,
-        "count": len(window),
-        "indicators": indicators,
-        "next_cursor": next_cursor,
-    }
-
-
 @app.get("/healthz", summary="Readiness probe used by Railway")
-async def healthz() -> Dict[str, Any]:
-    payload = {"status": "ok"}
-    payload["session"] = _session_block()
-    return payload
+async def healthz() -> Dict[str, str]:
+    return {"status": "ok"}
 
 
 @app.get("/", summary="Service metadata")
 async def root() -> Dict[str, Any]:
-    payload = {
+    return {
         "name": "trading-coach-gpt-backend",
         "description": "Backend endpoints intended for a custom GPT Action.",
         "routes": {
@@ -5400,5 +4124,3 @@ async def root() -> Dict[str, Any]:
             "health": "/healthz",
         },
     }
-    payload["session"] = _session_block()
-    return payload

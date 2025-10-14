@@ -27,7 +27,6 @@ from .strategy_library import (
 from .context_overlays import _volume_profile
 from .calculations import atr, ema, vwap, adx
 from .statistics import get_style_stats, estimate_probability
-from .app.engine import build_target_profile, build_structured_plan
 
 TZ_ET = "America/New_York"
 RTH_START_MINUTE = 9 * 60 + 30
@@ -49,7 +48,7 @@ _STYLE_TARGET_PRESETS: Dict[str, Dict[str, Any]] = {
         "tp1_range": (1.00, 1.50),
         "tp2_range": (2.00, 3.00),
     },
-    "leaps": {
+    "leap": {
         "measure": "em",
         "tp1_range": (1.00, 1.30),
         "tp2_range": (1.60, 2.00),
@@ -201,7 +200,6 @@ class Plan:
     notes: str | None = None
     atr: float | None = None
     warnings: List[str] = field(default_factory=list)
-    target_profile: Dict[str, Any] | None = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -216,7 +214,6 @@ class Plan:
             "atr": round(float(self.atr), 4) if self.atr is not None else None,
             "notes": self.notes,
             "warnings": list(self.warnings),
-            "target_profile": self.target_profile,
         }
 
 
@@ -240,32 +237,6 @@ def rr(entry: float, stop: float, tp: float, bias: str) -> float:
     if risk <= 0:
         return 0.0
     return max(0.0, reward / risk)
-
-
-def _enrich_plan_with_profile(
-    plan: Plan,
-    *,
-    style: Optional[str],
-    bias: Optional[str],
-    atr_value: Optional[float],
-    expected_move: Optional[float],
-    debug: Optional[Dict[str, Any]],
-) -> TargetEngineResult:
-    profile = build_target_profile(
-        entry=plan.entry,
-        stop=plan.stop,
-        targets=plan.targets,
-        target_meta=plan.target_meta,
-        debug=debug,
-        runner=plan.runner,
-        warnings=plan.warnings,
-        atr_used=atr_value,
-        expected_move=expected_move,
-        style=style,
-        bias=bias,
-    )
-    plan.target_profile = profile.to_dict()
-    return profile
 
 
 def _normalize_trade_style(style: str | None) -> str:
@@ -1227,13 +1198,10 @@ def _infer_bar_minutes(index: pd.Index) -> float | None:
 def _resample_ohlcv(frame: pd.DataFrame, rule: str, min_length: int = 20) -> pd.DataFrame | None:
     if frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
         return None
-    rule_token = rule
-    if isinstance(rule_token, str) and rule_token.endswith("T"):
-        rule_token = f"{rule_token[:-1]}min"
     try:
         resampled = (
             frame[["open", "high", "low", "close", "volume"]]
-            .resample(rule_token, label="right", closed="right")
+            .resample(rule, label="right", closed="right")
             .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
         )
     except Exception:
@@ -1919,15 +1887,6 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
     if plan is None:
         return None
 
-    profile = _enrich_plan_with_profile(
-        plan,
-        style=style,
-        bias=plan.direction,
-        atr_value=atr_value,
-        expected_move=ctx.get("expected_move_horizon"),
-        debug=tp_debug_info,
-    )
-
     features = {
         "atr": atr_value,
         "adx": ctx["adx"],
@@ -1957,8 +1916,6 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
         features["tp1_struct_debug"] = tp1_dbg
     if tp_debug_info:
         features["tp_targets_debug"] = tp_debug_info
-    features["target_profile"] = profile.to_dict()
-    features["target_probabilities"] = profile.probabilities
 
     return Signal(
         symbol=symbol,
@@ -2121,15 +2078,6 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
     if plan is None:
         return None
 
-    profile = _enrich_plan_with_profile(
-        plan,
-        style=style,
-        bias=plan.direction,
-        atr_value=atr_value,
-        expected_move=ctx.get("expected_move_horizon"),
-        debug=tp_debug_info_ph,
-    )
-
     features = {
         "atr": atr_value,
         "adx": ctx["adx"],
@@ -2156,8 +2104,6 @@ def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any
         features["tp1_struct_debug"] = tp1_dbg_ph
     if tp_debug_info_ph:
         features["tp_targets_debug"] = tp_debug_info_ph
-    features["target_profile"] = profile.to_dict()
-    features["target_probabilities"] = profile.probabilities
 
     return Signal(
         symbol=symbol,
@@ -2427,15 +2373,6 @@ def _detect_gap_fill(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> Si
     if plan is None:
         return None
 
-    profile = _enrich_plan_with_profile(
-        plan,
-        style=style_token,
-        bias=plan.direction,
-        atr_value=atr_value,
-        expected_move=ctx.get("expected_move_horizon"),
-        debug=None,
-    )
-
     features = {
         "atr": atr_value,
         "adx": ctx["adx"],
@@ -2457,8 +2394,6 @@ def _detect_gap_fill(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> Si
     }
     if plan.warnings:
         features["plan_warnings"] = list(plan.warnings)
-    features["target_profile"] = profile.to_dict()
-    features["target_probabilities"] = profile.probabilities
 
     return Signal(
         symbol=symbol,
@@ -2528,15 +2463,6 @@ def _detect_midday_mean_revert(symbol: str, strategy: Strategy, ctx: Dict[str, A
     if plan is None:
         return None
 
-    profile = _enrich_plan_with_profile(
-        plan,
-        style=_style_for_strategy_id(strategy.id),
-        bias=plan.direction,
-        atr_value=atr_value,
-        expected_move=ctx.get("expected_move_horizon"),
-        debug=None,
-    )
-
     features = {
         "atr": atr_value,
         "adx": ctx["adx"],
@@ -2554,8 +2480,6 @@ def _detect_midday_mean_revert(symbol: str, strategy: Strategy, ctx: Dict[str, A
         "plan_risk_reward": plan.risk_reward,
         "plan_notes": plan.notes,
     }
-    features["target_profile"] = profile.to_dict()
-    features["target_probabilities"] = profile.probabilities
 
     return Signal(
         symbol=symbol,
