@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import httpx
@@ -95,6 +96,39 @@ async def fetch_polygon_option_chain(symbol: str, expiration: str | None = None,
     if not results:
         return pd.DataFrame()
     return _normalize_option_results(results, fallback_symbol=symbol.upper())
+
+
+async def fetch_polygon_option_chain_asof(
+    symbol: str,
+    as_of: datetime,
+    expiration: str | None = None,
+    *,
+    limit: int = 400,
+) -> pd.DataFrame:
+    """Return a Polygon option snapshot filtered to timestamps <= `as_of`."""
+
+    frame = await fetch_polygon_option_chain(symbol, expiration, limit=limit)
+    if frame.empty or as_of is None:
+        return frame
+
+    as_of_utc = as_of.astimezone(timezone.utc) if as_of.tzinfo else as_of.replace(tzinfo=timezone.utc)
+    for column in ("last_updated", "updated"):
+        if column in frame.columns:
+            try:
+                ts = pd.to_datetime(frame[column], errors="coerce", utc=True)
+            except Exception:
+                ts = None
+            if ts is not None:
+                frame["__timestamp"] = ts
+                break
+    else:
+        return frame
+
+    filtered = frame[frame["__timestamp"] <= as_of_utc]
+    if filtered.empty:
+        filtered = frame.copy()
+    filtered = filtered.drop(columns=["__timestamp"], errors="ignore")
+    return filtered
 
 
 def _normalize_option_results(results: Iterable[Dict[str, Any]], *, fallback_symbol: str) -> pd.DataFrame:
@@ -316,4 +350,3 @@ def summarize_polygon_chain(
         summary["underlying"] = underlying
 
     return summary
-

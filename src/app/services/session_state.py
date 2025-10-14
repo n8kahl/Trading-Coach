@@ -1,0 +1,107 @@
+"""Session state utilities for market-aware responses."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from datetime import datetime, time, timedelta, timezone
+from typing import Dict, Mapping, Optional
+from zoneinfo import ZoneInfo
+
+from ...market_clock import MarketClock
+
+_ET = ZoneInfo("America/New_York")
+_CLOCK = MarketClock()
+
+
+@dataclass(slots=True)
+class SessionState:
+    """Represents the current US equities trading session."""
+
+    status: str
+    as_of: str
+    next_open: str
+    tz: str
+    banner: str
+
+    def to_dict(self) -> Dict[str, str]:
+        """Return a JSON-serialisable representation."""
+        return asdict(self)
+
+
+def _format(dt: datetime | None) -> str:
+    if dt is None:
+        return ""
+    aware = dt.astimezone(_ET)
+    return aware.replace(microsecond=0).isoformat()
+
+
+def _fallback_as_of(now_et: datetime) -> datetime:
+    """Fallback to the previous regular close when outside cash hours."""
+    if now_et.weekday() >= 5:
+        days_back = (now_et.weekday() - 4) if now_et.weekday() >= 5 else 1
+        prior_business = now_et - timedelta(days=days_back)
+    else:
+        prior_business = now_et
+    close_time = time(hour=16, minute=0)
+    as_of = prior_business.replace(hour=close_time.hour, minute=close_time.minute, second=0, microsecond=0)
+    if as_of > now_et:
+        as_of -= timedelta(days=1)
+    while as_of.weekday() >= 5:
+        as_of -= timedelta(days=1)
+    return as_of
+
+
+def session_now() -> SessionState:
+    """Return the current session metadata (ET)."""
+
+    snapshot = _CLOCK.snapshot()
+    now_et = snapshot.now_et.astimezone(_ET)
+    status = snapshot.status  # "open" | "pre" | "post" | "closed"
+
+    if status == "open":
+        as_of_dt = now_et
+        banner = "Market open"
+    else:
+        as_of_dt = _CLOCK.last_rth_close(at=now_et)
+        if as_of_dt is None:
+            as_of_dt = _fallback_as_of(now_et)
+        banner = "Market closed — using last regular session"
+        if status == "pre":
+            banner = "Premarket — using prior close data"
+        elif status == "post":
+            banner = "After hours — using regular session close"
+
+    if as_of_dt.tzinfo is None:
+        as_of_dt = as_of_dt.replace(tzinfo=timezone.utc).astimezone(_ET)
+
+    next_open, _next_close = _CLOCK.next_open_close(at=now_et)
+
+    return SessionState(
+        status="open" if status == "open" else "closed",
+        as_of=_format(as_of_dt),
+        next_open=_format(next_open),
+        tz="America/New_York",
+        banner=banner,
+    )
+
+
+__all__ = ["SessionState", "session_now"]
+def parse_session_as_of(session: Mapping[str, str]) -> Optional[datetime]:
+    """Return the session's as_of timestamp in UTC."""
+    if not session:
+        return None
+    raw = session.get("as_of")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    tz_label = session.get("tz") or "America/New_York"
+    tz = ZoneInfo(tz_label)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=tz)
+    return dt.astimezone(timezone.utc)
+
+
+__all__ = ["SessionState", "session_now", "parse_session_as_of"]

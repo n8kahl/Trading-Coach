@@ -55,20 +55,26 @@ from .tradier import (
     fetch_option_quotes,
     select_tradier_contract,
 )
-from .polygon_options import fetch_polygon_option_chain, summarize_polygon_chain
+from .polygon_options import (
+    fetch_polygon_option_chain,
+    fetch_polygon_option_chain_asof,
+    summarize_polygon_chain,
+)
 from .context_overlays import compute_context_overlays
 from .db import (
     ensure_schema as ensure_db_schema,
     fetch_idea_snapshot as db_fetch_idea_snapshot,
     store_idea_snapshot as db_store_idea_snapshot,
 )
-from .data_sources import fetch_polygon_ohlcv
+from .data_sources import fetch_polygon_ohlcv, last_price_asof
 from .symbol_streamer import SymbolStreamCoordinator
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
 from zoneinfo import ZoneInfo
 
 from .market_clock import MarketClock
+from .app.services import session_now, parse_session_as_of
+from .app.engine import TargetEngineResult, build_structured_plan
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +126,34 @@ _FUTURES_PROXY_MAP: Dict[str, str] = {
 _FUTURES_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}
 
 _MARKET_CLOCK = MarketClock()
+
+
+def _session_block() -> Dict[str, Any]:
+    """Return a session dictionary safe for inclusion in responses."""
+    try:
+        session = session_now()
+        return session.to_dict()
+    except Exception:  # pragma: no cover - defensive logging
+        logger.exception("session_now failed; defaulting to closed session banner")
+        return {
+            "status": "closed",
+            "as_of": "",
+            "next_open": "",
+            "tz": "America/New_York",
+            "banner": "Session status unavailable",
+        }
+
+
+def _session_asof_timestamp(session: Dict[str, Any]) -> Optional[pd.Timestamp]:
+    dt = parse_session_as_of(session)
+    if dt is None:
+        return None
+    ts = pd.Timestamp(dt)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return ts
 
 
 def _market_snapshot_payload() -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
@@ -184,6 +218,7 @@ class ChartParams(BaseModel):
 
 class ChartLinks(BaseModel):
     interactive: str
+    session: Dict[str, Any] | None = None
 
 
 app = FastAPI(
@@ -339,6 +374,9 @@ class PlanResponse(BaseModel):
     update_reason: str | None = None
     market: Dict[str, Any] | None = None
     data: Dict[str, Any] | None = None
+    session: Dict[str, Any] | None = None
+    target_profile: Dict[str, Any] | None = None
+    structured_plan: Dict[str, Any] | None = None
 
 
 class IdeaStoreRequest(BaseModel):
@@ -385,6 +423,7 @@ class MultiContextResponse(BaseModel):
     decimals: int | None = None
     data_quality: Dict[str, Any] | None = None
     contexts: List[Dict[str, Any]] | None = None  # backward compatibility
+    session: Dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1960,6 +1999,18 @@ async def _build_interval_context(symbol: str, interval: str, lookback: int) -> 
     if frame.empty:
         raise HTTPException(status_code=502, detail=f"No market data available for {symbol.upper()} ({interval}).")
 
+    session_info = _session_block()
+    underlying_price_asof = None
+    if session_info.get("status") != "open":
+        as_of_dt = parse_session_as_of(session_info)
+        if as_of_dt is not None:
+            underlying_price_asof = await last_price_asof(symbol, as_of_dt)
+    as_of_ts = _session_asof_timestamp(session_info)
+    if session_info.get("status") != "open" and as_of_ts is not None:
+        limited = frame[frame["time"] <= as_of_ts]
+        if not limited.empty:
+            frame = limited
+
     df = frame.copy()
     df["time"] = pd.to_datetime(df["time"], utc=True)
     history = df.set_index("time")
@@ -2008,6 +2059,7 @@ async def _build_interval_context(symbol: str, interval: str, lookback: int) -> 
         "snapshot": snapshot,
         "indicators": indicators,
         "cached": False,
+        "session": session_info,
     }
 
     _MULTI_CONTEXT_CACHE[cache_key] = (now, dict(payload))
@@ -2262,13 +2314,15 @@ async def gpt_health(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]
 
     polygon_status, tradier_status = await asyncio.gather(_check_polygon(), _check_tradier())
 
-    return {
+    payload = {
         "status": "ok",
         "services": {
             "polygon": polygon_status,
             "tradier": tradier_status,
         },
     }
+    payload["session"] = _session_block()
+    return payload
 
 
 @gpt.get("/futures-snapshot", summary="Overnight/offsessions market tape (ETF proxies via Finnhub)")
@@ -2279,6 +2333,7 @@ async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict
     if cached and (now_ts - ts < 180):
         payload = {k: (dict(v) if isinstance(v, dict) else v) for k, v in cached.items()}
         payload["stale_seconds"] = int(now_ts - ts)
+        payload["session"] = _session_block()
         return payload
 
     settings = get_settings()
@@ -2297,6 +2352,7 @@ async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict
     payload: Dict[str, Any] = dict(quotes)
     payload["market_phase"] = _market_phase_chicago()
     payload["stale_seconds"] = 0
+    payload["session"] = _session_block()
     _FUTURES_CACHE["data"] = copy.deepcopy(payload)
     _FUTURES_CACHE["ts"] = now_ts
     return payload
@@ -2313,6 +2369,17 @@ async def gpt_scan(
         raise HTTPException(status_code=400, detail="No tickers provided")
 
     market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload()
+    session_info = _session_block()
+    session_as_of = parse_session_as_of(session_info)
+    if session_as_of is not None:
+        as_of_dt = session_as_of
+    as_of_ts = None
+    if as_of_dt is not None:
+        as_of_ts = pd.Timestamp(as_of_dt)
+        if as_of_ts.tzinfo is None:
+            as_of_ts = as_of_ts.tz_localize("UTC")
+        else:
+            as_of_ts = as_of_ts.tz_convert("UTC")
 
     style_filter = _normalize_style(universe.style)
     data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}.get(style_filter, "5")
@@ -2321,7 +2388,7 @@ async def gpt_scan(
     market_data = await _collect_market_data(
         universe.tickers,
         timeframe=data_timeframe,
-        as_of=None if is_open else as_of_dt,
+        as_of=None if is_open else (as_of_ts.to_pydatetime() if as_of_ts is not None else None),
     )
     if not market_data:
         raise HTTPException(status_code=502, detail="No market data available for the requested tickers.")
@@ -2340,8 +2407,8 @@ async def gpt_scan(
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Benchmark data fetch failed for %s: %s", benchmark_symbol, exc)
             benchmark_history = None
-    if benchmark_history is not None and as_of_dt is not None and not is_open:
-        cutoff = pd.Timestamp(as_of_dt).tz_convert("UTC")
+    if benchmark_history is not None and as_of_ts is not None and not is_open:
+        cutoff = as_of_ts
         benchmark_history = benchmark_history.loc[benchmark_history.index <= cutoff]
         if benchmark_history.empty:
             benchmark_history = None
@@ -2394,7 +2461,10 @@ async def gpt_scan(
     polygon_chains: Dict[str, pd.DataFrame] = {}
     if unique_symbols and polygon_enabled:
         try:
-            tasks = [fetch_polygon_option_chain(symbol) for symbol in unique_symbols]
+            if not is_open and as_of_ts is not None:
+                tasks = [fetch_polygon_option_chain_asof(symbol, as_of_ts.to_pydatetime()) for symbol in unique_symbols]
+            else:
+                tasks = [fetch_polygon_option_chain(symbol) for symbol in unique_symbols]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for symbol, result in zip(unique_symbols, results):
                 if isinstance(result, Exception):
@@ -2466,6 +2536,8 @@ async def gpt_scan(
             "vwap": "1",
             "theme": "dark",
         }
+        if session_info.get("as_of"):
+            chart_query["as_of"] = session_info["as_of"]
         plan_payload: Dict[str, Any] | None = None
         enhancements: Dict[str, Any] | None = None
         chain = polygon_chains.get(signal.symbol)
@@ -2636,10 +2708,14 @@ async def gpt_scan(
                 "market": dict(market_meta),
                 "context_overlays": enhancements,
                 **({"options": polygon_bundle} if polygon_bundle else {}),
+                "session": session_info,
             }
         )
 
     logger.info("scan universe=%s user=%s results=%d", universe.tickers, user.user_id, len(payload))
+    for item in payload:
+        if isinstance(item, dict):
+            item.setdefault("session", session_info)
     return payload
 
 
@@ -2671,6 +2747,7 @@ async def gpt_plan(
     if not results:
         raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
+    session_info = first.get("session") if isinstance(first.get("session"), dict) else _session_block()
     logger.info(
         "gpt_plan raw result received",
         extra={
@@ -2758,6 +2835,8 @@ async def gpt_plan(
         chart_params_payload.setdefault("strategy", first.get("strategy_id") or plan.get("setup"))
         chart_params_payload.setdefault("symbol", symbol)
         chart_params_payload.setdefault("range", _range_for_style(first.get("style")))
+        if session_info.get("as_of"):
+            chart_params_payload.setdefault("as_of", session_info["as_of"])
         if entry_val is not None or stop_val is not None or targets_list:
             default_note = _format_chart_note(symbol, first.get("style"), entry_val, stop_val, targets_list)
             if default_note and not chart_params_payload.get("notes"):
@@ -2783,6 +2862,7 @@ async def gpt_plan(
             {
                 "plan_id": plan_id,
                 "plan_version": str(version),
+                **({"as_of": session_info["as_of"]} if session_info.get("as_of") else {}),
             },
         )
         charts_payload["interactive"] = chart_url_value
@@ -2793,6 +2873,7 @@ async def gpt_plan(
             {
                 "plan_id": plan_id,
                 "plan_version": str(version),
+                **({"as_of": session_info["as_of"]} if session_info.get("as_of") else {}),
             },
         )
         charts_payload["interactive"] = fallback_chart_url
@@ -2815,6 +2896,8 @@ async def gpt_plan(
             minimal_params["stop"] = f"{stop_val:.2f}"
         if targets_list:
             minimal_params["tp"] = ",".join(f"{target:.2f}" for target in targets_list)
+        if session_info.get("as_of"):
+            minimal_params["as_of"] = session_info["as_of"]
         chart_url_value = _build_tv_chart_url(request, minimal_params)
         charts_payload.setdefault("params", minimal_params)
         charts_payload["interactive"] = chart_url_value
@@ -2824,6 +2907,70 @@ async def gpt_plan(
     plan["idea_url"] = trade_detail_url
 
     atr_val = _safe_number(indicators.get("atr14"))
+
+    profile_dict = plan.get("target_profile") or {}
+    try:
+        target_profile_obj = TargetEngineResult(
+            entry=float(profile_dict.get("entry", entry_output or plan.get("entry") or 0.0)),
+            stop=float(profile_dict.get("stop", stop_output or plan.get("stop") or 0.0)),
+            targets=[float(t) for t in profile_dict.get("targets", plan.get("targets") or targets_list or [])],
+            probabilities={k: float(v) for k, v in (profile_dict.get("probabilities") or {}).items()},
+            em_used=profile_dict.get("em_used"),
+            atr_used=profile_dict.get("atr_used", indicators.get("atr14")),
+            snap_trace=[dict(item) for item in profile_dict.get("snap_trace", []) if isinstance(item, dict)],
+            meta=[dict(item) for item in profile_dict.get("meta", []) if isinstance(item, dict)],
+            warnings=[str(w) for w in profile_dict.get("warnings", plan_warnings or [])],
+            runner=plan.get("runner"),
+            bias=plan.get("direction"),
+            style=plan.get("style"),
+            expected_move=profile_dict.get("expected_move"),
+        )
+    except Exception:
+        target_profile_obj = TargetEngineResult(
+            entry=float(plan.get("entry") or entry_val or 0.0),
+            stop=float(plan.get("stop") or stop_val or 0.0),
+            targets=[float(t) for t in (plan.get("targets") or targets_list or [])],
+            probabilities={},
+            em_used=None,
+            atr_used=atr_val,
+            snap_trace=[],
+            meta=[],
+            warnings=[str(w) for w in (plan.get("warnings") or [])],
+            runner=plan.get("runner"),
+            bias=plan.get("direction"),
+            style=plan.get("style"),
+            expected_move=None,
+        )
+    plan["target_profile"] = target_profile_obj.to_dict()
+
+    confluence_tags = []
+    for meta_entry in target_profile_obj.meta:
+        tag = meta_entry.get("snap_tag") or meta_entry.get("tag")
+        if tag:
+            token = str(tag)
+            if token not in confluence_tags:
+                confluence_tags.append(token)
+
+    structured_plan = build_structured_plan(
+        plan_id=plan_id,
+        symbol=symbol,
+        style=plan.get("style"),
+        direction=plan.get("direction"),
+        profile=target_profile_obj,
+        confidence=plan.get("confidence"),
+        rationale=plan.get("notes"),
+        options_block=first.get("options"),
+        chart_url=chart_url_value,
+        session=session_info,
+        confluence=confluence_tags,
+    )
+    plan["structured_plan"] = structured_plan
+    first["structured_plan"] = structured_plan
+    first["target_profile"] = plan["target_profile"]
+    if isinstance(first.get("features"), dict):
+        first["features"]["target_profile"] = plan["target_profile"]
+        first["features"]["structured_plan"] = structured_plan
+
     calc_notes: Dict[str, Any] = {}
     if atr_val is not None:
         calc_notes["atr14"] = atr_val
@@ -3123,6 +3270,9 @@ async def gpt_plan(
         update_reason=update_reason,
         market=market_meta,
         data=data_meta,
+        session=session_info,
+        target_profile=plan.get("target_profile") if plan else None,
+        structured_plan=plan.get("structured_plan") if plan else None,
     )
 
 @app.post("/internal/idea/store", include_in_schema=False, tags=["internal"])
@@ -3313,6 +3463,7 @@ async def gpt_multi_context(
     if not request_payload.intervals:
         raise HTTPException(status_code=400, detail="At least one interval is required")
 
+    session_info = _session_block()
     contexts: List[Dict[str, Any]] = []
     seen: set[str] = set()
     lookback = int(request_payload.lookback or 300)
@@ -3467,6 +3618,7 @@ async def gpt_multi_context(
         decimals=decimals,
         data_quality=data_quality,
         contexts=contexts,
+        session=session_info,
     )
 
 
@@ -3725,6 +3877,8 @@ async def gpt_contracts(
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
 
+    session_info = _session_block()
+
     try:
         chain = await fetch_option_chain_cached(symbol, request_payload.expiry)
     except TradierNotConfiguredError as exc:
@@ -3795,7 +3949,7 @@ async def gpt_contracts(
         except Exception:
             continue
 
-    return {
+    payload = {
         "symbol": symbol,
         "side": side,
         "style": style,
@@ -3806,6 +3960,10 @@ async def gpt_contracts(
         "alternatives": alternatives,
         "table": table_rows,
     }
+    payload["session"] = session_info
+    if underlying_price_asof is not None:
+        payload["underlying_price_asof"] = underlying_price_asof
+    return payload
 
 
 @gpt.post("/chart-url", summary="Build a canonical chart URL from params", response_model=ChartLinks)
@@ -3823,6 +3981,9 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
     # Collect raw data, preserving extras
     data: Dict[str, Any] = dict(payload.model_extra or {})
+    session_info = _session_block()
+    if not data.get("as_of") and session_info.get("as_of"):
+        data["as_of"] = session_info["as_of"]
     raw_symbol = str(payload.symbol or "").strip()
     raw_interval = str(payload.interval or "").strip()
     direction = (str(data.get("direction") or "").strip().lower())
@@ -3965,7 +4126,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
     encoded = urlencode(query, doseq=False, safe=",", quote_via=quote)
     url = f"{base}?{encoded}" if encoded else base
-    return ChartLinks(interactive=url)
+    return ChartLinks(interactive=url, session=session_info)
 
 
 @gpt.get("/context/{symbol}", summary="Return recent market context for a ticker")
@@ -4030,6 +4191,10 @@ async def gpt_context(
             bench_frame = get_candles("SPY", interval_normalized, lookback=lookback)
             bench_frame = bench_frame.copy()
             bench_frame["time"] = pd.to_datetime(bench_frame["time"], utc=True)
+            if session_info.get("status") != "open" and as_of_ts is not None:
+                limited_bench = bench_frame[bench_frame["time"] <= as_of_ts]
+                if not limited_bench.empty:
+                    bench_frame = limited_bench
             benchmark_history = bench_frame.set_index("time")
         except HTTPException:
             benchmark_history = None
@@ -4038,7 +4203,10 @@ async def gpt_context(
     polygon_bundle: Dict[str, Any] | None = None
     settings = get_settings()
     if settings.polygon_api_key:
-        chain_df = await fetch_polygon_option_chain(symbol)
+        if session_info.get("status") != "open" and as_of_ts is not None:
+            chain_df = await fetch_polygon_option_chain_asof(symbol, as_of_ts.to_pydatetime())
+        else:
+            chain_df = await fetch_polygon_option_chain(symbol)
         if chain_df is not None and not chain_df.empty:
             polygon_bundle = summarize_polygon_chain(chain_df, rules=None, top_n=3)
 
@@ -4076,20 +4244,25 @@ async def gpt_context(
     }
     if level_tokens:
         chart_params["levels"] = ",".join(level_tokens)
+    if session_info.get("as_of"):
+        chart_params["as_of"] = session_info["as_of"]
     response["charts"] = {"params": {key: str(value) for key, value in chart_params.items()}}
+    response["session"] = session_info
     return response
 
 
 @gpt.get("/widgets/{kind}", summary="Generate lightweight dashboard widgets")
 async def gpt_widget(kind: str, symbol: str | None = None, user: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
     if kind == "ticker_wedge" and symbol:
-        return {
+        payload = {
             "type": "ticker_wedge",
             "symbol": symbol.upper(),
             "pattern": "rising_wedge",
             "confidence": 0.72,
             "levels": {"support": 98.4, "resistance": 102.6},
         }
+        payload["session"] = _session_block()
+        return payload
     raise HTTPException(status_code=404, detail="Unknown widget kind or missing params")
 
 
@@ -4106,13 +4279,15 @@ app.include_router(gpt_sentiment_router)
 
 
 @app.get("/healthz", summary="Readiness probe used by Railway")
-async def healthz() -> Dict[str, str]:
-    return {"status": "ok"}
+async def healthz() -> Dict[str, Any]:
+    payload = {"status": "ok"}
+    payload["session"] = _session_block()
+    return payload
 
 
 @app.get("/", summary="Service metadata")
 async def root() -> Dict[str, Any]:
-    return {
+    payload = {
         "name": "trading-coach-gpt-backend",
         "description": "Backend endpoints intended for a custom GPT Action.",
         "routes": {
@@ -4124,3 +4299,5 @@ async def root() -> Dict[str, Any]:
             "health": "/healthz",
         },
     }
+    payload["session"] = _session_block()
+    return payload
