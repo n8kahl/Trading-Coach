@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Optional
 
+import httpx
+
+from ...config import get_settings
 from ..services.session_state import parse_session_as_of
 
 _DEFAULT_WINDOW_MINUTES = 240
@@ -32,31 +34,54 @@ def _ensure_as_of(as_of: str | None) -> datetime:
     return fallback or datetime.now(timezone.utc)
 
 
-def _summarise_event(name: str, ts: datetime, now: datetime) -> Dict[str, Any]:
+def _summarise_event(name: str, ts: datetime, now: datetime, severity: str | None = None) -> Dict[str, Any]:
     delta_minutes = int((ts - now).total_seconds() // 60)
-    severity = "medium"
-    key = name.lower()
-    if "fomc" in key or "fed" in key:
-        severity = "high"
-    elif "cpi" in key or "employment" in key:
-        severity = "high"
+    if severity is None:
+        severity = "medium"
+        key = name.lower()
+        if "fomc" in key or "fed" in key or "cpi" in key:
+            severity = "high"
     return {"name": name, "ts": ts.isoformat(), "severity": severity, "minutes": delta_minutes}
 
 
-def _mock_schedule(now: datetime) -> List[Dict[str, Any]]:
-    base = now.replace(hour=20, minute=0, second=0, microsecond=0)
-    return [
-        _summarise_event("FOMC press conference", base + timedelta(days=2), now),
-        _summarise_event("Initial jobless claims", base + timedelta(days=3), now),
-        _summarise_event("CPI release", base + timedelta(days=10), now),
-    ]
+def _fetch_macro_minutes() -> Dict[str, Any]:
+    settings = get_settings()
+    base = getattr(settings, "enrichment_service_url", None) or ""
+    if not base:
+        return {}
+    url = f"{base.rstrip('/')}/gpt/events/earnings"
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(url, params={"symbol": "SPY"})
+            resp.raise_for_status()
+    except httpx.HTTPError:
+        return {}
+    payload = resp.json()
+    return payload.get("events") or {}
 
 
 def get_event_window(as_of: str | None) -> Dict[str, Any]:
     """Return a compact macro event summary window."""
 
     now = _ensure_as_of(as_of)
-    schedule = _mock_schedule(now)
+    events_raw = _fetch_macro_minutes()
+    schedule: List[Dict[str, Any]] = []
+    mapping = [
+        ("FOMC decision", events_raw.get("next_fomc_minutes"), "high"),
+        ("CPI release", events_raw.get("next_cpi_minutes"), "high"),
+        ("Nonfarm payrolls", events_raw.get("next_nfp_minutes"), "medium"),
+    ]
+    for label, minutes, severity in mapping:
+        if minutes is None:
+            continue
+        try:
+            minutes_val = int(float(minutes))
+        except (TypeError, ValueError):
+            continue
+        ts = now + timedelta(minutes=minutes_val)
+        schedule.append(_summarise_event(label, ts, now, severity=severity))
+    if events_raw.get("within_event_window"):
+        schedule.append(_summarise_event("Event window", now, now, severity="high"))
     upcoming: List[Dict[str, Any]] = []
     active: List[Dict[str, Any]] = []
     min_minutes = None

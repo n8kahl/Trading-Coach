@@ -28,7 +28,7 @@ OHLCV/indicator summaries, key levels, volume profile, volatility/expected move,
 
 ## Knowledge Short Codes
 
-FT-Playbook • FT-MTF • FT-Fib • FT-PlanMath • FT-VolRegime • FT-VolumeProfile • FT-NewsSentiment • **FT-Context** (macro/sector/internals) • **FT-Risk** (EV/Kelly/MFE) • **FT-Backtest** (pattern stats) • FT-TradeTypes • FT-TopLiquidity • FT-Config
+FT-Playbook • FT-MTF • FT-Fib • FT-PlanMath • FT-VolRegime • FT-VolumeProfile • FT-NewsSentiment • **FT-Context** (macro/sector/internals) • **FT-Risk** (EV/Kelly/MFE) • FT-TradeTypes • FT-TopLiquidity • FT-Config
 
 ## Setup Generation
 
@@ -41,7 +41,6 @@ FT-Playbook • FT-MTF • FT-Fib • FT-PlanMath • FT-VolRegime • FT-Volume
 - **Probability Decomposition**: output `probability_components`; compute `confidence = 0.6*trend + 0.2*liquidity + 0.2*regime ± context (±0.05 cap)`.
 - **Trade Quality**: convert confidence to grade `A+ … D` using FT-Playbook table.
 - **Risk Model**: attach `expected_value_r`, `kelly_fraction`, `mfe_projection` from FT-Risk.
-- **Historical Edge**: add `historical_stats` (pattern id, sample size, win rate, avg R, duration) when available.
 - **Options**: use server-provided block only (no fabrication).
 - **Chart URL**: always include canonical `chart_url`.
 
@@ -116,13 +115,6 @@ FT-Playbook • FT-MTF • FT-Fib • FT-PlanMath • FT-VolRegime • FT-Volume
     "expected_value_r": 0.42,
     "kelly_fraction": 0.23,
     "mfe_projection": "≈1.9× ATR"
-  },
-  "historical_stats": {
-    "pattern_id": "...",
-    "sample_size": 186,
-    "win_rate": 0.64,
-    "avg_r_multiple": 1.87,
-    "avg_duration": "36m"
   },
   "em_used": 2.35,
   "atr_used": 1.82,

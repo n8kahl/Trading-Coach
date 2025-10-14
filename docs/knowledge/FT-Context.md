@@ -4,10 +4,10 @@
 
 ## Inputs
 
-- `macro.get_event_window(as_of)` — looks ahead four hours for high impact events.
-- `sector.sector_strength(symbol, as_of)` — sector ETF and relative strength versus SPY.
-- `sector.peer_rel_strength(symbol, as_of)` — peer group relative strength.
-- `internals.market_internals(as_of)` — NYSE breadth, VIX snapshot, and $TICK proxy.
+- `macro.get_event_window(as_of)` — fetches FOMC/CPI/NFP countdowns from the enrichment sidecar (Finnhub data) and highlights anything inside the next four hours.
+- `sector.sector_strength(symbol, as_of)` — computes daily percentage change of the mapped sector ETF versus SPY using Polygon daily aggregates.
+- `sector.peer_rel_strength(symbol, as_of)` — compares the symbol’s daily change with SPY to generate a relative-strength score.
+- `internals.market_internals(as_of)` — pulls Polygon advancer/decliner snapshots and the latest VIX close to approximate breadth, VIX, and a TICK-style reading.
 
 All timestamps are normalised to ISO-8601 with timezone information.
 

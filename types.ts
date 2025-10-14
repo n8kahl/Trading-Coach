@@ -62,14 +62,6 @@ export interface RiskModel {
   mfe_projection?: string;
 }
 
-export interface HistoricalStats {
-  pattern_id?: string;
-  sample_size?: number;
-  win_rate?: number;
-  avg_r_multiple?: number;
-  avg_duration?: string;
-}
-
 export interface ContextBlock {
   macro?: string;
   sector?: { name?: string; rel_vs_spy?: number; z?: number };
@@ -128,7 +120,6 @@ export interface Setup {
   rationale?: string;
   options?: OptionsBlock;
   risk_model?: RiskModel;
-  historical_stats?: HistoricalStats;
   em_used?: number;
   atr_used?: number;
   style_horizon_applied?: Style;

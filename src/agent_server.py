@@ -82,7 +82,6 @@ from .app.engine.evolve import evolve_plan
 from .app.engine.events import apply_event_gating
 from .app.engine.options_select import best_contract_example
 from .app.engine.options_select import build_example_leg, score_contract
-from .app.engine.patterns import fetch_pattern_stats, pattern_id
 from .app.engine.risk import risk_model_payload
 from .app.engine.scoring import overall_confidence, quality_grade, score_components
 from .app.routers.validators import canonical_chart_url
@@ -614,7 +613,6 @@ class SetupMeta(BaseModel):
     atr_used: Optional[float] = None
     style_horizon_applied: Optional[str] = None
     risk_model: Optional[Dict[str, Any]] = None
-    historical_stats: Optional[Dict[str, Any]] = None
     chart_url: str
     as_of: str
 
@@ -1152,17 +1150,6 @@ def _build_setup_from_plan_response(plan_resp: PlanResponse, session_info: Dict[
         atr_used=atr_used_value,
         style=style_token,
     )
-    plan_dict = plan_resp.plan or {}
-    pattern_payload = {
-        "symbol": plan_resp.symbol,
-        "style": style_token,
-        "direction": direction_token,
-        "entry": entry_meta.type,
-        "bias": plan_resp.bias or plan_dict.get("bias") or direction,
-    }
-    pattern_token = pattern_id(pattern_payload)
-    historical_stats = fetch_pattern_stats(pattern_token)
-
     return SetupMeta(
         plan_id=plan_identifier,
         symbol=plan_resp.symbol,
@@ -1187,7 +1174,6 @@ def _build_setup_from_plan_response(plan_resp: PlanResponse, session_info: Dict[
         atr_used=atr_used_value,
         style_horizon_applied=structured.get("style_horizon_applied"),
         risk_model=risk_payload,
-        historical_stats=historical_stats,
         chart_url=chart_url,
         as_of=as_of_value,
         version=int(plan_resp.version) if plan_resp.version is not None else None,
@@ -5062,14 +5048,6 @@ async def context_snapshot(
         "as_of": as_of_value,
         "context": context,
     }
-
-
-@app.get("/api/v1/patterns/{pattern_id}/stats")
-async def pattern_statistics(pattern_id: str) -> Dict[str, Any]:
-    stats = fetch_pattern_stats(pattern_id)
-    if not stats:
-        raise HTTPException(status_code=404, detail="Pattern stats unavailable")
-    return stats
 
 
 @app.get("/api/v1/symbol/{symbol}/series")

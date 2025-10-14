@@ -35,7 +35,7 @@ This document captures what is live, where the sharp edges are, and the near-ter
 
 ### 1.2 Recent enhancements (Oct 2025)
 
-- v3.0 “Pro Upgrade”: context providers, probability decomposition, risk modelling, historical pattern edge, adaptive `/ws/plans` events, and canonical chart URL enforcement.
+- v3.0 “Pro Upgrade”: context providers, probability decomposition, risk modelling, adaptive `/ws/plans` events, and canonical chart URL enforcement.
 
 - Replaced the stubbed scanner with plan-aware detectors and confidence scoring.
 - Added overlay parsing/rendering in `/tv` (supply/demand bands, liquidity pools, FVGs, AVWAP).

@@ -13,14 +13,13 @@ A lightweight FastAPI service that prepares market data, trading plans, volatili
 | Endpoint | Purpose | Notes |
 | --- | --- | --- |
 | `POST /gpt/scan` | Evaluate strategy playbooks (ORB retest, VWAP cluster, gap fill, midday fade, etc.) on any ticker list and return grounded plans (entry/stop/targets/confidence) plus overlays and indicators. | No stub logic remains—scores reflect real market structure. |
-| `POST /api/v1/assistant/exec` | Produce fully structured setups (JSON or chat) with context, risk, and historical edge. | Default `format=json` & `ui_mode=api`; each setup carries `context`, `probability_components`, `trade_quality_score`, `risk_model`, `historical_stats`, and canonical `chart_url`. |
+| `POST /api/v1/assistant/exec` | Produce fully structured setups (JSON or chat) with context and risk modelling. | Default `format=json` & `ui_mode=api`; each setup carries `context`, `probability_components`, `trade_quality_score`, `risk_model`, and canonical `chart_url`. |
 | `GET /gpt/context/{symbol}` | Stream the latest OHLCV bars + indicator series for a single interval. | Use when the GPT needs extra bars for bespoke analysis. |
 | `POST /gpt/multi-context` | Fetch multiple intervals in one call (e.g., `["5m","1h","4h","1D"]`) and attach a volatility regime block (ATM IV, IV rank/percentile, HV20/60/120, IV↔HV ratio). | Responses are cached for 30 s per symbol+interval+lookback. |
 | `POST /gpt/contracts` | Rank Tradier option contracts with composite liquidity scoring (spread, Δ proximity, IV percentile, volume/OI) and compute scenario P/L using plan anchors (delta/gamma/vega/theta). | `risk_amount` (defaults $100) is used only for sizing projections; no budget filtering occurs; response includes `example_leg` and score components. |
 | `POST /gpt/chart-url` | Normalise chart parameters and return a `/tv` URL containing plan lines, overlays, and metadata. | Supports plan rescaling, supply/demand zones, liquidity pools, FVG bands, and anchored VWAPs. |
 | `GET /tv` | Serves the TradingView Advanced UI when bundled; otherwise falls back to Lightweight Charts with EMA labels, white VWAP, plan bands, and overlay lines. | `scale_plan=auto` rescales historic plans to current price regimes. |
 | `GET /api/v1/context` | Returns the macro/sector/internals context block for a symbol at a given timestamp. | Useful for QA and prompt debugging. |
-| `GET /api/v1/patterns/{pattern_id}/stats` | Fetch cached historical win-rate stats for a pattern ID. | Returns sample size, win rate, average R, and duration. |
 
 Support routes: `/tv-api/*` (Lightweight Charts datafeed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html|png` (static renderer), `/ws/plans` (plan-scoped WebSocket stream with `price`, `hit`, `plan_update` events), `/api/v1/symbol/{symbol}/series`, `/api/v1/symbol/{symbol}/indicators` (paginated diagnostics).
 
@@ -99,10 +98,9 @@ Use `pytest` to run the current unit test suite (indicator maths only right now)
 
 - **FastAPI app (`src/agent_server.py`)** – hosts GPT endpoints, the `/tv` viewer, and a `/tv-api` datafeed. Uses async helpers for I/O.
 - **Market data** – Polygon aggregates with Yahoo fallback for OHLCV; Tradier chains & quotes (batched + cached for 15 s) provide option prices, greeks, and IV. Polygon option snapshots are best-effort; failures simply fall back to Tradier.
-- **Strategy engine (`scanner.py`)** – builds real trade plans from intraday context (anchored VWAPs, ATR, EMA alignment, breakout checks). Plans now ship with probability decomposition, risk math, and historical edge metadata.
+- **Strategy engine (`scanner.py`)** – builds real trade plans from intraday context (anchored VWAPs, ATR, EMA alignment, breakout checks) and now surfaces probability decomposition, context scoring, and risk modelling alongside canonical chart URLs.
 - **Context providers (`app/providers/*`, `app/engine/context.py`)** – aggregate macro event proximity, sector strength, peer relative strength, and market internals into the `context` block and a bounded confidence adjustment.
 - **Volatility & risk** – `_compute_iv_metrics` caches IV metrics while `app/engine/events.py` guards plans during high-impact events, `app/engine/risk.py` computes EV/Kelly/MFE, and `/ws/plans` streams price/hit/update events for adaptive execution.
-- **Historical edge** – `app/engine/patterns.py` hashes structural conditions into pattern IDs and serves cached statistics via the API and setup payloads.
 
 ### Assistant Exec quick start
 

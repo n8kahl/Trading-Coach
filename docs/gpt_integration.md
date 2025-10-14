@@ -1,6 +1,6 @@
 # GPT Integration Cheat Sheet
 
-> **v3.0 – Pro Upgrade** (macro/sector/internals context, probability decomposition, advanced risk, historical edge, adaptive plan evolution)
+> **v3.0 – Pro Upgrade** (macro/sector/internals context, probability decomposition, advanced risk, adaptive plan evolution)
 
 This backend now returns richer context so your GPT agent can deliver
 deterministic, production-ready trade plans. The server handles data prep,
@@ -11,9 +11,8 @@ scoring, risk math, and streaming updates; the model focuses on reasoning.
 - Context providers for macro events, sector strength, and market internals with a blended `context_score`.
 - Probability decomposition (`probability_components`) and deterministic trade quality grading.
 - Advanced risk model output (`expected_value_r`, scaled `kelly_fraction`, MFE projection).
-- Historical edge layer linking pattern IDs to cached win-rate statistics.
 - Adaptive plan evolution streamed over `/ws/plans` (`price`, `hit`, `plan_update`).
-- New debug endpoints: `GET /api/v1/context`, `GET /api/v1/patterns/{pattern_id}/stats`.
+- New debug endpoint: `GET /api/v1/context`.
 
 ## Production Endpoint
 
