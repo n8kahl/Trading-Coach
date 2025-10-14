@@ -7,7 +7,7 @@
 - Entry price, stop, target ladder (server-side).
 - Probabilities per target (`probabilities.tp1`, `probabilities.tp2`, …).
 - ATR snapshot (`atr_used`) and expected move cap (`em_used` when available).
-- Trade style (`scalp`, `intraday`, `swing`, `leap`) for MFE heuristics.
+- Trade style (`scalp`, `intraday`, `swing`, `leaps`) for MFE heuristics.
 
 ## Formulas
 
@@ -37,7 +37,7 @@ Heuristic labels by style:
 - `scalp` → ≈1.2× ATR
 - `intraday` → ≈1.6× ATR
 - `swing` → ≈2.4× ATR
-- `leap` → ≈3.0× ATR
+- `leaps` → ≈3.0× ATR
 
 Append “before reversal” when ATR is available; otherwise include “heuristic”.
 

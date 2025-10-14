@@ -62,6 +62,7 @@ def project_mfe(style: str, atr_used: Optional[float]) -> str:
         "scalp": 1.2,
         "intraday": 1.6,
         "swing": 2.4,
+        "leaps": 3.0,
         "leap": 3.0,
     }.get(style, 1.6)
     if atr_used is None:

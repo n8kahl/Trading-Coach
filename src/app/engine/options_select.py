@@ -178,9 +178,12 @@ async def best_contract_example(symbol: str, style: Optional[str], as_of: Option
         "scalp": 0.55,
         "intraday": 0.50,
         "swing": 0.45,
+        "leaps": 0.35,
         "leap": 0.35,
     }
     style_key = (style or "intraday").lower()
+    if style_key == "leap":
+        style_key = "leaps"
     prefer_delta = prefer_delta_map.get(style_key, 0.5)
 
     candidates: list[Dict[str, Any]] = []

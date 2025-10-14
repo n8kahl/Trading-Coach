@@ -8,7 +8,7 @@ export interface Session {
   banner?: string;
 }
 
-export type Style = "scalp" | "intraday" | "swing" | "leap";
+export type Style = "scalp" | "intraday" | "swing" | "leaps";
 export type Direction = "long" | "short";
 export type EntryType = "break" | "retest" | "reclaim" | "reject" | "limit";
 

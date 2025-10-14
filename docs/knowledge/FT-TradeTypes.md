@@ -7,7 +7,7 @@ Defines liquidity presets for option selection by style and regime.
 | `scalp` | 0.55 ± 0.05 | 0–3d | 0.08 | Prefer defined-risk when context score < 0.45 |
 | `intraday` | 0.50 ± 0.05 | 0–7d | 0.10 | Switch to debit spreads if spread_pct > 0.08 |
 | `swing` | 0.45 ± 0.05 | 7–35d | 0.12 | Use higher DTE when volatility regime elevated |
-| `leap` | 0.35 ± 0.05 | 35–90d | 0.15 | Allow wider spreads when IV rank < 0.3 |
+| `leaps` | 0.35 ± 0.05 | 35–90d | 0.15 | Allow wider spreads when IV rank < 0.3 |
 
 Adjustments by regime:
 

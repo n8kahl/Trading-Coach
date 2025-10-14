@@ -428,7 +428,7 @@ class ScanUniverse(BaseModel):
     tickers: List[str] = Field(..., description="Ticker symbols to analyse")
     style: str | None = Field(
         default=None,
-        description="Optional style filter: 'scalp', 'intraday', 'swing', or 'leap'.",
+        description="Optional style filter: 'scalp', 'intraday', 'swing', or 'leaps'.",
     )
 
 
@@ -591,7 +591,7 @@ class OptionsBlockMeta(BaseModel):
 class SetupMeta(BaseModel):
     plan_id: str
     symbol: str
-    style: Literal["scalp", "intraday", "swing", "leap"]
+    style: Literal["scalp", "intraday", "swing", "leaps"]
     direction: Literal["long", "short"]
     version: Optional[int] = None
     entry: EntryMeta
@@ -626,7 +626,7 @@ class ExecResponse(BaseModel):
 
 class ExecRequest(BaseModel):
     symbols: Optional[List[str]] = None
-    style: Optional[Literal["scalp", "intraday", "swing", "leap"]] = None
+    style: Optional[Literal["scalp", "intraday", "swing", "leap", "leaps"]] = None
     limit: Optional[int] = 3
     ui_mode: Optional[Literal["api", "chat"]] = "api"
     include_series: Optional[Literal["none", "compact", "full"]] = "none"
@@ -1015,8 +1015,8 @@ async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
 
 def _output_style_token(style: Optional[str]) -> str:
     token = (_normalize_trade_style(style) or "intraday").lower()
-    if token == "leaps":
-        return "leap"
+    if token == "leap":
+        return "leaps"
     return token
 
 
@@ -1797,13 +1797,13 @@ def _indicators_for_strategy(strategy_id: str) -> List[str]:
 
 def _timeframe_for_style(style: str | None) -> str:
     normalized = _normalize_style(style) or ""
-    mapping = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "1D"}
+    mapping = {"scalp": "1", "intraday": "5", "swing": "60", "leaps": "1D", "leap": "1D"}
     return mapping.get(normalized, "5")
 
 
 def _view_for_style(style: str | None) -> str:
     normalized = _normalize_style(style) or ""
-    mapping = {"scalp": "1d", "intraday": "5d", "swing": "3M", "leap": "1Y"}
+    mapping = {"scalp": "1d", "intraday": "5d", "swing": "3M", "leaps": "1Y", "leap": "1Y"}
     return mapping.get(normalized, "fit")
 
 
@@ -1813,7 +1813,7 @@ def _range_for_style(style: str | None) -> str:
         "scalp": "5d",
         "intraday": "15d",
         "swing": "6m",
-        "leap": "1y",
+        "leaps": "1y",
     }
     return mapping.get(normalized, "30d")
 
@@ -2803,7 +2803,7 @@ async def gpt_scan(
             as_of_ts = as_of_ts.tz_convert("UTC")
 
     style_filter = _normalize_style(universe.style)
-    data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}.get(style_filter, "5")
+    data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leaps": "D", "leap": "D"}.get(style_filter, "5")
 
     settings = get_settings()
     market_data = await _collect_market_data(

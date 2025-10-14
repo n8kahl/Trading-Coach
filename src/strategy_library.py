@@ -6,7 +6,7 @@ dictionary containing the following keys:
 
 * `id` – A short identifier used in logs and API responses.
 * `name` – Human‑readable name of the strategy.
-* `category` – One of `scalp`, `intraday`, `swing`, `leap`, or `index`.
+* `category` – One of `scalp`, `intraday`, `swing`, `leaps`, or `index`.
 * `description` – A high‑level explanation of the trading idea.
 * `triggers` – A list of conditions (written in plain language) that must
   occur for the strategy to be considered active.
@@ -391,7 +391,7 @@ def load_strategies() -> List[Strategy]:
         Strategy(
             id="pmcc",
             name="Poor Man’s Covered Call (PMCC)",
-            category="leap",
+        category="leaps",
             description=(
                 "Long a deep in‑the‑money LEAPS call and sell short‑dated calls against it on rips "
                 "to collect weekly income while retaining long exposure."
@@ -564,7 +564,7 @@ def load_strategies() -> List[Strategy]:
 def _normalize_category_token(category: Optional[str]) -> str:
     token = (category or "").strip().lower()
     if token in {"leaps", "leap"}:
-        return "leap"
+        return "leaps"
     if token == "index":
         return "intraday"
     if token in {"scalp", "intraday", "swing"}:
@@ -574,8 +574,6 @@ def _normalize_category_token(category: Optional[str]) -> str:
 
 def _public_category_token(category: Optional[str]) -> str:
     normalized = _normalize_category_token(category)
-    if normalized == "leap":
-        return "leaps"
     return normalized
 
 

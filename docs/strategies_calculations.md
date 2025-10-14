@@ -40,7 +40,7 @@ Keltner Channels are volatility bands around an exponential moving average.  A 
 
 ## Strategy summary
 
-The table below summarises the strategies defined in `src/strategy_library.py`.  Each entry lists the category (scalp, swing, leap, index or generic), the core idea, triggering conditions, option selection rules and high‑level risk management.  See the code for exact parameter ranges.
+The table below summarises the strategies defined in `src/strategy_library.py`.  Each entry lists the category (scalp, swing, **leaps**, index or generic), the core idea, triggering conditions, option selection rules and high‑level risk management.  See the code for exact parameter ranges.
 
 | ID | Category | Idea | Trigger highlights | Option rules | Stops & take‑profit | Target win rate |
 |---|---|---|---|---|---|---|

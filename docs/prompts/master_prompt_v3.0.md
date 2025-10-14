@@ -55,7 +55,7 @@ FT-Playbook • FT-MTF • FT-Fib • FT-PlanMath • FT-VolRegime • FT-Volume
 {
   "plan_id": "AAPL-YYYY-MM-DDTHH:mm:ss-1",
   "symbol": "AAPL",
-  "style": "scalp|intraday|swing|leap",
+  "style": "scalp|intraday|swing|leaps",
   "direction": "long|short",
   "entry": { "type": "break|retest|reclaim|reject|limit", "level": 193.40 },
   "invalid": 192.70,

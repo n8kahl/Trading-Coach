@@ -49,7 +49,7 @@ _STYLE_TARGET_PRESETS: Dict[str, Dict[str, Any]] = {
         "tp1_range": (1.00, 1.50),
         "tp2_range": (2.00, 3.00),
     },
-    "leap": {
+    "leaps": {
         "measure": "em",
         "tp1_range": (1.00, 1.30),
         "tp2_range": (1.60, 2.00),
