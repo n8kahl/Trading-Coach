@@ -1728,6 +1728,114 @@ def _build_market_snapshot(history: pd.DataFrame, key_levels: Dict[str, float]) 
     return snapshot
 
 
+def _fallback_scan_payload(
+    tickers: List[str],
+    market_data: Dict[str, pd.DataFrame],
+    *,
+    style_token: str,
+    session_info: Dict[str, Any],
+    market_meta: Dict[str, Any],
+    data_meta: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Construct deterministic fallback setups when scan_market yields nothing."""
+
+    fallback: List[Dict[str, Any]] = []
+    primary_style = style_token or "intraday"
+    interval_map = {
+        "scalp": "5",
+        "intraday": "15",
+        "swing": "60",
+        "leaps": "1D",
+    }
+    interval_token = interval_map.get(primary_style, "15")
+
+    for symbol in tickers:
+        history = market_data.get(symbol)
+        if history is None or history.empty:
+            continue
+        df = history.sort_index()
+        last = df.iloc[-1]
+        close_price = float(last["close"])
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+        atr_series = atr(high, low, close, period=14)
+        atr_value = float(atr_series.iloc[-1]) if not atr_series.empty else float("nan")
+        if not math.isfinite(atr_value) or atr_value <= 0:
+            atr_value = max(close_price * 0.01, 0.5)
+        ema20_series = ema(close, 20) if len(close) >= 20 else None
+        direction = "long"
+        if ema20_series is not None and not ema20_series.empty:
+            ema20_val = float(ema20_series.iloc[-1])
+            if math.isfinite(ema20_val) and close_price < ema20_val:
+                direction = "short"
+        stop = close_price - atr_value if direction == "long" else close_price + atr_value
+        targets: List[float] = []
+        for mult in (1.0, 2.0, 3.0):
+            level = close_price + atr_value * mult if direction == "long" else close_price - atr_value * mult
+            targets.append(round(level, 4))
+        key_levels = _extract_key_levels(df)
+        snapshot = _build_market_snapshot(df, key_levels)
+        plan_id = f"{symbol}-{primary_style}-fallback"
+        plan_payload = {
+            "plan_id": plan_id,
+            "symbol": symbol,
+            "style": primary_style,
+            "direction": direction,
+            "entry": round(close_price, 4),
+            "stop": round(stop, 4),
+            "targets": targets,
+            "confidence": 0.65,
+            "risk_reward": 2.0,
+            "notes": "Fallback ATR ladder generated automatically.",
+            "warnings": ["Fallback plan generated because no live strategy qualified."],
+        }
+        chart_entry_payload = {"type": "limit", "level": plan_payload["entry"]}
+        chart_url = build_chart_url(
+            CHART_BASE,
+            symbol=symbol,
+            plan_id=plan_id,
+            as_of=session_info.get("as_of") or "",
+            entry=chart_entry_payload,
+            stop=plan_payload["stop"],
+            targets=targets,
+            plan_version="0",
+        )
+        charts_params = {
+            "symbol": symbol,
+            "interval": normalize_interval(interval_token),
+            "direction": direction,
+            "entry": f"{plan_payload['entry']:.2f}",
+            "stop": f"{plan_payload['stop']:.2f}",
+            "tp": ",".join(f"{t:.2f}" for t in targets),
+        }
+        charts_payload = {"params": charts_params, "interactive": chart_url}
+        fallback.append(
+            {
+                "symbol": symbol,
+                "style": primary_style,
+                "strategy_id": "fallback_atr",
+                "description": "Fallback ATR ladder (auto-generated)",
+                "score": min(0.6, max(0.1, atr_value / max(close_price, 1e-6))),
+                "contract_suggestion": None,
+                "direction_hint": direction,
+                "key_levels": key_levels,
+                "market_snapshot": snapshot,
+                "charts": charts_payload,
+                "features": {"atr14": atr_value},
+                "plan": plan_payload,
+                "warnings": ["fallback_setup"],
+                "data": dict(data_meta),
+                "market": dict(market_meta),
+                "options": None,
+                "session": session_info,
+            }
+        )
+
+    fallback.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+    return fallback[:3]
+
+
 def _serialize_features(features: Dict[str, Any]) -> Dict[str, Any]:
     serialized: Dict[str, Any] = {}
     for key, value in features.items():
@@ -2814,6 +2922,22 @@ async def gpt_scan(
     if not market_data:
         raise HTTPException(status_code=502, detail="No market data available for the requested tickers.")
     signals = await scan_market(universe.tickers, market_data)
+
+    if not signals:
+        logger.info(
+            "No qualifying signals detected; generating fallback setups",
+            extra={"tickers": universe.tickers, "style": style_filter},
+        )
+        fallback_payload = _fallback_scan_payload(
+            universe.tickers,
+            market_data,
+            style_token=style_filter or "intraday",
+            session_info=session_info,
+            market_meta=market_meta,
+            data_meta=data_meta,
+        )
+        if fallback_payload:
+            return fallback_payload
 
     unique_symbols = sorted({signal.symbol for signal in signals})
 
