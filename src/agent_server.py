@@ -2982,7 +2982,6 @@ async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict
 
 
 @gpt.post("/scan", summary="Rank trade setups across a list of tickers")
-@gpt.post('/scan', summary='Rank trade setups across a list of tickers')
 async def gpt_scan(
     universe: ScanUniverse,
     request: Request,
@@ -3372,7 +3371,6 @@ async def gpt_scan(
 
 
 @gpt.post("/plan", summary="Return a single trade plan for a symbol", response_model=PlanResponse)
-@gpt.post('/plan', summary='Return a single trade plan for a symbol', response_model=PlanResponse)
 async def gpt_plan(
     request_payload: PlanRequest,
     request: Request,
