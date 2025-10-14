@@ -4,13 +4,70 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta, timezone
-from typing import Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
+import time as _time
+
+import httpx
 from zoneinfo import ZoneInfo
 
 from ...market_clock import MarketClock
+from ...config import get_settings
 
 _ET = ZoneInfo("America/New_York")
 _CLOCK = MarketClock()
+_POLYGON_BASE = "https://api.polygon.io"
+_STATUS_CACHE: Optional[Tuple[float, Dict[str, Any]]] = None
+_STATUS_CACHE_TTL = 30.0
+
+
+def _parse_iso_timestamp(raw: Any) -> Optional[datetime]:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        dt = raw
+    elif isinstance(raw, (int, float)):
+        dt = datetime.fromtimestamp(float(raw), tz=timezone.utc)
+    elif isinstance(raw, str):
+        token = raw.strip()
+        if not token:
+            return None
+        token = token.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(token)
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _polygon_market_status() -> Optional[Dict[str, Any]]:
+    global _STATUS_CACHE
+
+    settings = get_settings()
+    api_key = getattr(settings, "polygon_api_key", None)
+    if not api_key:
+        return None
+
+    now = _time.monotonic()
+    cached = _STATUS_CACHE
+    if cached and now - cached[0] < _STATUS_CACHE_TTL:
+        return dict(cached[1])
+
+    params = {"apiKey": api_key}
+    url = f"{_POLYGON_BASE}/v1/marketstatus/now"
+    try:
+        with httpx.Client(timeout=3.0) as client:
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+    except httpx.HTTPError:
+        return None
+
+    payload = resp.json()
+    _STATUS_CACHE = (now, dict(payload))
+    return dict(payload)
 
 
 @dataclass(slots=True)
@@ -76,6 +133,44 @@ def session_now() -> SessionState:
 
     next_open, _next_close = _CLOCK.next_open_close(at=now_et)
 
+    polygon_status = _polygon_market_status()
+    if polygon_status:
+        polygon_now = _parse_iso_timestamp(polygon_status.get("serverTime"))
+        if polygon_now is not None:
+            now_et = polygon_now.astimezone(_ET)
+        stocks_hours = (polygon_status.get("marketHours") or {}).get("stocks") or {}
+        exchanges = polygon_status.get("exchanges") or {}
+        exchange_state = str(exchanges.get("nyse") or exchanges.get("stocks") or "").lower()
+        market_flag = str(polygon_status.get("market") or "").lower()
+        session_label = str(stocks_hours.get("session") or "").lower()
+        is_open = bool(stocks_hours.get("isOpen"))
+
+        if is_open or exchange_state == "open" or market_flag == "open":
+            status = "open"
+            as_of_dt = polygon_now.astimezone(_ET) if polygon_now else now_et
+            banner = "Market open"
+        else:
+            status = "closed"
+            previous_close = ((polygon_status.get("previous") or {}).get("stocks") or {}).get("close")
+            previous_close_dt = _parse_iso_timestamp(previous_close)
+            close_hint = _parse_iso_timestamp(stocks_hours.get("close"))
+            if previous_close_dt:
+                as_of_dt = previous_close_dt.astimezone(_ET)
+            elif close_hint:
+                as_of_dt = close_hint.astimezone(_ET)
+            if session_label == "extended":
+                banner = "After hours — using regular session close"
+            elif session_label == "premarket":
+                banner = "Premarket — using prior close data"
+            else:
+                market_close_label = as_of_dt.strftime("%Y-%m-%d %H:%M %Z")
+                banner = f"Market closed — using {market_close_label}"
+
+        # Update next open if Polygon supplied it
+        open_hint = _parse_iso_timestamp(stocks_hours.get("open"))
+        if open_hint:
+            next_open = open_hint.astimezone(_ET)
+
     return SessionState(
         status="open" if status == "open" else "closed",
         as_of=_format(as_of_dt),
@@ -85,7 +180,6 @@ def session_now() -> SessionState:
     )
 
 
-__all__ = ["SessionState", "session_now"]
 def parse_session_as_of(session: Mapping[str, str]) -> Optional[datetime]:
     """Return the session's as_of timestamp in UTC."""
     if not session:

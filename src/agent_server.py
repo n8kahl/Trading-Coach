@@ -55,7 +55,15 @@ from .tradier import (
     fetch_option_quotes,
     select_tradier_contract,
 )
-from .polygon_options import fetch_polygon_option_chain, summarize_polygon_chain
+from .polygon_options import (
+    fetch_polygon_option_chain,
+    fetch_polygon_option_chain_asof,
+    summarize_polygon_chain,
+)
+from .app.engine import build_target_profile, build_structured_plan
+from .app.engine.options_select import score_contract, best_contract_example
+from .app.services import session_now, parse_session_as_of
+from .app.providers.universe import load_universe
 from .context_overlays import compute_context_overlays
 from .db import (
     ensure_schema as ensure_db_schema,
@@ -124,11 +132,14 @@ _MARKET_CLOCK = MarketClock()
 
 def _market_snapshot_payload() -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
     snapshot = _MARKET_CLOCK.snapshot()
-    as_of_dt = _MARKET_CLOCK.last_rth_close()
+    session_snapshot = session_now()
+    session_payload = session_snapshot.to_dict()
+    as_of_dt = parse_session_as_of(session_payload) or _MARKET_CLOCK.last_rth_close()
     frozen = snapshot.status != "open"
     market_payload = {
         "status": snapshot.status,
         "session": snapshot.session,
+        "session_state": session_payload,
         "now_et": snapshot.now_et.isoformat(),
         "next_open_et": snapshot.next_open_et.isoformat() if snapshot.next_open_et else None,
         "next_close_et": snapshot.next_close_et.isoformat() if snapshot.next_close_et else None,
@@ -137,6 +148,7 @@ def _market_snapshot_payload() -> Tuple[Dict[str, Any], Dict[str, Any], datetime
         "as_of_ts": int(as_of_dt.timestamp() * 1000),
         "frozen": frozen,
         "ok": True,
+        "session_state": session_payload,
     }
     return market_payload, data_payload, as_of_dt, not frozen
 
@@ -263,11 +275,34 @@ async def require_api_key(
 # ---------------------------------------------------------------------------
 
 class ScanUniverse(BaseModel):
-    tickers: List[str] = Field(..., description="Ticker symbols to analyse")
+    tickers: List[str] | None = Field(
+        default=None,
+        description="Explicit ticker symbols to analyse. When omitted, the server derives a universe from Polygon.",
+    )
     style: str | None = Field(
         default=None,
         description="Optional style filter: 'scalp', 'intraday', 'swing', or 'leap'.",
     )
+    sector: str | None = Field(
+        default=None,
+        description="Optional sector focus (e.g. 'technology', 'healthcare').",
+    )
+    include: List[str] | None = Field(
+        default=None,
+        description="Symbols that must be included in the universe.",
+    )
+    exclude: List[str] | None = Field(
+        default=None,
+        description="Symbols to remove from the derived universe.",
+    )
+    limit: int | None = Field(
+        default=None,
+        ge=10,
+        le=250,
+        description="Maximum number of symbols to scan (default varies by style).",
+    )
+
+    model_config = ConfigDict(extra="allow")
 
 
 class ContractsRequest(BaseModel):
@@ -324,6 +359,8 @@ class PlanResponse(BaseModel):
     description: str | None = None
     score: float | None = None
     plan: Dict[str, Any] | None = None
+    structured_plan: Dict[str, Any] | None = None
+    target_profile: Dict[str, Any] | None = None
     charts: Dict[str, Any] | None = None
     key_levels: Dict[str, Any] | None = None
     market_snapshot: Dict[str, Any] | None = None
@@ -339,6 +376,30 @@ class PlanResponse(BaseModel):
     update_reason: str | None = None
     market: Dict[str, Any] | None = None
     data: Dict[str, Any] | None = None
+    session_state: Dict[str, Any] | None = None
+
+
+class AssistantExecRequest(BaseModel):
+    symbol: str
+    style: str | None = None
+    plan_id: str | None = None
+
+
+class AssistantExecResponse(BaseModel):
+    plan: Dict[str, Any]
+    chart: Dict[str, Any]
+    options: Dict[str, Any] | None = None
+    context: Dict[str, Any]
+    meta: Dict[str, Any]
+
+
+class SymbolDiagnosticsResponse(BaseModel):
+    symbol: str
+    interval: str
+    key_levels: Dict[str, Any]
+    snapshot: Dict[str, Any]
+    indicators: Dict[str, Any]
+    session: Dict[str, Any]
 
 
 class IdeaStoreRequest(BaseModel):
@@ -750,17 +811,30 @@ async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
 
 async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
     async with _STREAM_LOCK:
-        queues = list(_STREAM_SUBSCRIBERS.get(symbol, []))
-    payload = json.dumps({"symbol": symbol, "event": event})
-    for queue in queues:
+        symbol_queues = list(_STREAM_SUBSCRIBERS.get(symbol, []))
+        plan_id = _extract_event_plan_id(event)
+        plan_queues = list(_PLAN_STREAM_SUBSCRIBERS.get(plan_id, [])) if plan_id else []
+    symbol_payload = json.dumps({"symbol": symbol, "event": event})
+    for queue in symbol_queues:
         try:
-            queue.put_nowait(payload)
+            queue.put_nowait(symbol_payload)
         except asyncio.QueueFull:
             try:
                 queue.get_nowait()
             except asyncio.QueueEmpty:
                 pass
-            queue.put_nowait(payload)
+            queue.put_nowait(symbol_payload)
+    if plan_id:
+        plan_payload = json.dumps({"plan_id": plan_id, "event": event})
+        for queue in plan_queues:
+            try:
+                queue.put_nowait(plan_payload)
+            except asyncio.QueueFull:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                queue.put_nowait(plan_payload)
 
 
 async def _ingest_stream_event(symbol: str, event: Dict[str, Any]) -> None:
@@ -770,6 +844,23 @@ async def _ingest_stream_event(symbol: str, event: Dict[str, Any]) -> None:
     await _publish_stream_event(symbol, event)
     for derived in derived_events:
         await _publish_stream_event(symbol, derived)
+
+
+def _extract_event_plan_id(event: Dict[str, Any]) -> Optional[str]:
+    plan_id = event.get("plan_id")
+    if plan_id:
+        return str(plan_id)
+    payload = event.get("payload")
+    if isinstance(payload, dict):
+        plan_block = payload.get("plan")
+        if isinstance(plan_block, dict):
+            candidate = plan_block.get("plan_id")
+            if candidate:
+                return str(candidate)
+        candidate = payload.get("plan_id")
+        if candidate:
+            return str(candidate)
+    return None
 
 
 async def _get_idea_snapshot(plan_id: str, version: Optional[int] = None) -> Dict[str, Any]:
@@ -1693,6 +1784,13 @@ CONTRACT_STYLE_TARGET_DELTA: Dict[str, float] = {
     "leaps": 0.35,
 }
 
+PREFER_DELTA_BY_STYLE: Dict[str, float] = {
+    "scalp": 0.55,
+    "intraday": 0.50,
+    "swing": 0.45,
+    "leaps": 0.35,
+}
+
 
 def _normalize_contract_style(style: str | None) -> str:
     token = (style or "").strip().lower()
@@ -1820,6 +1918,7 @@ _IDEA_LOCK = asyncio.Lock()
 _MAX_IDEA_CACHE_VERSIONS = 20
 _IDEA_PERSISTENCE_ENABLED = False
 _STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
+_PLAN_STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
 _STREAM_LOCK = asyncio.Lock()
 _IV_METRICS_CACHE_TTL = 120.0
 _IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -2309,8 +2408,36 @@ async def gpt_scan(
     request: Request,
     user: AuthedUser = Depends(require_api_key),
 ) -> List[Dict[str, Any]]:
-    if not universe.tickers:
-        raise HTTPException(status_code=400, detail="No tickers provided")
+    resolved_tickers: List[str] = []
+    exclude_set = {symbol.upper() for symbol in (universe.exclude or []) if symbol}
+    include_symbols = [symbol.upper() for symbol in (universe.include or []) if symbol]
+    requested_limit = universe.limit or 60
+    limit = max(10, min(requested_limit, 250))
+
+    if universe.tickers:
+        resolved_tickers = [symbol.upper() for symbol in universe.tickers if symbol]
+    else:
+        try:
+            resolved_tickers = await load_universe(
+                style=universe.style,
+                sector=universe.sector,
+                limit=limit,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("auto-universe build failed: %s", exc)
+            resolved_tickers = []
+        if not resolved_tickers:
+            raise HTTPException(status_code=502, detail="Ticker universe unavailable")
+
+    if include_symbols:
+        resolved_tickers = list(dict.fromkeys(include_symbols + resolved_tickers))
+    if exclude_set:
+        resolved_tickers = [symbol for symbol in resolved_tickers if symbol not in exclude_set]
+
+    if not resolved_tickers:
+        raise HTTPException(status_code=400, detail="No tickers available after applying filters")
+    if len(resolved_tickers) > limit:
+        resolved_tickers = resolved_tickers[:limit]
 
     market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload()
 
@@ -2319,13 +2446,13 @@ async def gpt_scan(
 
     settings = get_settings()
     market_data = await _collect_market_data(
-        universe.tickers,
+        resolved_tickers,
         timeframe=data_timeframe,
         as_of=None if is_open else as_of_dt,
     )
     if not market_data:
         raise HTTPException(status_code=502, detail="No market data available for the requested tickers.")
-    signals = await scan_market(universe.tickers, market_data)
+    signals = await scan_market(resolved_tickers, market_data)
 
     unique_symbols = sorted({signal.symbol for signal in signals})
 
@@ -2394,7 +2521,11 @@ async def gpt_scan(
     polygon_chains: Dict[str, pd.DataFrame] = {}
     if unique_symbols and polygon_enabled:
         try:
-            tasks = [fetch_polygon_option_chain(symbol) for symbol in unique_symbols]
+            as_of_hint = None if is_open else as_of_dt
+            tasks = [
+                fetch_polygon_option_chain_asof(symbol, as_of_hint)
+                for symbol in unique_symbols
+            ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for symbol, result in zip(unique_symbols, results):
                 if isinstance(result, Exception):
@@ -2639,7 +2770,7 @@ async def gpt_scan(
             }
         )
 
-    logger.info("scan universe=%s user=%s results=%d", universe.tickers, user.user_id, len(payload))
+    logger.info("scan universe=%s user=%s results=%d", resolved_tickers, user.user_id, len(payload))
     return payload
 
 
@@ -2923,10 +3054,69 @@ async def gpt_plan(
     planning_context_value: str | None = None
     market_meta_context = first.get("market") or first.get("meta")
     data_meta_context = first.get("data") or first.get("meta")
+    style_token = plan.get("style") or first.get("style") or request_payload.style
+    session_state_payload: Dict[str, Any] | None = None
+    if isinstance(market_meta_context, dict):
+        session_state_payload = market_meta_context.get("session_state")
+    if session_state_payload is None and isinstance(data_meta_context, dict):
+        session_state_payload = data_meta_context.get("session_state")
+
+    entry_for_engine = entry_val
+    if entry_for_engine is None:
+        try:
+            entry_for_engine = float(plan.get("entry")) if plan.get("entry") is not None else None
+        except Exception:
+            entry_for_engine = None
+    stop_for_engine = stop_val
+    if stop_for_engine is None:
+        try:
+            stop_for_engine = float(plan.get("stop")) if plan.get("stop") is not None else None
+        except Exception:
+            stop_for_engine = None
+    targets_for_engine = list(targets_list)
+    target_profile = None
+    target_profile_dict: Dict[str, Any] | None = None
+    structured_plan_payload: Dict[str, Any] | None = None
+    if (
+        entry_for_engine is not None
+        and stop_for_engine is not None
+        and targets_for_engine
+    ):
+        try:
+            target_profile = build_target_profile(
+                entry=float(entry_for_engine),
+                stop=float(stop_for_engine),
+                targets=targets_for_engine,
+                target_meta=plan.get("target_meta"),
+                debug=plan.get("debug") or first.get("debug"),
+                runner=plan.get("runner"),
+                warnings=plan_warnings,
+                atr_used=plan.get("atr"),
+                expected_move=plan.get("expected_move"),
+                style=style_token,
+                bias=plan.get("direction") or direction_hint,
+            )
+            target_profile_dict = target_profile.to_dict()
+            structured_plan_payload = build_structured_plan(
+                plan_id=plan_id,
+                symbol=symbol,
+                style=style_token,
+                direction=plan.get("direction") or direction_hint,
+                profile=target_profile,
+                confidence=plan.get("confidence"),
+                rationale=(plan.get("notes") or "").strip() or None,
+                options=first.get("options"),
+                chart_url=chart_url_value,
+                session=session_state_payload,
+                confluence=snapped_names or None,
+            )
+        except Exception as exc:
+            logger.debug("structured plan build failed for %s: %s", symbol, exc)
+            target_profile_dict = None
+            structured_plan_payload = None
     if isinstance(market_meta_context, dict) and market_meta_context.get("status") != "open":
         planning_context_value = "frozen"
 
-    style_token = plan.get("style") or first.get("style") or request_payload.style
     style_public = public_style(style_token) or "intraday"
     side_hint = _infer_contract_side(plan.get("side"), plan.get("direction") or direction_hint)
     options_payload = first.get("options")
@@ -2980,6 +3170,12 @@ async def gpt_plan(
         plan_core["update_reason"] = update_reason
     if plan_warnings:
         plan_core["warnings"] = plan_warnings
+    if structured_plan_payload:
+        plan_core["structured_plan"] = structured_plan_payload
+    if target_profile_dict:
+        plan_core["target_profile"] = target_profile_dict
+    if session_state_payload:
+        plan_core.setdefault("session_state", session_state_payload)
     summary_snapshot = _build_snapshot_summary(first)
     idea_snapshot = {
         "plan": plan_core,
@@ -3036,6 +3232,16 @@ async def gpt_plan(
     sentiment_block = first.get("sentiment")
     events_block = first.get("events")
     earnings_block = first.get("earnings")
+    if not events_block or not earnings_block:
+        try:
+            enrichment = await _fetch_context_enrichment(symbol)
+        except Exception as exc:
+            logger.debug("enrichment fetch failed for %s: %s", symbol, exc)
+            enrichment = None
+        if not events_block:
+            events_block = (enrichment or {}).get("events")
+        if not earnings_block:
+            earnings_block = (enrichment or {}).get("earnings")
     confidence_factors = None
     feature_block = first.get("features") or {}
     for key in ("plan_confidence_factors", "plan_confidence_reasons", "confidence_reasons"):
@@ -3108,6 +3314,8 @@ async def gpt_plan(
         description=first.get("description"),
         score=first.get("score"),
         plan=first.get("plan"),
+        structured_plan=structured_plan_payload,
+        target_profile=target_profile_dict,
         charts=charts_field,
         key_levels=first.get("key_levels"),
         market_snapshot=first.get("market_snapshot"),
@@ -3123,7 +3331,111 @@ async def gpt_plan(
         update_reason=update_reason,
         market=market_meta,
         data=data_meta,
+        session_state=session_state_payload,
     )
+
+
+@gpt.post(
+    "/api/v1/assistant/exec",
+    summary="Structured execution payload for assistant clients",
+    response_model=AssistantExecResponse,
+)
+async def assistant_exec(
+    request_payload: AssistantExecRequest,
+    request: Request,
+    user: AuthedUser = Depends(require_api_key),
+) -> AssistantExecResponse:
+    plan_request = PlanRequest(
+        symbol=request_payload.symbol,
+        style=request_payload.style,
+        plan_id=request_payload.plan_id,
+    )
+    plan_response = await gpt_plan(plan_request, request, user)
+
+    plan_block = plan_response.structured_plan or {}
+    if not plan_block:
+        fallback_plan = plan_response.plan or {}
+        plan_block = dict(fallback_plan)
+    if not plan_block:
+        raise HTTPException(status_code=502, detail="Plan data unavailable")
+    plan_block.setdefault("plan_id", plan_response.plan_id)
+    plan_block.setdefault("version", plan_response.version)
+    plan_block.setdefault("symbol", plan_response.symbol)
+    plan_block.setdefault("style", plan_response.style)
+
+    chart_block = {
+        "interactive": plan_response.chart_url,
+        "params": plan_response.charts_params,
+    }
+
+    options_block = plan_response.options or {}
+    if not options_block or not options_block.get("best"):
+        example = None
+        try:
+            as_of_hint = None
+            if plan_response.session_state and plan_response.session_state.get("as_of"):
+                as_of_hint = plan_response.session_state.get("as_of")
+            example = await best_contract_example(
+                plan_response.symbol or plan_request.symbol.upper(),
+                plan_response.style or plan_request.style,
+                as_of_hint,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("options example lookup failed for %s: %s", plan_request.symbol, exc)
+        if example:
+            options_block = {
+                "best": [example],
+                "source": "tradier",
+            }
+
+    context_block = {
+        "events": plan_response.events,
+        "earnings": plan_response.earnings,
+        "session": plan_response.session_state
+        or (plan_response.market or {}).get("session_state"),
+        "market": plan_response.market_snapshot,
+    }
+
+    meta_block = {
+        "plan_id": plan_response.plan_id,
+        "version": plan_response.version,
+        "symbol": plan_response.symbol,
+        "style": plan_response.style,
+        "trade_detail": plan_response.trade_detail,
+        "idea_url": plan_response.idea_url,
+    }
+
+    return AssistantExecResponse(
+        plan=plan_block,
+        chart=chart_block,
+        options=options_block or None,
+        context=context_block,
+        meta=meta_block,
+    )
+
+
+@gpt.get(
+    "/api/v1/symbol/{symbol}/diagnostics",
+    summary="Lightweight diagnostics for a symbol",
+    response_model=SymbolDiagnosticsResponse,
+)
+async def symbol_diagnostics(
+    symbol: str,
+    interval: str = Query("5"),
+    lookback: int = Query(300, ge=100, le=1000),
+) -> SymbolDiagnosticsResponse:
+    normalized_interval = normalize_interval(interval)
+    context = await _build_interval_context(symbol.upper(), normalized_interval, lookback)
+    session_payload = session_now().to_dict()
+    return SymbolDiagnosticsResponse(
+        symbol=symbol.upper(),
+        interval=normalized_interval,
+        key_levels=context.get("key_levels") or {},
+        snapshot=context.get("snapshot") or {},
+        indicators=context.get("indicators") or {},
+        session=session_payload,
+    )
+
 
 @app.post("/internal/idea/store", include_in_schema=False, tags=["internal"])
 async def internal_idea_store(payload: IdeaStoreRequest, request: Request) -> IdeaStoreResponse:
@@ -3261,6 +3573,53 @@ async def stream_symbol_ws(websocket: WebSocket, symbol: str) -> None:
                 subscribers.remove(queue)
             if not subscribers:
                 _STREAM_SUBSCRIBERS.pop(uppercase, None)
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
+
+
+@app.websocket("/ws/plans/{plan_id}")
+async def stream_plan_ws(websocket: WebSocket, plan_id: str) -> None:
+    plan_token = (plan_id or "").strip()
+    if not plan_token:
+        await websocket.close(code=1008, reason="plan_id required")
+        return
+    await websocket.accept()
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+    async with _STREAM_LOCK:
+        _PLAN_STREAM_SUBSCRIBERS.setdefault(plan_token, []).append(queue)
+    try:
+        try:
+            snapshot = await _get_idea_snapshot(plan_token)
+            await _LIVE_PLAN_ENGINE.register_snapshot(snapshot)
+            initial_event = json.dumps({"plan_id": plan_token, "event": {"t": "plan_full", "payload": snapshot}})
+            await websocket.send_text(initial_event)
+        except HTTPException as exc:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "plan_id": plan_token,
+                        "event": {"t": "error", "status": exc.status_code, "detail": exc.detail},
+                    }
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            await websocket.send_text(
+                json.dumps({"plan_id": plan_token, "event": {"t": "error", "detail": str(exc)}})
+            )
+        while True:
+            payload = await queue.get()
+            await websocket.send_text(payload)
+    except WebSocketDisconnect:
+        return
+    finally:
+        async with _STREAM_LOCK:
+            subscribers = _PLAN_STREAM_SUBSCRIBERS.get(plan_token, [])
+            if queue in subscribers:
+                subscribers.remove(queue)
+            if not subscribers:
+                _PLAN_STREAM_SUBSCRIBERS.pop(plan_token, None)
         try:
             await websocket.close()
         except RuntimeError:
@@ -3604,9 +3963,38 @@ def _screen_contracts(
             "iv_rank": None,
             "tradeability": tradeability,
         }
+        prefer_delta = PREFER_DELTA_BY_STYLE.get(style, 0.5)
+        try:
+            spread_normalized = (
+                float(contract["spread_pct"]) / 100.0 if contract.get("spread_pct") is not None else None
+            )
+            composite = score_contract(
+                {
+                    "spread_pct": spread_normalized,
+                    "bid": contract.get("bid"),
+                    "ask": contract.get("ask"),
+                    "delta": contract.get("delta"),
+                    "volume": contract.get("volume"),
+                    "open_interest": contract.get("oi"),
+                    "iv_percentile": row.get("iv_percentile"),
+                },
+                prefer_delta=prefer_delta,
+            )
+            contract["liquidity_score"] = round(float(composite.score), 4)
+            contract["liquidity_components"] = {
+                key: round(float(value), 4) for key, value in composite.components.items()
+            }
+        except Exception:
+            pass
         candidates.append(contract)
 
-    candidates.sort(key=lambda item: item["tradeability"], reverse=True)
+    candidates.sort(
+        key=lambda item: (
+            item.get("liquidity_score") or 0.0,
+            item.get("tradeability") or 0.0,
+        ),
+        reverse=True,
+    )
     return candidates
 
 

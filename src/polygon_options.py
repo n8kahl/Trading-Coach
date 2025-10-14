@@ -8,6 +8,7 @@ summaries (best contract plus a few alternatives) driven by strategy rules.
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 import math
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -18,6 +19,7 @@ import pandas as pd
 
 from .config import get_settings
 from .contract_selector import filter_chain
+from .data_sources import fetch_polygon_ohlcv
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,83 @@ async def fetch_polygon_option_chain(symbol: str, expiration: str | None = None,
     if not results:
         return pd.DataFrame()
     return _normalize_option_results(results, fallback_symbol=symbol.upper())
+
+
+def _normalize_as_of(as_of: datetime | str | pd.Timestamp | None) -> pd.Timestamp | None:
+    if not as_of:
+        return None
+    if isinstance(as_of, pd.Timestamp):
+        ts = as_of
+    elif isinstance(as_of, datetime):
+        ts = pd.Timestamp(as_of)
+    elif isinstance(as_of, str):
+        try:
+            ts = pd.Timestamp(as_of)
+        except Exception:
+            return None
+    else:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return ts
+
+
+async def fetch_polygon_option_chain_asof(
+    symbol: str,
+    as_of: datetime | str | pd.Timestamp | None,
+    *,
+    expiration: str | None = None,
+    limit: int = 400,
+) -> pd.DataFrame:
+    """Return Polygon option chain data clamped to the provided `as_of` timestamp."""
+
+    frame = await fetch_polygon_option_chain(symbol, expiration=expiration, limit=limit)
+    cutoff = _normalize_as_of(as_of)
+    if frame.empty or cutoff is None:
+        return frame
+
+    filtered = frame.copy()
+    timestamp_columns = []
+    if "last_updated" in filtered.columns:
+        timestamp_columns.append("last_updated")
+    if "underlying_last_updated" in filtered.columns:
+        timestamp_columns.append("underlying_last_updated")
+
+    for column in timestamp_columns:
+        try:
+            timestamps = pd.to_datetime(filtered[column], utc=True, errors="coerce")
+        except Exception:
+            continue
+        mask = timestamps.isna() | (timestamps <= cutoff)
+        filtered = filtered.loc[mask]
+
+    return filtered
+
+
+async def last_price_asof(
+    symbol: str,
+    as_of: datetime | str | pd.Timestamp | None,
+    *,
+    timeframe: str = "1",
+) -> Optional[float]:
+    """Return the latest Polygon close at or before `as_of` for the requested symbol."""
+
+    frame = await fetch_polygon_ohlcv(symbol, timeframe)
+    if frame is None or frame.empty:
+        return None
+
+    cutoff = _normalize_as_of(as_of)
+    if cutoff is not None:
+        frame = frame.loc[frame.index <= cutoff]
+        if frame.empty:
+            return None
+
+    try:
+        return float(frame["close"].iloc[-1])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
 
 
 def _normalize_option_results(results: Iterable[Dict[str, Any]], *, fallback_symbol: str) -> pd.DataFrame:
@@ -316,4 +395,3 @@ def summarize_polygon_chain(
         summary["underlying"] = underlying
 
     return summary
-
