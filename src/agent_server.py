@@ -3231,6 +3231,7 @@ async def gpt_plan(
         session=session_info,
         confluence=confluence_tags,
     )
+    _validate_chart_url(structured_plan.get("chart_url"))
     events_block = first.get("events")
     gating_decision = apply_event_gating(_coalesce_events(events_block))
     if gating_decision.action == "suppress":
@@ -4645,8 +4646,94 @@ app.include_router(gpt_sentiment_router)
 
 
 # ---------------------------------------------------------------------------
-# Platform health endpoints
+# Platform health endpoints & Assistant API
 # ---------------------------------------------------------------------------
+
+
+def _allowed_chart_host() -> Optional[str]:
+    settings = get_settings()
+    base_url = getattr(settings, "chart_base_url", None)
+    if not base_url:
+        return None
+    try:
+        parsed = urlsplit(base_url)
+    except Exception:
+        return None
+    return parsed.netloc.lower() if parsed.netloc else None
+
+
+def _validate_chart_url(url: Optional[str]) -> None:
+    if not url:
+        raise HTTPException(status_code=502, detail="Chart URL unavailable")
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        raise HTTPException(status_code=502, detail="Invalid chart URL")
+    host = parsed.netloc.lower()
+    allowed = _allowed_chart_host()
+    if allowed and host != allowed:
+        raise HTTPException(status_code=502, detail="Chart URL host mismatch")
+
+
+def _parse_symbol_query(symbols: Optional[str]) -> List[str]:
+    if not symbols:
+        return []
+    tokens = [token.strip().upper() for token in symbols.split(",") if token.strip()]
+    return list(dict.fromkeys(tokens))
+
+
+def _parse_cursor(cursor: Optional[str]) -> Optional[pd.Timestamp]:
+    if not cursor:
+        return None
+    try:
+        ts = pd.Timestamp(cursor)
+    except Exception:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return ts
+
+
+def _maybe_create_hedge(setup: SetupMeta) -> Optional[SetupMeta]:
+    if setup.direction == "long":
+        if setup.stop is None or not setup.targets:
+            return None
+        atr = setup.atr_used or 0.0
+        entry = setup.entry.level
+        stop_break = setup.stop - max(0.1, atr * 0.2)
+        first_target = setup.targets[0] if setup.targets else entry - max(0.5, atr)
+        hedge = setup.model_copy(update={
+            "plan_id": f"{setup.plan_id}-H",
+            "direction": "short",
+            "entry": EntryMeta(type="break", level=round(stop_break, 2)),
+            "stop": round(entry + max(0.1, (first_target - setup.stop) * 0.5), 2),
+            "targets": [round(first_target, 2)],
+            "confidence": min(0.5, setup.confidence * 0.8),
+            "rationale": f"Hedge: break below {setup.stop:.2f} invalidates long structure",
+            "options": None,
+        })
+        return hedge
+    if setup.direction == "short":
+        if setup.stop is None or not setup.targets:
+            return None
+        atr = setup.atr_used or 0.0
+        entry = setup.entry.level
+        stop_break = setup.stop + max(0.1, atr * 0.2)
+        first_target = setup.targets[0] if setup.targets else entry + max(0.5, atr)
+        hedge = setup.model_copy(update={
+            "plan_id": f"{setup.plan_id}-H",
+            "direction": "long",
+            "entry": EntryMeta(type="break", level=round(stop_break, 2)),
+            "stop": round(entry - max(0.1, (setup.stop - first_target) * 0.5), 2),
+            "targets": [round(first_target, 2)],
+            "confidence": min(0.5, setup.confidence * 0.8),
+            "rationale": f"Hedge: reclaim above {setup.stop:.2f} invalidates short structure",
+            "options": None,
+        })
+        return hedge
+    return None
 
 
 @app.post("/api/v1/assistant/exec")
@@ -4656,14 +4743,20 @@ async def exec_assistant(
     format: str = Query(default="text"),
     style: Optional[str] = Query(default=None),
     limit: int = Query(default=3, ge=1, le=10),
+    symbols: Optional[str] = Query(default=None),
+    include_series: str = Query(default="none"),
+    include_inputs: str = Query(default="compact"),
     user: AuthedUser = Depends(require_api_key),
 ) -> Any:
-    tickers = request_payload.tickers
+    query_symbols = _parse_symbol_query(symbols)
+    body_symbols = [token.upper() for token in request_payload.tickers]
+    tickers = query_symbols or body_symbols
+    tickers = [t for t in tickers if t]
     if not tickers:
-        raise HTTPException(status_code=400, detail="At least one ticker is required")
+        raise HTTPException(status_code=400, detail="At least one symbol is required")
 
     style_param = style or request_payload.style
-    limit_param = request_payload.limit or limit
+    limit_param = max(1, min(limit, request_payload.limit or limit))
     session_state = session_now()
     session_info = session_state.to_dict()
     session_meta = SessionMeta.model_validate(session_info)
@@ -4694,11 +4787,18 @@ async def exec_assistant(
         except HTTPException:
             continue
         try:
+            _validate_chart_url(plan_response.chart_url or plan_response.trade_detail)
             setup = _build_setup_from_plan_response(plan_response, session_info)
+            _validate_chart_url(setup.chart_url)
+        except HTTPException:
+            raise
         except Exception:
             logger.exception("failed to build setup for %s", symbol)
             continue
         setups.append(setup)
+        hedge = _maybe_create_hedge(setup)
+        if hedge:
+            setups.append(hedge)
 
     exec_payload = ExecResponse(session=session_meta, count=len(setups), setups=setups)
 
@@ -4714,6 +4814,95 @@ async def exec_assistant(
         lines.append(json.dumps(setup.model_dump(), separators=(",", ":"), sort_keys=True))
     lines.append("Notes: Charts generated by Trading Coach backend; all times ET.")
     return PlainTextResponse("\n".join(lines))
+
+
+@app.get("/api/v1/symbol/{symbol}/series")
+async def symbol_series(
+    symbol: str,
+    tf: str = Query("1m"),
+    limit: int = Query(1500, ge=50, le=5000),
+    cursor: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    interval = normalize_interval(tf)
+    frame = get_candles(symbol, interval, lookback=max(limit * 2, 200))
+    if frame.empty:
+        raise HTTPException(status_code=404, detail="No data available")
+    df = frame.copy()
+    df["time"] = pd.to_datetime(df["time"], utc=True)
+    df = df.set_index("time").sort_index()
+    cursor_ts = _parse_cursor(cursor)
+    if cursor_ts is not None:
+        df = df.loc[df.index < cursor_ts]
+    if df.empty:
+        return {"symbol": symbol.upper(), "interval": interval, "bars": [], "next_cursor": None}
+    window = df.tail(limit)
+    bars = [
+        {
+            "time": idx.isoformat(),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row.get("volume") or 0.0),
+        }
+        for idx, row in window.iterrows()
+    ]
+    next_cursor = None
+    if len(window) == limit and len(df) > limit:
+        next_cursor = window.index[0].isoformat()
+    return {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "count": len(bars),
+        "bars": bars,
+        "next_cursor": next_cursor,
+    }
+
+
+@app.get("/api/v1/symbol/{symbol}/indicators")
+async def symbol_indicators(
+    symbol: str,
+    tf: str = Query("1m"),
+    limit: int = Query(1500, ge=50, le=5000),
+    cursor: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    interval = normalize_interval(tf)
+    frame = get_candles(symbol, interval, lookback=max(limit * 2, 200))
+    if frame.empty:
+        raise HTTPException(status_code=404, detail="No data available")
+    df = frame.copy()
+    df["time"] = pd.to_datetime(df["time"], utc=True)
+    df = df.set_index("time").sort_index()
+    cursor_ts = _parse_cursor(cursor)
+    if cursor_ts is not None:
+        df = df.loc[df.index < cursor_ts]
+    if df.empty:
+        return {"symbol": symbol.upper(), "interval": interval, "series": [], "next_cursor": None}
+    window = df.tail(limit)
+    ema9_series = ema(window["close"], 9) if len(window) >= 9 else pd.Series(dtype=float)
+    ema20_series = ema(window["close"], 20) if len(window) >= 20 else pd.Series(dtype=float)
+    ema50_series = ema(window["close"], 50) if len(window) >= 50 else pd.Series(dtype=float)
+    vwap_series = vwap(window["close"], window["volume"])
+    atr_series = atr(window["high"], window["low"], window["close"], 14)
+    adx_series = adx(window["high"], window["low"], window["close"], 14)
+    indicators = {
+        "ema9": _series_points(ema9_series),
+        "ema20": _series_points(ema20_series),
+        "ema50": _series_points(ema50_series),
+        "vwap": _series_points(vwap_series),
+        "atr14": _series_points(atr_series),
+        "adx14": _series_points(adx_series),
+    }
+    next_cursor = None
+    if len(window) == limit and len(df) > limit:
+        next_cursor = window.index[0].isoformat()
+    return {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "count": len(window),
+        "indicators": indicators,
+        "next_cursor": next_cursor,
+    }
 
 
 @app.get("/healthz", summary="Readiness probe used by Railway")
