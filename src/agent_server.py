@@ -1836,6 +1836,86 @@ def _fallback_scan_payload(
     return fallback[:3]
 
 
+def _polygon_snapshot_list(kind: str, api_key: str) -> List[Dict[str, Any]]:
+    url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/{kind}"
+    params = {"apiKey": api_key}
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+            payload = resp.json()
+    except httpx.HTTPError:
+        return []
+    return payload.get("results") or payload.get("tickers") or []
+
+
+def _autofill_symbols(style: Optional[str]) -> Tuple[List[str], Dict[str, Any]]:
+    """Return an auto-generated universe for day-trading scans."""
+
+    metadata: Dict[str, Any] = {"source": "static"}
+    settings = get_settings()
+    api_key = settings.polygon_api_key
+    if not api_key:
+        metadata["large_cap"] = _DEFAULT_TOP_SYMBOLS[:5]
+        metadata["mid_cap"] = _DEFAULT_TOP_SYMBOLS[5:10]
+        return list(_DEFAULT_TOP_SYMBOLS), metadata
+
+    combined: List[Dict[str, Any]] = []
+    for endpoint in ("most_actives", "gainers", "losers"):
+        combined.extend(_polygon_snapshot_list(endpoint, api_key))
+
+    seen: set[str] = set()
+    large: List[str] = []
+    mid: List[str] = []
+    for item in combined:
+        ticker = item.get("ticker")
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        last_trade = item.get("lastTrade") or {}
+        price = last_trade.get("p") or last_trade.get("price")
+        day = item.get("day") or {}
+        volume = day.get("v") or day.get("volume")
+        if price is None or volume is None:
+            continue
+        try:
+            price_val = float(price)
+            volume_val = float(volume)
+        except (TypeError, ValueError):
+            continue
+        if price_val >= 75 or volume_val >= 15_000_000:
+            if len(large) < 20:
+                large.append(ticker)
+        elif 10 <= price_val <= 75 and volume_val >= 2_000_000:
+            if len(mid) < 20:
+                mid.append(ticker)
+
+    if not large and not mid:
+        metadata["large_cap"] = _DEFAULT_TOP_SYMBOLS[:5]
+        metadata["mid_cap"] = _DEFAULT_TOP_SYMBOLS[5:10]
+        return list(_DEFAULT_TOP_SYMBOLS), metadata
+
+    style_token = (_normalize_trade_style(style) or "intraday").lower()
+    selection: List[str] = []
+    if style_token in {"scalp", "intraday"}:
+        selection.extend(large[:5])
+        selection.extend([symbol for symbol in mid if symbol not in selection][:5])
+    elif style_token in {"swing", "leaps"}:
+        selection.extend(large[:7])
+        selection.extend([symbol for symbol in mid if symbol not in selection][:3])
+    else:
+        selection.extend(large[:5])
+        selection.extend([symbol for symbol in mid if symbol not in selection][:5])
+
+    if not selection:
+        selection = (large or mid or list(_DEFAULT_TOP_SYMBOLS))[:10]
+
+    metadata["source"] = "polygon"
+    metadata["large_cap"] = large[:10]
+    metadata["mid_cap"] = mid[:10]
+    return selection, metadata
+
+
 def _serialize_features(features: Dict[str, Any]) -> Dict[str, Any]:
     serialized: Dict[str, Any] = {}
     for key, value in features.items():
@@ -2906,6 +2986,7 @@ async def gpt_scan(
     request: Request,
     user: AuthedUser = Depends(require_api_key),
     auto_universe: bool = False,
+    auto_meta: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     if not universe.tickers:
         raise HTTPException(status_code=400, detail="No tickers provided")
@@ -2974,6 +3055,10 @@ async def gpt_scan(
     symbol_freshness: Dict[str, float] = {}
     data_meta.setdefault("ok", True)
     data_meta["auto_universe"] = auto_universe
+    if auto_universe and auto_meta:
+        data_meta["auto_universe_source"] = auto_meta.get("source")
+        data_meta["auto_universe_large"] = auto_meta.get("large_cap")
+        data_meta["auto_universe_mid"] = auto_meta.get("mid_cap")
     if is_open:
         now_utc = pd.Timestamp.utcnow()
         for symbol_key, frame in market_data.items():
@@ -5087,8 +5172,9 @@ async def exec_assistant(
     tickers = query_symbols or body_symbols
     tickers = [t for t in tickers if t]
     auto_universe = False
+    auto_meta: Dict[str, Any] = {}
     if not tickers:
-        tickers = list(_DEFAULT_TOP_SYMBOLS)
+        tickers, auto_meta = _autofill_symbols(style_param)
         auto_universe = True
         logger.info("No symbols supplied; using default universe", extra={"symbols": tickers, "style": style_param})
 
@@ -5102,7 +5188,13 @@ async def exec_assistant(
     session_meta = SessionMeta.model_validate(session_info)
 
     universe = ScanUniverse(tickers=tickers, style=style_param)
-    scan_results = await gpt_scan(universe, request, user, auto_universe=auto_universe)
+    scan_results = await gpt_scan(
+        universe,
+        request,
+        user,
+        auto_universe=auto_universe,
+        auto_meta=auto_meta,
+    )
 
     style_token = _output_style_token(style_param) if style_param else None
 
