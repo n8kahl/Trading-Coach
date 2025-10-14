@@ -13,6 +13,7 @@ import asyncio
 import json
 import math
 import logging
+import os
 import time
 import uuid
 import re
@@ -74,11 +75,12 @@ from .statistics import get_style_stats
 from zoneinfo import ZoneInfo
 
 from .market_clock import MarketClock
-from .app.services import session_now, parse_session_as_of
+from .app.services import session_now, parse_session_as_of, build_chart_url
 from .app.engine import TargetEngineResult, build_structured_plan
 from .app.engine.events import apply_event_gating
 from .app.engine.options_select import best_contract_example
 from .app.engine.options_select import build_example_leg, score_contract
+from .app.routers.validators import canonical_chart_url
 
 logger = logging.getLogger(__name__)
 
@@ -1040,14 +1042,30 @@ def _build_setup_from_plan_response(plan_resp: PlanResponse, session_info: Dict[
 
     options_block = _build_options_block_meta(plan_resp.options, structured)
 
+    stop_value = float(plan_resp.stop) if plan_resp.stop is not None else float(structured.get("stop") or 0.0)
+    targets_clean = [float(t) for t in targets]
+
     chart_url = plan_resp.chart_url or structured.get("chart_url") or plan_resp.trade_detail
     as_of = structured.get("as_of") or session_info.get("as_of")
+    as_of_value = as_of or session_info.get("as_of") or ""
 
     confluence = structured.get("confluence") if isinstance(structured.get("confluence"), list) else None
 
     plan_identifier = plan_resp.plan_id or (plan_resp.plan or {}).get("plan_id")
     if not plan_identifier:
         plan_identifier = f"{plan_resp.symbol}-{uuid.uuid4().hex[:8]}"
+
+    entry_dict = entry_meta.model_dump()
+    if not canonical_chart_url(chart_url):
+        chart_url = build_chart_url(
+            CHART_BASE,
+            symbol=plan_resp.symbol,
+            plan_id=plan_identifier,
+            as_of=as_of_value,
+            entry=entry_dict,
+            stop=stop_value,
+            targets=targets_clean,
+        )
 
     return SetupMeta(
         plan_id=plan_identifier,
@@ -1056,8 +1074,8 @@ def _build_setup_from_plan_response(plan_resp: PlanResponse, session_info: Dict[
         direction=direction_token,  # type: ignore[arg-type]
         entry=entry_meta,
         invalid=None,
-        stop=float(plan_resp.stop) if plan_resp.stop is not None else float(structured.get("stop") or 0.0),
-        targets=[float(t) for t in targets],
+        stop=stop_value,
+        targets=targets_clean,
         probabilities=probabilities,
         runner=plan_resp.runner,
         confluence=confluence,
@@ -1068,7 +1086,7 @@ def _build_setup_from_plan_response(plan_resp: PlanResponse, session_info: Dict[
         atr_used=plan_resp.calc_notes.get("atr14") if plan_resp.calc_notes else structured.get("atr_used"),
         style_horizon_applied=structured.get("style_horizon_applied"),
         chart_url=chart_url,
-        as_of=as_of or session_info.get("as_of"),
+        as_of=as_of_value,
     )
 
 
@@ -3159,24 +3177,6 @@ async def gpt_plan(
         charts_payload.setdefault("params", minimal_params)
         charts_payload["interactive"] = chart_url_value
 
-    params_for_chart = dict(charts_payload.get("params") or minimal_params or {})
-    if not params_for_chart:
-        params_for_chart = {
-            "symbol": symbol.upper(),
-            "interval": normalize_interval(plan.get("interval") or "15"),
-        }
-    params_for_chart.setdefault("symbol", symbol.upper())
-    params_for_chart.setdefault("plan_id", plan_id)
-    params_for_chart.setdefault("plan_version", str(version))
-    if session_info.get("as_of"):
-        params_for_chart["as_of"] = session_info["as_of"]
-    chart_url_value = _canonical_chart_url_from_params(params_for_chart)
-    charts_payload["interactive"] = chart_url_value
-
-    trade_detail_url = chart_url_value
-    plan["trade_detail"] = trade_detail_url
-    plan["idea_url"] = trade_detail_url
-
     atr_val = _safe_number(indicators.get("atr14"))
 
     profile_dict = plan.get("target_profile") or {}
@@ -3214,6 +3214,33 @@ async def gpt_plan(
         )
     plan["target_profile"] = target_profile_obj.to_dict()
 
+    entry_type_token = None
+    if isinstance(chart_params_payload, dict):
+        entry_type_token = chart_params_payload.get("entry_type")
+    entry_type_token = plan.get("entry_type") or entry_type_token or "limit"
+    if isinstance(entry_type_token, str):
+        entry_type_token = entry_type_token.lower()
+    chart_entry_payload = {
+        "type": entry_type_token,
+        "level": target_profile_obj.entry,
+    }
+    chart_targets_payload = target_profile_obj.targets or targets_list
+    chart_stop_value = target_profile_obj.stop
+    chart_url_value = build_chart_url(
+        CHART_BASE,
+        symbol=symbol,
+        plan_id=plan_id,
+        as_of=session_info.get("as_of") or "",
+        entry=chart_entry_payload,
+        stop=chart_stop_value,
+        targets=chart_targets_payload,
+    )
+    charts_payload["interactive"] = chart_url_value
+
+    trade_detail_url = chart_url_value
+    plan["trade_detail"] = trade_detail_url
+    plan["idea_url"] = trade_detail_url
+
     confluence_tags = []
     for meta_entry in target_profile_obj.meta:
         tag = meta_entry.get("snap_tag") or meta_entry.get("tag")
@@ -3235,22 +3262,6 @@ async def gpt_plan(
         session=session_info,
         confluence=confluence_tags,
     )
-    if not canonical_chart_url(structured_plan.get("chart_url")):
-        params_for_chart = charts_payload.get("params") or minimal_params or {
-            "symbol": symbol,
-            "interval": normalize_interval(plan.get("interval") or "15"),
-        }
-        fallback_url = _build_tv_chart_url(request, params_for_chart)
-        fallback_url = _append_query_params(
-            fallback_url,
-            {
-                "plan_id": plan_id,
-                "plan_version": str(version),
-                **({"as_of": session_info["as_of"]} if session_info.get("as_of") else {}),
-            },
-        )
-        structured_plan["chart_url"] = fallback_url
-        chart_url_value = fallback_url
     _validate_chart_url(structured_plan.get("chart_url"))
     events_block = first.get("events")
     gating_decision = apply_event_gating(_coalesce_events(events_block))
@@ -4670,21 +4681,12 @@ app.include_router(gpt_sentiment_router)
 # ---------------------------------------------------------------------------
 
 
-CANONICAL_CHART_PREFIX = "https://app.fancytrader.io/chart?"
-
-
-def canonical_chart_url(url: Optional[str]) -> bool:
-    return bool(isinstance(url, str) and url.startswith(CANONICAL_CHART_PREFIX))
-
-
-def _canonical_chart_url_from_params(params: Dict[str, Any]) -> str:
-    cleaned = {k: v for k, v in params.items() if v is not None}
-    return CANONICAL_CHART_PREFIX + urlencode(cleaned, doseq=True)
+CHART_BASE = os.getenv("CHART_BASE", "https://app.fancytrader.io/chart").split("?", 1)[0].rstrip("?")
 
 
 def _validate_chart_url(url: Optional[str]) -> None:
     if not canonical_chart_url(url):
-        raise HTTPException(status_code=502, detail="chart_url must reference canonical FancyTrader chart")
+        raise HTTPException(status_code=500, detail="chart_url must be canonical.")
 
 
 def _parse_symbol_query(symbols: Optional[str]) -> List[str]:
@@ -4859,6 +4861,17 @@ async def exec_assistant(
         for candidate in filter(None, [main_setup, _maybe_create_hedge(main_setup)]):
             data = candidate.model_dump()
             data["as_of"] = session_meta.as_of
+            entry_payload = data.get("entry") or {}
+            stop_value = data.get("stop")
+            data["chart_url"] = build_chart_url(
+                CHART_BASE,
+                symbol=data.get("symbol"),
+                plan_id=data.get("plan_id"),
+                as_of=data.get("as_of"),
+                entry=entry_payload,
+                stop=float(stop_value) if stop_value is not None else 0.0,
+                targets=data.get("targets"),
+            )
             data = await _attach_options_example_dict(data)
             _validate_chart_url(data.get("chart_url"))
             setup_dicts.append(data)
@@ -4878,6 +4891,9 @@ async def exec_assistant(
     lines.append(f"{exec_payload.count} setups returned (style={summary_style}).")
     for setup in setup_dicts:
         lines.append(json.dumps(setup, separators=(",", ":"), sort_keys=True))
+        chart_url = setup.get("chart_url")
+        if isinstance(chart_url, str) and chart_url:
+            lines.append(f"Open chart: {chart_url}")
     lines.append("Notes: Charts generated by Trading Coach backend; all times ET.")
     return PlainTextResponse("\n".join(lines))
 
