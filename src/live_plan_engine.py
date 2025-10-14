@@ -5,7 +5,9 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from .follower import FollowerUpdate, TradeFollower, TradeState
 
 
 class PlanStatus(str, Enum):
@@ -214,7 +216,13 @@ class LivePlanEngine:
 
     def __init__(self) -> None:
         self._monitors: Dict[str, Dict[str, PlanMonitor]] = {}
+        self._followers: Dict[str, Dict[str, TradeFollower]] = {}
+        self._plan_meta: Dict[str, Dict[str, Any]] = {}
+        self._replan_callback: Optional[Callable[[str, Optional[str], str, Optional[str]], Awaitable[None]]] = None
         self._lock = asyncio.Lock()
+
+    def set_replan_callback(self, callback: Callable[[str, Optional[str], str, Optional[str]], Awaitable[None]]) -> None:
+        self._replan_callback = callback
 
     async def register_snapshot(self, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         plan = snapshot.get("plan") or {}
@@ -223,36 +231,68 @@ class LivePlanEngine:
         if not plan_id or not symbol:
             return None
         symbol_key = symbol.upper()
+        style = plan.get("style") or (plan.get("structured_plan") or {}).get("style")
         async with self._lock:
             symbol_plans = self._monitors.setdefault(symbol_key, {})
+            symbol_followers = self._followers.setdefault(symbol_key, {})
+            self._plan_meta[plan_id] = {"style": style, "symbol": symbol_key}
+
+            direction = (plan.get("bias") or plan.get("direction") or "long").lower()
+            entry_val = _coerce_float(plan.get("entry")) or 0.0
+            stop_val = _coerce_float(plan.get("stop"))
+            if stop_val is None:
+                stop_val = entry_val * (0.995 if direction == "long" else 1.005)
+            targets_raw = plan.get("targets") or []
+            targets = [float(t) for t in targets_raw if _coerce_float(t) is not None]
+            version = int(plan.get("version") or 1)
+            confidence = _coerce_float(plan.get("confidence"))
+            rr_to_t1 = _coerce_float(plan.get("rr_to_t1")) or 1.2
+
             monitor = symbol_plans.get(plan_id)
             if monitor is None:
-                direction = (plan.get("bias") or plan.get("direction") or "long").lower()
-                entry = _coerce_float(plan.get("entry")) or 0.0
-                stop = _coerce_float(plan.get("stop")) or 0.0
-                targets_raw = plan.get("targets") or []
-                targets = [float(t) for t in targets_raw if _coerce_float(t) is not None]
                 monitor = PlanMonitor(
                     plan_id=plan_id,
                     symbol=symbol_key,
                     direction=direction,
-                    entry=entry,
-                    stop=stop,
+                    entry=entry_val,
+                    stop=stop_val,
                     targets=targets,
-                    version=int(plan.get("version") or 1),
-                    min_rr=_coerce_float(plan.get("rr_to_t1")) or 1.2,
-                    confidence=_coerce_float(plan.get("confidence")),
+                    version=version,
+                    min_rr=rr_to_t1,
+                    confidence=confidence,
                     runner=plan.get("runner"),
                 )
                 symbol_plans[plan_id] = monitor
-                return monitor.update_snapshot(plan)
-            return monitor.update_snapshot(plan)
+                monitor_event = monitor.update_snapshot(plan)
+            else:
+                monitor_event = monitor.update_snapshot(plan)
+
+            primary_target = targets[0] if targets else None
+            atr_candidate = _coerce_float((plan.get("structured_plan") or {}).get("atr_used")) or _coerce_float(plan.get("atr"))
+            follower = symbol_followers.get(plan_id)
+            if follower is None:
+                follower = TradeFollower(
+                    plan_id=plan_id,
+                    symbol=symbol_key,
+                    direction=direction,
+                    entry_price=entry_val,
+                    stop_price=stop_val,
+                    tp_price=primary_target if primary_target is not None else entry_val,
+                    atr_value=atr_candidate,
+                )
+                symbol_followers[plan_id] = follower
+            follower.direction = direction
+            follower.refresh_plan(entry=entry_val, stop=stop_val, target=primary_target, atr=atr_candidate)
+
+        return monitor_event
 
     async def handle_market_event(self, symbol: str, event: Dict[str, Any]) -> List[Dict[str, Any]]:
         symbol_key = symbol.upper()
         async with self._lock:
-            monitors = list((self._monitors.get(symbol_key) or {}).values())
-        if not monitors:
+            monitor_map = self._monitors.get(symbol_key) or {}
+            follower_map = self._followers.get(symbol_key) or {}
+            monitors = list(monitor_map.values())
+        if not monitors and not follower_map:
             return []
         event_type = event.get("t")
         emitted: List[Dict[str, Any]] = []
@@ -265,6 +305,42 @@ class LivePlanEngine:
                 payload = monitor.handle_price(price, partial=partial)
                 if payload:
                     emitted.append(payload)
+            follower_updates: List[FollowerUpdate] = []
+            for follower in follower_map.values():
+                update = follower.update_from_price(price)
+                if update:
+                    follower_updates.append(update)
+                    if update.state == TradeState.EXITED and not follower.auto_replan_triggered:
+                        meta = self._plan_meta.get(update.plan_id, {})
+                        style = meta.get("style")
+                        if self._replan_callback and style:
+                            follower.auto_replan_triggered = True
+                            asyncio.create_task(self._replan_callback(symbol_key, style, update.plan_id, update.exit_reason))
+            for update in follower_updates:
+                monitor = monitor_map.get(update.plan_id)
+                version = monitor.version if monitor is not None else 1
+                changes: Dict[str, Any] = {
+                    "status": update.state.value,
+                    "note": update.note,
+                    "timestamp": update.timestamp,
+                }
+                if update.trailing_stop is not None:
+                    changes["trailing_stop"] = round(float(update.trailing_stop), 4)
+                if update.last_price is not None:
+                    changes["last_price"] = float(update.last_price)
+                if update.event:
+                    changes["coach_event"] = update.event
+                if update.exit_reason:
+                    changes["exit_reason"] = update.exit_reason
+                emitted.append(
+                    {
+                        "t": "plan_delta",
+                        "plan_id": update.plan_id,
+                        "version": version,
+                        "changes": changes,
+                        "reason": update.event or "follower",
+                    }
+                )
         elif event_type == "plan_full":
             payload = event.get("payload")
             if isinstance(payload, dict):

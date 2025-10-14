@@ -42,6 +42,7 @@ class Settings(BaseSettings):
         env="ENRICH_SERVICE_URL",
     )
     finnhub_api_key: str | None = Field(None, env="FINNHUB_API_KEY")
+    self_base_url: str | None = Field(None, env="SELF_API_BASE_URL")
 
 @lru_cache()
 def get_settings() -> Settings:

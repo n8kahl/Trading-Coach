@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from "react";
+import { MutableRefObject, useEffect, useRef } from "react";
 import {
   ColorType,
   CrosshairMode,
@@ -14,12 +14,20 @@ import {
 type PriceChartProps = {
   data: LineData[];
   lastPrice?: number | null;
+  entry?: number | null;
+  stop?: number | null;
+  trailingStop?: number | null;
+  targets?: number[];
 };
 
-export default function PriceChart({ data, lastPrice }: PriceChartProps) {
+export default function PriceChart({ data, lastPrice, entry, stop, trailingStop, targets }: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
+  const entryLineRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
+  const stopLineRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
+  const trailLineRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
+  const targetLinesRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]>[]>([]);
 
   useEffect(() => {
     if (!containerRef.current || chartRef.current) return;
@@ -89,6 +97,75 @@ export default function PriceChart({ data, lastPrice }: PriceChartProps) {
       },
     });
   }, [lastPrice]);
+
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+
+    const ensureLine = (
+      ref: MutableRefObject<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>,
+      price: number | null | undefined,
+      options: Parameters<ISeriesApi<"Area">["createPriceLine"]>[0],
+    ) => {
+      if (price === undefined || price === null || !Number.isFinite(price)) {
+        if (ref.current) {
+          series.removePriceLine(ref.current);
+          ref.current = null;
+        }
+        return;
+      }
+      if (!ref.current) {
+        ref.current = series.createPriceLine({ ...options, price });
+      } else {
+        ref.current.applyOptions({ ...options, price });
+      }
+    };
+
+    ensureLine(entryLineRef, entry, {
+      color: "rgba(59, 130, 246, 0.7)",
+      lineWidth: 2,
+      lineStyle: LineStyle.Dotted,
+      title: "Entry",
+    });
+
+    ensureLine(stopLineRef, stop, {
+      color: "rgba(248, 113, 113, 0.8)",
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      title: "Stop",
+    });
+
+    ensureLine(trailLineRef, trailingStop, {
+      color: "rgba(249, 115, 22, 0.9)",
+      lineWidth: 2,
+      lineStyle: LineStyle.Dashed,
+      title: "Trail",
+    });
+
+    targetLinesRef.current.forEach((line) => {
+      series.removePriceLine(line);
+    });
+    targetLinesRef.current = [];
+
+    if (targets && targets.length) {
+      targets.forEach((target, index) => {
+        if (!Number.isFinite(target)) return;
+        const line = series.createPriceLine({
+          price: target,
+          color: "rgba(16, 185, 129, 0.7)",
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          title: `TP${index + 1}`,
+        });
+        targetLinesRef.current.push(line);
+      });
+    }
+
+    return () => {
+      targetLinesRef.current.forEach((line) => series.removePriceLine(line));
+      targetLinesRef.current = [];
+    };
+  }, [entry, stop, trailingStop, targets]);
 
   return <div ref={containerRef} className="h-[360px] w-full" />;
 }

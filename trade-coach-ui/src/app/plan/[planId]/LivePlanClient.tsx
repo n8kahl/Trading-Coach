@@ -5,6 +5,7 @@ import clsx from "clsx";
 import PriceChart from "@/components/PriceChart";
 import { API_BASE_URL, WS_BASE_URL } from "@/lib/env";
 import type { PlanDeltaEvent, PlanSnapshot, SymbolTickEvent } from "@/lib/types";
+import type { LineData } from "lightweight-charts";
 import Link from "next/link";
 
 type LivePlanClientProps = {
@@ -28,8 +29,6 @@ type PlanState = {
   lastPrice?: number | null;
   note?: string;
 };
-
-type PricePoint = { time: number; value: number };
 
 const MAX_POINTS = 720;
 
@@ -81,10 +80,13 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
     }
     return items;
   });
-  const [priceSeries, setPriceSeries] = useState<PricePoint[]>([]);
+  const [priceSeries, setPriceSeries] = useState<LineData[]>([]);
+  const [nextPlanId, setNextPlanId] = useState<string | null>(null);
 
   const plan = initialSnapshot.plan;
   const structured = plan.structured_plan;
+  const entryLevel = structured?.entry?.level ?? plan.entry ?? null;
+  const baseStop = plan.stop ?? structured?.stop ?? null;
   const summaryLevels = useMemo(() => {
     const summary = initialSnapshot.summary as { key_levels?: Record<string, number> } | undefined;
     if (summary?.key_levels && typeof summary.key_levels === "object") {
@@ -106,6 +108,10 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
         const payload = JSON.parse(event.data) as PlanDeltaEvent;
         if (payload.t !== "plan_delta") return;
         dispatchPlan(payload.changes);
+        const nextPlan = (payload.changes as Record<string, unknown>).next_plan_id;
+        if (typeof nextPlan === "string" && nextPlan) {
+          setNextPlanId(nextPlan);
+        }
         if (payload.changes.note) {
           setCoachingLog((prev) => [
             {
@@ -219,6 +225,14 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
     },
   ];
 
+  if (planState.trailingStop || baseStop) {
+    summaryCards.push({
+      label: planState.trailingStop ? "Trail stop" : "Initial stop",
+      value: (planState.trailingStop ?? baseStop)?.toFixed(2) ?? "—",
+      accent: "from-rose-400/30 to-rose-500/20",
+    });
+  }
+
   return (
     <div className="space-y-8 px-6 py-10 sm:px-10">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -238,6 +252,14 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
             ) : null}
           </p>
         </div>
+        {nextPlanId ? (
+          <Link
+            href={`/plan/${encodeURIComponent(nextPlanId)}`}
+            className="inline-flex items-center gap-2 rounded-full border border-cyan-400/60 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-400/20"
+          >
+            Switch to {nextPlanId}
+          </Link>
+        ) : null}
         {plan.chart_url ? (
           <Link
             href={plan.chart_url}
@@ -264,7 +286,14 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
             </div>
           </div>
           <div className="mt-6 overflow-hidden rounded-2xl border border-neutral-800/70 bg-neutral-950/40">
-            <PriceChart data={priceSeries} lastPrice={planState.lastPrice ?? undefined} />
+            <PriceChart
+              data={priceSeries}
+              lastPrice={planState.lastPrice ?? undefined}
+              entry={entryLevel}
+              stop={planState.trailingStop ?? baseStop ?? undefined}
+              trailingStop={planState.trailingStop ?? undefined}
+              targets={targets}
+            />
           </div>
         </section>
 

@@ -1941,10 +1941,6 @@ _PLAN_STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
 _STREAM_LOCK = asyncio.Lock()
 _IV_METRICS_CACHE_TTL = 120.0
 _IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-_LIVE_PLAN_ENGINE = LivePlanEngine()
-_SYMBOL_STREAM_COORDINATOR: Optional[SymbolStreamCoordinator] = None
-
-
 async def _symbol_stream_emit(symbol: str, event: Dict[str, Any]) -> None:
     await _ingest_stream_event(symbol, event)
 
@@ -1958,6 +1954,71 @@ async def _ensure_symbol_stream(symbol: str) -> None:
         await coordinator.ensure_symbol(symbol_key)
     except Exception:
         logger.exception("failed to ensure symbol streamer", extra={"symbol": symbol_key})
+
+
+async def _auto_replan(symbol: str, style: Optional[str], origin_plan_id: str, exit_reason: Optional[str]) -> None:
+    if not style:
+        return
+    settings = get_settings()
+    base_url = (settings.self_base_url or "").rstrip("/")
+    if not base_url:
+        logger.info(
+            "auto replan skipped; SELF_API_BASE_URL not configured",
+            extra={"symbol": symbol, "style": style, "plan": origin_plan_id},
+        )
+        return
+
+    payload = {"symbol": symbol.upper(), "style": style}
+    headers: Dict[str, str] = {"Accept": "application/json"}
+    if settings.backend_api_key:
+        headers["Authorization"] = f"Bearer {settings.backend_api_key}"
+
+    url = f"{base_url}/gpt/plan"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+        data = response.json()
+        new_plan_id = str(data.get("plan_id")) if isinstance(data, dict) else None
+        logger.info(
+            "auto replan triggered",
+            extra={"symbol": symbol, "style": style, "origin_plan_id": origin_plan_id, "exit_reason": exit_reason, "new_plan_id": new_plan_id},
+        )
+        if new_plan_id:
+            note = f"Plan replanned ({style}) to {new_plan_id}." if exit_reason is None else f"Plan replanned after {exit_reason}; new plan {new_plan_id}."
+            timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            await _publish_stream_event(
+                symbol,
+                {
+                    "t": "plan_delta",
+                    "plan_id": origin_plan_id,
+                    "version": 1,
+                    "changes": {
+                        "status": "auto_replanned",
+                        "note": note,
+                        "next_plan_id": new_plan_id,
+                        "timestamp": timestamp,
+                    },
+                    "reason": "auto_replan",
+                },
+            )
+    except Exception as exc:
+        logger.warning(
+            "auto replan request failed",
+            extra={
+                "symbol": symbol,
+                "style": style,
+                "origin_plan_id": origin_plan_id,
+                "exit_reason": exit_reason,
+                "error": str(exc),
+            },
+        )
+
+
+_LIVE_PLAN_ENGINE = LivePlanEngine()
+_SYMBOL_STREAM_COORDINATOR: Optional[SymbolStreamCoordinator] = None
+
+_LIVE_PLAN_ENGINE.set_replan_callback(_auto_replan)
 
 
 async def _compute_iv_metrics(symbol: str) -> Dict[str, Any]:
