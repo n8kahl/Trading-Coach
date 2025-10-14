@@ -2616,6 +2616,8 @@ async def gpt_scan(
         plan_stop = None
         plan_targets: List[float] = []
         plan_direction = direction_hint
+        plan_id = None
+        version = 1
         if signal.plan is not None:
             plan_payload = signal.plan.as_dict()
             plan_entry = float(signal.plan.entry)
@@ -2628,6 +2630,24 @@ async def gpt_scan(
             chart_query.setdefault("direction", signal.plan.direction)
             if signal.plan.atr and "atr" not in chart_query:
                 chart_query["atr"] = f"{float(signal.plan.atr):.4f}"
+            raw_plan_id = str(plan_payload.get("plan_id") or "").strip()
+            plan_id = raw_plan_id or _generate_plan_slug(
+                signal.symbol,
+                style,
+                plan_direction or direction_hint,
+                snapshot,
+            )
+            try:
+                version = int(plan_payload.get("version") or 1)
+            except (TypeError, ValueError):
+                version = 1
+        else:
+            plan_id = _generate_plan_slug(
+                signal.symbol,
+                style,
+                plan_direction or direction_hint,
+                snapshot,
+            )
         chart_query["range"] = _range_for_style(style)
         bias_for_chart = plan_direction or direction_hint
         chart_query["title"] = _format_chart_title(signal.symbol, bias_for_chart, signal.strategy_id)
@@ -2645,8 +2665,9 @@ async def gpt_scan(
         if level_tokens:
             chart_query["levels"] = ",".join(level_tokens)
         chart_query["strategy"] = signal.strategy_id
-        chart_query["plan_id"] = plan_id
-        chart_query["plan_version"] = version
+        if plan_id:
+            chart_query["plan_id"] = plan_id
+            chart_query["plan_version"] = version
         if bias_for_chart:
             chart_query["direction"] = bias_for_chart
         if signal.plan is not None:
