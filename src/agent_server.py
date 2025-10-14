@@ -2393,6 +2393,18 @@ _LIVE_PLAN_ENGINE = LivePlanEngine()
 _SYMBOL_STREAM_COORDINATOR: Optional[SymbolStreamCoordinator] = None
 _ACTIVE_SETUPS: Dict[str, Dict[str, Any]] = {}
 _ACTIVE_SETUPS_LOCK = asyncio.Lock()
+_DEFAULT_TOP_SYMBOLS: List[str] = [
+    "SPY",
+    "QQQ",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "TSLA",
+    "IWM",
+    "DIA",
+]
 
 
 async def _symbol_stream_emit(symbol: str, event: Dict[str, Any]) -> None:
@@ -2893,6 +2905,7 @@ async def gpt_scan(
     universe: ScanUniverse,
     request: Request,
     user: AuthedUser = Depends(require_api_key),
+    auto_universe: bool = False,
 ) -> List[Dict[str, Any]]:
     if not universe.tickers:
         raise HTTPException(status_code=400, detail="No tickers provided")
@@ -2960,6 +2973,7 @@ async def gpt_scan(
 
     symbol_freshness: Dict[str, float] = {}
     data_meta.setdefault("ok", True)
+    data_meta["auto_universe"] = auto_universe
     if is_open:
         now_utc = pd.Timestamp.utcnow()
         for symbol_key, frame in market_data.items():
@@ -5072,8 +5086,11 @@ async def exec_assistant(
     body_symbols = [token.upper() for token in (request_payload.symbols or [])]
     tickers = query_symbols or body_symbols
     tickers = [t for t in tickers if t]
+    auto_universe = False
     if not tickers:
-        raise HTTPException(status_code=400, detail="At least one symbol is required")
+        tickers = list(_DEFAULT_TOP_SYMBOLS)
+        auto_universe = True
+        logger.info("No symbols supplied; using default universe", extra={"symbols": tickers, "style": style_param})
 
     style_param = style or request_payload.style
     limit_param = max(1, min(limit, request_payload.limit or limit))
@@ -5085,7 +5102,7 @@ async def exec_assistant(
     session_meta = SessionMeta.model_validate(session_info)
 
     universe = ScanUniverse(tickers=tickers, style=style_param)
-    scan_results = await gpt_scan(universe, request, user)
+    scan_results = await gpt_scan(universe, request, user, auto_universe=auto_universe)
 
     style_token = _output_style_token(style_param) if style_param else None
 

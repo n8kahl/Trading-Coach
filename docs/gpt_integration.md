@@ -29,6 +29,7 @@ scoring, risk math, and streaming updates; the model focuses on reasoning.
 - Master prompt (**active v3.0**): [`docs/prompts/master_prompt_v3.0.md`](prompts/master_prompt_v3.0.md)
 - API schema (**OpenAPI 3.0**): mirrors `https://trading-coach-production.up.railway.app/openapi.json`
 - Deployment status: **Production ready & approved** (2025-10-13 refresh; commit `feat/v3.0-pro-upgrade`)
+- Default universe: when a request omits `symbols`, the API evaluates `SPY`, `QQQ`, `AAPL`, `MSFT`, `NVDA`, `AMZN`, `META`, `TSLA`, `IWM`, and `DIA` automatically.
 - Persistent storage: set `DB_URL` (Postgres) so `/gpt/plan` snapshots and idea permalinks survive restarts.
 
 ---
