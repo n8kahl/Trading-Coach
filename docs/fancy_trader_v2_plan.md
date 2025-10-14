@@ -39,27 +39,27 @@ The work is split into the stages below so that the codebase remains deployable 
 
 ### Stage 4 – Options & Event Intelligence
 
-- Implement composite option scoring in `app/engine/options_select.py`.
-- Add event gating heuristics to toggle between full-risk and defined-risk plays.
-- Wire results into response formatting and documentation.
+- ✅ Implemented composite option scoring (`app/engine/options_select.py`) with response annotations (`example_leg`, score components) in `/gpt/contracts`.
+- ✅ Added event gating heuristics (`app/engine/events.py`) that convert high-severity, near-term events into defined-risk or suppressed plans, surfaced via plan warnings and structured plan metadata.
+- ✅ Propagated gating metadata into plan features/structured plans so downstream clients receive consistent guidance.
 
 ### Stage 5 – Streaming & Chart Enhancements
 
-- Launch `/ws/plans` WebSocket endpoint with plan lifecycle events.
-- Add canonical chart URLs that embed `plan_id` and `as_of`.
-- Harden live streaming with shared caches and instrumentation.
+- ✅ Launched `/ws/plans` WebSocket endpoint (plan-scoped live stream with price/hit/replan events) alongside expanded plan event fan-out.
+- ✅ Chart URLs continue to embed `plan_id`/`as_of`, now backed by session-aware providers.
+- ⬜ Add streaming instrumentation/metrics dashboards (scheduled alongside Stage 6 observability tasks).
 
 ### Stage 6 – Testing & Backtesting
 
-- Build automated regression tests (unit, integration, load) covering closed-session replay, provider fallbacks, and streaming.
-- Refactor the backtesting harness to align with the unified target engine.
-- Add CI hooks for schema validation, linting, and coverage dashboards.
+- ✅ Added unit coverage for option scoring (`tests/test_options_select.py`) and event gating (`tests/test_event_gating.py`), expanding regression coverage beyond indicator math.
+- ✅ Instrumented plan gating and WebSocket lifecycle logging to aid observability during staging/production rollouts.
+- ⬜ Load/soak harness + CI schema diff remain future enhancements (documented in roadmap).
 
 ### Stage 7 – Release & Documentation
 
-- Refresh READMEs, operational runbooks, and API schemas.
-- Prepare migration notes for GPT actions and downstream clients.
-- Create release checklist and tag production build.
+- ✅ Refreshed README with composite option scoring, event gating, and `/ws/plans` streaming guidance; updated delivery plan (this file).
+- ✅ Documented Fancy Trader 2.0 rollout plan in-repo for handoffs.
+- ⬜ Final release checklist/tagging to be executed alongside deployment.
 
 ## Documentation & Ownership
 
@@ -69,6 +69,6 @@ The work is split into the stages below so that the codebase remains deployable 
 
 ## Next Steps
 
-1. Fold closed-session regression tests into the expanded Stage 6 suite.
-2. Kick off Stage 4 (options/event intelligence) while monitoring new session + target pipelines in staging.
+1. Fold closed-session and streaming regression tests into the expanded Stage 6 suite.
+2. Implement Stage 6 observability/test automation while monitoring the new option scoring + plan streams in staging.
 3. Continue updating this document as subsequent stages progress.

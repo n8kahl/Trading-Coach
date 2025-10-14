@@ -75,6 +75,8 @@ from zoneinfo import ZoneInfo
 from .market_clock import MarketClock
 from .app.services import session_now, parse_session_as_of
 from .app.engine import TargetEngineResult, build_structured_plan
+from .app.engine.events import apply_event_gating
+from .app.engine.options_select import build_example_leg, score_contract
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +156,93 @@ def _session_asof_timestamp(session: Dict[str, Any]) -> Optional[pd.Timestamp]:
     else:
         ts = ts.tz_convert("UTC")
     return ts
+
+
+def _coalesce_events(block: Any) -> List[Dict[str, Any]]:
+    if block is None:
+        return []
+    if isinstance(block, list):
+        return [dict(item) for item in block if isinstance(item, dict)]
+    if isinstance(block, dict):
+        collected: List[Dict[str, Any]] = []
+        for key in ("items", "events", "upcoming", "data"):
+            value = block.get(key)
+            if isinstance(value, list):
+                collected.extend([dict(item) for item in value if isinstance(item, dict)])
+        if not collected:
+            collected.append({k: v for k, v in block.items() if k in {"severity", "minutes_to_event", "label", "type"}})
+        return [item for item in collected if item]
+    return []
+
+
+def _plan_stream_key(symbol: str, plan_id: str) -> str:
+    return f"{symbol.upper()}::{plan_id}"
+
+
+def _transform_plan_event(symbol: str, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    plan_id = event.get("plan_id")
+    if not plan_id:
+        return None
+    payload: Dict[str, Any] = {
+        "symbol": symbol.upper(),
+        "plan_id": plan_id,
+    }
+    event_type = event.get("t") or "note"
+    if event_type == "plan_delta":
+        changes = event.get("changes") or {}
+        payload.update({
+            "type": "price",
+            "changes": changes,
+            "raw": event,
+        })
+        breach = str(changes.get("breach") or "").lower()
+        status = str(changes.get("status") or "").lower()
+        if breach in {"stop_hit", "tp1_hit", "tp2_hit"}:
+            payload["type"] = "hit"
+            payload["hit"] = breach
+        elif status == "invalidated":
+            payload["type"] = "hit"
+            payload["hit"] = "invalid"
+        if "last_price" in changes:
+            payload["price"] = changes["last_price"]
+        if "note" in changes:
+            payload.setdefault("note", changes.get("note"))
+    elif event_type == "plan_full":
+        payload.update({
+            "type": "replan",
+            "plan": event.get("payload"),
+        })
+    else:
+        payload.update({
+            "type": "note",
+            "event": event,
+        })
+    return payload
+
+
+async def _publish_plan_event(symbol: str, event: Dict[str, Any]) -> None:
+    plan_id = event.get("plan_id")
+    if not plan_id:
+        return
+    key = _plan_stream_key(symbol, plan_id)
+    async with _PLAN_STREAM_LOCK:
+        queues = list(_PLAN_STREAM_SUBSCRIBERS.get(key, []))
+    if not queues:
+        return
+    payload = _transform_plan_event(symbol, event) or event
+    try:
+        message = json.dumps({"symbol": symbol.upper(), "plan_id": plan_id, "event": payload})
+    except TypeError:
+        return
+    for queue in queues:
+        try:
+            queue.put_nowait(message)
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            queue.put_nowait(message)
 
 
 def _market_snapshot_payload() -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
@@ -790,7 +879,10 @@ async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
 async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
     async with _STREAM_LOCK:
         queues = list(_STREAM_SUBSCRIBERS.get(symbol, []))
-    payload = json.dumps({"symbol": symbol, "event": event})
+    try:
+        payload = json.dumps({"symbol": symbol, "event": event})
+    except TypeError:
+        payload = json.dumps({"symbol": symbol, "event": "unserializable"})
     for queue in queues:
         try:
             queue.put_nowait(payload)
@@ -800,6 +892,7 @@ async def _publish_stream_event(symbol: str, event: Dict[str, Any]) -> None:
             except asyncio.QueueEmpty:
                 pass
             queue.put_nowait(payload)
+    await _publish_plan_event(symbol, event)
 
 
 async def _ingest_stream_event(symbol: str, event: Dict[str, Any]) -> None:
@@ -1860,6 +1953,8 @@ _MAX_IDEA_CACHE_VERSIONS = 20
 _IDEA_PERSISTENCE_ENABLED = False
 _STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
 _STREAM_LOCK = asyncio.Lock()
+_PLAN_STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
+_PLAN_STREAM_LOCK = asyncio.Lock()
 _IV_METRICS_CACHE_TTL = 120.0
 _IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _LIVE_PLAN_ENGINE = LivePlanEngine()
@@ -2964,12 +3059,44 @@ async def gpt_plan(
         session=session_info,
         confluence=confluence_tags,
     )
+    events_block = first.get("events")
+    gating_decision = apply_event_gating(_coalesce_events(events_block))
+    if gating_decision.action == "suppress":
+        structured_plan["status"] = "suppressed"
+        plan_warnings.append(
+            f"Plan suppressed due to upcoming event ({gating_decision.reason})"
+        )
+        logger.info(
+            "plan gating suppress",
+            extra={
+                "symbol": symbol,
+                "plan_id": plan_id,
+                "events": gating_decision.triggered,
+                "reason": gating_decision.reason,
+            },
+        )
+    elif gating_decision.action == "defined_risk":
+        structured_plan["defined_risk_only"] = True
+        plan_warnings.append(
+            f"Defined-risk only: upcoming event ({gating_decision.reason})"
+        )
+        logger.info(
+            "plan gating defined-risk",
+            extra={
+                "symbol": symbol,
+                "plan_id": plan_id,
+                "events": gating_decision.triggered,
+                "reason": gating_decision.reason,
+            },
+        )
+
     plan["structured_plan"] = structured_plan
     first["structured_plan"] = structured_plan
     first["target_profile"] = plan["target_profile"]
     if isinstance(first.get("features"), dict):
         first["features"]["target_profile"] = plan["target_profile"]
         first["features"]["structured_plan"] = structured_plan
+        first["features"]["event_gating"] = gating_decision.to_dict()
 
     calc_notes: Dict[str, Any] = {}
     if atr_val is not None:
@@ -3415,6 +3542,56 @@ async def stream_symbol_ws(websocket: WebSocket, symbol: str) -> None:
             await websocket.close()
         except RuntimeError:
             pass
+
+
+@app.websocket("/ws/plans")
+async def stream_plan_ws(
+    websocket: WebSocket,
+    symbol: str = Query(...),
+    plan_id: str = Query(...),
+) -> None:
+    uppercase = (symbol or "").upper()
+    target_plan = (plan_id or "").strip()
+    if not uppercase or not target_plan:
+        await websocket.close(code=4000)
+        return
+    await websocket.accept()
+    logger.info("plan websocket connected", extra={"symbol": uppercase, "plan_id": target_plan})
+    await _ensure_symbol_stream(uppercase)
+    key = _plan_stream_key(uppercase, target_plan)
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+    async with _PLAN_STREAM_LOCK:
+        _PLAN_STREAM_SUBSCRIBERS.setdefault(key, []).append(queue)
+    try:
+        initial_states = await _LIVE_PLAN_ENGINE.active_plan_states(uppercase)
+        snapshot = next((state for state in initial_states if state.get("plan_id") == target_plan), None)
+        if snapshot:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "symbol": uppercase,
+                        "plan_id": target_plan,
+                        "event": {"type": "state", "state": snapshot},
+                    }
+                )
+            )
+        while True:
+            data = await queue.get()
+            await websocket.send_text(data)
+    except WebSocketDisconnect:
+        return
+    finally:
+        async with _PLAN_STREAM_LOCK:
+            subscribers = _PLAN_STREAM_SUBSCRIBERS.get(key, [])
+            if queue in subscribers:
+                subscribers.remove(queue)
+            if not subscribers:
+                _PLAN_STREAM_SUBSCRIBERS.pop(key, None)
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
+        logger.info("plan websocket disconnected", extra={"symbol": uppercase, "plan_id": target_plan})
 
 
 @app.post("/internal/stream/push", include_in_schema=False, tags=["internal"])
@@ -3919,9 +4096,18 @@ async def gpt_contracts(
     else:
         filters = filters
 
+    prefer_delta = float(request_payload.max_delta or 0.55)
+    scored_candidates: List[Dict[str, Any]] = []
+    for contract in candidates:
+        result = score_contract(contract, prefer_delta=prefer_delta)
+        contract["liquidity_score"] = round(result.score, 4)
+        contract["liquidity_components"] = {k: round(v, 4) for k, v in result.components.items()}
+        scored_candidates.append(contract)
+    scored_candidates.sort(key=lambda item: item.get("liquidity_score", 0.0), reverse=True)
+
     plan_anchor = getattr(request_payload, "plan_anchor", None)
-    best = [_enrich_contract_with_plan(contract, plan_anchor, risk_amount) for contract in candidates[:3]]
-    alternatives = [_enrich_contract_with_plan(contract, plan_anchor, risk_amount) for contract in candidates[3:10]]
+    best = [_enrich_contract_with_plan(dict(contract), plan_anchor, risk_amount) for contract in scored_candidates[:3]]
+    alternatives = [_enrich_contract_with_plan(dict(contract), plan_anchor, risk_amount) for contract in scored_candidates[3:10]]
 
     # Compact table view for UI rendering
     table_rows: List[Dict[str, Any]] = []
@@ -3944,10 +4130,12 @@ async def gpt_contracts(
                 "iv": row.get("implied_volatility") or row.get("iv"),
                 "spread_pct": row.get("spread_pct"),
                 "oi": row.get("open_interest") or row.get("oi"),
-                "liquidity_score": row.get("tradeability") or row.get("liquidity_score"),
+                "liquidity_score": row.get("liquidity_score") or row.get("tradeability"),
             })
         except Exception:
             continue
+
+    example_leg = build_example_leg(scored_candidates[0]) if scored_candidates else None
 
     payload = {
         "symbol": symbol,
@@ -3959,6 +4147,7 @@ async def gpt_contracts(
         "best": best,
         "alternatives": alternatives,
         "table": table_rows,
+        "example_leg": example_leg,
     }
     payload["session"] = session_info
     if underlying_price_asof is not None:
