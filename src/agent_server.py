@@ -115,6 +115,9 @@ DATA_SYMBOL_ALIASES: Dict[str, List[str]] = {
     "^SPX": ["^GSPC"],
     "INDEX:SPX": ["^GSPC"],
     "SP500": ["^GSPC"],
+    "OEX": ["SPX", "^OEX", "SPY"],
+    "^OEX": ["SPX", "SPY"],
+    "INDEX:OEX": ["SPX", "SPY"],
 }
 
 _FUTURES_PROXY_MAP: Dict[str, str] = {
@@ -196,6 +199,22 @@ class ChartParams(BaseModel):
 
 class ChartLinks(BaseModel):
     interactive: str
+
+
+async def _fetch_option_chain_with_aliases(symbol: str, as_of_hint: Optional[datetime]) -> pd.DataFrame:
+    aliases = _data_symbol_candidates(symbol)
+    for candidate in aliases:
+        try:
+            frame = await fetch_polygon_option_chain_asof(candidate, as_of_hint)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("polygon option chain alias %s failed for %s: %s", candidate, symbol, exc)
+            continue
+        if frame is not None and not frame.empty:
+            if candidate != symbol:
+                frame = frame.copy()
+                frame["underlying_symbol"] = candidate
+            return frame
+    return pd.DataFrame()
 
 
 app = FastAPI(
@@ -2523,7 +2542,7 @@ async def gpt_scan(
         try:
             as_of_hint = None if is_open else as_of_dt
             tasks = [
-                fetch_polygon_option_chain_asof(symbol, as_of_hint)
+                _fetch_option_chain_with_aliases(symbol, as_of_hint)
                 for symbol in unique_symbols
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
