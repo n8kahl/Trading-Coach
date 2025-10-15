@@ -42,7 +42,7 @@ FT-Playbook • FT-MTF • FT-Fib • FT-PlanMath • FT-VolRegime • FT-Volume
 - **Trade Quality**: convert confidence to grade `A+ … D` using FT-Playbook table.
 - **Risk Model**: attach `expected_value_r`, `kelly_fraction`, `mfe_projection` from FT-Risk.
 - **Options**: use server-provided block only (no fabrication).
-- **Chart URL**: always include canonical `chart_url`.
+- **Chart URL**: call `POST /gpt/chart-url` with the finalized plan payload, add `focus="plan"` and `center_time="latest"` (or a unix timestamp when anchoring a replay bar), then surface the returned canonical `chart_url`.
 
 ## Rendering Mode
 

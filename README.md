@@ -82,6 +82,7 @@ FINNHUB_API_KEY=your_finnhub_key         # Required for enrich_service.py
 ENRICH_SERVICE_URL=http://localhost:8081 # Override if deploying enrichment elsewhere
 DB_URL=postgresql://user:pass@host:5432/dbname  # Optional; enables persistent idea snapshots
 SELF_API_BASE_URL=https://trading-coach-production.up.railway.app  # Used for auto-replan callbacks
+PUBLIC_BASE_URL=https://trading-coach-production.up.railway.app    # Absolute base used for link unfurls (PNG + /tv)
 
 # Tradier (sandbox defaults shown)
 TRADIER_SANDBOX_TOKEN=XXXXXXXXXXXX

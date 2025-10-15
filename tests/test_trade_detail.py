@@ -45,7 +45,10 @@ async def test_gpt_plan_includes_trade_detail(monkeypatch):
         ]
 
     async def fake_chart_url(params, request):
-        return agent_server.ChartLinks(interactive="https://example.com/chart")
+        return agent_server.ChartLinks(
+            interactive="https://example.com/chart",
+            png="https://example.com/chart.png",
+        )
 
     monkeypatch.setattr(agent_server, "gpt_scan", fake_scan)
     monkeypatch.setattr(agent_server, "gpt_chart_url", fake_chart_url)

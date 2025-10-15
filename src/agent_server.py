@@ -42,6 +42,8 @@ from .scanner import (
     _base_targets_for_style,
     _normalize_trade_style,
     _runner_config,
+    _prepare_symbol_frame,
+    _build_context,
 )
 from .strategy_library import (
     normalize_style_input,
@@ -107,6 +109,8 @@ ALLOWED_CHART_KEYS = {
     "liquidity",
     "fvg",
     "avwap",
+    "focus",
+    "center_time",
 }
 
 
@@ -199,6 +203,7 @@ class ChartParams(BaseModel):
 
 class ChartLinks(BaseModel):
     interactive: str
+    png: str | None = None
 
 
 async def _fetch_option_chain_with_aliases(symbol: str, as_of_hint: Optional[datetime]) -> pd.DataFrame:
@@ -1519,6 +1524,60 @@ def _format_chart_note(
     return summary[:140]
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _fallback_style_token(style: str | None) -> str:
+    token = _normalize_style(style)
+    if token:
+        return token
+    return "intraday"
+
+
+def _fallback_levels_param(levels: Dict[str, float], limit: int = 6) -> str | None:
+    if not levels:
+        return None
+    items: List[Tuple[float, str]] = []
+    for name, value in levels.items():
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(price):
+            continue
+        label = name.replace("_", " ").title()
+        items.append((abs(price), f"{price:.2f}|{label}"))
+    if not items:
+        return None
+    items.sort(key=lambda pair: pair[0])
+    tokens = [token for _, token in items[:limit]]
+    return ";".join(tokens) if tokens else None
+
+
+def _fallback_confidence(trend_component: float, liquidity_component: float, regime_component: float) -> float:
+    composite = 0.6 * trend_component + 0.2 * liquidity_component + 0.2 * regime_component
+    return _clamp(composite, 0.45, 0.92)
+
+
+def _risk_reward(entry: float, stop: float, target: float, direction: str) -> float | None:
+    try:
+        entry_f = float(entry)
+        stop_f = float(stop)
+        target_f = float(target)
+    except (TypeError, ValueError):
+        return None
+    if direction == "long":
+        risk = entry_f - stop_f
+        reward = target_f - entry_f
+    else:
+        risk = stop_f - entry_f
+        reward = entry_f - target_f
+    if risk <= 0 or reward <= 0:
+        return None
+    return reward / risk
+
+
 def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
     # Respect reverse-proxy headers to avoid mixed-content (http iframe on https page)
     headers = request.headers
@@ -2819,6 +2878,8 @@ async def gpt_scan(
         charts_payload: Dict[str, Any] = {"params": chart_query}
         if chart_links:
             charts_payload["interactive"] = chart_links.interactive
+            if chart_links.png:
+                charts_payload["png"] = chart_links.png
         elif required_chart_keys.issubset(chart_query.keys()):
             fallback_chart_url = _build_tv_chart_url(request, chart_query)
             charts_payload["interactive"] = fallback_chart_url
@@ -2875,6 +2936,316 @@ async def gpt_scan(
     return payload
 
 
+async def _generate_fallback_plan(
+    symbol: str,
+    style: str | None,
+    request: Request,
+    user: AuthedUser,
+) -> PlanResponse | None:
+    style_token = _fallback_style_token(style)
+    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload()
+    timeframe_map = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}
+    timeframe = timeframe_map.get(style_token, "5")
+    try:
+        market_data = await _collect_market_data(
+            [symbol],
+            timeframe=timeframe,
+            as_of=None if is_open else as_of_dt,
+        )
+    except HTTPException:
+        return None
+    frame = market_data.get(symbol)
+    if frame is None or frame.empty:
+        return None
+    prepared = _prepare_symbol_frame(frame)
+    if prepared.empty:
+        return None
+    context = _build_context(prepared)
+    latest = context.get("latest")
+    if latest is None:
+        latest = prepared.iloc[-1]
+    try:
+        close_price = float(latest["close"])
+    except (TypeError, ValueError, KeyError):
+        close_price = float(prepared["close"].iloc[-1])
+    ema9 = float(context.get("ema9") or latest.get("ema9") or close_price)
+    ema20 = float(context.get("ema20") or latest.get("ema20") or close_price)
+    ema50 = float(context.get("ema50") or latest.get("ema50") or close_price)
+    vwap_value = context.get("vwap")
+    atr_value = context.get("atr")
+    if not isinstance(atr_value, (int, float)) or not math.isfinite(atr_value) or atr_value <= 0:
+        atr_series = prepared.get("atr14")
+        if atr_series is not None:
+            atr_candidates = atr_series.dropna()
+            if not atr_candidates.empty:
+                atr_value = float(atr_candidates.iloc[-1])
+    if not isinstance(atr_value, (int, float)) or not math.isfinite(atr_value) or atr_value <= 0:
+        atr_value = max(close_price * 0.006, 0.25)
+    key_levels = context.get("key") or {}
+    ema_trend_up = ema9 > ema20 > ema50
+    ema_trend_down = ema9 < ema20 < ema50
+    if ema_trend_up or (close_price >= ema20 >= ema50):
+        direction = "long"
+    elif ema_trend_down or (close_price <= ema20 <= ema50):
+        direction = "short"
+    else:
+        direction = "long" if close_price >= ema50 else "short"
+    session_high = key_levels.get("session_high")
+    session_low = key_levels.get("session_low")
+    or_high = key_levels.get("opening_range_high")
+    or_low = key_levels.get("opening_range_low")
+    if direction == "long":
+        candidates = [close_price, session_high, or_high]
+        entry_base = max(
+            float(val)
+            for val in candidates
+            if isinstance(val, (int, float)) and math.isfinite(float(val))
+        )
+        entry = round(entry_base, 2)
+        stop = round(entry - atr_value * 1.25, 2)
+        if stop <= 0 or stop >= entry:
+            stop = round(entry - max(atr_value, close_price * 0.004), 2)
+        target_multipliers = {
+            "scalp": (0.9, 1.4, 2.0),
+            "intraday": (1.2, 1.9, 2.8),
+            "swing": (2.2, 3.4, 4.8),
+            "leap": (3.6, 5.2, 7.0),
+        }.get(style_token, (1.2, 1.9, 2.8))
+        targets = [round(entry + atr_value * mult, 2) for mult in target_multipliers]
+        if session_high and isinstance(session_high, (int, float)) and session_high > entry:
+            targets[0] = round(float(session_high), 2)
+            targets[1] = round(entry + atr_value * 1.9, 2)
+    else:
+        candidates = [close_price, session_low, or_low]
+        entry_base = min(
+            float(val)
+            for val in candidates
+            if isinstance(val, (int, float)) and math.isfinite(float(val))
+        )
+        entry = round(entry_base, 2)
+        stop = round(entry + atr_value * 1.25, 2)
+        if stop <= entry:
+            stop = round(entry + max(atr_value, close_price * 0.004), 2)
+        target_multipliers = {
+            "scalp": (0.9, 1.4, 2.0),
+            "intraday": (1.2, 1.9, 2.8),
+            "swing": (2.2, 3.4, 4.8),
+            "leap": (3.6, 5.2, 7.0),
+        }.get(style_token, (1.2, 1.9, 2.8))
+        targets = [round(entry - atr_value * mult, 2) for mult in target_multipliers]
+        if session_low and isinstance(session_low, (int, float)) and session_low < entry:
+            targets[0] = round(float(session_low), 2)
+            targets[1] = round(entry - atr_value * 1.9, 2)
+    rr_to_t1 = _risk_reward(entry, stop, targets[0], direction)
+    if rr_to_t1 is None or rr_to_t1 < 1.2:
+        scale = 1.2 / max(rr_to_t1 or 0.6, 0.4)
+        if direction == "long":
+            targets = [round(entry + (target - entry) * scale, 2) for target in targets]
+        else:
+            targets = [round(entry - (entry - target) * scale, 2) for target in targets]
+        rr_to_t1 = _risk_reward(entry, stop, targets[0], direction)
+    rr_to_t1 = float(rr_to_t1) if rr_to_t1 is not None else None
+    trend_component = 0.8 if (direction == "long" and ema_trend_up) or (direction == "short" and ema_trend_down) else 0.6
+    liquidity_component = 0.65 if isinstance(context.get("volume_median"), (int, float)) and context["volume_median"] > 0 else 0.5
+    regime_component = 0.6 if isinstance(context.get("atr_1d"), (int, float)) and math.isfinite(context["atr_1d"] or float("nan")) else 0.52
+    confidence = round(_fallback_confidence(trend_component, liquidity_component, regime_component), 2)
+    confidence_factors: List[str] = []
+    if (direction == "long" and ema_trend_up) or (direction == "short" and ema_trend_down):
+        confidence_factors.append("EMA alignment")
+    if isinstance(vwap_value, (int, float)) and math.isfinite(vwap_value):
+        if direction == "long" and close_price >= vwap_value:
+            confidence_factors.append("Above VWAP")
+        if direction == "short" and close_price <= vwap_value:
+            confidence_factors.append("Below VWAP")
+    expected_move_abs = context.get("expected_move_horizon")
+    expected_move_basis = None
+    if isinstance(expected_move_abs, (int, float)) and math.isfinite(expected_move_abs) and expected_move_abs > 0:
+        expected_move_pct = (expected_move_abs / close_price) * 100 if close_price else 0.0
+        expected_move_basis = f"EM ≈ {expected_move_abs:.2f} ({expected_move_pct:.1f}%)"
+    target_meta = []
+    for idx, target in enumerate(targets, start=1):
+        distance = round(abs(target - entry), 2)
+        prob_base = 0.58 if idx == 1 else 0.34 if idx == 2 else 0.2
+        trend_bonus = 0.07 if confidence > 0.75 and idx == 1 else 0.0
+        prob = _clamp(prob_base + trend_bonus, 0.15, 0.92)
+        target_meta.append(
+            {
+                "label": f"TP{idx}",
+                "prob_touch": round(prob, 2),
+                "distance": distance,
+            }
+        )
+    runner_trail = "ATR(14) x 0.8" if style_token in {"scalp", "intraday"} else "ATR(14) x 1.0"
+    runner = {"trail": runner_trail}
+    direction_label = "Long" if direction == "long" else "Short"
+    notes = (
+        f"{direction_label} bias with EMA stack supportive; manage risk using {runner_trail} and watch VWAP for continuation."
+    )
+    plan_ts = context.get("timestamp")
+    if isinstance(plan_ts, pd.Timestamp):
+        plan_ts_utc = plan_ts.tz_convert("UTC") if plan_ts.tzinfo else plan_ts.tz_localize("UTC")
+    else:
+        plan_ts_utc = pd.Timestamp.utcnow()
+    plan_id = f"{symbol.upper()}-{plan_ts_utc.strftime('%Y%m%dT%H%M%S')}-{style_token}-auto"
+    view_token = _view_for_style(style_token)
+    range_token = _range_for_style(style_token)
+    interval_map = {"1": "1m", "5": "5m", "60": "1h", "D": "d"}
+    interval_token = interval_map.get(timeframe, "5m")
+    chart_params: Dict[str, Any] = {
+        "symbol": symbol.upper(),
+        "interval": interval_token,
+        "direction": direction,
+        "entry": f"{entry:.2f}",
+        "stop": f"{stop:.2f}",
+        "tp": ",".join(f"{target:.2f}" for target in targets),
+        "ema": "9,20,50",
+        "focus": "plan",
+        "center_time": "latest",
+        "scale_plan": "auto",
+        "view": view_token,
+        "range": range_token,
+        "theme": "dark",
+    }
+    levels_param = _fallback_levels_param({k: v for k, v in key_levels.items() if isinstance(v, (int, float))})
+    if levels_param:
+        chart_params["levels"] = levels_param
+    chart_links = None
+    try:
+        chart_links = await gpt_chart_url(ChartParams(**chart_params), request)
+    except HTTPException:
+        chart_links = None
+    chart_url = chart_links.interactive if chart_links else _build_tv_chart_url(request, chart_params)
+    chart_png = chart_links.png if chart_links else None
+    chart_url_with_ids = _append_query_params(
+        chart_url,
+        {
+            "plan_id": plan_id,
+            "plan_version": "1",
+        },
+    )
+    if chart_png:
+        chart_png = _append_query_params(
+            chart_png,
+            {
+                "plan_id": plan_id,
+                "plan_version": "1",
+            },
+        )
+    plan_block = {
+        "symbol": symbol.upper(),
+        "style": style_token,
+        "direction": direction,
+        "entry": entry,
+        "stop": stop,
+        "targets": targets,
+        "target_meta": target_meta,
+        "runner": runner,
+        "confidence": confidence,
+        "notes": notes,
+        "rr_to_t1": rr_to_t1,
+        "expected_move": expected_move_abs,
+        "atr": atr_value,
+        "interval": interval_token,
+        "warnings": [],
+        "strategy": "baseline_auto",
+        "debug": {"source": "auto_fallback_plan"},
+    }
+    plan_warnings: List[str] = []
+    target_profile = build_target_profile(
+        entry=entry,
+        stop=stop,
+        targets=targets,
+        target_meta=plan_block.get("target_meta"),
+        debug=plan_block.get("debug"),
+        runner=runner,
+        warnings=plan_warnings,
+        atr_used=atr_value,
+        expected_move=expected_move_abs,
+        style=style_token,
+        bias=direction,
+    )
+    structured_plan = build_structured_plan(
+        plan_id=plan_id,
+        symbol=symbol.upper(),
+        style=style_token,
+        direction=direction,
+        profile=target_profile,
+        confidence=confidence,
+        rationale=notes,
+        options_block=None,
+        chart_url=chart_url_with_ids,
+        session=market_meta.get("session_state"),
+        confluence=confidence_factors or None,
+    )
+    chart_params_payload = {key: str(value) for key, value in chart_params.items()}
+    charts_payload: Dict[str, Any] = {"params": chart_params_payload, "interactive": chart_url_with_ids}
+    if chart_png:
+        charts_payload["png"] = chart_png
+    data_payload = dict(data_meta)
+    data_payload["bars"] = f"{str(request.base_url).rstrip('/')}/gpt/context/{symbol.upper()}?interval={interval_token}&lookback=300"
+    data_payload["session_state"] = market_meta.get("session_state")
+    response = PlanResponse(
+        plan_id=plan_id,
+        version=1,
+        trade_detail=chart_url_with_ids,
+        idea_url=chart_url_with_ids,
+        warnings=plan_warnings or None,
+        planning_context="live" if is_open else "frozen",
+        symbol=symbol.upper(),
+        style=style_token,
+        bias=direction,
+        setup="baseline_auto",
+        entry=entry,
+        stop=stop,
+        targets=targets,
+        target_meta=target_meta,
+        rr_to_t1=rr_to_t1,
+        confidence=confidence,
+        confidence_factors=confidence_factors or None,
+        notes=notes,
+        relevant_levels={k: float(v) for k, v in key_levels.items() if isinstance(v, (int, float))},
+        expected_move_basis=expected_move_basis,
+        charts_params=chart_params_payload,
+        chart_url=chart_url_with_ids,
+        strategy_id="baseline_auto",
+        description="Automatically generated plan using live market context when no strategy signals are active.",
+        score=confidence,
+        plan=plan_block,
+        structured_plan=structured_plan,
+        target_profile=target_profile.to_dict(),
+        charts=charts_payload,
+        key_levels={k: float(v) for k, v in key_levels.items() if isinstance(v, (int, float))},
+        market_snapshot=market_meta,
+        features={
+            "auto_fallback_plan": True,
+            "ema_trend_up": ema_trend_up,
+            "ema_trend_down": ema_trend_down,
+            "vwap": vwap_value,
+        },
+        options=None,
+        calc_notes={
+            "atr14": round(float(atr_value), 4),
+            "rr_inputs": {"entry": entry, "stop": stop, "tp1": targets[0]},
+        },
+        htf={
+            "bias": direction,
+            "snapped_targets": [],
+        },
+        decimals=2,
+        data_quality={
+            "series_present": True,
+            "iv_present": False,
+            "earnings_present": bool(market_meta.get("session_state")),
+        },
+        debug={"source": "auto_fallback_plan"},
+        runner=runner,
+        market=market_meta,
+        data=data_payload,
+        session_state=market_meta.get("session_state"),
+    )
+    return response
+
+
 @gpt.post("/plan", summary="Return a single trade plan for a symbol", response_model=PlanResponse)
 @gpt.post('/plan', summary='Return a single trade plan for a symbol', response_model=PlanResponse)
 async def gpt_plan(
@@ -2901,6 +3272,13 @@ async def gpt_plan(
     universe = ScanUniverse(tickers=[symbol], style=request_payload.style)
     results = await gpt_scan(universe, request, user)
     if not results:
+        fallback_plan = await _generate_fallback_plan(symbol, request_payload.style, request, user)
+        if fallback_plan is not None:
+            logger.info(
+                "gpt_plan fallback_generated",
+                extra={"symbol": symbol, "style": request_payload.style, "mode": "no_signals"},
+            )
+            return fallback_plan
         raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
     logger.info(
@@ -2919,6 +3297,15 @@ async def gpt_plan(
     volatility = (snapshot.get("volatility") or {})
     # Build calc_notes + htf from available payload
     raw_plan = first.get("plan") or {}
+    if not raw_plan:
+        fallback_plan = await _generate_fallback_plan(symbol, request_payload.style, request, user)
+        if fallback_plan is not None:
+            logger.info(
+                "gpt_plan fallback_generated",
+                extra={"symbol": symbol, "style": request_payload.style, "mode": "empty_plan"},
+            )
+            return fallback_plan
+        raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     plan: Dict[str, Any] = dict(raw_plan)
     raw_plan_id = str(plan.get("plan_id") or "").strip()
     raw_version = plan.get("version")
@@ -2954,6 +3341,7 @@ async def gpt_plan(
     charts = charts_container.get("params") if isinstance(charts_container, dict) else None
     chart_params_payload: Dict[str, Any] = charts if isinstance(charts, dict) else {}
     chart_url_value: Optional[str] = charts_container.get("interactive") if isinstance(charts_container, dict) else None
+    chart_png_value: Optional[str] = charts_container.get("png") if isinstance(charts_container, dict) else None
 
     def _coerce_float(value: Any) -> Optional[float]:
         try:
@@ -2999,6 +3387,7 @@ async def gpt_plan(
             if not chart_url_value or not isinstance(chart_url_value, str):
                 chart_links = await gpt_chart_url(chart_model, request)
                 chart_url_value = chart_links.interactive
+                chart_png_value = chart_links.png
         except HTTPException as exc:
             logger.debug("plan chart link validation failed for %s: %s", symbol, exc)
             chart_url_value = None
@@ -3018,6 +3407,8 @@ async def gpt_plan(
             },
         )
         charts_payload["interactive"] = chart_url_value
+        if chart_png_value:
+            charts_payload["png"] = chart_png_value
     elif chart_params_payload and {"direction", "entry", "stop", "tp"}.issubset(chart_params_payload.keys()):
         fallback_chart_url = _build_tv_chart_url(request, chart_params_payload)
         fallback_chart_url = _append_query_params(
@@ -4421,10 +4812,12 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     # Otherwise default to the local charts HTML renderer.
     settings = get_settings()
     configured_base = (settings.chart_base_url or "").strip()
+    public_base = (getattr(settings, "public_base_url", None) or "").strip()
     if configured_base:
         base = configured_base.rstrip("/")
     else:
-        base = f"{str(request.base_url).rstrip('/')}/charts/html"
+        origin = public_base or str(request.base_url).rstrip("/")
+        base = f"{origin}/charts/html"
 
     # Assemble query with normalized fields
     data["symbol"] = _normalize_chart_symbol(raw_symbol)
@@ -4454,7 +4847,11 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
     encoded = urlencode(query, doseq=False, safe=",", quote_via=quote)
     url = f"{base}?{encoded}" if encoded else base
-    return ChartLinks(interactive=url)
+
+    png_origin = public_base or str(request.base_url).rstrip("/")
+    png_base = f"{png_origin.rstrip('/')}/charts/png"
+    png_url = f"{png_base}?{encoded}" if encoded else png_base
+    return ChartLinks(interactive=url, png=png_url)
 
 
 @gpt.get("/context/{symbol}", summary="Return recent market context for a ticker")

@@ -474,8 +474,11 @@ pre-baked trade levels.
 ## `/gpt/chart-url`
 
 Use this helper whenever you need a shareable chart link. Provide the baseline
-`charts.params` from the scan/context response and append your computed trade
-plan fields.
+`charts.params` from the scan/context response, append your computed trade plan
+fields, and set the view helpers that keep the plan centred:
+
+- `focus="plan"` focuses the price scale on the entry/stop/targets & confluence levels.
+- `center_time="latest"` (or a unix timestamp) centres the time scale on the most relevant bar.
 
 **Required body fields:** `symbol`, `interval`, `direction`, `entry`, `stop`,
 and `tp` (comma-separated list for multiple targets). Missing any of these will
@@ -505,15 +508,23 @@ curl -s -X POST https://host/gpt/chart-url \
         "entry":"258.40",
         "stop":"257.80",
         "tp":"259.60,260.10",
-        "notes":"Breakout plan"
+        "notes":"Breakout plan",
+        "focus":"plan",
+        "center_time":"latest",
+        "scale_plan":"auto"
       }'
 ```
 
 Response:
 
 ```json
-{"interactive":"https://host/tv?symbol=AAPL&interval=1m&ema=9%2C20%2C50&view=30m&entry=258.40&stop=257.80&tp=259.60%2C260.10&notes=Breakout+plan"}
+{
+  "interactive": "https://host/tv?symbol=AAPL&interval=1m&ema=9%2C20%2C50&view=30m&entry=258.40&stop=257.80&tp=259.60%2C260.10&notes=Breakout+plan&focus=plan&center_time=latest&scale_plan=auto",
+  "png": "https://host/charts/png?symbol=AAPL&interval=1m&ema=9%2C20%2C50&view=30m&entry=258.40&stop=257.80&tp=259.60%2C260.10&notes=Breakout+plan&focus=plan&center_time=latest&scale_plan=auto"
+}
 ```
+
+Render the `interactive` link for live charting and use the `png` URL when you need a static preview (Slack/Discord unfurls, inline chat bubbles, etc.).
 
 If any required parameter is missing or geometry/risk constraints fail you will
 receive a `422` response with a descriptive error message.

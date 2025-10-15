@@ -152,6 +152,14 @@
   });
   keyLevels = dedupedLevels;
 
+  const focusToken = (params.get('focus') || '').toLowerCase();
+  const centerTimeParamRaw = params.get('center_time');
+  const centerTimeToken = typeof centerTimeParamRaw === 'string' ? centerTimeParamRaw.trim() : '';
+  const centerTimeIsLatest = centerTimeToken && centerTimeToken.toLowerCase() === 'latest';
+  const centerTimeNumeric = !centerTimeIsLatest && centerTimeToken ? Number(centerTimeToken) : null;
+  let hasAppliedFocusRange = false;
+  let hasAppliedTimeCenter = false;
+
   const headerSymbolEl = document.getElementById('header_symbol');
   const headerStrategyEl = document.getElementById('header_strategy');
   const headerBiasEl = document.getElementById('header_bias');
@@ -278,6 +286,109 @@
   let replayQueue = [];
   let replayIndex = 0;
   let replayTimer = null;
+
+  const collectPlanFocusValues = (plan) => {
+    const values = [];
+    if (plan) {
+      const pushIfFinite = (val) => {
+        if (Number.isFinite(val)) {
+          values.push(val);
+        }
+      };
+      pushIfFinite(plan.entry);
+      pushIfFinite(plan.stop);
+      (plan.tps || []).forEach((tp) => pushIfFinite(tp));
+      if (plan.runner) {
+        pushIfFinite(plan.runner.anchor);
+      }
+    }
+    if (Array.isArray(keyLevels) && keyLevels.length) {
+      keyLevels.forEach((level) => {
+        if (level && Number.isFinite(level.price)) {
+          values.push(level.price);
+        }
+      });
+    }
+    return values;
+  };
+
+  const applyPlanPriceFocus = (plan, { force = false } = {}) => {
+    if (focusToken !== 'plan') {
+      chart.priceScale('right').applyOptions({ autoScale: true });
+      hasAppliedFocusRange = false;
+      return;
+    }
+    if (!force && hasAppliedFocusRange) {
+      return;
+    }
+    const values = collectPlanFocusValues(plan);
+    if (!values.length) {
+      chart.priceScale('right').applyOptions({ autoScale: true });
+      hasAppliedFocusRange = false;
+      return;
+    }
+    const minPrice = Math.min(...values);
+    const maxPrice = Math.max(...values);
+    const span = Math.max(0.01, maxPrice - minPrice);
+    const padPct = 0.008;
+    const baselinePad = Math.max(span * padPct, span * 0.05);
+    const atrPad = Number.isFinite(plan?.atr) && plan.atr > 0 ? plan.atr * 0.5 : 0;
+    const pad = Math.max(baselinePad, atrPad);
+    const priceScale = chart.priceScale('right');
+    priceScale.applyOptions({ autoScale: false });
+    priceScale.setPriceRange({
+      minValue: minPrice - pad,
+      maxValue: maxPrice + pad,
+    });
+    hasAppliedFocusRange = true;
+  };
+
+  const applyTimeCentering = ({ force = false } = {}) => {
+    if (!centerTimeToken) {
+      return;
+    }
+    if (!force && hasAppliedTimeCenter) {
+      return;
+    }
+    if (!latestCandleData.length) {
+      return;
+    }
+    const timeScale = chart.timeScale();
+    if (centerTimeIsLatest) {
+      timeScale.scrollToPosition(0, true);
+      hasAppliedTimeCenter = true;
+      return;
+    }
+    if (!Number.isFinite(centerTimeNumeric)) {
+      return;
+    }
+    let closestIndex = -1;
+    let smallestDiff = Number.POSITIVE_INFINITY;
+    latestCandleData.forEach((bar, idx) => {
+      if (!bar || !Number.isFinite(bar.time)) return;
+      const diff = Math.abs(bar.time - centerTimeNumeric);
+      if (diff < smallestDiff) {
+        smallestDiff = diff;
+        closestIndex = idx;
+      }
+    });
+    if (closestIndex === -1) {
+      return;
+    }
+    const logicalRange = timeScale.getVisibleLogicalRange();
+    const halfSpan = logicalRange
+      ? Math.max(5, (logicalRange.to - logicalRange.from) / 2)
+      : Math.max(5, Math.floor(latestCandleData.length / 4) || 20);
+    try {
+      timeScale.setVisibleLogicalRange({
+        from: closestIndex - halfSpan,
+        to: closestIndex + halfSpan,
+      });
+      hasAppliedTimeCenter = true;
+    } catch (err) {
+      console.warn('center_time adjustment failed', err);
+    }
+  };
   let replayPrevPhase = null;
   let replayPrevNote = null;
   let replayHadStream = false;
@@ -959,6 +1070,9 @@
         }
       } else {
         chart.timeScale().fitContent();
+        if (centerTimeToken) {
+          applyTimeCentering({ force: true });
+        }
       }
     } else if (restoreChart) {
       const clonedCandles = latestCandleData.map((item) => ({ ...item }));
@@ -967,6 +1081,15 @@
       volumeSeries.setData(clonedVolume);
       latestCandleData = clonedCandles.map((item) => ({ ...item }));
       latestVolumeData = clonedVolume.map((item) => ({ ...item }));
+      chart.timeScale().fitContent();
+      if (centerTimeToken) {
+        applyTimeCentering({ force: true });
+      }
+    }
+    if (focusToken === 'plan') {
+      applyPlanPriceFocus(currentPlan, { force: true });
+    } else {
+      chart.priceScale('right').applyOptions({ autoScale: true });
     }
     const restoredLast = latestCandleData.length ? latestCandleData[latestCandleData.length - 1].close : null;
     if (Number.isFinite(restoredLast)) {
@@ -1232,6 +1355,8 @@
   const fetchBars = async () => {
     if (isReplaying) return;
     const token = ++fetchToken;
+    hasAppliedFocusRange = false;
+    hasAppliedTimeCenter = false;
     try {
       const now = Math.floor(Date.now() / 1000);
       const minSpan = resolutionToSeconds(currentResolution) * 200;
@@ -1456,7 +1581,16 @@
 
       candleSeries.setMarkers([]);
 
-      chart.priceScale('right').applyOptions({ autoScale: true });
+      if (focusToken === 'plan') {
+        applyPlanPriceFocus(planForFrame, { force: true });
+      } else {
+        chart.priceScale('right').applyOptions({ autoScale: true });
+      }
+
+      chart.timeScale().fitContent();
+      if (centerTimeToken) {
+        applyTimeCentering({ force: true });
+      }
 
       debugEl.style.display = 'none';
       debugEl.textContent = '';
