@@ -5,6 +5,7 @@ from starlette.requests import Request
 from src import polygon_options
 from src.polygon_options import fetch_polygon_option_chain_asof
 from src.agent_server import (
+    _expand_universe_tokens,
     _screen_contracts,
     AssistantExecRequest,
     AuthedUser,
@@ -28,6 +29,20 @@ async def test_fetch_polygon_option_chain_asof_filters_future_rows(monkeypatch):
 
     frame = await fetch_polygon_option_chain_asof("AAPL", "2024-01-01T15:00:00Z")
     assert list(frame["symbol"]) == ["KEEP"]
+
+
+@pytest.mark.asyncio
+async def test_expand_universe_tokens_resolves_top_active(monkeypatch):
+    async def fake_load_universe(*, style, sector, limit):  # noqa: ARG001
+        return ["AAPL", "MSFT", "NVDA"]
+
+    monkeypatch.setattr("src.agent_server.load_universe", fake_load_universe)
+
+    expanded = await _expand_universe_tokens(["top_active_setups", "TSLA"], style="scalp", limit=5)
+
+    assert expanded[:3] == ["AAPL", "MSFT", "NVDA"]
+    assert expanded[-1] == "TSLA"
+    assert "TOP_ACTIVE_SETUPS" not in expanded
 
 
 def test_screen_contracts_includes_liquidity_score():

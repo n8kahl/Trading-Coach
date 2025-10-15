@@ -72,7 +72,7 @@ from .db import (
     fetch_idea_snapshot as db_fetch_idea_snapshot,
     store_idea_snapshot as db_store_idea_snapshot,
 )
-from .data_sources import fetch_polygon_ohlcv
+from .data_sources import fetch_polygon_ohlcv, fetch_yahoo_ohlcv
 from .symbol_streamer import SymbolStreamCoordinator
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
@@ -123,6 +123,9 @@ DATA_SYMBOL_ALIASES: Dict[str, List[str]] = {
     "^OEX": ["SPX", "SPY"],
     "INDEX:OEX": ["SPX", "SPY"],
 }
+
+_MARKET_DATA_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_MARKET_DATA_CACHE_TTL = 300.0  # seconds
 
 _FUTURES_PROXY_MAP: Dict[str, str] = {
     "es_proxy": "SPY",
@@ -208,6 +211,32 @@ def _normalize_chart_interval(value: str) -> str:
     if token in {"d", "1d"}:
         return "1D"
     return token.upper()
+
+
+async def _expand_universe_tokens(symbols: List[str], *, style: str | None, limit: int) -> List[str]:
+    """Expand synthetic universe tokens (e.g., TOP_ACTIVE_SETUPS) into real tickers."""
+    if not symbols:
+        return []
+
+    expanded: List[str] = []
+    for symbol in symbols:
+        token = (symbol or "").strip().upper()
+        if not token:
+            continue
+        if token in {"TOP_ACTIVE_SETUPS", "TOP_ACTIVE", "TOP_ACTIVE_SCALPS"}:
+            try:
+                dynamic = await load_universe(style=style, sector=None, limit=limit)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Dynamic universe expansion failed for %s: %s", token, exc)
+                dynamic = []
+            for dyn_symbol in dynamic:
+                dyn_token = (dyn_symbol or "").strip().upper()
+                if dyn_token and dyn_token not in expanded:
+                    expanded.append(dyn_token)
+            continue
+        if token not in expanded:
+            expanded.append(token)
+    return expanded
 
 
 class ChartParams(BaseModel):
@@ -1074,9 +1103,12 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
         if poly is None or poly.empty:
             continue
         if not _is_stale_frame(poly, timeframe):
-            fresh_polygon = poly
+            fresh_polygon = poly.copy()
+            fresh_polygon.attrs["source"] = "polygon"
             break
-        stale_polygon = poly if stale_polygon is None else stale_polygon
+        stale_frame = poly.copy()
+        stale_frame.attrs["source"] = "polygon_stale"
+        stale_polygon = stale_frame if stale_polygon is None else stale_polygon
 
     if fresh_polygon is not None:
         return fresh_polygon
@@ -1084,6 +1116,20 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
     if stale_polygon is not None:
         logger.warning("Polygon data is stale for %s; returning last known data.", symbol)
         return stale_polygon
+
+    # Yahoo Finance fallback
+    for candidate in candidates:
+        try:
+            yahoo = await fetch_yahoo_ohlcv(candidate, timeframe)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Yahoo fallback failed for %s via %s: %s", symbol, candidate, exc)
+            continue
+        if yahoo is None or yahoo.empty:
+            continue
+        yahoo_frame = yahoo.copy()
+        yahoo_frame.attrs["source"] = "yahoo"
+        logger.warning("No Polygon data available for %s; using Yahoo fallback.", symbol)
+        return yahoo_frame
 
     logger.warning("No Polygon data available for %s", symbol)
     return None
@@ -1094,47 +1140,70 @@ async def _collect_market_data(
     timeframe: str = "5",
     *,
     as_of: datetime | None = None,
-) -> Dict[str, pd.DataFrame]:
-    """Fetch OHLCV for a list of tickers from Polygon."""
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, str]]:
+    """Fetch OHLCV for a list of tickers with caching and fallbacks."""
     tasks = [_load_remote_ohlcv(ticker, timeframe) for ticker in tickers]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     market_data: Dict[str, pd.DataFrame] = {}
+    source_map: Dict[str, str] = {}
+
+    now_monotonic = time.monotonic()
 
     for ticker, result in zip(tickers, results):
         frame: pd.DataFrame | None = None
+        source_label = "unknown"
+        cache_key = (ticker.upper(), timeframe)
         if isinstance(result, Exception):
             logger.warning("Data fetch raised for %s: %s", ticker, result)
         elif isinstance(result, pd.DataFrame) and not result.empty:
             frame = result
+
         if frame is None or frame.empty:
-            try:
-                normalized_interval = normalize_interval(timeframe)
-            except ValueError:
-                normalized_interval = "5m"
-            try:
-                fallback = await asyncio.to_thread(
-                    get_candles,
-                    ticker,
-                    normalized_interval,
-                    600,
-                )
-            except Exception as exc:
-                logger.warning("Fallback candle fetch failed for %s: %s", ticker, exc)
-                fallback = None
-            if isinstance(fallback, pd.DataFrame) and not fallback.empty:
-                frame = fallback
-            else:
-                logger.warning("No market data available for %s", ticker)
-                continue
+            cached = _MARKET_DATA_CACHE.get(cache_key)
+            if cached:
+                age = now_monotonic - float(cached.get("ts", 0.0))
+                if age < _MARKET_DATA_CACHE_TTL:
+                    cached_frame = cached["frame"].copy(deep=True)
+                    cached_source = cached.get("source") or "cache"
+                    cached_frame.attrs["source"] = f"{cached_source}_cached"
+                    frame = cached_frame
+                    source_label = f"{cached_source}_cached"
+                    logger.warning("Using cached market data for %s timeframe=%s", ticker, timeframe)
+            if frame is None or frame.empty:
+                try:
+                    yahoo_frame = await fetch_yahoo_ohlcv(ticker, timeframe)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Secondary Yahoo fallback failed for %s: %s", ticker, exc)
+                    yahoo_frame = None
+                if isinstance(yahoo_frame, pd.DataFrame) and not yahoo_frame.empty:
+                    frame = yahoo_frame
+                    frame.attrs["source"] = "yahoo"
+                    source_label = "yahoo"
+                else:
+                    source_map[ticker] = "missing"
+                    logger.warning("No market data available for %s", ticker)
+                    continue
+
+        if frame is not None:
+            source_label = frame.attrs.get("source", source_label or "live")
+            _MARKET_DATA_CACHE[cache_key] = {
+                "frame": frame.copy(deep=True),
+                "source": source_label,
+                "ts": now_monotonic,
+            }
+
         if as_of is not None:
             cutoff = pd.Timestamp(as_of).tz_convert("UTC")
             frame = frame.loc[frame.index <= cutoff]
             if frame.empty:
+                source_map[ticker] = f"{source_label}_empty"
                 logger.warning("No market data available for %s up to %s", ticker, cutoff)
                 continue
+
+        source_map[ticker] = source_label
         market_data[ticker] = frame
 
-    return market_data
+    return market_data, source_map
 
 
 def _resample_ohlcv(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
@@ -2635,7 +2704,8 @@ async def gpt_scan(
     limit = max(10, min(requested_limit, 250))
 
     if universe.tickers:
-        resolved_tickers = [symbol.upper() for symbol in universe.tickers if symbol]
+        base_symbols = [symbol.upper() for symbol in universe.tickers if symbol]
+        resolved_tickers = await _expand_universe_tokens(base_symbols, style=universe.style, limit=limit)
     else:
         try:
             resolved_tickers = await load_universe(
@@ -2650,7 +2720,8 @@ async def gpt_scan(
             raise HTTPException(status_code=502, detail="Ticker universe unavailable")
 
     if include_symbols:
-        resolved_tickers = list(dict.fromkeys(include_symbols + resolved_tickers))
+        expanded_includes = await _expand_universe_tokens(include_symbols, style=universe.style, limit=limit)
+        resolved_tickers = list(dict.fromkeys(expanded_includes + resolved_tickers))
     if exclude_set:
         resolved_tickers = [symbol for symbol in resolved_tickers if symbol not in exclude_set]
 
@@ -2665,13 +2736,33 @@ async def gpt_scan(
     data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}.get(style_filter, "5")
 
     settings = get_settings()
-    market_data = await _collect_market_data(
+    market_data, data_source_map = await _collect_market_data(
         resolved_tickers,
         timeframe=data_timeframe,
         as_of=None if is_open else as_of_dt,
     )
+    data_meta["sources"] = data_source_map
+    missing_symbols = [
+        symbol
+        for symbol, src in data_source_map.items()
+        if src.startswith("missing") or src.endswith("_empty")
+    ]
+    degraded_sources = [src for src in data_source_map.values() if src != "polygon"]
+    if missing_symbols:
+        data_meta["ok"] = False
+        data_meta["error"] = "data_gap"
+        data_meta["missing_symbols"] = missing_symbols
+        data_meta.setdefault("mode", "degraded")
+        logger.warning("Market data missing for %s", ",".join(missing_symbols))
+    if degraded_sources and not missing_symbols:
+        data_meta.setdefault("mode", "degraded")
+        if data_meta.get("ok", True):
+            data_meta["ok"] = False
+    if data_meta.get("mode") == "degraded":
+        data_meta.setdefault("banner", "Live feed degraded — using cached market data.")
     if not market_data:
-        raise HTTPException(status_code=502, detail="No market data available for the requested tickers.")
+        logger.warning("No market data available after fallbacks for %s", resolved_tickers)
+        return []
     signals = await scan_market(resolved_tickers, market_data)
 
     unique_symbols = sorted({signal.symbol for signal in signals})
@@ -2759,6 +2850,15 @@ async def gpt_scan(
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Polygon option chain request error: %s", exc)
             polygon_chains.clear()
+    if polygon_enabled and unique_symbols:
+        if any(not df.empty for df in polygon_chains.values()):
+            data_meta.setdefault("options_mode", "polygon")
+        else:
+            data_meta.setdefault("options_mode", "tradier")
+            data_meta.setdefault("mode", "degraded")
+            data_meta["ok"] = False
+    elif tradier_enabled:
+        data_meta.setdefault("options_mode", "tradier")
 
     tradier_suggestions: Dict[str, Dict[str, Any] | None] = {}
     if unique_symbols and tradier_enabled:
@@ -2959,34 +3059,38 @@ async def gpt_scan(
             if plan_dict.get("runner"):
                 chart_query["runner"] = json.dumps(plan_dict["runner"])
 
-    chart_links = None
-    required_chart_keys = {"direction", "entry", "stop", "tp"}
-    if required_chart_keys.issubset(chart_query.keys()):
-        try:
-            chart_links = await gpt_chart_url(ChartParams(**chart_query), request)
-        except HTTPException as exc:
-            logger.debug("chart link generation failed for %s: %s", signal.symbol, exc)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("chart link generation error for %s: %s", signal.symbol, exc)
+        chart_links = None
+        required_chart_keys = {"direction", "entry", "stop", "tp"}
+        if required_chart_keys.issubset(chart_query.keys()):
+            try:
+                chart_links = await gpt_chart_url(ChartParams(**chart_query), request)
+            except HTTPException as exc:
+                logger.debug("chart link generation failed for %s: %s", signal.symbol, exc)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("chart link generation error for %s: %s", signal.symbol, exc)
 
-    charts_payload: Dict[str, Any] = {"params": chart_query, "timeframe": chart_interval_hint, "guidance": hint_guidance}
-    if chart_links:
-        chart_query["interval"] = chart_interval_hint
-        charts_payload["interactive"] = chart_links.interactive
-        if chart_links.png:
-            charts_payload["png"] = chart_links.png
-    elif required_chart_keys.issubset(chart_query.keys()):
-        fallback_chart_url = _build_tv_chart_url(request, chart_query)
-        charts_payload["interactive"] = fallback_chart_url
-        logger.debug(
-            "chart link fallback used",
-            extra={"symbol": signal.symbol, "strategy_id": signal.strategy_id, "url": fallback_chart_url},
-        )
-        if "png" not in charts_payload:
-            charts_payload["png"] = _swap_chart_path(fallback_chart_url, "/tv", "/charts/png")
+        charts_payload: Dict[str, Any] = {
+            "params": chart_query,
+            "timeframe": chart_interval_hint,
+            "guidance": hint_guidance,
+        }
+        if chart_links:
+            chart_query["interval"] = chart_interval_hint
+            charts_payload["interactive"] = chart_links.interactive
+            if chart_links.png:
+                charts_payload["png"] = chart_links.png
+        elif required_chart_keys.issubset(chart_query.keys()):
+            fallback_chart_url = _build_tv_chart_url(request, chart_query)
+            charts_payload["interactive"] = fallback_chart_url
+            logger.debug(
+                "chart link fallback used",
+                extra={"symbol": signal.symbol, "strategy_id": signal.strategy_id, "url": fallback_chart_url},
+            )
+            if "png" not in charts_payload:
+                charts_payload["png"] = _swap_chart_path(fallback_chart_url, "/tv", "/charts/png")
 
-    if "interactive" in charts_payload and "png" not in charts_payload:
-        charts_payload["png"] = _swap_chart_path(charts_payload["interactive"], "/tv", "/charts/png")
+        if "interactive" in charts_payload and "png" not in charts_payload:
+            charts_payload["png"] = _swap_chart_path(charts_payload["interactive"], "/tv", "/charts/png")
 
         polygon_bundle: Dict[str, Any] | None = None
         if polygon_chains:
@@ -2995,7 +3099,9 @@ async def gpt_scan(
             if polygon_bundle is None:
                 chain = polygon_chains.get(signal.symbol)
                 rules = signal.options_rules if isinstance(signal.options_rules, dict) else None
-                polygon_bundle = summarize_polygon_chain(chain, rules=rules, top_n=3) if chain is not None else None
+                polygon_bundle = (
+                    summarize_polygon_chain(chain, rules=rules, top_n=3) if chain is not None else None
+                )
                 options_cache[cache_key] = polygon_bundle
 
         best_contract = None
@@ -3049,13 +3155,14 @@ async def _generate_fallback_plan(
     timeframe_map = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}
     timeframe = timeframe_map.get(style_token, "5")
     try:
-        market_data = await _collect_market_data(
+        market_data, data_sources = await _collect_market_data(
             [symbol],
             timeframe=timeframe,
             as_of=None if is_open else as_of_dt,
         )
     except HTTPException:
         return None
+    data_meta["sources"] = data_sources
     frame = market_data.get(symbol)
     if frame is None or frame.empty:
         return None
@@ -3724,6 +3831,10 @@ async def gpt_plan(
         session_state_payload = market_meta_context.get("session_state")
     if session_state_payload is None and isinstance(data_meta_context, dict):
         session_state_payload = data_meta_context.get("session_state")
+    if isinstance(data_meta_context, dict):
+        mode_token = str(data_meta_context.get("mode") or "").lower()
+        if mode_token == "degraded" and planning_context_value != "frozen":
+            planning_context_value = "degraded"
 
     entry_for_engine = entry_val
     if entry_for_engine is None:
@@ -3957,8 +4068,6 @@ async def gpt_plan(
             data_meta.setdefault("ok", fallback_data.get("ok", True))
     if planning_context_value is None:
         planning_context_value = "live"
-    if planning_context_value is None:
-        planning_context_value = "live"
 
     logger.info(
         "plan response ready",
@@ -3978,7 +4087,7 @@ async def gpt_plan(
         trade_detail=trade_detail_url,
         idea_url=trade_detail_url,
         warnings=plan_warnings or None,
-        planning_context="frozen" if market_meta.get("status") != "open" else "live",
+        planning_context=planning_context_value,
         symbol=first.get("symbol"),
         style=first.get("style"),
         bias=bias_output,

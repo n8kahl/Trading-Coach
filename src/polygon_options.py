@@ -8,6 +8,7 @@ summaries (best contract plus a few alternatives) driven by strategy rules.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 import logging
 import math
@@ -75,8 +76,6 @@ async def fetch_polygon_option_chain(symbol: str, expiration: str | None = None,
         "limit": limit,
         "order": "asc",
         "sort": "expiration_date",
-        "include_greeks": "true",
-        "include_volatility": "true",
         "apiKey": api_key,
     }
     if expiration:
@@ -85,14 +84,27 @@ async def fetch_polygon_option_chain(symbol: str, expiration: str | None = None,
     url = f"{POLYGON_BASE_URL}/v3/snapshot/options/{symbol.upper()}"
     timeout = httpx.Timeout(8.0, connect=4.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            logger.warning("Polygon option snapshot failed for %s: %s", symbol, exc)
+        response: httpx.Response | None = None
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in {400, 403, 404}:
+                    logger.warning("Polygon option snapshot rejected for %s (status %s)", symbol, status)
+                    return pd.DataFrame()
+                last_error = exc
+            except httpx.HTTPError as exc:  # pragma: no cover - network
+                last_error = exc
+            await asyncio.sleep(0.5 * (attempt + 1))
+        else:
+            logger.warning("Polygon option snapshot failed for %s: %s", symbol, last_error)
             return pd.DataFrame()
 
-    payload = resp.json()
+    payload = response.json()
     results = payload.get("results") or []
     if not results:
         return pd.DataFrame()
