@@ -2812,19 +2812,22 @@ async def gpt_scan(
 
         base_url = str(request.base_url).rstrip("/")
         interval = _timeframe_for_style(style)
+        chart_query: Dict[str, Any] = {}
         hint_interval_raw, hint_guidance = _chart_hint(signal.strategy_id, style)
         try:
             chart_interval_hint = normalize_interval(hint_interval_raw)
         except ValueError:
             chart_interval_hint = interval
-        chart_query: Dict[str, Any] = {
-            "symbol": signal.symbol.upper(),
-            "interval": chart_interval_hint,
-            "ema": ",".join(str(span) for span in ema_spans),
-            "view": _view_for_style(style),
-            "vwap": "1",
-            "theme": "dark",
-        }
+        chart_query.update(
+            {
+                "symbol": signal.symbol.upper(),
+                "interval": chart_interval_hint,
+                "ema": ",".join(str(span) for span in ema_spans),
+                "view": _view_for_style(style),
+                "vwap": "1",
+                "theme": "dark",
+            }
+        )
         plan_payload: Dict[str, Any] | None = None
         enhancements: Dict[str, Any] | None = None
         chain = polygon_chains.get(signal.symbol)
