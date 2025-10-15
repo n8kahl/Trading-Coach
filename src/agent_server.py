@@ -72,7 +72,7 @@ from .db import (
     fetch_idea_snapshot as db_fetch_idea_snapshot,
     store_idea_snapshot as db_store_idea_snapshot,
 )
-from .data_sources import fetch_polygon_ohlcv, fetch_yahoo_ohlcv
+from .data_sources import fetch_polygon_ohlcv
 from .symbol_streamer import SymbolStreamCoordinator
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
@@ -111,6 +111,10 @@ ALLOWED_CHART_KEYS = {
     "avwap",
     "focus",
     "center_time",
+    "data_source",
+    "data_mode",
+    "data_age_ms",
+    "last_update",
 }
 
 
@@ -1117,20 +1121,6 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
         logger.warning("Polygon data is stale for %s; returning last known data.", symbol)
         return stale_polygon
 
-    # Yahoo Finance fallback
-    for candidate in candidates:
-        try:
-            yahoo = await fetch_yahoo_ohlcv(candidate, timeframe)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Yahoo fallback failed for %s via %s: %s", symbol, candidate, exc)
-            continue
-        if yahoo is None or yahoo.empty:
-            continue
-        yahoo_frame = yahoo.copy()
-        yahoo_frame.attrs["source"] = "yahoo"
-        logger.warning("No Polygon data available for %s; using Yahoo fallback.", symbol)
-        return yahoo_frame
-
     logger.warning("No Polygon data available for %s", symbol)
     return None
 
@@ -1170,19 +1160,9 @@ async def _collect_market_data(
                     source_label = f"{cached_source}_cached"
                     logger.warning("Using cached market data for %s timeframe=%s", ticker, timeframe)
             if frame is None or frame.empty:
-                try:
-                    yahoo_frame = await fetch_yahoo_ohlcv(ticker, timeframe)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.debug("Secondary Yahoo fallback failed for %s: %s", ticker, exc)
-                    yahoo_frame = None
-                if isinstance(yahoo_frame, pd.DataFrame) and not yahoo_frame.empty:
-                    frame = yahoo_frame
-                    frame.attrs["source"] = "yahoo"
-                    source_label = "yahoo"
-                else:
-                    source_map[ticker] = "missing"
-                    logger.warning("No market data available for %s", ticker)
-                    continue
+                source_map[ticker] = "missing"
+                logger.warning("No market data available for %s", ticker)
+                continue
 
         if frame is not None:
             source_label = frame.attrs.get("source", source_label or "live")
@@ -2889,6 +2869,22 @@ async def gpt_scan(
                 continue
         latest_row = history.iloc[-1]
         entry_price = float(latest_row["close"])
+        last_bar_ts = history.index[-1]
+        if isinstance(last_bar_ts, pd.Timestamp):
+            if last_bar_ts.tzinfo is None:
+                last_bar_ts = last_bar_ts.tz_localize("UTC")
+            else:
+                last_bar_ts = last_bar_ts.tz_convert("UTC")
+        else:
+            last_bar_ts = pd.Timestamp.utcnow().tz_localize("UTC")
+        last_update_iso = last_bar_ts.isoformat()
+        freshness_val = None
+        if symbol_freshness:
+            try:
+                freshness_val = float(symbol_freshness.get(signal.symbol))
+            except (TypeError, ValueError):
+                freshness_val = None
+        source_label = data_source_map.get(signal.symbol)
         key_levels = _extract_key_levels(history)
         # Strategy direction inference hint (AI will make the final decision)
         direction_hint = signal.features.get("direction_bias")
@@ -2928,6 +2924,16 @@ async def gpt_scan(
                 "theme": "dark",
             }
         )
+        chart_query["last_update"] = last_update_iso
+        if freshness_val is not None:
+            try:
+                chart_query["data_age_ms"] = str(int(freshness_val))
+            except (TypeError, ValueError):
+                chart_query["data_age_ms"] = str(freshness_val)
+        if source_label:
+            chart_query["data_source"] = source_label
+        if data_meta.get("mode"):
+            chart_query["data_mode"] = str(data_meta.get("mode"))
         plan_payload: Dict[str, Any] | None = None
         enhancements: Dict[str, Any] | None = None
         chain = polygon_chains.get(signal.symbol)
@@ -3074,6 +3080,13 @@ async def gpt_scan(
             "timeframe": chart_interval_hint,
             "guidance": hint_guidance,
         }
+        charts_payload["last_update"] = last_update_iso
+        if source_label:
+            charts_payload["data_source"] = source_label
+        if data_meta.get("mode"):
+            charts_payload["data_mode"] = str(data_meta.get("mode"))
+        if freshness_val is not None:
+            charts_payload["data_age_ms"] = int(freshness_val)
         if chart_links:
             chart_query["interval"] = chart_interval_hint
             charts_payload["interactive"] = chart_links.interactive

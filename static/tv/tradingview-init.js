@@ -152,6 +152,12 @@
   });
   keyLevels = dedupedLevels;
 
+  const dataSourceRaw = (params.get('data_source') || '').trim();
+  const dataModeToken = (params.get('data_mode') || '').trim().toLowerCase();
+  const dataAgeMsParam = Number(params.get('data_age_ms') || '');
+  const lastUpdateRaw = (params.get('last_update') || '').trim();
+  const isDegradedFeed = dataModeToken === 'degraded';
+
   const focusToken = (params.get('focus') || '').toLowerCase();
   const centerTimeParamRaw = params.get('center_time');
   const centerTimeToken = typeof centerTimeParamRaw === 'string' ? centerTimeParamRaw.trim() : '';
@@ -170,11 +176,149 @@
   const headerLastPriceEl = document.getElementById('header_lastprice');
   const headerPlanStatusEl = document.getElementById('header_planstatus');
   const headerMarketEl = document.getElementById('header_market');
+  const headerLastUpdateEl = document.getElementById('header_lastupdate');
+  const headerDataSourceEl = document.getElementById('header_datasource');
   const planStatusNoteEl = document.getElementById('plan_status_note');
   const timeframeSwitcherEl = document.getElementById('timeframe_switcher');
   const planPanelEl = document.getElementById('plan_panel');
   const planPanelBodyEl = document.getElementById('plan_panel_body');
   const debugEl = document.getElementById('debug_banner');
+
+  const planLogEntries = [];
+  const PLAN_LOG_LIMIT = 60;
+  let planLogListEl = null;
+  let planLogEmptyEl = null;
+
+  const escapeHtml = (value) =>
+    typeof value === 'string'
+      ? value
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+      : value;
+
+  const parseIsoDate = (value) => {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
+
+  const etDateFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  const etTimeFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
+  const formatRelativeDuration = (ms) => {
+    if (!Number.isFinite(ms) || ms < 0) return '';
+    const seconds = Math.round(ms / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `${hours}h`;
+    const days = Math.round(hours / 24);
+    return `${days}d`;
+  };
+
+  let dataLastUpdateDate = parseIsoDate(lastUpdateRaw);
+  let dataAgeMs = Number.isFinite(dataAgeMsParam) ? dataAgeMsParam : null;
+
+  const friendlySourceLabel = (token) => {
+    const normalized = (token || '').trim().toLowerCase();
+    if (!normalized) return '';
+    if (normalized === 'polygon') return 'Polygon';
+    if (normalized === 'polygon_cached') return 'Polygon (cached)';
+    if (normalized === 'polygon_stale') return 'Polygon (stale)';
+    return (token || '').replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+  };
+
+  const formatLogTime = (timestampSeconds) => {
+    if (!Number.isFinite(timestampSeconds)) return '';
+    const date = new Date(timestampSeconds * 1000);
+    return `${etTimeFormatter.format(date)} ET`;
+  };
+
+  const renderPlanLog = () => {
+    if (!planLogListEl || !planLogEmptyEl) return;
+    if (!planLogEntries.length) {
+      planLogListEl.innerHTML = '';
+      planLogEmptyEl.style.display = 'block';
+      return;
+    }
+    planLogEmptyEl.style.display = 'none';
+    const itemsHtml = planLogEntries
+      .map((entry) => {
+        const severityClass = entry.severity === 'alert' ? ' plan-log__entry--alert' : '';
+        const timeLabel = formatLogTime(entry.ts);
+        const safeMessage = escapeHtml(entry.message);
+        return `<li class="plan-log__entry${severityClass}"><span class="plan-log__time">${timeLabel}</span><span class="plan-log__message">${safeMessage}</span></li>`;
+      })
+      .join('');
+    planLogListEl.innerHTML = itemsHtml;
+  };
+
+  const appendPlanLogEntry = (message, timestampSeconds = Math.floor(Date.now() / 1000), severity = 'info') => {
+    if (!message && message !== 0) return;
+    const raw = String(message).trim();
+    if (!raw) return;
+    const ts = Number.isFinite(timestampSeconds) ? Number(timestampSeconds) : Math.floor(Date.now() / 1000);
+    planLogEntries.unshift({ message: raw, ts, severity });
+    if (planLogEntries.length > PLAN_LOG_LIMIT) {
+      planLogEntries.length = PLAN_LOG_LIMIT;
+    }
+    renderPlanLog();
+  };
+
+  const setDataLastUpdate = (timestampSeconds) => {
+    if (!Number.isFinite(timestampSeconds)) return;
+    dataLastUpdateDate = new Date(timestampSeconds * 1000);
+    dataAgeMs = 0;
+    updateDataMetadata();
+  };
+
+  const updateDataMetadata = () => {
+    if (headerLastUpdateEl) {
+      if (dataLastUpdateDate) {
+        const age = Number.isFinite(dataAgeMs) ? dataAgeMs : Date.now() - dataLastUpdateDate.getTime();
+        const rel = Number.isFinite(age) ? formatRelativeDuration(age) : '';
+        const formatted = etDateFormatter.format(dataLastUpdateDate);
+        headerLastUpdateEl.textContent = `Last update: ${formatted} ET${rel ? ` · ${rel} ago` : ''}`;
+      } else {
+        headerLastUpdateEl.textContent = '';
+      }
+    }
+    if (headerDataSourceEl) {
+      const sourceLabel = friendlySourceLabel(dataSourceRaw);
+      const parts = [];
+      if (sourceLabel) parts.push(`Data: ${sourceLabel}`);
+      if (isDegradedFeed) parts.push('Degraded');
+      headerDataSourceEl.textContent = parts.join(' · ');
+      headerDataSourceEl.classList.toggle('plan-header__meta--alert', isDegradedFeed);
+    }
+  };
+
+  const isAlertSeverity = (token) => {
+    if (!token) return false;
+    const normalized = token.toLowerCase();
+    return normalized !== 'intact';
+  };
+
+  updateDataMetadata();
+
+  window.setInterval(() => {
+    if (!dataLastUpdateDate) return;
+    dataAgeMs = Date.now() - dataLastUpdateDate.getTime();
+    updateDataMetadata();
+  }, 60000);
 
   const showError = (message) => {
     if (!debugEl) return;
@@ -276,6 +420,9 @@
   let latestPlanNote = 'Plan intact. Risk profile unchanged.';
   let latestNextStep = 'hold_plan';
   let latestMarketNote = null;
+  if (isDegradedFeed) {
+    latestMarketNote = 'Data feed degraded — using last Polygon bars.';
+  }
   let currentMarketPhase = null;
   let streamSource = null;
   let latestCandleData = [];
@@ -289,6 +436,7 @@
   let replayTimer = null;
 
   let planFocusSeries = null;
+  let loggedInitialPlan = false;
 
   const ensurePlanFocusSeries = () => {
     if (planFocusSeries) {
@@ -466,6 +614,14 @@
     reversal: { label: 'Plan Reversal', className: 'status-pill--reversal' },
   };
 
+  const statusLabel = (token) => {
+    if (!token) return null;
+    const normalized = token.toLowerCase();
+    const meta = PLAN_STATUS_META[normalized];
+    if (meta) return meta.label;
+    return token.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+  };
+
   const NEXT_STEP_LABELS = {
     hold_plan: 'Hold plan',
     tighten_stop: 'Tighten stop',
@@ -576,6 +732,16 @@
     } else {
       latestMarketNote = meta.note;
     }
+    if (isDegradedFeed) {
+      const degradeCopy = 'Data feed degraded — using last Polygon bars.';
+      if (latestMarketNote) {
+        if (!latestMarketNote.toLowerCase().includes('degraded')) {
+          latestMarketNote = `${latestMarketNote} · ${degradeCopy}`;
+        }
+      } else {
+        latestMarketNote = degradeCopy;
+      }
+    }
     updateStatusNote();
   };
 
@@ -606,11 +772,31 @@
     const statusToken = changes.status || payload.status || currentPlanStatus;
     const rrValue = Number.isFinite(changes.rr_to_t1) ? changes.rr_to_t1 : null;
     applyPlanStatus(statusToken, changes.note, changes.next_step, rrValue);
+    const eventTs = parseEventTimestamp(payload);
+    const logParts = [];
+    if (changes.status) {
+      logParts.push(`Status → ${statusLabel(changes.status) || changes.status}`);
+    }
+    if (changes.note) {
+      logParts.push(changes.note);
+    }
+    if (changes.next_step) {
+      const stepLabel = formatNextStep(changes.next_step);
+      if (stepLabel) {
+        logParts.push(`Next: ${stepLabel}`);
+      }
+    }
+    if (logParts.length) {
+      appendPlanLogEntry(logParts.join(' • '), eventTs, isAlertSeverity(statusToken) ? 'alert' : 'info');
+    }
     if (Number.isFinite(changes.last_price)) {
       lastKnownPrice = changes.last_price;
       updateHeaderPricing(lastKnownPrice);
       renderPlanPanel(lastKnownPrice);
       updatePlanPanelLastPrice(lastKnownPrice);
+    }
+    if (Number.isFinite(eventTs)) {
+      setDataLastUpdate(eventTs);
     }
   };
 
@@ -619,16 +805,25 @@
     const planBlock = payload.plan || {};
     if (!matchesPlan(planBlock.plan_id)) return;
     applyPlanStatus('intact', 'Plan updated. Review levels.', 'hold_plan', planBlock.rr_to_t1);
+    const eventTs = parseEventTimestamp(payload);
+    appendPlanLogEntry('Plan refreshed — review latest guidance.', eventTs, 'info');
+    if (Number.isFinite(eventTs)) {
+      setDataLastUpdate(eventTs);
+    }
   };
 
   const handleTickEvent = (payload) => {
     if (!payload || isReplaying) return;
+    const eventTs = parseEventTimestamp(payload);
     const price = Number.isFinite(payload.p) ? payload.p : Number.isFinite(payload.close) ? payload.close : null;
     if (price === null) return;
     lastKnownPrice = price;
     updateHeaderPricing(price);
     updatePlanPanelLastPrice(price);
     updateRealtimeBar(price, payload);
+    if (Number.isFinite(eventTs)) {
+      setDataLastUpdate(eventTs);
+    }
   };
 
   const connectStream = () => {
@@ -829,6 +1024,7 @@
     if (headerDurationEl) {
       headerDurationEl.textContent = estimateDuration() || '';
     }
+    updateDataMetadata();
   };
 
   const renderPlanPanel = (lastPrice) => {
@@ -924,6 +1120,11 @@
           }
         </ul>
       </div>
+      <div class="plan-panel__section">
+        <h3>Plan Log</h3>
+        <ul class="plan-log" id="plan_log"></ul>
+        <p class="plan-log__empty" id="plan_log_empty">No management updates yet.</p>
+      </div>
       <div class="plan-panel__section plan-replay">
         <h3>Market Replay</h3>
         <div class="plan-replay__controls">
@@ -957,6 +1158,16 @@
       } else {
         planPanelEl.open = true;
       }
+    }
+    planLogListEl = document.getElementById('plan_log');
+    planLogEmptyEl = document.getElementById('plan_log_empty');
+    renderPlanLog();
+    if (!loggedInitialPlan) {
+      const initialMessage = isDegradedFeed
+        ? 'Plan loaded — data feed degraded; use cached Polygon bars until live resumes.'
+        : 'Plan loaded — follow the checklist before acting.';
+      appendPlanLogEntry(initialMessage, Math.floor(Date.now() / 1000), isDegradedFeed ? 'alert' : 'info');
+      loggedInitialPlan = true;
     }
     attachReplayControls();
     updatePlanPanelLastPrice(lastPrice);
@@ -1442,6 +1653,13 @@
         close: payload.c[idx],
         volume: payload.v[idx] || 0,
       }));
+
+      if (bars.length) {
+        const lastBar = bars[bars.length - 1];
+        if (Number.isFinite(lastBar?.time)) {
+          setDataLastUpdate(lastBar.time);
+        }
+      }
 
       const planForFrame = clonePlan();
 

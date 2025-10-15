@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import html
 import json
+import logging
 import math
 from typing import Dict, Iterable, List, Optional, Sequence
 from urllib.parse import urlencode
@@ -25,6 +26,8 @@ from fastapi.responses import HTMLResponse, Response
 from .config import get_settings
 
 router = APIRouter(prefix="/charts", tags=["charts"])
+
+logger = logging.getLogger(__name__)
 
 INTERVAL_FREQ = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1h", "d": "1D"}
 INTERVAL_ALIASES = {
@@ -134,54 +137,6 @@ def _fetch_polygon_candles(symbol: str, interval: str, lookback: int) -> pd.Data
     return frame
 
 
-def _fetch_yahoo_candles(symbol: str, interval: str) -> pd.DataFrame | None:
-    """Fetch candles from Yahoo Finance as a secondary live data source."""
-    interval_map = {
-        "1m": ("5d", "1m"),
-        "5m": ("5d", "5m"),
-        "15m": ("1mo", "15m"),
-        "1h": ("3mo", "60m"),
-        "d": ("1y", "1d"),
-    }
-    range_span, yahoo_interval = interval_map.get(interval, ("5d", "5m"))
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol.upper()}"
-    params = {"interval": yahoo_interval, "range": range_span, "includePrePost": "false"}
-    try:
-        with httpx.Client(timeout=6.0) as client:
-            resp = client.get(url, params=params)
-            resp.raise_for_status()
-    except httpx.HTTPError:
-        return None
-
-    payload = resp.json()
-    try:
-        chart = payload["chart"]
-        if chart.get("error"):
-            return None
-        result = chart["result"][0]
-    except (KeyError, IndexError, TypeError, ValueError):
-        return None
-
-    timestamps = result.get("timestamp")
-    if not timestamps:
-        return None
-    quote = result["indicators"]["quote"][0]
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(timestamps, unit="s", utc=True),
-            "open": quote.get("open"),
-            "high": quote.get("high"),
-            "low": quote.get("low"),
-            "close": quote.get("close"),
-            "volume": quote.get("volume"),
-        }
-    ).dropna()
-    if frame.empty:
-        return None
-    frame = frame.set_index("timestamp").sort_index()
-    return frame
-
-
 def _is_stale(frame: pd.DataFrame, interval: str) -> bool:
     """Return True if the latest candle timestamp is older than expected for the interval."""
     if frame.empty:
@@ -199,15 +154,16 @@ def _is_stale(frame: pd.DataFrame, interval: str) -> bool:
 
 
 def get_candles(symbol: str, interval: str, lookback: int = 300) -> pd.DataFrame:
-    """Return live OHLCV candles sourced from Polygon.io or Yahoo Finance."""
+    """Return live OHLCV candles sourced from Polygon.io."""
     normalized = normalize_interval(interval)
     lookback = int(max(20, min(lookback, MAX_LOOKBACK)))
 
     frame = _fetch_polygon_candles(symbol, normalized, lookback)
-    if frame is None or _is_stale(frame, normalized):
-        frame = _fetch_yahoo_candles(symbol, normalized)
     if frame is None or frame.empty:
         raise HTTPException(status_code=502, detail=f"No market data available for {symbol.upper()} ({normalized}).")
+
+    if _is_stale(frame, normalized):
+        logger.warning("Polygon data is stale for %s interval=%s", symbol.upper(), normalized)
 
     frame = frame.sort_index().tail(lookback)
     frame = frame.reset_index().rename(columns={"timestamp": "time"})

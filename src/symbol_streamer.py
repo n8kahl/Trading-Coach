@@ -73,36 +73,6 @@ async def _fetch_finnhub_quote(symbol: str, api_key: str) -> QuoteResult:
     )
 
 
-async def _fetch_yahoo_last_trade(symbol: str) -> QuoteResult:
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol.upper()}"
-    params = {"interval": "1m", "range": "1d", "includePrePost": "false"}
-    timeout = httpx.Timeout(5.0, connect=2.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            payload = resp.json()
-        except httpx.HTTPError as exc:
-            logger.debug("yahoo last trade request failed", exc_info=exc, extra={"symbol": symbol})
-            return QuoteResult(price=None, timestamp=None, source="yahoo", error="yahoo_error")
-    try:
-        result = payload["chart"]["result"][0]
-        timestamps = result.get("timestamp") or []
-        quote = result["indicators"]["quote"][0]
-        closes = quote.get("close") or []
-    except (KeyError, IndexError, TypeError) as exc:
-        logger.debug("yahoo payload parse failed", exc_info=exc, extra={"symbol": symbol})
-        return QuoteResult(price=None, timestamp=None, source="yahoo", error="yahoo_error")
-    if not timestamps or not closes:
-        return QuoteResult(price=None, timestamp=None, source="yahoo", error="yahoo_empty")
-    price = closes[-1]
-    ts = timestamps[-1]
-    if price is None:
-        return QuoteResult(price=None, timestamp=None, source="yahoo", error="yahoo_no_price")
-    timestamp = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-    return QuoteResult(price=float(price), timestamp=timestamp, source="yahoo", error=None)
-
-
 async def fetch_live_quote(symbol: str) -> QuoteResult:
     """Attempt to fetch the latest trade from available providers."""
 
@@ -118,10 +88,6 @@ async def fetch_live_quote(symbol: str) -> QuoteResult:
         if quote.price is not None:
             return quote
         errors.append(quote.error or "finnhub_error")
-    yahoo_quote = await _fetch_yahoo_last_trade(symbol)
-    if yahoo_quote.price is not None:
-        return yahoo_quote
-    errors.append(yahoo_quote.error or "yahoo_error")
     try:
         polygon_frame = await fetch_polygon_ohlcv(symbol.upper(), "1")
     except Exception as exc:  # pragma: no cover - defensive
