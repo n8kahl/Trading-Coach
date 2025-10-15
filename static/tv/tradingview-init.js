@@ -287,6 +287,23 @@
   let replayIndex = 0;
   let replayTimer = null;
 
+  let planFocusSeries = null;
+
+  const ensurePlanFocusSeries = () => {
+    if (planFocusSeries) {
+      return planFocusSeries;
+    }
+    planFocusSeries = chart.addLineSeries({
+      color: 'rgba(0,0,0,0)',
+      lineWidth: 0,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+      visible: false,
+    });
+    return planFocusSeries;
+  };
+
   const collectPlanFocusValues = (plan) => {
     const values = [];
     if (plan) {
@@ -313,7 +330,10 @@
   };
 
   const applyPlanPriceFocus = (plan, { force = false } = {}) => {
+    const focusSeries = ensurePlanFocusSeries();
     if (focusToken !== 'plan') {
+      focusSeries.setData([]);
+      focusSeries.applyOptions({ visible: false });
       chart.priceScale('right').applyOptions({ autoScale: true });
       hasAppliedFocusRange = false;
       return;
@@ -334,12 +354,21 @@
     const baselinePad = Math.max(span * padPct, span * 0.05);
     const atrPad = Number.isFinite(plan?.atr) && plan.atr > 0 ? plan.atr * 0.5 : 0;
     const pad = Math.max(baselinePad, atrPad);
-    const priceScale = chart.priceScale('right');
-    priceScale.applyOptions({ autoScale: false });
-    priceScale.setPriceRange({
-      minValue: minPrice - pad,
-      maxValue: maxPrice + pad,
-    });
+    const startTime = latestCandleData.length ? latestCandleData[0].time : undefined;
+    const endTime = latestCandleData.length ? latestCandleData[latestCandleData.length - 1].time : undefined;
+    if (startTime == null || endTime == null) {
+      focusSeries.setData([]);
+      focusSeries.applyOptions({ visible: false });
+      chart.priceScale('right').applyOptions({ autoScale: true });
+      hasAppliedFocusRange = false;
+      return;
+    }
+    focusSeries.setData([
+      { time: startTime, value: minPrice - pad },
+      { time: endTime, value: maxPrice + pad },
+    ]);
+    focusSeries.applyOptions({ visible: true });
+    chart.priceScale('right').applyOptions({ autoScale: true });
     hasAppliedFocusRange = true;
   };
 

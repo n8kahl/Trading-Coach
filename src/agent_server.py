@@ -379,6 +379,8 @@ class PlanResponse(BaseModel):
     earnings: Dict[str, Any] | None = None
     charts_params: Dict[str, Any] | None = None
     chart_url: str | None = None
+    chart_png: str | None = None
+    chart_inline_markdown: str | None = None
     strategy_id: str | None = None
     description: str | None = None
     score: float | None = None
@@ -401,6 +403,7 @@ class PlanResponse(BaseModel):
     market: Dict[str, Any] | None = None
     data: Dict[str, Any] | None = None
     session_state: Dict[str, Any] | None = None
+    confidence_visual: str | None = None
 
 
 class AssistantExecRequest(BaseModel):
@@ -1576,6 +1579,29 @@ def _risk_reward(entry: float, stop: float, target: float, direction: str) -> fl
     if risk <= 0 or reward <= 0:
         return None
     return reward / risk
+
+
+def _confidence_visual(confidence: Optional[float]) -> Optional[str]:
+    if confidence is None:
+        return None
+    try:
+        numeric = float(confidence)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    rating = _clamp(numeric, 0.0, 1.0)
+    if rating >= 0.8:
+        color = "🟢"
+    elif rating >= 0.6:
+        color = "🟡"
+    elif rating >= 0.4:
+        color = "🟠"
+    else:
+        color = "🔴"
+    filled = max(0, min(5, round(rating * 5)))
+    stars = "⭐" * filled + "☆" * (5 - filled)
+    return f"{color} {rating:.2f} · {stars}"
 
 
 def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
@@ -3062,6 +3088,7 @@ async def _generate_fallback_plan(
     if isinstance(expected_move_abs, (int, float)) and math.isfinite(expected_move_abs) and expected_move_abs > 0:
         expected_move_pct = (expected_move_abs / close_price) * 100 if close_price else 0.0
         expected_move_basis = f"EM ≈ {expected_move_abs:.2f} ({expected_move_pct:.1f}%)"
+    confidence_visual = _confidence_visual(confidence)
     target_meta = []
     for idx, target in enumerate(targets, start=1):
         distance = round(abs(target - entry), 2)
@@ -3123,6 +3150,7 @@ async def _generate_fallback_plan(
             "plan_version": "1",
         },
     )
+    inline_markdown = None
     if chart_png:
         chart_png = _append_query_params(
             chart_png,
@@ -3131,6 +3159,7 @@ async def _generate_fallback_plan(
                 "plan_version": "1",
             },
         )
+        inline_markdown = f"[![{symbol.upper()} plan]({chart_png})]({chart_url_with_ids})"
     plan_block = {
         "symbol": symbol.upper(),
         "style": style_token,
@@ -3150,6 +3179,12 @@ async def _generate_fallback_plan(
         "strategy": "baseline_auto",
         "debug": {"source": "auto_fallback_plan"},
     }
+    if chart_png:
+        plan_block["chart_png"] = chart_png
+    if inline_markdown:
+        plan_block["chart_inline_markdown"] = inline_markdown
+    if confidence_visual:
+        plan_block["confidence_visual"] = confidence_visual
     plan_warnings: List[str] = []
     target_profile = build_target_profile(
         entry=entry,
@@ -3177,10 +3212,14 @@ async def _generate_fallback_plan(
         session=market_meta.get("session_state"),
         confluence=confidence_factors or None,
     )
+    if confidence_visual:
+        structured_plan["confidence_visual"] = confidence_visual
     chart_params_payload = {key: str(value) for key, value in chart_params.items()}
     charts_payload: Dict[str, Any] = {"params": chart_params_payload, "interactive": chart_url_with_ids}
     if chart_png:
         charts_payload["png"] = chart_png
+    if inline_markdown:
+        charts_payload["inline_markdown"] = inline_markdown
     data_payload = dict(data_meta)
     data_payload["bars"] = f"{str(request.base_url).rstrip('/')}/gpt/context/{symbol.upper()}?interval={interval_token}&lookback=300"
     data_payload["session_state"] = market_meta.get("session_state")
@@ -3242,6 +3281,9 @@ async def _generate_fallback_plan(
         market=market_meta,
         data=data_payload,
         session_state=market_meta.get("session_state"),
+        chart_png=chart_png,
+        chart_inline_markdown=inline_markdown,
+        confidence_visual=confidence_visual,
     )
     return response
 
@@ -3408,6 +3450,13 @@ async def gpt_plan(
         )
         charts_payload["interactive"] = chart_url_value
         if chart_png_value:
+            chart_png_value = _append_query_params(
+                chart_png_value,
+                {
+                    "plan_id": plan_id,
+                    "plan_version": str(version),
+                },
+            )
             charts_payload["png"] = chart_png_value
     elif chart_params_payload and {"direction", "entry", "stop", "tp"}.issubset(chart_params_payload.keys()):
         fallback_chart_url = _build_tv_chart_url(request, chart_params_payload)
@@ -3710,6 +3759,12 @@ async def gpt_plan(
     targets_output = plan.get("targets") or (targets_list if targets_list else None)
     rr_output = plan.get("risk_reward")
     confidence_output = plan.get("confidence")
+    confidence_visual_value = _confidence_visual(confidence_output)
+    if confidence_visual_value:
+        if plan:
+            plan["confidence_visual"] = confidence_visual_value
+        if structured_plan_payload:
+            structured_plan_payload["confidence_visual"] = confidence_visual_value
     notes_output = (plan.get("notes") or "").strip() if plan else ""
     if plan and "watch plan" in notes_output.lower():
         plan["notes"] = None
@@ -3747,6 +3802,22 @@ async def gpt_plan(
     charts_field = charts_payload or None
     charts_params_output = chart_params_payload or None
     chart_url_output = chart_url_value or None
+    chart_inline_markdown_value = None
+    if chart_png_value and chart_url_output:
+        chart_inline_markdown_value = f"[![{symbol.upper()} plan]({chart_png_value})]({chart_url_output})"
+        if charts_field is not None:
+            charts_field.setdefault("inline_markdown", chart_inline_markdown_value)
+    if chart_png_value and plan:
+        plan["chart_png"] = chart_png_value
+    if chart_inline_markdown_value and plan:
+        plan["chart_inline_markdown"] = chart_inline_markdown_value
+    if structured_plan_payload:
+        if chart_inline_markdown_value:
+            structured_plan_payload["chart_inline_markdown"] = chart_inline_markdown_value
+        if chart_png_value:
+            structured_plan_payload["chart_png"] = chart_png_value
+        if confidence_visual_value:
+            structured_plan_payload["confidence_visual"] = confidence_visual_value
     market_meta = market_meta_context if isinstance(market_meta_context, dict) else None
     data_meta = data_meta_context if isinstance(data_meta_context, dict) else None
     if market_meta is None or data_meta is None:
@@ -3802,6 +3873,8 @@ async def gpt_plan(
         earnings=earnings_block,
         charts_params=charts_params_output,
         chart_url=chart_url_output,
+        chart_png=chart_png_value,
+        chart_inline_markdown=chart_inline_markdown_value,
         strategy_id=first.get("strategy_id"),
         description=first.get("description"),
         score=first.get("score"),
@@ -3824,6 +3897,7 @@ async def gpt_plan(
         market=market_meta,
         data=data_meta,
         session_state=session_state_payload,
+        confidence_visual=confidence_visual_value,
     )
 
 
@@ -3854,11 +3928,21 @@ async def assistant_exec(
     plan_block.setdefault("version", plan_response.version)
     plan_block.setdefault("symbol", plan_response.symbol)
     plan_block.setdefault("style", plan_response.style)
+    if plan_response.confidence_visual and "confidence_visual" not in plan_block:
+        plan_block["confidence_visual"] = plan_response.confidence_visual
+    if plan_response.chart_inline_markdown and "chart_inline_markdown" not in plan_block:
+        plan_block["chart_inline_markdown"] = plan_response.chart_inline_markdown
+    if plan_response.chart_png and "chart_png" not in plan_block:
+        plan_block["chart_png"] = plan_response.chart_png
 
     chart_block = {
         "interactive": plan_response.chart_url,
         "params": plan_response.charts_params,
     }
+    if plan_response.chart_png:
+        chart_block["png"] = plan_response.chart_png
+    if plan_response.chart_inline_markdown:
+        chart_block["inline_markdown"] = plan_response.chart_inline_markdown
 
     options_block = plan_response.options or {}
     if not options_block or not options_block.get("best"):
