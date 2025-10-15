@@ -34,6 +34,19 @@ class RatioSnapshot:
             ratio *= adjustment if math.isfinite(adjustment) else 1.0
         return float(level) * ratio
 
+    def translate_from_proxy(self, proxy_level: float) -> float:
+        """Translate a proxy price back to index terms."""
+        ratio = self.spot_ratio
+        if ratio == 0 or not math.isfinite(ratio):
+            return float(proxy_level)
+        if self.gamma_current and self.gamma_mean and math.isfinite(self.gamma_current) and math.isfinite(self.gamma_mean):
+            adjustment = self.gamma_mean / self.gamma_current if self.gamma_current else 1.0
+            if math.isfinite(adjustment) and adjustment > 0:
+                ratio *= adjustment
+        if ratio == 0 or not math.isfinite(ratio):
+            return float(proxy_level)
+        return float(proxy_level) / ratio
+
 
 class RatioEngine:
     """Maintain rolling gamma between index and ETF proxies."""

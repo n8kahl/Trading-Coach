@@ -2761,6 +2761,25 @@ async def gpt_scan(
         timeframe=data_timeframe,
         as_of=None if is_open else as_of_dt,
     )
+    if index_mode and index_symbols:
+        synthetic_count = 0
+        for index_symbol in list(index_symbols):
+            frame = market_data.get(index_symbol)
+            if frame is not None and not frame.empty:
+                continue
+            try:
+                synthetic = await index_mode.synthetic_ohlcv(index_symbol, data_timeframe)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("synthetic index build failed", extra={"symbol": index_symbol, "error": str(exc)})
+                synthetic = None
+            if synthetic is not None and not synthetic.empty:
+                market_data[index_symbol] = synthetic
+                data_source_map[index_symbol] = synthetic.attrs.get("source", "proxy_gamma")
+                synthetic_count += 1
+                logger.warning("Using proxy-translated data for %s", index_symbol)
+        if synthetic_count:
+            data_meta.setdefault("mode", "degraded")
+            data_meta.setdefault("banners", []).append("Index bars unavailable — translating via ETF proxy.")
     data_meta["sources"] = data_source_map
     missing_symbols = [
         symbol

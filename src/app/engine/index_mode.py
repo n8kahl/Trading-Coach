@@ -124,6 +124,31 @@ class IndexPlanner:
     def proxy_symbol(self, symbol: str) -> Optional[str]:
         return resolve_proxy_symbol(symbol)
 
+    async def synthetic_index_ohlcv(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        """Construct an index OHLCV frame from the ETF proxy when direct data is unavailable."""
+        proxy_symbol = resolve_proxy_symbol(symbol)
+        if not proxy_symbol:
+            return None
+        proxy_frame = await fetch_polygon_ohlcv(proxy_symbol, timeframe)
+        if proxy_frame is None or proxy_frame.empty:
+            return None
+        snapshot = await self.ratio_snapshot(symbol)
+        if snapshot is None:
+            return None
+        converted = proxy_frame.copy()
+        for column in ("open", "high", "low", "close"):
+            if column in converted.columns:
+                converted[column] = converted[column].apply(snapshot.translate_from_proxy)
+        if "volume" in converted.columns:
+            try:
+                converted["volume"] = converted["volume"].astype(float)
+            except Exception:  # pragma: no cover - defensive
+                converted["volume"] = 0.0
+        else:
+            converted["volume"] = 0.0
+        converted.attrs["source"] = "proxy_gamma"
+        return converted
+
 
 __all__ = [
     "IndexPlanner",

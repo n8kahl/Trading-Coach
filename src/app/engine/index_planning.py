@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
+import pandas as pd
+
 from .index_mode import IndexPlanner, GammaSnapshot
 from .index_selector import ContractsDecision, IndexOptionSelector
 from .options_select import rules_for_symbol
@@ -44,6 +46,9 @@ class IndexPlanningMode:
 
     async def ratio_snapshot(self, symbol: str) -> Optional[GammaSnapshot]:
         return await self.planner.gamma_snapshot(symbol)
+
+    async def synthetic_ohlcv(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        return await self.planner.synthetic_index_ohlcv(symbol, timeframe)
 
 
 __all__ = ["IndexPlanningMode"]
