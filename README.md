@@ -135,6 +135,13 @@ npm run start      # start the live plan console (Next.js) on $PORT
 - **Chart renderer (`static/tv`)** – Lightweight Charts fallback draws labelled EMAs, white VWAP, plan lines, supply/demand bands, liquidity pools, fair value gaps, and anchored VWAPs. Autoscale + plan rescaling keep everything on-screen.
 - **Caching** – Multi-context responses (30 s), IV metrics (120 s), Tradier chains/quotes (15 s). All caches are in-memory; restart clears them.
 
+## Index sniper mode (SPX/NDX)
+
+- Enable via `INDEX_SNIPER_MODE=1` to prioritize SPX/NDX structure while automatically substituting SPY/QQQ contracts when index feeds degrade.
+- Polygon index snapshots (`/v3/snapshot/options/I:SPX|I:NDX`) are used first; Tradier greeks (requires the ORATS entitlement) are the secondary source.
+- When both feeds are degraded the planner falls back to the ETF proxy using a rolling 60-minute gamma regression to translate entry/stop/target levels (γ, ratio, drift exposed in `execution_proxy`).
+- Plans include a banner (`fallback_banner`) and settlement note to flag American-style ETF contracts; charts receive the same metadata for the `/tv` renderer.
+
 ---
 
 ## Wiring a custom GPT (Actions)

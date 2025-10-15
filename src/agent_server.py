@@ -62,7 +62,13 @@ from .polygon_options import (
     fetch_polygon_option_chain_asof,
     summarize_polygon_chain,
 )
-from .app.engine import build_target_profile, build_structured_plan
+from .app.engine import (
+    build_target_profile,
+    build_structured_plan,
+    IndexPlanningMode,
+    IndexPlanner,
+    GammaSnapshot,
+)
 from .app.engine.execution_profiles import ExecutionContext as PlanExecutionContext, refine_plan as refine_execution_plan
 from .app.engine.options_select import score_contract, best_contract_example
 from .app.services import session_now, parse_session_as_of
@@ -118,12 +124,30 @@ ALLOWED_CHART_KEYS = {
     "last_update",
 }
 
+_STYLE_DELTA_PREF: Dict[str, float] = {
+    "scalp": 0.55,
+    "intraday": 0.50,
+    "swing": 0.45,
+    "leap": 0.35,
+    "leaps": 0.35,
+}
+
+
+def _prefer_delta_for_style(style: Optional[str]) -> float:
+    token = (style or "intraday").lower()
+    if token == "leap":
+        token = "leaps"
+    return _STYLE_DELTA_PREF.get(token, 0.5)
+
 
 DATA_SYMBOL_ALIASES: Dict[str, List[str]] = {
-    "SPX": ["^GSPC"],
+    "SPX": ["I:SPX", "^GSPC"],
     "^SPX": ["^GSPC"],
     "INDEX:SPX": ["^GSPC"],
     "SP500": ["^GSPC"],
+    "I:SPX": ["SPX"],
+    "NDX": ["I:NDX", "^NDX"],
+    "I:NDX": ["NDX"],
     "OEX": ["SPX", "^OEX", "SPY"],
     "^OEX": ["SPX", "SPY"],
     "INDEX:OEX": ["SPX", "SPY"],
@@ -2210,6 +2234,18 @@ _SYMBOL_STREAM_COORDINATOR: Optional[SymbolStreamCoordinator] = None
 
 _LIVE_PLAN_ENGINE.set_replan_callback(_auto_replan)
 
+_INDEX_PLANNING_MODE: Optional[IndexPlanningMode] = None
+
+
+def _get_index_mode() -> Optional[IndexPlanningMode]:
+    settings = get_settings()
+    if not getattr(settings, "index_sniper_mode", False):
+        return None
+    global _INDEX_PLANNING_MODE
+    if _INDEX_PLANNING_MODE is None:
+        _INDEX_PLANNING_MODE = IndexPlanningMode()
+    return _INDEX_PLANNING_MODE
+
 
 async def _compute_iv_metrics(symbol: str) -> Dict[str, Any]:
     key = symbol.upper()
@@ -2717,6 +2753,9 @@ async def gpt_scan(
     data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}.get(style_filter, "5")
 
     settings = get_settings()
+    index_mode = _get_index_mode()
+    index_symbols = {symbol for symbol in resolved_tickers if index_mode and index_mode.applies(symbol)}
+    index_counters = {"success": 0, "fallback": 0}
     market_data, data_source_map = await _collect_market_data(
         resolved_tickers,
         timeframe=data_timeframe,
@@ -3150,6 +3189,102 @@ async def gpt_scan(
         if "interactive" in charts_payload and "png" not in charts_payload:
             charts_payload["png"] = _swap_chart_path(charts_payload["interactive"], "/tv", "/charts/png")
 
+        index_decision = None
+        index_execution_proxy: Optional[Dict[str, object]] = None
+        index_snapshot: Optional[GammaSnapshot] = None
+        fallback_banner: Optional[str] = None
+        settlement_note: Optional[str] = None
+        index_metadata: Dict[str, Any] | None = None
+
+        prefer_delta = _prefer_delta_for_style(style)
+        if index_mode and signal.symbol in index_symbols:
+            try:
+                index_contract, index_decision = await index_mode.select_contract(
+                    signal.symbol,
+                    prefer_delta=prefer_delta,
+                    style=style,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("index contract selection failed", extra={"symbol": signal.symbol, "error": str(exc)})
+                index_contract = None
+                index_decision = None
+
+            if index_decision:
+                index_metadata = {
+                    "mode": "index_sniper",
+                    "preference": list(index_mode.contract_preference),
+                    "source": index_decision.source,
+                }
+                proxy_symbol = index_mode.liquidity_proxy(signal.symbol)
+                if proxy_symbol:
+                    index_metadata["proxy"] = proxy_symbol
+                if index_decision.health:
+                    index_metadata["health"] = index_decision.health.to_dict()
+                if index_decision.diagnostics:
+                    index_metadata["diagnostics"] = dict(index_decision.diagnostics)
+                if index_decision.execution_proxy:
+                    index_execution_proxy = index_decision.execution_proxy
+                    index_metadata["execution_proxy"] = index_decision.execution_proxy
+                if index_decision.proxy_snapshot:
+                    index_snapshot = index_decision.proxy_snapshot
+                    index_metadata["gamma_snapshot"] = {
+                        "gamma": round(index_snapshot.gamma_current, 6),
+                        "gamma_mean": round(index_snapshot.gamma_mean, 6),
+                        "gamma_drift": round(index_snapshot.drift, 6),
+                        "ratio": round(index_snapshot.spot_ratio, 6),
+                        "samples": index_snapshot.samples,
+                    }
+                if index_decision.fallback_note:
+                    fallback_banner = index_decision.fallback_note
+                if index_decision.source == "ETF_PROXY":
+                    settlement_note = "ETF options are American, watch assignment/settlement."
+                    proxy_symbol = None
+                    if index_execution_proxy:
+                        proxy_symbol = index_execution_proxy.get("symbol")
+                    if not proxy_symbol and index_metadata:
+                        proxy_symbol = index_metadata.get("proxy")
+                    gamma_val = None
+                    if index_execution_proxy:
+                        gamma_val = index_execution_proxy.get("gamma")
+                    if proxy_symbol:
+                        if isinstance(gamma_val, (int, float)):
+                            fallback_banner = (
+                                f"Index chain degraded — executing via {proxy_symbol} with γ={gamma_val:.3f}; parity OK."
+                            )
+                        else:
+                            fallback_banner = f"Index chain degraded — executing via {proxy_symbol}; parity OK."
+                logger.info(
+                    "index_mode_decision",
+                    extra={
+                        "symbol": signal.symbol,
+                        "style": style,
+                        "source": index_decision.source,
+                        "contracts_source": index_decision.source,
+                        "execution_proxy": index_decision.execution_proxy,
+                        "gamma": (index_execution_proxy or {}).get("gamma"),
+                        "fallback_note": fallback_banner,
+                        "index_health": index_decision.health.to_dict() if index_decision.health else None,
+                    },
+                )
+                if index_decision.source == "ETF_PROXY":
+                    index_counters["fallback"] += 1
+                elif index_decision.source in {"INDEX_POLYGON", "INDEX_TRADIER"}:
+                    index_counters["success"] += 1
+
+            best_contract = index_contract if index_contract else None
+        else:
+            best_contract = None
+
+        if index_metadata and index_snapshot and plan_entry is not None and plan_stop is not None and plan_targets:
+            try:
+                index_metadata["translated_levels"] = {
+                    "entry": index_mode.planner.translate_level(plan_entry, index_snapshot),
+                    "stop": index_mode.planner.translate_level(plan_stop, index_snapshot),
+                    "targets": index_mode.planner.translate_targets(plan_targets, index_snapshot),
+                }
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("index level translation failed", exc_info=True)
+
         polygon_bundle: Dict[str, Any] | None = None
         if polygon_chains:
             cache_key = (signal.symbol, signal.strategy_id)
@@ -3162,11 +3297,22 @@ async def gpt_scan(
                 )
                 options_cache[cache_key] = polygon_bundle
 
-        best_contract = None
-        if polygon_bundle and polygon_bundle.get("best"):
-            best_contract = polygon_bundle.get("best")
-        else:
-            best_contract = tradier_suggestions.get(signal.symbol)
+        if best_contract is None:
+            if polygon_bundle and polygon_bundle.get("best"):
+                best_contract = polygon_bundle.get("best")
+            else:
+                best_contract = tradier_suggestions.get(signal.symbol)
+
+        if plan_payload is not None and index_execution_proxy:
+            plan_payload.setdefault("execution_proxy", index_execution_proxy)
+        if plan_payload is not None and fallback_banner:
+            plan_payload.setdefault("banners", []).append(fallback_banner)
+        if plan_payload is not None and settlement_note:
+            plan_payload.setdefault("execution_notes", []).append(settlement_note)
+        if fallback_banner:
+            charts_payload.setdefault("banners", []).append(fallback_banner)
+        if settlement_note:
+            charts_payload.setdefault("notes", []).append(settlement_note)
 
         payload.append(
             {
@@ -3195,8 +3341,15 @@ async def gpt_scan(
                 "market": dict(market_meta),
                 "context_overlays": enhancements,
                 **({"options": polygon_bundle} if polygon_bundle else {}),
+                **({"index_mode": index_metadata} if index_metadata else {}),
+                **({"fallback_banner": fallback_banner} if fallback_banner else {}),
+                **({"settlement_note": settlement_note} if settlement_note else {}),
+                **({"execution_proxy": index_execution_proxy} if index_execution_proxy else {}),
             }
         )
+
+    if index_mode and (index_counters["success"] or index_counters["fallback"]):
+        data_meta["index_mode_counts"] = dict(index_counters)
 
     logger.info("scan universe=%s user=%s results=%d", resolved_tickers, user.user_id, len(payload))
     return payload

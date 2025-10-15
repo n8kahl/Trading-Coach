@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 
+from src.contract_selector import filter_chain, pick_best_contract
 from src.tradier import TradierNotConfiguredError, fetch_option_chain_cached
-
+from .index_common import ETF_PROXIES, INDEX_BASE_TICKERS
 
 SEVERITY_WEIGHTS = {
     "spread": 0.30,
@@ -19,6 +19,29 @@ SEVERITY_WEIGHTS = {
     "volume_oi": 0.15,
 }
 
+DEFAULT_RULES = {
+    "dte_range": (0, 90),
+    "delta_range": (0.2, 0.8),
+    "max_spread_pct": 0.25,
+    "min_open_interest": 10,
+    "min_volume": 1,
+}
+
+INDEX_RULES = {
+    "dte_range": (0, 45),
+    "delta_range": (0.25, 0.65),
+    "max_spread_pct": 0.15,
+    "min_open_interest": 1,
+    "min_volume": 0,
+}
+
+ETF_RULES = {
+    "dte_range": (0, 60),
+    "delta_range": (0.25, 0.70),
+    "max_spread_pct": 0.20,
+    "min_open_interest": 100,
+    "min_volume": 25,
+}
 
 @dataclass(slots=True)
 class OptionScore:
@@ -152,6 +175,15 @@ def build_example_leg(contract: Dict[str, float | int | str]) -> Dict[str, float
     }
 
 
+def rules_for_symbol(symbol: str) -> Dict[str, object]:
+    token = symbol.upper()
+    if token in INDEX_BASE_TICKERS:
+        return dict(INDEX_RULES)
+    if token in ETF_PROXIES.values():
+        return dict(ETF_RULES)
+    return dict(DEFAULT_RULES)
+
+
 async def best_contract_example(symbol: str, style: Optional[str], as_of: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Return the top-scoring contract example for a symbol/style."""
 
@@ -166,12 +198,10 @@ async def best_contract_example(symbol: str, style: Optional[str], as_of: Option
 
     df = chain.copy()
     if "spread_pct" not in df.columns:
-        bid = df.get("bid")
-        ask = df.get("ask")
-        if bid is not None and ask is not None:
+        try:
             mid = (df["bid"] + df["ask"]) / 2.0
             df["spread_pct"] = (df["ask"] - df["bid"]) / mid.replace(0, pd.NA)
-        else:
+        except Exception:
             df["spread_pct"] = pd.NA
 
     prefer_delta_map = {
@@ -186,33 +216,12 @@ async def best_contract_example(symbol: str, style: Optional[str], as_of: Option
         style_key = "leaps"
     prefer_delta = prefer_delta_map.get(style_key, 0.5)
 
-    candidates: list[Dict[str, Any]] = []
-    for _, row in df.iterrows():
-        try:
-            contract = {
-                "symbol": row.get("symbol"),
-                "option_type": row.get("option_type"),
-                "strike": row.get("strike"),
-                "expiration_date": row.get("expiration_date"),
-                "bid": row.get("bid"),
-                "ask": row.get("ask"),
-                "spread_pct": row.get("spread_pct"),
-                "volume": row.get("volume"),
-                "open_interest": row.get("open_interest"),
-                "delta": row.get("delta"),
-            }
-        except Exception:
-            continue
-        score = score_contract(contract, prefer_delta=prefer_delta)
-        contract["liquidity_score"] = score.score
-        contract["liquidity_components"] = score.components
-        contract["open_interest"] = row.get("open_interest")
-        contract["volume"] = row.get("volume")
-        contract["tradeability"] = int(round(score.score * 100))
-        candidates.append(contract)
-
-    if not candidates:
+    rules = rules_for_symbol(symbol)
+    filtered = filter_chain(df, rules)
+    best = pick_best_contract(filtered, prefer_delta=prefer_delta)
+    if best is None:
         return None
-    candidates.sort(key=lambda item: item.get("liquidity_score", 0.0), reverse=True)
-    top = candidates[0]
-    return build_example_leg(top)
+
+    contract = best.to_dict() if hasattr(best, "to_dict") else dict(best)
+    score_contract(contract, prefer_delta=prefer_delta)
+    return build_example_leg(contract)

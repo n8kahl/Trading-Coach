@@ -19,6 +19,7 @@ import httpx
 from ...config import get_settings
 
 _POLYGON_BASE = "https://api.polygon.io"
+INDEX_PRIORITY = ['SPX', 'NDX']
 _UNIVERSE_CACHE: Optional[Tuple[float, List[Dict[str, Any]]]] = None
 _UNIVERSE_CACHE_TTL = 900.0  # 15 minutes
 _SECTOR_CACHE: Optional[Tuple[float, Dict[str, float]]] = None
@@ -159,7 +160,7 @@ async def _sector_biases(api_key: str) -> Dict[str, float]:
         return dict(cached[1])
 
     symbols = set(_SECTOR_FOCUS.values())
-    symbols.add("SPY")
+    symbols.update({"SPY", "QQQ"})
 
     timeout = httpx.Timeout(6.0, connect=3.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -173,12 +174,13 @@ async def _sector_biases(api_key: str) -> Dict[str, float]:
         changes[symbol.upper()] = float(outcome)
 
     spy_change = changes.get("SPY", 0.0)
+    qqq_change = changes.get("QQQ", spy_change)
     biases: Dict[str, float] = {}
     for sector_name, etf in _SECTOR_FOCUS.items():
         sector_change = changes.get(etf.upper())
         if sector_change is None:
             continue
-        relative = sector_change - spy_change
+        relative = sector_change - (qqq_change if etf.upper() == 'QQQ' else spy_change)
         # Damp the impact so sectors are nudged, not dominated.
         biases[sector_name] = max(-0.20, min(0.20, relative * 5.0))
 
@@ -246,7 +248,12 @@ async def load_universe(
     scored: List[Tuple[float, str]] = []
     for row in reference:
         ticker = str(row.get("ticker") or "").upper()
-        if not ticker or ticker.endswith(".W") or ticker.endswith(".U"):
+        if not ticker:
+            continue
+        if ticker in INDEX_PRIORITY:
+            scored.append((1.0, ticker))
+            continue
+        if ticker.endswith(".W") or ticker.endswith(".U"):
             continue
         primary_exchange = (row.get("primary_exchange") or "").upper()
         if primary_exchange.startswith("OTC"):
