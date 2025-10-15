@@ -63,6 +63,7 @@ from .polygon_options import (
     summarize_polygon_chain,
 )
 from .app.engine import build_target_profile, build_structured_plan
+from .app.engine.execution_profiles import ExecutionContext as PlanExecutionContext, refine_plan as refine_execution_plan
 from .app.engine.options_select import score_contract, best_contract_example
 from .app.services import session_now, parse_session_as_of
 from .app.providers.universe import load_universe
@@ -2955,6 +2956,50 @@ async def gpt_scan(
         plan_direction = direction_hint
         plan_id = None
         version = 1
+        if signal.plan is not None:
+            indicators = snapshot.get("indicators") or {}
+            session_snapshot = snapshot.get("session") or {}
+            volatility_snapshot = snapshot.get("volatility") or {}
+            atr_val = indicators.get("atr14")
+            try:
+                atr_numeric = float(atr_val) if atr_val is not None else None
+            except (TypeError, ValueError):
+                atr_numeric = None
+            expected_move_val = volatility_snapshot.get("expected_move_horizon")
+            try:
+                expected_move_numeric = float(expected_move_val) if expected_move_val is not None else None
+            except (TypeError, ValueError):
+                expected_move_numeric = None
+            price_close = snapshot.get("price", {}).get("close") or entry_price
+            try:
+                price_numeric = float(price_close)
+            except (TypeError, ValueError):
+                price_numeric = float(entry_price)
+            exec_context = PlanExecutionContext(
+                symbol=signal.symbol,
+                style=style,
+                direction=signal.plan.direction or plan_direction or direction_hint,
+                price=price_numeric,
+                key_levels=dict(key_levels),
+                atr14=atr_numeric,
+                expected_move=expected_move_numeric,
+                vwap=_safe_number(indicators.get("vwap")),
+                ema_stack=(snapshot.get("trend") or {}).get("ema_stack"),
+                session_phase=session_snapshot.get("phase"),
+                minutes_to_close=session_snapshot.get("minutes_to_close"),
+                data_mode=data_meta.get("mode"),
+            )
+            refined_plan, adjustments = refine_execution_plan(signal.plan, exec_context)
+            signal.plan = refined_plan
+            signal.score = refined_plan.confidence if refined_plan.confidence is not None else signal.score
+            feature_updates = dict(signal.features or {})
+            feature_updates.update(adjustments.feature_updates())
+            feature_updates["plan_entry"] = refined_plan.entry
+            feature_updates["plan_stop"] = refined_plan.stop
+            feature_updates["plan_targets"] = list(refined_plan.targets)
+            feature_updates["plan_confidence"] = refined_plan.confidence
+            feature_updates["plan_risk_reward"] = refined_plan.risk_reward
+            signal.features = feature_updates
         if signal.plan is not None:
             plan_payload = signal.plan.as_dict()
             plan_entry = float(signal.plan.entry)
