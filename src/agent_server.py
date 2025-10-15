@@ -2812,9 +2812,14 @@ async def gpt_scan(
 
         base_url = str(request.base_url).rstrip("/")
         interval = _timeframe_for_style(style)
+        hint_interval_raw, hint_guidance = _chart_hint(signal.strategy_id, style)
+        try:
+            chart_interval_hint = normalize_interval(hint_interval_raw)
+        except ValueError:
+            chart_interval_hint = interval
         chart_query: Dict[str, Any] = {
             "symbol": signal.symbol.upper(),
-            "interval": interval,
+            "interval": chart_interval_hint,
             "ema": ",".join(str(span) for span in ema_spans),
             "view": _view_for_style(style),
             "vwap": "1",
@@ -2930,6 +2935,8 @@ async def gpt_scan(
                     "key_levels": key_levels,
                 },
             )
+            plan_payload.setdefault("chart_timeframe", chart_interval_hint)
+            plan_payload.setdefault("chart_guidance", hint_guidance)
         atr_hint = snapshot.get("indicators", {}).get("atr14")
         if isinstance(atr_hint, (int, float)) and math.isfinite(atr_hint):
             chart_query["atr"] = f"{float(atr_hint):.4f}"
@@ -2959,9 +2966,9 @@ async def gpt_scan(
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("chart link generation error for %s: %s", signal.symbol, exc)
 
-    charts_payload: Dict[str, Any] = {"params": chart_query}
+    charts_payload: Dict[str, Any] = {"params": chart_query, "timeframe": chart_interval_hint, "guidance": hint_guidance}
     if chart_links:
-        chart_query["interval"] = chart_query.get("interval") or "5m"
+        chart_query["interval"] = chart_interval_hint
         charts_payload["interactive"] = chart_links.interactive
         if chart_links.png:
             charts_payload["png"] = chart_links.png
@@ -2972,6 +2979,11 @@ async def gpt_scan(
             "chart link fallback used",
             extra={"symbol": signal.symbol, "strategy_id": signal.strategy_id, "url": fallback_chart_url},
         )
+        if "png" not in charts_payload:
+            charts_payload["png"] = _swap_chart_path(fallback_chart_url, "/tv", "/charts/png")
+
+    if "interactive" in charts_payload and "png" not in charts_payload:
+        charts_payload["png"] = _swap_chart_path(charts_payload["interactive"], "/tv", "/charts/png")
 
         polygon_bundle: Dict[str, Any] | None = None
         if polygon_chains:
@@ -3002,6 +3014,8 @@ async def gpt_scan(
                 "market_snapshot": snapshot,
                 "charts": charts_payload,
                 "features": feature_payload,
+                "chart_timeframe": chart_interval_hint,
+                "chart_guidance": hint_guidance,
                 **({"plan": plan_payload} if plan_payload else {}),
                 "warnings": plan_payload.get("warnings") if plan_payload else [],
                 "data": {
