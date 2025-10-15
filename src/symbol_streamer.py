@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from .config import get_settings
+from .data_sources import fetch_polygon_ohlcv
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,20 @@ async def fetch_live_quote(symbol: str) -> QuoteResult:
     if yahoo_quote.price is not None:
         return yahoo_quote
     errors.append(yahoo_quote.error or "yahoo_error")
+    try:
+        polygon_frame = await fetch_polygon_ohlcv(symbol.upper(), "1")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("polygon bars fallback failed", exc_info=exc, extra={"symbol": symbol})
+        polygon_frame = None
+    if polygon_frame is not None and not polygon_frame.empty:
+        last = polygon_frame.iloc[-1]
+        price = float(last.get("close"))
+        ts = last.name
+        if isinstance(ts, datetime):
+            ts = ts.astimezone(timezone.utc).isoformat()
+        else:
+            ts = datetime.utcnow().isoformat()
+        return QuoteResult(price=price, timestamp=ts, source="polygon_bars", error=None)
     if not settings.polygon_api_key and not settings.finnhub_api_key:
         errors.append("missing_credentials")
     return QuoteResult(price=None, timestamp=None, source="none", error=";".join(errors) or "no_data")
