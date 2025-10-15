@@ -1088,9 +1088,26 @@ async def _collect_market_data(
             logger.warning("Data fetch raised for %s: %s", ticker, result)
         elif isinstance(result, pd.DataFrame) and not result.empty:
             frame = result
-        if frame is None:
-            logger.warning("No market data available for %s", ticker)
-            continue
+        if frame is None or frame.empty:
+            try:
+                normalized_interval = normalize_interval(timeframe)
+            except ValueError:
+                normalized_interval = "5m"
+            try:
+                fallback = await asyncio.to_thread(
+                    get_candles,
+                    ticker,
+                    normalized_interval,
+                    600,
+                )
+            except Exception as exc:
+                logger.warning("Fallback candle fetch failed for %s: %s", ticker, exc)
+                fallback = None
+            if isinstance(fallback, pd.DataFrame) and not fallback.empty:
+                frame = fallback
+            else:
+                logger.warning("No market data available for %s", ticker)
+                continue
         if as_of is not None:
             cutoff = pd.Timestamp(as_of).tz_convert("UTC")
             frame = frame.loc[frame.index <= cutoff]

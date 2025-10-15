@@ -159,6 +159,7 @@
   const centerTimeNumeric = !centerTimeIsLatest && centerTimeToken ? Number(centerTimeToken) : null;
   let hasAppliedFocusRange = false;
   let hasAppliedTimeCenter = false;
+  let hasAppliedTimeWindow = false;
 
   const headerSymbolEl = document.getElementById('header_symbol');
   const headerStrategyEl = document.getElementById('header_strategy');
@@ -416,6 +417,32 @@
       hasAppliedTimeCenter = true;
     } catch (err) {
       console.warn('center_time adjustment failed', err);
+    }
+  };
+
+  const applyPlanTimeWindow = ({ force = false } = {}) => {
+    if (focusToken !== 'plan') {
+      hasAppliedTimeWindow = false;
+      return;
+    }
+    if (!force && hasAppliedTimeWindow) {
+      return;
+    }
+    const totalBars = latestCandleData.length;
+    if (!totalBars) {
+      return;
+    }
+    const windowSize = Math.min(Math.max(120, Math.round(totalBars * 0.4)), 360);
+    const fromIndex = Math.max(totalBars - windowSize, 0);
+    const toIndex = Math.max(totalBars - 1, fromIndex + 1);
+    try {
+      chart.timeScale().setVisibleLogicalRange({
+        from: fromIndex,
+        to: toIndex,
+      });
+      hasAppliedTimeWindow = true;
+    } catch (err) {
+      console.warn('plan time window adjustment failed', err);
     }
   };
   let replayPrevPhase = null;
@@ -1386,6 +1413,7 @@
     const token = ++fetchToken;
     hasAppliedFocusRange = false;
     hasAppliedTimeCenter = false;
+    hasAppliedTimeWindow = false;
     try {
       const now = Math.floor(Date.now() / 1000);
       const minSpan = resolutionToSeconds(currentResolution) * 200;
@@ -1612,13 +1640,18 @@
 
       if (focusToken === 'plan') {
         applyPlanPriceFocus(planForFrame, { force: true });
+        applyPlanTimeWindow({ force: true });
+        if (centerTimeToken) {
+          applyTimeCentering({ force: true });
+        } else {
+          chart.timeScale().scrollToPosition(0, true);
+        }
       } else {
         chart.priceScale('right').applyOptions({ autoScale: true });
-      }
-
-      chart.timeScale().fitContent();
-      if (centerTimeToken) {
-        applyTimeCentering({ force: true });
+        chart.timeScale().fitContent();
+        if (centerTimeToken) {
+          applyTimeCentering({ force: true });
+        }
       }
 
       debugEl.style.display = 'none';
@@ -1640,6 +1673,9 @@
       planPanelEl.open = true;
     }
     renderPlanPanel(lastKnownPrice);
+    if (focusToken === 'plan') {
+      applyPlanTimeWindow({ force: true });
+    }
   });
   window.setInterval(fetchBars, TIMEFRAME_REFRESH_MS);
   window.addEventListener('beforeunload', () => {

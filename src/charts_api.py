@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import html
 import json
 import math
@@ -10,10 +11,16 @@ from urllib.parse import urlencode
 
 import pandas as pd
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+
 import httpx
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 from .config import get_settings
 
@@ -921,3 +928,62 @@ def build_chart_url(
     query = urlencode(params, doseq=False, safe=",")
     base = base.rstrip("/")
     return f"{base}/charts/{kind}?{query}"
+
+
+# --------------------------------------------------------------------------- #
+# PNG renderer
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/png")
+def chart_png(
+    symbol: str,
+    interval: str = Query("1m"),
+    entry: Optional[float] = None,
+    stop: Optional[float] = None,
+    tp: Optional[str] = None,
+    title: Optional[str] = None,
+    lookback: int = Query(300, ge=50, le=MAX_LOOKBACK),
+) -> Response:
+    try:
+        interval_normalized = normalize_interval(interval)
+        df = get_candles(symbol, interval_normalized, lookback=lookback)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if df.empty:
+        raise HTTPException(status_code=500, detail="No candle data available.")
+
+    df = df.copy()
+    df["time"] = pd.to_datetime(df["time"], utc=True)
+    df.set_index("time", inplace=True)
+
+    tps = parse_floats(tp)[:MAX_TPS]
+
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=140)
+    ax.plot(df.index, df["close"], color="#22c55e", linewidth=1.6, label="Close")
+    ax.fill_between(df.index, df["low"], df["high"], color="#22c55e", alpha=0.12)
+
+    def _plot_line(level: Optional[float], color: str, label: str):
+        if level is None or not math.isfinite(level):
+            return
+        ax.axhline(level, color=color, linestyle="--", linewidth=1.1, alpha=0.9, label=label)
+
+    _plot_line(entry, "#60a5fa", "Entry")
+    _plot_line(stop, "#f87171", "Stop")
+    for idx, target in enumerate(tps, start=1):
+        _plot_line(target, "#34d399", f"TP{idx}")
+
+    title_text = title or f"{symbol.upper()} {interval_normalized.upper()}"
+    ax.set_title(title_text, fontsize=13, pad=14)
+    ax.set_ylabel("Price")
+    ax.grid(True, linestyle="--", alpha=0.25)
+    ax.legend(loc="upper left", fontsize=8, ncol=2)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    fig.autofmt_xdate()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return Response(content=buf.getvalue(), media_type="image/png")
