@@ -437,6 +437,35 @@
         min-height: 420px;
       }
 
+      .session-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        mix-blend-mode: lighten;
+      }
+
+      .session-band {
+        position: absolute;
+        top: 0;
+        height: 100%;
+        background: rgba(148, 163, 184, 0.05);
+      }
+
+      .session-band.session-premarket {
+        background: rgba(59, 130, 246, 0.08);
+      }
+
+      .session-band.session-regular {
+        background: rgba(34, 197, 94, 0.05);
+      }
+
+      .session-band.session-afterhours {
+        background: rgba(129, 140, 248, 0.08);
+      }
+
       .debug-banner {
         position: fixed;
         bottom: 20px;

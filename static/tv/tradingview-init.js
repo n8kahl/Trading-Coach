@@ -189,6 +189,54 @@
   let planLogListEl = null;
   let planLogEmptyEl = null;
 
+  const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const etSessionPartsFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
+  const getEtParts = (timestampSeconds) => {
+    const parts = etSessionPartsFormatter.formatToParts(new Date(timestampSeconds * 1000));
+    const map = {};
+    for (const part of parts) {
+      if (part.type !== 'literal') {
+        map[part.type] = part.value;
+      }
+    }
+    const monthNumber = Number(map.month);
+    return {
+      year: Number(map.year),
+      month: monthNumber,
+      monthName: MONTH_NAMES[monthNumber - 1] || map.month,
+      day: map.day,
+      hour: Number(map.hour),
+      minute: Number(map.minute),
+    };
+  };
+
+  const classifySession = (minutes) => {
+    if (minutes >= 4 * 60 && minutes < 9 * 60 + 30) return 'premarket';
+    if (minutes >= 9 * 60 + 30 && minutes < 16 * 60) return 'regular';
+    if (minutes >= 16 * 60 && minutes < 20 * 60) return 'afterhours';
+    return 'overnight';
+  };
+
+  const SESSION_CLASSNAMES = {
+    premarket: 'session-band session-premarket',
+    regular: 'session-band session-regular',
+    afterhours: 'session-band session-afterhours',
+    overnight: 'session-band',
+  };
+
+  let sessionOverlayEl = null;
+  let sessionSegments = [];
+  let lastSecondsPerBar = Math.max(resolutionToSeconds(currentResolution), 60);
+
   const escapeHtml = (value) =>
     typeof value === 'string'
       ? value
@@ -245,6 +293,60 @@
     if (!Number.isFinite(timestampSeconds)) return '';
     const date = new Date(timestampSeconds * 1000);
     return `${etTimeFormatter.format(date)} ET`;
+  };
+
+  const updateSessionBands = (candles, secondsPerBar) => {
+    if (!Array.isArray(candles) || !candles.length) {
+      sessionSegments = [];
+      renderSessionBands();
+      return;
+    }
+    const segments = [];
+    let current = null;
+    candles.forEach((bar) => {
+      if (!bar || !Number.isFinite(bar.time)) return;
+      const info = getEtParts(bar.time);
+      const dateKey = `${info.year}-${String(info.month).padStart(2, '0')}-${info.day}`;
+      const minutes = info.hour * 60 + info.minute;
+      const session = classifySession(minutes);
+      if (!current || current.session !== session || current.dateKey !== dateKey) {
+        if (current) {
+          segments.push(current);
+        }
+        current = {
+          session,
+          start: bar.time,
+          end: bar.time,
+          dateKey,
+        };
+      }
+      current.end = bar.time + secondsPerBar;
+    });
+    if (current) {
+      segments.push(current);
+    }
+    sessionSegments = segments;
+    renderSessionBands();
+  };
+
+  const renderSessionBands = () => {
+    if (!sessionOverlayEl) return;
+    const timeScale = chart ? chart.timeScale() : null;
+    if (!timeScale) return;
+    sessionOverlayEl.innerHTML = '';
+    if (!sessionSegments.length) return;
+    sessionSegments.forEach((segment) => {
+      const left = timeScale.timeToCoordinate(segment.start);
+      const right = timeScale.timeToCoordinate(segment.end);
+      if (left == null || right == null || right <= left) {
+        return;
+      }
+      const band = document.createElement('div');
+      band.className = SESSION_CLASSNAMES[segment.session] || SESSION_CLASSNAMES.overnight;
+      band.style.left = `${left}px`;
+      band.style.width = `${right - left}px`;
+      sessionOverlayEl.appendChild(band);
+    });
   };
 
   const renderPlanLog = () => {
@@ -355,12 +457,39 @@
     horzLines: { color: theme === 'light' ? '#e5e9f0' : '#1f2933' },
   };
 
+  const TickMarkType = LightweightCharts.TickMarkType;
+
+  const formatTickMark = (time, tickMarkType) => {
+    const info = getEtParts(time);
+    const timeLabel = `${String(info.hour).padStart(2, '0')}:${String(info.minute).padStart(2, '0')}`;
+    const dayLabel = `${info.monthName} ${info.day}`;
+    switch (tickMarkType) {
+      case TickMarkType.Time:
+      case TickMarkType.TimeWithSeconds:
+        return timeLabel;
+      case TickMarkType.TimeAndDate:
+      case TickMarkType.DayOfMonth:
+        return dayLabel;
+      case TickMarkType.Month:
+        return `${info.monthName} ${info.year}`;
+      case TickMarkType.Year:
+        return `${info.year}`;
+      default:
+        return dayLabel;
+    }
+  };
+
   const container = document.getElementById('tv_chart_container');
   const chart = LightweightCharts.createChart(container, {
     layout: layoutBase,
     grid: gridBase,
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    timeScale: { borderColor: theme === 'light' ? '#d1d5db' : '#1f2933' },
+    timeScale: {
+      borderColor: theme === 'light' ? '#d1d5db' : '#1f2933',
+      timeVisible: true,
+      secondsVisible: false,
+      tickMarkFormatter: formatTickMark,
+    },
     rightPriceScale: {
       borderColor: theme === 'light' ? '#d1d5db' : '#1f2933',
       scaleMargins: { top: 0.1, bottom: 0.25 },
@@ -378,6 +507,13 @@
       color: theme === 'light' ? 'rgba(15,23,42,0.08)' : 'rgba(148,163,184,0.08)',
       text: '',
     },
+  });
+
+  sessionOverlayEl = document.createElement('div');
+  sessionOverlayEl.className = 'session-overlay';
+  container.appendChild(sessionOverlayEl);
+  chart.timeScale().subscribeVisibleTimeRangeChange(() => {
+    renderSessionBands();
   });
 
   const candleSeries = chart.addCandlestickSeries({
@@ -1181,7 +1317,7 @@
 
   const updateRealtimeBar = (price, payload) => {
     if (!latestCandleData.length || !Number.isFinite(price)) return;
-    const secondsPerBar = Math.max(resolutionToSeconds(currentResolution), 60);
+    const secondsPerBar = Math.max(lastSecondsPerBar, 60);
     const eventTs = parseEventTimestamp(payload) ?? Math.floor(Date.now() / 1000);
     const bucketTime = Math.floor(eventTs / secondsPerBar) * secondsPerBar;
 
@@ -1236,6 +1372,7 @@
     };
     latestVolumeData.push(newVolumeBar);
     volumeSeries.update(newVolumeBar);
+    updateSessionBands(latestCandleData, lastSecondsPerBar);
   };
 
   const setReplayStatusMessage = (message) => {
@@ -1368,6 +1505,9 @@
     replaySavedVolumeData = [];
     replaySavedVisibleRange = null;
 
+    updateSessionBands(latestCandleData, lastSecondsPerBar);
+    renderSessionBands();
+
     if (replayPrevPhase || replayPrevNote) {
       applyMarketStatus(replayPrevPhase || 'closed', replayPrevNote || undefined);
     }
@@ -1416,6 +1556,7 @@
     };
     latestVolumeData.push({ ...volumeBar });
     volumeSeries.update(volumeBar);
+    updateSessionBands(latestCandleData, lastSecondsPerBar);
 
     lastKnownPrice = candle.close;
     updateHeaderPricing(lastKnownPrice);
@@ -1503,6 +1644,7 @@
       volumeSeries.setData(initialVolume);
       latestCandleData = initialCandles.map((item) => ({ ...item }));
       latestVolumeData = initialVolume.map((item) => ({ ...item }));
+      updateSessionBands(latestCandleData, lastSecondsPerBar);
 
       const priorClose = latestCandleData.length
         ? latestCandleData[latestCandleData.length - 1].close
@@ -1680,6 +1822,10 @@
       }));
       volumeSeries.setData(volumeData);
       latestVolumeData = volumeData.map((bar) => ({ ...bar }));
+
+      const secondsPerBar = Math.max(resolutionToSeconds(currentResolution), 60);
+      lastSecondsPerBar = secondsPerBar;
+      updateSessionBands(candleData, secondsPerBar);
 
       const lastPrice = bars[bars.length - 1]?.close ?? null;
       lastKnownPrice = lastPrice;
@@ -1894,6 +2040,7 @@
     if (focusToken === 'plan') {
       applyPlanTimeWindow({ force: true });
     }
+    renderSessionBands();
   });
   window.setInterval(fetchBars, TIMEFRAME_REFRESH_MS);
   window.addEventListener('beforeunload', () => {
