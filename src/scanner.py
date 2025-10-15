@@ -1436,8 +1436,8 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
         fib_up, fib_down = {}, {}
 
     bar_minutes = _infer_bar_minutes(frame.index)
-    resampled_5m = _resample_ohlcv(frame, "5T") if bar_minutes is not None and bar_minutes <= 5.01 else None
-    resampled_15m = _resample_ohlcv(frame, "15T") if bar_minutes is not None and bar_minutes <= 15.01 else None
+    resampled_5m = _resample_ohlcv(frame, "5min") if bar_minutes is not None and bar_minutes <= 5.01 else None
+    resampled_15m = _resample_ohlcv(frame, "15min") if bar_minutes is not None and bar_minutes <= 15.01 else None
     resampled_daily = _resample_ohlcv(frame, "1D", min_length=10)
     resampled_weekly = _resample_ohlcv(frame, "1W", min_length=10)
 

@@ -1621,6 +1621,15 @@ def _confidence_visual(confidence: Optional[float]) -> Optional[str]:
     return f"{color} {rating:.2f} · {stars}"
 
 
+def _swap_chart_path(url: str, source: str, target: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        path = parsed.path.replace(source, target, 1)
+        return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+    except Exception:
+        return url
+
+
 def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
     # Respect reverse-proxy headers to avoid mixed-content (http iframe on https page)
     headers = request.headers
@@ -2657,6 +2666,7 @@ async def gpt_scan(
 
     symbol_freshness: Dict[str, float] = {}
     data_meta.setdefault("ok", True)
+    stale_ms_threshold = 90000
     if is_open:
         now_utc = pd.Timestamp.utcnow()
         for symbol_key, frame in market_data.items():
@@ -2664,7 +2674,7 @@ async def gpt_scan(
             age_ms = max((now_utc - last_ts).total_seconds() * 1000.0, 0.0)
             symbol_freshness[symbol_key] = age_ms
         if symbol_freshness:
-            stale_symbols = [sym for sym, age in symbol_freshness.items() if age > 2000]
+            stale_symbols = [sym for sym, age in symbol_freshness.items() if age > stale_ms_threshold]
             if stale_symbols:
                 refreshed = False
                 for sym in stale_symbols:
@@ -2684,8 +2694,8 @@ async def gpt_scan(
             if symbol_freshness:
                 max_age = max(symbol_freshness.values())
                 data_meta["data_freshness_ms"] = int(max_age)
-                if max_age > 2000:
-                    logger.warning("Detected stale market data during RTH (max age %.0f ms)", max_age)
+                if max_age > stale_ms_threshold:
+                    logger.warning("Detected potentially stale market data during RTH (max age %.0f ms)", max_age)
                     data_meta["ok"] = False
                     data_meta["error"] = "stale_feed"
                 else:
@@ -2695,10 +2705,13 @@ async def gpt_scan(
         else:
             data_meta["data_freshness_ms"] = None
             data_meta.pop("error", None)
+            data_meta.pop("error", None)
     else:
         data_meta.pop("data_freshness_ms", None)
         data_meta["ok"] = True
         data_meta.pop("error", None)
+
+    data_meta["stale_threshold_ms"] = stale_ms_threshold
 
     polygon_chains: Dict[str, pd.DataFrame] = {}
     if unique_symbols and polygon_enabled:
@@ -3438,6 +3451,14 @@ async def gpt_plan(
         chart_params_payload.setdefault("strategy", first.get("strategy_id") or plan.get("setup"))
         chart_params_payload.setdefault("symbol", symbol)
         chart_params_payload.setdefault("range", _range_for_style(first.get("style")))
+        chart_params_payload.setdefault("focus", "plan")
+        chart_params_payload.setdefault("center_time", "latest")
+        chart_params_payload.setdefault("scale_plan", "auto")
+        interval_token = chart_params_payload.get("interval") or plan.get("interval") or first.get("style_interval")
+        try:
+            chart_params_payload["interval"] = normalize_interval(interval_token or "5m")
+        except ValueError:
+            chart_params_payload["interval"] = "5m"
         if entry_val is not None or stop_val is not None or targets_list:
             default_note = _format_chart_note(symbol, first.get("style"), entry_val, stop_val, targets_list)
             if default_note and not chart_params_payload.get("notes"):
@@ -3479,6 +3500,9 @@ async def gpt_plan(
                 },
             )
             charts_payload["png"] = chart_png_value
+        else:
+            chart_png_value = _swap_chart_path(chart_url_value, "/tv", "/charts/png")
+            charts_payload["png"] = chart_png_value
     elif chart_params_payload and {"direction", "entry", "stop", "tp"}.issubset(chart_params_payload.keys()):
         fallback_chart_url = _build_tv_chart_url(request, chart_params_payload)
         fallback_chart_url = _append_query_params(
@@ -3494,6 +3518,9 @@ async def gpt_plan(
             "plan chart fallback used",
             extra={"symbol": symbol, "plan_id": plan_id, "url": fallback_chart_url},
         )
+        if not chart_png_value:
+            chart_png_value = _swap_chart_path(chart_url_value, "/tv", "/charts/png")
+            charts_payload["png"] = chart_png_value
 
     if not chart_url_value:
         minimal_params = {
@@ -3508,9 +3535,15 @@ async def gpt_plan(
             minimal_params["stop"] = f"{stop_val:.2f}"
         if targets_list:
             minimal_params["tp"] = ",".join(f"{target:.2f}" for target in targets_list)
+        minimal_params.setdefault("focus", "plan")
+        minimal_params.setdefault("center_time", "latest")
+        minimal_params.setdefault("scale_plan", "auto")
         chart_url_value = _build_tv_chart_url(request, minimal_params)
         charts_payload.setdefault("params", minimal_params)
         charts_payload["interactive"] = chart_url_value
+        if not chart_png_value:
+            chart_png_value = _swap_chart_path(chart_url_value, "/tv", "/charts/png")
+            charts_payload["png"] = chart_png_value
 
     trade_detail_url = chart_url_value
     plan["trade_detail"] = trade_detail_url
