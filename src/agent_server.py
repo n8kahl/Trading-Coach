@@ -2908,28 +2908,29 @@ async def gpt_scan(
             if plan_dict.get("runner"):
                 chart_query["runner"] = json.dumps(plan_dict["runner"])
 
-        chart_links = None
-        required_chart_keys = {"direction", "entry", "stop", "tp"}
-        if required_chart_keys.issubset(chart_query.keys()):
-            try:
-                chart_links = await gpt_chart_url(ChartParams(**chart_query), request)
-            except HTTPException as exc:
-                logger.debug("chart link generation failed for %s: %s", signal.symbol, exc)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("chart link generation error for %s: %s", signal.symbol, exc)
+    chart_links = None
+    required_chart_keys = {"direction", "entry", "stop", "tp"}
+    if required_chart_keys.issubset(chart_query.keys()):
+        try:
+            chart_links = await gpt_chart_url(ChartParams(**chart_query), request)
+        except HTTPException as exc:
+            logger.debug("chart link generation failed for %s: %s", signal.symbol, exc)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("chart link generation error for %s: %s", signal.symbol, exc)
 
-        charts_payload: Dict[str, Any] = {"params": chart_query}
-        if chart_links:
-            charts_payload["interactive"] = chart_links.interactive
-            if chart_links.png:
-                charts_payload["png"] = chart_links.png
-        elif required_chart_keys.issubset(chart_query.keys()):
-            fallback_chart_url = _build_tv_chart_url(request, chart_query)
-            charts_payload["interactive"] = fallback_chart_url
-            logger.debug(
-                "chart link fallback used",
-                extra={"symbol": signal.symbol, "strategy_id": signal.strategy_id, "url": fallback_chart_url},
-            )
+    charts_payload: Dict[str, Any] = {"params": chart_query}
+    if chart_links:
+        chart_query["interval"] = chart_query.get("interval") or "5m"
+        charts_payload["interactive"] = chart_links.interactive
+        if chart_links.png:
+            charts_payload["png"] = chart_links.png
+    elif required_chart_keys.issubset(chart_query.keys()):
+        fallback_chart_url = _build_tv_chart_url(request, chart_query)
+        charts_payload["interactive"] = fallback_chart_url
+        logger.debug(
+            "chart link fallback used",
+            extra={"symbol": signal.symbol, "strategy_id": signal.strategy_id, "url": fallback_chart_url},
+        )
 
         polygon_bundle: Dict[str, Any] | None = None
         if polygon_chains:
@@ -3443,10 +3444,13 @@ async def gpt_plan(
                 chart_params_payload["notes"] = default_note
         try:
             chart_model = ChartParams(**chart_params_payload)
-            if not chart_url_value or not isinstance(chart_url_value, str):
-                chart_links = await gpt_chart_url(chart_model, request)
-                chart_url_value = chart_links.interactive
-                chart_png_value = chart_links.png
+            chart_links = await gpt_chart_url(chart_model, request)
+            chart_url_value = chart_links.interactive
+            chart_png_value = chart_links.png
+            try:
+                chart_params_payload["interval"] = normalize_interval(chart_params_payload.get("interval") or chart_model.interval)
+            except Exception:
+                pass
         except HTTPException as exc:
             logger.debug("plan chart link validation failed for %s: %s", symbol, exc)
             chart_url_value = None
