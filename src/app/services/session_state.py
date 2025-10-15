@@ -133,6 +133,7 @@ def session_now() -> SessionState:
 
     next_open, _next_close = _CLOCK.next_open_close(at=now_et)
 
+    final_status = status
     polygon_status = _polygon_market_status()
     if polygon_status:
         polygon_now = _parse_iso_timestamp(polygon_status.get("serverTime"))
@@ -146,11 +147,11 @@ def session_now() -> SessionState:
         is_open = bool(stocks_hours.get("isOpen"))
 
         if is_open or exchange_state == "open" or market_flag == "open":
-            status = "open"
+            final_status = "open"
             as_of_dt = polygon_now.astimezone(_ET) if polygon_now else now_et
             banner = "Market open"
         else:
-            status = "closed"
+            final_status = "closed"
             previous_close = ((polygon_status.get("previous") or {}).get("stocks") or {}).get("close")
             previous_close_dt = _parse_iso_timestamp(previous_close)
             close_hint = _parse_iso_timestamp(stocks_hours.get("close"))
@@ -171,8 +172,13 @@ def session_now() -> SessionState:
         if open_hint:
             next_open = open_hint.astimezone(_ET)
 
+    if snapshot.status == "open":
+        final_status = "open"
+        banner = "Market open"
+        as_of_dt = now_et
+
     return SessionState(
-        status="open" if status == "open" else "closed",
+        status="open" if final_status == "open" else "closed",
         as_of=_format(as_of_dt),
         next_open=_format(next_open),
         tz="America/New_York",

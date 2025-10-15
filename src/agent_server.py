@@ -136,13 +136,29 @@ _FUTURES_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}
 
 _MARKET_CLOCK = MarketClock()
 
+_STRATEGY_CHART_HINTS: Dict[str, Tuple[str, str]] = {
+    "orb_retest": ("1m", "Wait for a 1 minute break and retest of the opening range boundary before committing."),
+    "power_hour_trend": ("5m", "Manage the trade on 5 minute closes while price holds trend alignment into the close."),
+    "vwap_avwap": ("1m", "Use 1 minute closes to confirm the reclaim above VWAP/AVWAP cluster before scaling."),
+    "gap_fill_open": ("1m", "Watch 1 minute rejection of prior close to trigger the gap-fill continuation."),
+    "midday_mean_revert": ("1m", "Fade extensions with 1 minute bars; wait for a VWAP reclaim before adding risk."),
+    "baseline_auto": ("5m", "Default to 5 minute management — respect plan entry/stop on close."),
+}
+
+_STYLE_CHART_HINTS: Dict[str, Tuple[str, str]] = {
+    "scalp": ("1m", "Use 1 minute closes to validate the scalp trigger and manage stops."),
+    "intraday": ("5m", "Manage risk on 5 minute closes relative to the plan levels."),
+    "swing": ("1h", "Focus on 1 hour structure; keep stops below the HTF pivot."),
+    "leap": ("d", "Use daily bars for confirmation and management."),
+}
+
 
 def _market_snapshot_payload() -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
     snapshot = _MARKET_CLOCK.snapshot()
     session_snapshot = session_now()
     session_payload = session_snapshot.to_dict()
     as_of_dt = parse_session_as_of(session_payload) or _MARKET_CLOCK.last_rth_close()
-    frozen = snapshot.status != "open"
+    frozen = session_payload.get("status") != "open"
     market_payload = {
         "status": snapshot.status,
         "session": snapshot.session,
@@ -381,6 +397,8 @@ class PlanResponse(BaseModel):
     chart_url: str | None = None
     chart_png: str | None = None
     chart_inline_markdown: str | None = None
+    chart_timeframe: str | None = None
+    chart_guidance: str | None = None
     strategy_id: str | None = None
     description: str | None = None
     score: float | None = None
@@ -1621,6 +1639,17 @@ def _confidence_visual(confidence: Optional[float]) -> Optional[str]:
     return f"{color} {rating:.2f} · {stars}"
 
 
+def _chart_hint(strategy_id: Optional[str], style: Optional[str]) -> Tuple[str, str]:
+    if strategy_id:
+        hint = _STRATEGY_CHART_HINTS.get(str(strategy_id))
+        if hint:
+            return hint
+    style_norm = _normalize_style(style)
+    if style_norm and style_norm in _STYLE_CHART_HINTS:
+        return _STYLE_CHART_HINTS[style_norm]
+    return ("5m", "Use 5 minute closes to validate the trigger and manage stops.")
+
+
 def _swap_chart_path(url: str, source: str, target: str) -> str:
     try:
         parsed = urlsplit(url)
@@ -2705,13 +2734,12 @@ async def gpt_scan(
         else:
             data_meta["data_freshness_ms"] = None
             data_meta.pop("error", None)
-            data_meta.pop("error", None)
     else:
         data_meta.pop("data_freshness_ms", None)
         data_meta["ok"] = True
         data_meta.pop("error", None)
 
-    data_meta["stale_threshold_ms"] = stale_ms_threshold
+    data_meta["stale_threshold_ms"] = stale_ms_threshold if is_open else None
 
     polygon_chains: Dict[str, pd.DataFrame] = {}
     if unique_symbols and polygon_enabled:
@@ -3139,6 +3167,11 @@ async def _generate_fallback_plan(
     notes = (
         f"{direction_label} bias with EMA stack supportive; manage risk using {runner_trail} and watch VWAP for continuation."
     )
+    hint_interval_raw, hint_guidance = _chart_hint("baseline_auto", style_token)
+    try:
+        chart_timeframe_hint = normalize_interval(hint_interval_raw)
+    except ValueError:
+        chart_timeframe_hint = "5m"
     plan_ts = context.get("timestamp")
     if isinstance(plan_ts, pd.Timestamp):
         plan_ts_utc = plan_ts.tz_convert("UTC") if plan_ts.tzinfo else plan_ts.tz_localize("UTC")
@@ -3148,10 +3181,10 @@ async def _generate_fallback_plan(
     view_token = _view_for_style(style_token)
     range_token = _range_for_style(style_token)
     interval_map = {"1": "1m", "5": "5m", "60": "1h", "D": "d"}
-    interval_token = interval_map.get(timeframe, "5m")
+    interval_token = interval_map.get(timeframe, chart_timeframe_hint or "5m")
     chart_params: Dict[str, Any] = {
         "symbol": symbol.upper(),
-        "interval": interval_token,
+        "interval": chart_timeframe_hint or interval_token,
         "direction": direction,
         "entry": f"{entry:.2f}",
         "stop": f"{stop:.2f}",
@@ -3210,6 +3243,8 @@ async def _generate_fallback_plan(
         "strategy": "baseline_auto",
         "debug": {"source": "auto_fallback_plan"},
     }
+    plan_block["chart_timeframe"] = chart_timeframe_hint
+    plan_block["chart_guidance"] = hint_guidance
     if chart_png:
         plan_block["chart_png"] = chart_png
     if inline_markdown:
@@ -3247,6 +3282,8 @@ async def _generate_fallback_plan(
         structured_plan["confidence_visual"] = confidence_visual
     chart_params_payload = {key: str(value) for key, value in chart_params.items()}
     charts_payload: Dict[str, Any] = {"params": chart_params_payload, "interactive": chart_url_with_ids}
+    charts_payload["timeframe"] = chart_timeframe_hint
+    charts_payload["guidance"] = hint_guidance
     if chart_png:
         charts_payload["png"] = chart_png
     if inline_markdown:
@@ -3314,6 +3351,8 @@ async def _generate_fallback_plan(
         session_state=market_meta.get("session_state"),
         chart_png=chart_png,
         chart_inline_markdown=inline_markdown,
+        chart_timeframe=chart_timeframe_hint,
+        chart_guidance=hint_guidance,
         confidence_visual=confidence_visual,
     )
     return response
@@ -3400,6 +3439,16 @@ async def gpt_plan(
     plan.setdefault("style", first.get("style"))
     plan.setdefault("direction", plan.get("direction") or (snapshot.get("trend") or {}).get("direction_hint"))
     first["plan"] = plan
+
+    strategy_id_value = first.get("strategy_id") or plan.get("strategy")
+    style_token = plan.get("style") or first.get("style") or request_payload.style
+    hint_interval_raw, hint_guidance = _chart_hint(strategy_id_value, style_token)
+    try:
+        chart_timeframe_hint = normalize_interval(hint_interval_raw)
+    except ValueError:
+        chart_timeframe_hint = "5m"
+    plan["chart_timeframe"] = chart_timeframe_hint
+    plan["chart_guidance"] = hint_guidance
     logger.info(
         "plan identity normalized",
         extra={
@@ -3451,6 +3500,7 @@ async def gpt_plan(
         chart_params_payload.setdefault("strategy", first.get("strategy_id") or plan.get("setup"))
         chart_params_payload.setdefault("symbol", symbol)
         chart_params_payload.setdefault("range", _range_for_style(first.get("style")))
+        chart_params_payload.setdefault("interval", chart_timeframe_hint)
         chart_params_payload.setdefault("focus", "plan")
         chart_params_payload.setdefault("center_time", "latest")
         chart_params_payload.setdefault("scale_plan", "auto")
@@ -3482,6 +3532,8 @@ async def gpt_plan(
     charts_payload: Dict[str, Any] = {}
     if chart_params_payload:
         charts_payload["params"] = chart_params_payload
+        charts_payload["timeframe"] = chart_timeframe_hint
+        charts_payload["guidance"] = hint_guidance
     if chart_url_value:
         chart_url_value = _append_query_params(
             chart_url_value,
@@ -3525,7 +3577,7 @@ async def gpt_plan(
     if not chart_url_value:
         minimal_params = {
             "symbol": symbol,
-            "interval": normalize_interval(plan.get("interval") or chart_params_payload.get("interval") or "15"),
+            "interval": chart_timeframe_hint or normalize_interval(plan.get("interval") or chart_params_payload.get("interval") or "15"),
             "plan_id": plan_id,
             "plan_version": str(version),
         }
@@ -3759,6 +3811,8 @@ async def gpt_plan(
         plan.setdefault("setup", plan_core.get("setup"))
     plan_core["trade_detail"] = trade_detail_url
     plan_core["idea_url"] = trade_detail_url
+    plan_core["chart_timeframe"] = chart_timeframe_hint
+    plan_core["chart_guidance"] = hint_guidance
     if updated_from_version:
         plan_core["updated_from_version"] = updated_from_version
     if update_reason:
@@ -3929,6 +3983,8 @@ async def gpt_plan(
         chart_url=chart_url_output,
         chart_png=chart_png_value,
         chart_inline_markdown=chart_inline_markdown_value,
+        chart_timeframe=chart_timeframe_hint,
+        chart_guidance=hint_guidance,
         strategy_id=first.get("strategy_id"),
         description=first.get("description"),
         score=first.get("score"),
@@ -3982,6 +4038,10 @@ async def assistant_exec(
     plan_block.setdefault("version", plan_response.version)
     plan_block.setdefault("symbol", plan_response.symbol)
     plan_block.setdefault("style", plan_response.style)
+    if plan_response.chart_timeframe and "chart_timeframe" not in plan_block:
+        plan_block["chart_timeframe"] = plan_response.chart_timeframe
+    if plan_response.chart_guidance and "chart_guidance" not in plan_block:
+        plan_block["chart_guidance"] = plan_response.chart_guidance
     if plan_response.confidence_visual and "confidence_visual" not in plan_block:
         plan_block["confidence_visual"] = plan_response.confidence_visual
     if plan_response.chart_inline_markdown and "chart_inline_markdown" not in plan_block:
@@ -3993,6 +4053,10 @@ async def assistant_exec(
         "interactive": plan_response.chart_url,
         "params": plan_response.charts_params,
     }
+    if plan_response.chart_png:
+        chart_block["png"] = plan_response.chart_png
+    if plan_response.chart_inline_markdown:
+        chart_block["inline_markdown"] = plan_response.chart_inline_markdown
     if plan_response.chart_png:
         chart_block["png"] = plan_response.chart_png
     if plan_response.chart_inline_markdown:
