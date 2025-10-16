@@ -1110,18 +1110,27 @@ def _fallback_scan_candidates(
     limit: int,
 ) -> List[ScanCandidate]:
     ranked: List[Tuple[float, ScanCandidate]] = []
-    for symbol in symbols:
+    fallback_counter = 0
+    for idx, symbol in enumerate(symbols):
         frame = market_data.get(symbol)
         if frame is None or frame.empty:
-            continue
-        rvol = _relative_volume(frame)
-        liq = _liquidity_score(frame)
-        score = max(rvol, 0.05) + min(liq / 1_000_000_000.0, 0.25)
-        confidence = max(min(0.35 + 0.2 * min(rvol, 1.5), 0.65), 0.3)
-        reasons = [
-            f"Fallback candidate — RVOL {rvol:.2f}",
-            "Liquidity baseline applied",
-        ]
+            fallback_counter += 1
+            score = max(0.2, 0.45 - (idx * 0.01))
+            confidence = 0.32 + (fallback_counter * 0.005)
+            reasons = [
+                "Fallback candidate — market data unavailable",
+                "Ranking via universe order",
+            ]
+        else:
+            rvol = _relative_volume(frame)
+            liq = _liquidity_score(frame)
+            liquidity_component = min(liq / 1_000_000_000.0, 0.3)
+            score = max(rvol, 0.05) + liquidity_component
+            confidence = max(min(0.35 + 0.2 * min(rvol, 1.5), 0.65), 0.3)
+            reasons = [
+                f"Fallback candidate — RVOL {rvol:.2f}",
+                "Liquidity baseline applied",
+            ]
         candidate = ScanCandidate(
             symbol=symbol.upper(),
             score=float(round(score, 4)),
@@ -1135,8 +1144,15 @@ def _fallback_scan_candidates(
             chart_url=None,
         )
         ranked.append((score, candidate))
-    ranked.sort(key=lambda item: (-item[0], item[1].symbol))
-    return [item[1] for item in ranked[:limit]]
+    ranked.sort(
+        key=lambda item: (
+            -item[1].confidence if item[1].confidence is not None else -item[0],
+            -item[0],
+            item[1].symbol,
+        )
+    )
+    fallback_limit = max(1, min(limit, 15))
+    return [item[1] for item in ranked[:fallback_limit]]
 
 
 def _fallback_scan_page(

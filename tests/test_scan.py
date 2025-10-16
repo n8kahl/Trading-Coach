@@ -284,6 +284,58 @@ async def test_scan_relaxes_min_rvol_when_frozen(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_scan_fallback_limits_and_confidence_sort(monkeypatch):
+    tickers = [f"T{idx}" for idx in range(40)]
+
+    async def fake_expand_universe(universe, style, limit):  # noqa: ARG001
+        return tickers[:limit]
+
+    async def fake_collect_market_data(symbols, timeframe, as_of=None):  # noqa: ARG001
+        frames = {}
+        for idx, sym in enumerate(symbols):
+            if idx % 3 == 0:
+                frames[sym] = pd.DataFrame()  # force missing data
+            else:
+                history = _make_history()
+                history["volume"] = [200_000 + (idx * 10_000)] * len(history)
+                frames[sym] = history
+        return frames, {sym: "polygon" for sym in symbols}
+
+    async def fake_scan_market(symbols, market_data):  # noqa: ARG001
+        return []  # force fallback
+
+    def frozen_context(policy, style):  # noqa: ARG001
+        context = ScanContext(
+            as_of=datetime(2025, 10, 14, 20, 0),
+            label="frozen",
+            is_open=False,
+            data_timeframe="5",
+            market_meta={},
+            data_meta={"ok": True},
+        )
+        return context, "Frozen planning context requested.", {"ok": True}
+
+    monkeypatch.setattr("src.agent_server.expand_universe", fake_expand_universe)
+    monkeypatch.setattr("src.agent_server._collect_market_data", fake_collect_market_data)
+    monkeypatch.setattr("src.agent_server.scan_market", fake_scan_market)
+    monkeypatch.setattr("src.agent_server._evaluate_scan_context", frozen_context)
+
+    request_payload = ScanRequest(
+        universe="FT-TopLiquidity",
+        style="intraday",
+        limit=100,
+    )
+    request = _make_request()
+    user = AuthedUser(user_id="tester")
+
+    page = await gpt_scan_endpoint(request_payload, request, user)
+    assert page.candidates
+    assert 1 <= len(page.candidates) <= 15
+    confidences = [cand.confidence or 0.0 for cand in page.candidates]
+    assert confidences == sorted(confidences, reverse=True)
+
+
+@pytest.mark.asyncio
 async def test_universe_not_symbol(monkeypatch):
     monkeypatch.setattr("src.agent_server.expand_universe", lambda universe, style, limit: ["AAPL"])  # noqa: ARG001
     monkeypatch.setattr("src.agent_server._collect_market_data", lambda symbols, timeframe, as_of=None: ({sym: _make_history() for sym in symbols}, {sym: "polygon" for sym in symbols}))  # noqa: ARG001
