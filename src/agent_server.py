@@ -4441,6 +4441,7 @@ async def _generate_fallback_plan(
 ) -> PlanResponse | None:
     style_token = _fallback_style_token(style)
     market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload()
+    is_plan_live = bool(is_open)
     timeframe_map = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}
     timeframe = timeframe_map.get(style_token, "5")
     try:
@@ -4604,7 +4605,7 @@ async def _generate_fallback_plan(
         plan_ts_utc = plan_ts.tz_convert("UTC") if plan_ts.tzinfo else plan_ts.tz_localize("UTC")
     else:
         plan_ts_utc = pd.Timestamp.utcnow()
-    if is_open:
+    if is_plan_live:
         plan_ts_utc = pd.Timestamp.utcnow()
     plan_id = f"{symbol.upper()}-{plan_ts_utc.strftime('%Y%m%dT%H%M%S')}-{style_token}-auto"
     view_token = _view_for_style(style_token)
@@ -4887,6 +4888,7 @@ async def gpt_plan(
         chart_timeframe_hint = "5m"
     plan["chart_timeframe"] = chart_timeframe_hint
     plan["chart_guidance"] = hint_guidance
+    is_plan_live = str(first.get("planning_context") or "").strip().lower() == "live"
     logger.info(
         "plan identity normalized",
         extra={
