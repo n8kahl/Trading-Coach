@@ -10,12 +10,14 @@ import pandas as pd
 
 from ...polygon_options import fetch_polygon_option_chain
 from ...tradier import TradierNotConfiguredError, fetch_option_chain_cached
+from ...data_sources import fetch_polygon_ohlcv
 from .index_common import (
     CONTRACT_PREF_ORDER,
     ETF_PROXIES,
     POLYGON_INDEX_TICKERS,
     resolve_polygon_symbol,
     resolve_proxy_symbol,
+    DEFAULT_INDEX_RATIOS,
 )
 from .index_health import FeedStatus, polygon_index_snapshot, polygon_universal_snapshot, tradier_index_greeks
 from .ratio_engine import RatioEngine, RatioSnapshot
@@ -133,12 +135,18 @@ class IndexPlanner:
         if proxy_frame is None or proxy_frame.empty:
             return None
         snapshot = await self.ratio_snapshot(symbol)
-        if snapshot is None:
-            return None
         converted = proxy_frame.copy()
-        for column in ("open", "high", "low", "close"):
-            if column in converted.columns:
-                converted[column] = converted[column].apply(snapshot.translate_from_proxy)
+        if snapshot is None:
+            ratio = DEFAULT_INDEX_RATIOS.get(symbol.upper())
+            if ratio is None:
+                return None
+            for column in ("open", "high", "low", "close"):
+                if column in converted.columns:
+                    converted[column] = converted[column].astype(float) * float(ratio)
+        else:
+            for column in ("open", "high", "low", "close"):
+                if column in converted.columns:
+                    converted[column] = converted[column].apply(snapshot.translate_from_proxy)
         if "volume" in converted.columns:
             try:
                 converted["volume"] = converted["volume"].astype(float)

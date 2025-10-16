@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from src.app.engine.ratio_engine import RatioEngine, RatioSnapshot
+from src.app.engine.index_mode import IndexPlanner
 
 
 @pytest.mark.asyncio
@@ -58,3 +59,35 @@ async def test_ratio_engine_detects_gamma_drift(monkeypatch):
     assert snapshot.drift != 0.0
     # Drift should be positive because proxy outran the index
     assert snapshot.drift > 0
+
+
+@pytest.mark.asyncio
+async def test_synthetic_index_ohlcv_uses_default_ratio(monkeypatch):
+    proxy_times = pd.date_range("2024-01-01 14:30", periods=3, freq="5min", tz="UTC")
+    proxy_prices = pd.Series([450.0, 451.0, 452.0], index=proxy_times)
+    proxy_df = pd.DataFrame(
+        {
+            "open": proxy_prices,
+            "high": proxy_prices + 1,
+            "low": proxy_prices - 1,
+            "close": proxy_prices,
+            "volume": [1_000_000, 1_100_000, 1_200_000],
+        },
+        index=proxy_times,
+    )
+
+    async def fake_fetch(symbol: str, timeframe: str):  # noqa: ARG001
+        assert symbol == "SPY"
+        return proxy_df
+
+    async def fake_ratio_snapshot(self, symbol: str):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("src.app.engine.index_mode.fetch_polygon_ohlcv", fake_fetch)
+    monkeypatch.setattr(IndexPlanner, "ratio_snapshot", fake_ratio_snapshot, raising=False)
+
+    planner = IndexPlanner()
+    converted = await planner.synthetic_index_ohlcv("SPX", "5")
+
+    assert converted is not None
+    assert pytest.approx(converted["close"].iloc[-1], rel=1e-3) == 4520.0

@@ -8,6 +8,7 @@ INDEX_BASE_TICKERS: Tuple[str, ...] = ("SPX", "NDX")
 POLYGON_INDEX_TICKERS: Dict[str, str] = {base: f"I:{base}" for base in INDEX_BASE_TICKERS}
 ETF_PROXIES: Dict[str, str] = {"SPX": "SPY", "NDX": "QQQ"}
 CONTRACT_PREF_ORDER: Tuple[str, ...] = ("INDEX_POLYGON", "INDEX_TRADIER", "ETF_PROXY")
+DEFAULT_INDEX_RATIOS: Dict[str, float] = {"SPX": 10.0, "NDX": 40.0}
 
 
 def resolve_polygon_symbol(symbol: str) -> str | None:
@@ -36,6 +37,7 @@ __all__ = [
     "POLYGON_INDEX_TICKERS",
     "ETF_PROXIES",
     "CONTRACT_PREF_ORDER",
+    "DEFAULT_INDEX_RATIOS",
     "resolve_polygon_symbol",
     "resolve_proxy_symbol",
     "base_index_symbols",
