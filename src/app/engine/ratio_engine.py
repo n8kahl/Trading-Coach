@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from ...data_sources import fetch_polygon_ohlcv
+from src.data_sources import fetch_polygon_ohlcv
 from .index_common import ETF_PROXIES, POLYGON_INDEX_TICKERS
 
 

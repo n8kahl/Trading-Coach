@@ -8,7 +8,7 @@ import time
 
 import httpx
 
-from ...config import get_settings
+from config import get_settings
 
 _POLYGON_BASE = "https://api.polygon.io"
 _CACHE_TTL = 60.0

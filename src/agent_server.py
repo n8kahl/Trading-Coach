@@ -4720,6 +4720,8 @@ async def _generate_fallback_plan(
         "strategy": "baseline_auto",
         "debug": {},
     }
+    plan_block["trade_detail"] = chart_url_with_ids
+    plan_block["idea_url"] = chart_url_with_ids
     plan_block["chart_timeframe"] = chart_timeframe_hint
     plan_block["chart_guidance"] = hint_guidance
     if chart_png:
@@ -4757,6 +4759,7 @@ async def _generate_fallback_plan(
     )
     if confidence_visual:
         structured_plan["confidence_visual"] = confidence_visual
+    structured_plan["trade_detail"] = chart_url_with_ids
     chart_params_payload = {key: str(value) for key, value in chart_params.items()}
     charts_payload: Dict[str, Any] = {"params": chart_params_payload, "interactive": chart_url_with_ids}
     charts_payload["live"] = is_plan_live
@@ -4864,7 +4867,7 @@ async def gpt_plan(
         },
     )
     universe = ScanUniverse(tickers=[symbol], style=request_payload.style)
-    results = await _legacy_scan(universe, request, user)
+    results = await gpt_scan(universe, request, user)
     if not results:
         fallback_plan = await _generate_fallback_plan(symbol, request_payload.style, request, user)
         if fallback_plan is not None:
@@ -5503,10 +5506,10 @@ async def gpt_plan(
         if chart_params_payload:
             charts_field["params"] = chart_params_payload
         charts_field["live"] = is_live_plan
-    if data_payload is not None and isinstance(data_payload, dict) and is_live_plan:
-        bars_url = data_payload.get("bars")
+    if data_meta is not None and isinstance(data_meta, dict) and is_live_plan:
+        bars_url = data_meta.get("bars")
         if isinstance(bars_url, str):
-            data_payload["bars"] = _append_query_params(bars_url, {"live": "1"})
+            data_meta["bars"] = _append_query_params(bars_url, {"live": "1"})
 
     logger.info(
         "plan response ready",

@@ -16,7 +16,7 @@ from urllib.parse import urlparse, parse_qs
 
 import httpx
 
-from ...config import get_settings
+from config import get_settings
 
 _POLYGON_BASE = "https://api.polygon.io"
 INDEX_PRIORITY = ['SPX', 'NDX']
