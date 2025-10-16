@@ -353,6 +353,22 @@ def _normalize_chart_symbol(value: str) -> str:
     return token.upper()
 
 
+def _tv_symbol(value: str) -> str:
+    """Normalize symbols for the TradingView-style chart route.
+
+    Ensures index underlyings resolve to Polygon's index tickers to avoid
+    host defaults (e.g., AAPL when symbol is missing).
+    """
+    tok = (value or "").strip().upper()
+    spx_aliases = {"SPX", "^GSPC", "X:SPX", "INDEX:SPX", "SP500"}
+    ndx_aliases = {"NDX", "^NDX", "X:NDX", "INDEX:NDX"}
+    if tok in spx_aliases or tok == "I:SPX":
+        return "I:SPX"
+    if tok in ndx_aliases or tok == "I:NDX":
+        return "I:NDX"
+    return tok
+
+
 def _normalize_chart_interval(value: str) -> str:
     token = (value or "").strip().lower()
     if not token:
@@ -2360,9 +2376,15 @@ def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
             continue
         if isinstance(value, (list, tuple)):
             value = ",".join(str(item) for item in value if item is not None)
-        query[key] = str(value)
+        if key == "symbol":
+            query[key] = _tv_symbol(str(value))
+        else:
+            query[key] = str(value)
     if not query:
         return base
+    # Ensure symbol is present; if absent, use a safe default to avoid host fallback
+    if "symbol" not in query or not query["symbol"]:
+        query["symbol"] = "SPY"
     return f"{base}?{urlencode(query, safe=',|:;+-_() ')}"
 
 
