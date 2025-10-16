@@ -200,6 +200,7 @@ _FROZEN_DEFAULT_UNIVERSE: List[str] = [
     "SPY",
     "QQQ",
     "IWM",
+    "DIA",
     "AAPL",
     "MSFT",
     "NVDA",
@@ -207,6 +208,15 @@ _FROZEN_DEFAULT_UNIVERSE: List[str] = [
     "META",
     "AMZN",
     "GOOG",
+    "NFLX",
+    "AMD",
+    "CRM",
+    "COST",
+    "JPM",
+    "XLF",
+    "XLK",
+    "SMH",
+    "TLT",
 ]
 
 _STRATEGY_CHART_HINTS: Dict[str, Tuple[str, str]] = {
@@ -1181,7 +1191,7 @@ def _fallback_scan_candidates(
             item[1].symbol,
         )
     )
-    fallback_limit = max(1, min(limit, 15))
+    fallback_limit = max(1, min(limit, len(ranked)))
     return [item[1] for item in ranked[:fallback_limit]]
 
 
@@ -1192,13 +1202,15 @@ def _fallback_scan_page(
     symbols: Sequence[str],
     market_data: Dict[str, pd.DataFrame],
     dq: Dict[str, Any],
-    banner: str,
+    banner: str | None,
     limit: int,
     mode: str | None = None,
     label: str | None = None,
 ) -> ScanPage | None:
     # Primary frozen list for requested horizon
-    primary_limit = max(1, min(limit, 10))
+    is_live = context.label == "live" and context.is_open
+    max_items = 20 if is_live else 10
+    primary_limit = max(1, min(limit, max_items))
     candidates = _fallback_scan_candidates(symbols, market_data, limit=primary_limit)
     if not candidates:
         return None
@@ -1213,14 +1225,15 @@ def _fallback_scan_page(
         "style": request.style,
         "limit": request.limit,
         "universe_size": len(symbols),
-        "mode": mode or ("frozen_preview" if not context.is_open else "live_default"),
-        "label": label or ("Frozen leaders (as of RTH close)" if not context.is_open else "Default leaders (live)"),
+        "mode": mode or ("live_default" if is_live else "frozen_preview"),
+        "label": label or ("Live liquidity leaders" if is_live else "Frozen leaders (as of RTH close)"),
         "alt_candidates": {alt_key: alt_compact},
     }
+    banner_value = banner if banner is not None else (None if is_live else "Market closed — frozen data")
     return ScanPage(
         as_of=context.as_of_iso,
         planning_context=context.label,
-        banner=banner,
+        banner=banner_value,
         meta=meta,
         candidates=candidates,
         data_quality=dq,
@@ -3405,8 +3418,8 @@ async def gpt_scan_endpoint(
             symbols=_FROZEN_DEFAULT_UNIVERSE,
             market_data={},
             dq=dq,
-            banner=context_banner or "Universe unavailable — showing frozen leaders.",
-            limit=min(10, max(request_payload.limit, 1)),
+            banner=None if context.is_open else (context_banner or "Universe unavailable — showing frozen leaders."),
+            limit=request_payload.limit,
         )
         if fallback_page is not None:
             return fallback_page
@@ -3428,10 +3441,8 @@ async def gpt_scan_endpoint(
             symbols=_FROZEN_DEFAULT_UNIVERSE,
             market_data={},
             dq=dq,
-            banner=(context_banner or ("Empty universe — showing default leaders." if context.is_open else "Empty universe — showing frozen leaders.")),
-            limit=min(10, max(request_payload.limit, 1)),
-            mode=("live_default" if context.is_open else None),
-            label=("Default leaders (live)" if context.is_open else None),
+            banner=None if context.is_open else (context_banner or "Empty universe — showing frozen leaders."),
+            limit=request_payload.limit,
         )
         if fallback_page is not None:
             return fallback_page
@@ -3479,14 +3490,8 @@ async def gpt_scan_endpoint(
                 symbols=tickers,
                 market_data={},
                 dq=dq,
-                banner=(
-                    "Live data unavailable — showing default leaders."
-                    if context.is_open
-                    else "Market data unavailable — showing frozen leaders."
-                ),
-                limit=min(10, max(request_payload.limit, 1)),
-                mode=("live_default" if context.is_open else None),
-                label=("Default leaders (live)" if context.is_open else None),
+                banner=None if context.is_open else "Market data unavailable — showing frozen leaders.",
+                limit=request_payload.limit,
             )
             if fallback_page is not None:
                 return fallback_page
@@ -3534,6 +3539,26 @@ async def gpt_scan_endpoint(
     requested_limit = max(request_payload.limit, 1)
     rank_limit = 100 if requested_limit < 100 else min(requested_limit, 100)
     page_limit = min(requested_limit, rank_limit)
+    if context.is_open and available_symbols:
+        now_utc = pd.Timestamp.utcnow()
+        tolerance_ms = 15 * 60 * 1000  # 15 minutes
+        fresh = []
+        for sym in available_symbols:
+            frame = market_data.get(sym)
+            if frame is None or frame.empty:
+                continue
+            ts = frame.index[-1]
+            if not isinstance(ts, pd.Timestamp):
+                continue
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            age_ms = max((now_utc - ts).total_seconds() * 1000.0, 0.0)
+            if age_ms <= tolerance_ms:
+                fresh.append(sym)
+        if fresh:
+            available_symbols = fresh
+        else:
+            logger.warning("Live scan: all symbols stale (>%d ms); continuing with best-effort data", tolerance_ms)
     if not available_symbols:
         fallback_page = _fallback_scan_page(
             request_payload,
@@ -3541,8 +3566,8 @@ async def gpt_scan_endpoint(
             symbols=tickers,
             market_data=market_data,
             dq=dq,
-            banner=banner or "Market closed — showing frozen leaders.",
-            limit=min(10, page_limit),
+            banner=None if context.is_open else (banner or "Market closed — showing frozen leaders."),
+            limit=page_limit,
         )
         if fallback_page is not None:
             return fallback_page
@@ -3562,10 +3587,8 @@ async def gpt_scan_endpoint(
             symbols=available_symbols,
             market_data=market_data,
             dq=dq,
-            banner=banner or ("Filters removed all symbols — showing default leaders." if context.is_open else "Filters removed all symbols — showing frozen leaders."),
-            limit=min(10, page_limit),
-            mode=("live_default" if context.is_open else None),
-            label=("Default leaders (live)" if context.is_open else None),
+            banner=None if context.is_open else (banner or "Filters removed all symbols — showing frozen leaders."),
+            limit=page_limit,
         )
         if fallback_page is not None:
             return fallback_page
@@ -3614,10 +3637,8 @@ async def gpt_scan_endpoint(
             symbols=available_symbols,
             market_data=market_subset,
             dq=dq,
-            banner=banner or ("Scanner returned no signals — showing default leaders." if context.is_open else "Scanner returned no signals — showing frozen leaders."),
-            limit=min(10, page_limit),
-            mode=("live_default" if context.is_open else None),
-            label=("Default leaders (live)" if context.is_open else None),
+            banner=None if context.is_open else (banner or "Scanner returned no signals — showing frozen leaders."),
+            limit=page_limit,
         )
         if fallback_page is not None:
             return fallback_page
@@ -3661,10 +3682,8 @@ async def gpt_scan_endpoint(
             symbols=available_symbols,
             market_data=market_subset,
             dq=dq,
-            banner=banner or ("Ranking produced no results — showing default leaders." if context.is_open else "Ranking produced no results — showing frozen leaders."),
-            limit=min(10, page_limit),
-            mode=("live_default" if context.is_open else None),
-            label=("Default leaders (live)" if context.is_open else None),
+            banner=None if context.is_open else (banner or "Ranking produced no results — showing frozen leaders."),
+            limit=page_limit,
         )
         if fallback_page is not None:
             return fallback_page

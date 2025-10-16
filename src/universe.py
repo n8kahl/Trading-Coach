@@ -85,7 +85,11 @@ async def expand_universe(universe: str | List[str], *, style: str, limit: int) 
 
     specials = await _resolve_special_token(token, style=style, limit=limit)
     if specials:
-        return _normalize_symbols(specials)[:limit]
+        symbols = _normalize_symbols(specials)[:limit]
+        if style and style.lower() == "swing" and symbols:
+            seed = int(datetime.utcnow().timestamp() // 86400)
+            symbols.sort(key=lambda sym: (hash((sym, seed)) & 0xFFFFFFFF))
+        return symbols
 
     if _SYMBOL_PATTERN.fullmatch(token):
         return _normalize_symbols([token])[:limit]

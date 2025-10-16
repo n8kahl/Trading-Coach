@@ -143,3 +143,9 @@ Happy shipping!
 - 2025-10-12 00:41:19Z – Schema documentation synced to OpenAPI 1.9.6 (docs/prompts/master_prompt_v2.1.md, docs/gpt_integration.md).
 
 - 2025-10-11T20:37:56.623921-05:00 – Marked commit 23a45da as production ready baseline (docs/gpt_integration.md).
+
+- 2025-10-16T13:55Z – Live scan pipeline hardened. Diagnosed that FT-TopLiquidity expansion was intermittently returning empty results during RTH, causing the assistant to fall back to “frozen” lists despite the market being open. Added:
+  - deterministic live-default universe (20 high-liquidity names) when expansion or market-data fetch fails.
+  - better labeling (`Live liquidity leaders`) with no warning banner during RTH and up to 20 ranked symbols.
+  - relaxed, logged handling for slightly stale bars instead of bailing to frozen context immediately.
+  - doc note: if upstream watchlist service continues to fail, consider building an internal Top-Liquidity snapshot service for true live rankings.
