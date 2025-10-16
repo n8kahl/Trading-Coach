@@ -1,0 +1,576 @@
+openapi: 3.1.0
+info:
+  title: Trading Coach Backend API
+  version: "2.1.0"
+  description: |
+    Fancy Trader endpoints powering GPT integrations.
+    Session-aware payloads clamp Polygon and Tradier data when markets are closed.
+servers:
+  - url: https://trading-coach-production.up.railway.app
+    description: Production deployment
+paths:
+  /gpt/plan:
+    post:
+      summary: Return a single trade plan for a symbol
+      operationId: postGptPlan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanRequest'
+      responses:
+        '200':
+          description: Structured plan response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanResponse'
+        '400':
+          description: Invalid input
+        '404':
+          description: No plan available
+        '502':
+          description: Upstream market data unavailable
+
+  /gpt/scan:
+    post:
+      summary: Rank trade setups across a universe
+      operationId: postGptScan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanRequest'
+      responses:
+        '200':
+          description: Ranked scan candidates (paged 50 per request)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanPage'
+        '400':
+          description: Invalid input or empty universe
+        '502':
+          description: Upstream market data unavailable
+
+components:
+  schemas:
+    # ---------- Scan Schemas ----------
+    ScanFilters:
+      type: object
+      properties:
+        min_rvol:
+          type: number
+          minimum: 0
+          nullable: true
+        exclude:
+          type: array
+          items:
+            type: string
+        min_liquidity_rank:
+          type: integer
+          minimum: 1
+          nullable: true
+
+    ScanRequest:
+      type: object
+      required: [universe, style]
+      properties:
+        universe:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        style:
+          type: string
+          enum: [scalp, intraday, swing, leaps]
+        limit:
+          type: integer
+          default: 20
+          minimum: 1
+          maximum: 100
+        asof_policy:
+          type: string
+          enum: [live, frozen, live_or_lkg]
+          default: live_or_lkg
+        filters:
+          $ref: '#/components/schemas/ScanFilters'
+        cursor:
+          type: string
+          nullable: true
+
+    ScanCandidate:
+      type: object
+      required: [symbol, score, reasons]
+      properties:
+        symbol:
+          type: string
+        score:
+          type: number
+          format: double
+        reasons:
+          type: array
+          items:
+            type: string
+        plan_id:
+          type: string
+          nullable: true
+        entry:
+          type: number
+          format: double
+          nullable: true
+        stop:
+          type: number
+          format: double
+          nullable: true
+        tps:
+          type: array
+          items:
+            type: number
+            format: double
+        rr_t1:
+          type: number
+          format: double
+          nullable: true
+        confidence:
+          type: number
+          format: double
+          nullable: true
+        chart_url:
+          type: string
+          format: uri
+          nullable: true
+
+    ScanPage:
+      type: object
+      required: [as_of, planning_context, meta, candidates, data_quality]
+      properties:
+        as_of:
+          type: string
+          format: date-time
+        planning_context:
+          type: string
+          enum: [live, frozen]
+        banner:
+          type: string
+          nullable: true
+        meta:
+          type: object
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScanCandidate'
+        data_quality:
+          type: object
+        next_cursor:
+          type: string
+          nullable: true
+
+    # ---------- Existing Plan Schemas ----------
+    PlanRequest:
+      type: object
+      required: [symbol]
+      properties:
+        symbol:
+          type: string
+          description: Ticker symbol to plan
+        style:
+          type: string
+          nullable: true
+          description: Optional style hint (scalp, intraday, swing, leaps)
+        plan_id:
+          type: string
+          nullable: true
+          description: Force plan refresh for a specific plan id
+
+    PlanResponse:
+      type: object
+      required: [plan_id, version, trade_detail, idea_url, symbol]
+      properties:
+        plan_id:
+          type: string
+        version:
+          type: integer
+          minimum: 1
+        trade_detail:
+          type: string
+          format: uri
+        idea_url:
+          type: string
+          format: uri
+        warnings:
+          type: array
+          items:
+            type: string
+        planning_context:
+          type: string
+          enum: [live, frozen]
+        symbol:
+          type: string
+        style:
+          type: string
+          nullable: true
+        bias:
+          type: string
+          nullable: true
+        setup:
+          type: string
+          nullable: true
+        entry:
+          type: number
+          format: double
+          nullable: true
+        stop:
+          type: number
+          format: double
+          nullable: true
+        targets:
+          type: array
+          items:
+            type: number
+            format: double
+        target_meta:
+          type: array
+          items:
+            $ref: '#/components/schemas/TargetMeta'
+        rr_to_t1:
+          type: number
+          format: double
+          nullable: true
+        confidence:
+          type: number
+          format: double
+          nullable: true
+        confidence_factors:
+          type: array
+          items:
+            type: string
+        notes:
+          type: string
+          nullable: true
+        relevant_levels:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+        expected_move_basis:
+          type: string
+          nullable: true
+        sentiment:
+          type: object
+          nullable: true
+        events:
+          $ref: '#/components/schemas/EventsBlock'
+        earnings:
+          $ref: '#/components/schemas/EarningsBlock'
+        charts_params:
+          type: object
+        chart_url:
+          type: string
+          format: uri
+          nullable: true
+        strategy_id:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        score:
+          type: number
+          format: double
+          nullable: true
+        plan:
+          type: object
+          nullable: true
+        structured_plan:
+          $ref: '#/components/schemas/StructuredPlan'
+        target_profile:
+          $ref: '#/components/schemas/TargetProfile'
+        charts:
+          type: object
+          nullable: true
+        key_levels:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+        market_snapshot:
+          type: object
+          nullable: true
+        features:
+          type: object
+          nullable: true
+        options:
+          type: object
+          nullable: true
+        calc_notes:
+          type: object
+          nullable: true
+        htf:
+          type: object
+          properties:
+            bias:
+              type: string
+            snapped_targets:
+              type: array
+              items:
+                type: string
+        decimals:
+          type: integer
+          nullable: true
+        data_quality:
+          type: object
+          properties:
+            series_present:
+              type: boolean
+            iv_present:
+              type: boolean
+            earnings_present:
+              type: boolean
+        debug:
+          type: object
+          nullable: true
+        runner:
+          type: object
+          nullable: true
+        updated_from_version:
+          type: integer
+          nullable: true
+        update_reason:
+          type: string
+          nullable: true
+        market:
+          type: object
+          nullable: true
+        data:
+          type: object
+          nullable: true
+        session_state:
+          $ref: '#/components/schemas/SessionState'
+
+    TargetMeta:
+      type: object
+      properties:
+        label:
+          type: string
+        prob_touch:
+          type: number
+          format: double
+        distance:
+          type: number
+          format: double
+        optional:
+          type: boolean
+        em_fraction:
+          type: number
+          format: double
+        em_basis:
+          type: number
+          format: double
+        mfe_quantile:
+          type: string
+        mfe_ratio:
+          type: number
+          format: double
+
+    StructuredPlan:
+      type: object
+      required: [plan_id, symbol, entry, stop, targets]
+      properties:
+        plan_id:
+          type: string
+        symbol:
+          type: string
+        style:
+          type: string
+          nullable: true
+        direction:
+          type: string
+          nullable: true
+        entry:
+          type: object
+          required: [type, level]
+          properties:
+            type:
+              type: string
+            level:
+              type: number
+              format: double
+        invalid:
+          type: boolean
+        stop:
+          type: number
+          format: double
+        targets:
+          type: array
+          items:
+            type: number
+            format: double
+        probabilities:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+        runner:
+          type: object
+          nullable: true
+        confluence:
+          type: array
+          items:
+            type: string
+        confidence:
+          type: number
+          format: double
+          nullable: true
+        rationale:
+          type: string
+          nullable: true
+        options:
+          type: object
+          nullable: true
+        em_used:
+          type: number
+          format: double
+          nullable: true
+        atr_used:
+          type: number
+          format: double
+          nullable: true
+        style_horizon_applied:
+          type: string
+          nullable: true
+        chart_url:
+          type: string
+          format: uri
+          nullable: true
+        as_of:
+          type: string
+          format: date-time
+          nullable: true
+        snap_trace:
+          type: array
+          items:
+            type: object
+        meta:
+          type: array
+          items:
+            type: object
+
+    TargetProfile:
+      type: object
+      required: [entry, stop, targets, probabilities, snap_trace, meta, warnings]
+      properties:
+        entry:
+          type: number
+          format: double
+        stop:
+          type: number
+          format: double
+        targets:
+          type: array
+          items:
+            type: number
+            format: double
+        probabilities:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+        em_used:
+          type: number
+          format: double
+          nullable: true
+        atr_used:
+          type: number
+          format: double
+          nullable: true
+        snap_trace:
+          type: array
+          items:
+            type: object
+        meta:
+          type: array
+          items:
+            type: object
+        warnings:
+          type: array
+          items:
+            type: string
+        runner:
+          type: object
+          nullable: true
+        bias:
+          type: string
+          nullable: true
+        style:
+          type: string
+          nullable: true
+        expected_move:
+          type: number
+          format: double
+          nullable: true
+
+    EventsBlock:
+      type: object
+      nullable: true
+      properties:
+        next_fomc_minutes:
+          type: integer
+          nullable: true
+        next_cpi_minutes:
+          type: integer
+          nullable: true
+        next_nfp_minutes:
+          type: integer
+          nullable: true
+        within_event_window:
+          type: boolean
+          nullable: true
+        label:
+          type: string
+          nullable: true
+
+    EarningsBlock:
+      type: object
+      nullable: true
+      properties:
+        next_earnings_at:
+          type: string
+          format: date-time
+          nullable: true
+        dte_to_earnings:
+          type: integer
+          nullable: true
+        pre_or_post:
+          type: string
+          nullable: true
+        earnings_flag:
+          type: string
+          nullable: true
+        expected_move_pct:
+          type: number
+          format: double
+          nullable: true
+
+    SessionState:
+      type: object
+      nullable: true
+      properties:
+        status:
+          type: string
+          enum: [open, closed]
+        as_of:
+          type: string
+          format: date-time
+        next_open:
+          type: string
+          format: date-time
+          nullable: true
+        tz:
+          type: string
+          default: America/New_York
+        banner:
+          type: string

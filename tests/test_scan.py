@@ -17,7 +17,7 @@ from src.agent_server import (
     gpt_scan_endpoint,
 )
 from src.scan_features import Metrics, Penalties
-from src.schemas import ScanPage
+from src.schemas import ScanFilters, ScanPage
 from src.scanner import Plan, Signal
 
 
@@ -227,6 +227,63 @@ async def test_scan_never_5xx_on_stale(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_scan_relaxes_min_rvol_when_frozen(monkeypatch):
+    symbols = ["SYM0", "SYM1", "SYM2"]
+
+    async def fake_expand_universe(universe, style, limit):  # noqa: ARG001
+        return symbols[:limit]
+
+    async def fake_collect_market_data(symbols, timeframe, as_of=None):  # noqa: ARG001
+        frames = {sym: _make_history() for sym in symbols}
+        return frames, {sym: "polygon" for sym in symbols}
+
+    async def fake_scan_market(symbols, market_data):  # noqa: ARG001
+        return [_make_signal(sym, idx, "TECH") for idx, sym in enumerate(symbols)]
+
+    def fake_indicator_bundle(symbol, history):  # noqa: ARG001
+        return {"key_levels": {}, "snapshot": {"timestamp_utc": "2025-10-14T20:00:00Z", "indicators": {}}, "indicators": {}}
+
+    async def fake_indicator_metrics(symbol, history):  # noqa: ARG001
+        return {}
+
+    def fake_compute_metrics_fast(symbol, style, context):  # noqa: ARG001
+        return _metrics_for(symbol, "TECH")
+
+    def frozen_context(policy, style):  # noqa: ARG001
+        context = ScanContext(
+            as_of=datetime(2025, 10, 14, 20, 0),
+            label="frozen",
+            is_open=False,
+            data_timeframe="5",
+            market_meta={},
+            data_meta={"ok": True},
+        )
+        return context, "Frozen planning context requested.", {"ok": True}
+
+    monkeypatch.setattr("src.agent_server.expand_universe", fake_expand_universe)
+    monkeypatch.setattr("src.agent_server._collect_market_data", fake_collect_market_data)
+    monkeypatch.setattr("src.agent_server.scan_market", fake_scan_market)
+    monkeypatch.setattr("src.agent_server._indicator_bundle", fake_indicator_bundle)
+    monkeypatch.setattr("src.agent_server._indicator_metrics", fake_indicator_metrics)
+    monkeypatch.setattr("src.agent_server.compute_metrics_fast", fake_compute_metrics_fast)
+    monkeypatch.setattr("src.agent_server._evaluate_scan_context", frozen_context)
+
+    request_payload = ScanRequest(
+        universe=symbols,
+        style="intraday",
+        limit=20,
+        filters=ScanFilters(min_rvol=1.2),
+    )
+    request = _make_request()
+    user = AuthedUser(user_id="tester")
+
+    page = await gpt_scan_endpoint(request_payload, request, user)
+    assert page.planning_context == "frozen"
+    assert page.candidates
+    assert page.data_quality.get("ok") is True
+
+
+@pytest.mark.asyncio
 async def test_universe_not_symbol(monkeypatch):
     monkeypatch.setattr("src.agent_server.expand_universe", lambda universe, style, limit: ["AAPL"])  # noqa: ARG001
     monkeypatch.setattr("src.agent_server._collect_market_data", lambda symbols, timeframe, as_of=None: ({sym: _make_history() for sym in symbols}, {sym: "polygon" for sym in symbols}))  # noqa: ARG001
@@ -324,4 +381,3 @@ async def test_sector_cap_and_min_quality(monkeypatch):
     assert page.next_cursor is None
     assert {cand.symbol for cand in page.candidates}.issubset(set(tickers))
     assert all(c.reasons for c in page.candidates)
-

@@ -624,6 +624,19 @@ def _apply_scan_filters(
     return filtered
 
 
+def _effective_scan_filters(filters: ScanFilters | None, *, context: ScanContext) -> ScanFilters | None:
+    if not filters:
+        return None
+    payload = filters.model_dump(exclude_none=True)
+    if context.label != "live" or not context.is_open:
+        min_rvol = payload.get("min_rvol")
+        if min_rvol is not None and min_rvol > 1.0:
+            payload["min_rvol"] = 1.0
+    if not payload:
+        return None
+    return ScanFilters(**payload)
+
+
 def _empty_scan_page(
     request: ScanRequest,
     context: ScanContext,
@@ -3322,7 +3335,8 @@ async def gpt_scan_endpoint(
             dq=dq,
         )
 
-    filtered_symbols = _apply_scan_filters(available_symbols, market_data, request_payload.filters)
+    effective_filters = _effective_scan_filters(request_payload.filters, context=context)
+    filtered_symbols = _apply_scan_filters(available_symbols, market_data, effective_filters)
     if not filtered_symbols:
         return _empty_scan_page(
             request_payload,
@@ -3331,8 +3345,10 @@ async def gpt_scan_endpoint(
             dq=dq,
         )
 
-    max_return = min(max(request_payload.limit, 1), 100)
-    subset = filtered_symbols[: max_return * 2]
+    requested_limit = max(request_payload.limit, 1)
+    rank_limit = 100 if requested_limit < 100 else min(requested_limit, 100)
+    page_limit = min(requested_limit, rank_limit)
+    subset = filtered_symbols[: rank_limit * 2]
     try:
         market_subset = {symbol: market_data[symbol] for symbol in subset if symbol in market_data}
         signals = await scan_market(subset, market_subset)
@@ -3375,7 +3391,7 @@ async def gpt_scan_endpoint(
     style_literal = _ranking_style(request_payload.style)
     features = [prep.features for prep in preps]
     ranked_rollup = rank_candidates(features, style_literal)
-    diversified = diversify_ranked(ranked_rollup, limit=max_return)
+    diversified = diversify_ranked(ranked_rollup, limit=rank_limit)
     prep_lookup = {prep.candidate.symbol: prep for prep in preps}
 
     ordered_candidates: List[ScanCandidate] = []
@@ -3396,11 +3412,11 @@ async def gpt_scan_endpoint(
             preps,
             key=lambda item: (-item.candidate.score, item.candidate.symbol),
         )
-        ordered_candidates = [item.candidate for item in fallback[:max_return]]
+        ordered_candidates = [item.candidate for item in fallback[:rank_limit]]
 
     start_index = decode_cursor(request_payload.cursor)
-    page_size = min(50, max_return)
-    cutoff = min(max_return, len(ordered_candidates))
+    page_size = min(50, page_limit)
+    cutoff = min(page_limit, len(ordered_candidates))
     start = min(start_index, cutoff)
     end = min(start + page_size, cutoff)
     next_cursor = encode_cursor(end) if end < cutoff else None

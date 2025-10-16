@@ -12,12 +12,12 @@ focuses on data prep; the agent performs the higher-level reasoning.
 - Health: `GET /healthz`
 - Quick checks:
   - `curl -sS https://trading-coach-production.up.railway.app/openapi.json | jq '.paths | keys'`
-- `curl -sS -X POST https://trading-coach-production.up.railway.app/gpt/scan -H 'content-type: application/json' -d '{"tickers":["AAPL"],"style":"intraday"}'`
+- `curl -sS -X POST https://trading-coach-production.up.railway.app/gpt/scan -H 'content-type: application/json' -d '{"universe":"AAPL","style":"intraday"}'`
 
 ## Prompt & Schema (Live)
 
 - Master prompt (**approved v2.1**): [`docs/prompts/master_prompt_v2.1.md`](prompts/master_prompt_v2.1.md)
-- API schema (**OpenAPI 1.9.6**): mirrors `https://trading-coach-production.up.railway.app/openapi.json`
+- API schema (**OpenAPI 2.1.0**): see [`docs/openapi_v2.1.0.yaml`](openapi_v2.1.0.yaml) or `https://trading-coach-production.up.railway.app/openapi.json`
 - Deployment status: **Production ready & approved** (2025-10-10 refresh; commit `23a45da`)
 - Persistent storage: set `DB_URL` (Postgres) so `/gpt/plan` snapshots and idea permalinks survive restarts.
 
