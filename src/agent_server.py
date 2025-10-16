@@ -141,13 +141,15 @@ def _prefer_delta_for_style(style: Optional[str]) -> float:
 
 
 DATA_SYMBOL_ALIASES: Dict[str, List[str]] = {
-    "SPX": ["I:SPX", "^GSPC"],
+    "SPX": ["I:SPX", "X:SPX", "^GSPC"],
     "^SPX": ["^GSPC"],
     "INDEX:SPX": ["^GSPC"],
     "SP500": ["^GSPC"],
     "I:SPX": ["SPX"],
-    "NDX": ["I:NDX", "^NDX"],
+    "X:SPX": ["SPX"],
+    "NDX": ["I:NDX", "X:NDX", "^NDX"],
     "I:NDX": ["NDX"],
+    "X:NDX": ["NDX"],
     "OEX": ["SPX", "^OEX", "SPY"],
     "^OEX": ["SPX", "SPY"],
     "INDEX:OEX": ["SPX", "SPY"],
