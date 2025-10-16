@@ -54,6 +54,14 @@ What’s included
 - `/gpt/chart-url`
   - Server‑side validator: required fields, monotonic geometry, R:R gates, ATR distance w/ confluence override, whitelisted interval/view, percent‑encoding of notes/levels/strategy; BASE_URL respected verbatim; returns `/tv` link
   - Accepts optional `tp_meta` (JSON array of per-target metadata) and `runner` (JSON plan trail config) query params for richer chart annotations.
+  - Session + live flags (optional, echoed into the returned URL so the viewer renders the proper banner and behavior):
+    - `market_status`: `open|closed` (or provider token)
+    - `session_status`: e.g. `open|closed`
+    - `session_phase`: `premarket|regular|afterhours` (preferred)
+    - `session_banner`: free‑text banner to show in the header (e.g., `Market open`)
+    - `live`: `1` when the plan should poll/live‑update
+    - `last_update`: ISO timestamp for cache‑busting and “Last update” text
+    - `data_age_ms`, `data_mode`: optional freshness hints; the viewer shows a degraded badge only when `data_age_ms > 120000` ms
 - `/gpt/sentiment`
   - Latest‑video sentiment + `tickers_detail` (price, change_pct, 15m EMA stack, ATR, range), robust to transcript issues; always JSON (204/502/503 on errors)
 
@@ -66,7 +74,25 @@ Client guidance
 - Use `contracts.table` to render compact options; always show `bid`, `ask`, and `price`.
 - Use `plan.calc_notes`, `plan.trade_detail`, and `plan.htf.snapped_targets` in explanations; the model should not recompute these locally.
 - Leverage `plan.target_meta` (EM/MFE fractions, POT) and `plan.runner` notes to explain how the exit ladder and trail were derived; avoid fabricating probabilities.
-- For charts, always call `POST /gpt/chart-url` and validate the returned URL before rendering.
+- For charts, always call `POST /gpt/chart-url` (or use the server’s `trade_detail` URL) and render the returned URL verbatim.
+  - Do not strip or override `symbol`, `plan_id`, `plan_version`, or session/live flags.
+  - Never reconstruct `/tv` links locally; use what the server returns.
+
+### Session + Live Flags in Plan Responses
+
+`/gpt/plan` now includes the session flags inside `plan.trade_detail`, `chart_url`, and `charts.params` (mirrored); clients don’t need to add them manually. Example additions:
+
+```
+"charts_params": {
+  "market_status": "open",
+  "session_status": "open",
+  "session_phase": "regular",
+  "session_banner": "Market open",
+  "live": "1",
+  "last_update": "2025-10-16T18:23:14.880679+00:00"
+}
+```
+
 
 This snapshot is the “last production point” before the upcoming significant change. Future updates may alter schemas and behaviors; use this section to maintain compatibility with current GPT prompts and tooling.
 

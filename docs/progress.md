@@ -160,7 +160,22 @@ Happy shipping!
   - TV viewer treats session flags and data freshness properly: shows “Market Open” when session is live and only displays a degraded banner when `data_age_ms > 120s`.
   - Bumped static bundle version (`tradingview-init.js?v=20251116`) to force fresh assets in production.
 
-### 7. Known issues / next work items
+### 7. Release checklist
+
+Use this when promoting to production:
+
+- [ ] Merge to `main`; CI green
+- [ ] Bump TV bundle query param in `static/tv/index.html` (forces clients to fetch latest JS)
+- [ ] Deploy to Railway; confirm `/healthz` OK
+- [ ] Smoke test:
+  - [ ] `/gpt/scan` returns candidates for `[AAPL, MSFT, TSLA]`
+  - [ ] `/gpt/plan` for a core symbol returns `trade_detail` with `symbol`, `plan_id`, `plan_version`, and session flags
+  - [ ] Open the plan link; header shows the correct symbol and session status; levels + EMAs render
+  - [ ] Switch timeframes; verify polling when `live=1`
+- [ ] Check logs: no 500s, stale‑feed warnings within expected range
+- [ ] Hard‑refresh `/tv` in browser to clear cached assets
+
+### 8. Known issues / next work items
 
 - Data freshness
   - Stale feed warnings during RTH indicate upstream data delays. Consider adding an adaptive retry/backfill and a “polygon_cached” mode label.
