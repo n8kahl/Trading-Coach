@@ -4603,6 +4603,8 @@ async def _generate_fallback_plan(
         plan_ts_utc = plan_ts.tz_convert("UTC") if plan_ts.tzinfo else plan_ts.tz_localize("UTC")
     else:
         plan_ts_utc = pd.Timestamp.utcnow()
+    if is_open:
+        plan_ts_utc = pd.Timestamp.utcnow()
     plan_id = f"{symbol.upper()}-{plan_ts_utc.strftime('%Y%m%dT%H%M%S')}-{style_token}-auto"
     view_token = _view_for_style(style_token)
     range_token = _range_for_style(style_token)
@@ -4624,7 +4626,7 @@ async def _generate_fallback_plan(
         "theme": "dark",
     }
     if is_open:
-        live_stamp = plan_ts_utc.isoformat()
+        live_stamp = datetime.now(timezone.utc).isoformat()
         chart_params["live"] = "1"
         chart_params["last_update"] = live_stamp
     levels_param = _fallback_levels_param({k: v for k, v in key_levels.items() if isinstance(v, (int, float))})
@@ -4991,8 +4993,17 @@ async def gpt_plan(
             logger.warning("plan chart link error for %s: %s", symbol, exc)
             chart_url_value = None
 
+    live_stamp_payload: Optional[str] = None
     charts_payload: Dict[str, Any] = {}
     if chart_params_payload:
+        if is_open:
+            live_stamp_payload = chart_params_payload.get("last_update")
+            if not live_stamp_payload:
+                live_stamp_payload = datetime.now(timezone.utc).isoformat()
+                chart_params_payload["last_update"] = live_stamp_payload
+            chart_params_payload["live"] = "1"
+        else:
+            chart_params_payload.pop("live", None)
         charts_payload["params"] = chart_params_payload
         charts_payload["timeframe"] = chart_timeframe_hint
         charts_payload["guidance"] = hint_guidance
@@ -5004,6 +5015,11 @@ async def gpt_plan(
                 "plan_version": str(version),
             },
         )
+        if is_open:
+            live_param_stamp = live_stamp_payload or chart_params_payload.get("last_update") if chart_params_payload else None
+            if not live_param_stamp:
+                live_param_stamp = datetime.now(timezone.utc).isoformat()
+            chart_url_value = _append_query_params(chart_url_value, {"live": "1", "last_update": live_param_stamp})
         charts_payload["interactive"] = chart_url_value
         if chart_png_value:
             chart_png_value = _append_query_params(
@@ -5026,6 +5042,14 @@ async def gpt_plan(
                 "plan_version": str(version),
             },
         )
+        if is_open:
+            live_param_stamp = chart_params_payload.get("last_update") or datetime.now(timezone.utc).isoformat()
+            chart_params_payload["last_update"] = live_param_stamp
+            chart_params_payload["live"] = "1"
+            fallback_chart_url = _append_query_params(
+                fallback_chart_url,
+                {"live": "1", "last_update": live_param_stamp},
+            )
         charts_payload["interactive"] = fallback_chart_url
         chart_url_value = fallback_chart_url
         logger.debug(
@@ -5052,6 +5076,9 @@ async def gpt_plan(
         minimal_params.setdefault("focus", "plan")
         minimal_params.setdefault("center_time", "latest")
         minimal_params.setdefault("scale_plan", "auto")
+        if is_open:
+            minimal_params["live"] = "1"
+            minimal_params["last_update"] = datetime.now(timezone.utc).isoformat()
         chart_url_value = _build_tv_chart_url(request, minimal_params)
         charts_payload.setdefault("params", minimal_params)
         charts_payload["interactive"] = chart_url_value
