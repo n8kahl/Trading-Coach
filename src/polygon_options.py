@@ -8,24 +8,19 @@ summaries (best contract plus a few alternatives) driven by strategy rules.
 
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime
 import logging
 import math
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import httpx
 import numpy as np
 import pandas as pd
 
-from .config import get_settings
 from .contract_selector import filter_chain
 from .data_sources import fetch_polygon_ohlcv
+from .providers.polygon_client import fetch_option_snapshot
 
 logger = logging.getLogger(__name__)
-
-POLYGON_BASE_URL = "https://api.polygon.io"
-
 
 def _safe_number(value: Any) -> Optional[float]:
     """Convert numeric-ish values to float, guarding against NaNs/Infs."""
@@ -67,48 +62,19 @@ def _normalize_contract_type(contract_type: Optional[str]) -> Optional[str]:
 
 async def fetch_polygon_option_chain(symbol: str, expiration: str | None = None, *, limit: int = 400) -> pd.DataFrame:
     """Fetch Polygon's snapshot option chain for the given underlying ticker."""
-    settings = get_settings()
-    api_key = settings.polygon_api_key
-    if not api_key:
+    payload = await fetch_option_snapshot(symbol.upper(), expiration=expiration)
+    if not payload:
         return pd.DataFrame()
 
-    params: Dict[str, Any] = {
-        "limit": limit,
-        "order": "asc",
-        "sort": "expiration_date",
-        "apiKey": api_key,
-    }
-    if expiration:
-        params["expiration_date"] = expiration
-
-    url = f"{POLYGON_BASE_URL}/v3/snapshot/options/{symbol.upper()}"
-    timeout = httpx.Timeout(8.0, connect=4.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response: httpx.Response | None = None
-        last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-                break
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                if status in {400, 403, 404}:
-                    logger.warning("Polygon option snapshot rejected for %s (status %s)", symbol, status)
-                    return pd.DataFrame()
-                last_error = exc
-            except httpx.HTTPError as exc:  # pragma: no cover - network
-                last_error = exc
-            await asyncio.sleep(0.5 * (attempt + 1))
-        else:
-            logger.warning("Polygon option snapshot failed for %s: %s", symbol, last_error)
-            return pd.DataFrame()
-
-    payload = response.json()
     results = payload.get("results") or []
     if not results:
         return pd.DataFrame()
-    return _normalize_option_results(results, fallback_symbol=symbol.upper())
+    frame = _normalize_option_results(results, fallback_symbol=symbol.upper())
+    if frame.empty:
+        return frame
+    if limit and limit > 0:
+        return frame.head(limit)
+    return frame
 
 
 def _normalize_as_of(as_of: datetime | str | pd.Timestamp | None) -> pd.Timestamp | None:

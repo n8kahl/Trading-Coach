@@ -10,15 +10,17 @@ workflow.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import math
 import logging
 import time
 import uuid
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, cast
 import copy
 
 import httpx
@@ -33,12 +35,15 @@ from urllib.parse import urlencode, quote, urlsplit, urlunsplit, parse_qsl
 from fastapi.responses import StreamingResponse
 
 from .config import get_settings
+from .schemas import ScanRequest, ScanPage, ScanCandidate, ScanFilters
+from .universe import expand_universe
 from .app.engine.index_common import INDEX_BASE_TICKERS
 from .realtime_bars import PolygonRealtimeBarStreamer
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
 from .charts_api import router as charts_router, get_candles, normalize_interval
 from .gpt_sentiment import router as gpt_sentiment_router
 from .scanner import (
+    Signal,
     scan_market,
     _apply_tp_logic,
     _base_targets_for_style,
@@ -85,6 +90,15 @@ from .data_sources import fetch_polygon_ohlcv
 from .symbol_streamer import SymbolStreamCoordinator
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
+from .ranking import (
+    Features as RankingFeatures,
+    Scored as RankedCandidate,
+    Style as RankingStyle,
+    diversify as diversify_ranked,
+    rank as rank_candidates,
+)
+from .scan_features import Metrics, MetricsContext, compute_metrics_fast
+from .indicators import get_indicator_bundle
 from zoneinfo import ZoneInfo
 
 from .market_clock import MarketClock
@@ -157,8 +171,17 @@ DATA_SYMBOL_ALIASES: Dict[str, List[str]] = {
     "INDEX:OEX": ["SPX", "SPY"],
 }
 
+_PLAN_SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9\.:]{0,9}$")
+
 _MARKET_DATA_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _MARKET_DATA_CACHE_TTL = 300.0  # seconds
+
+_CHART_URL_CACHE_TTL = 600.0
+_CHART_URL_CACHE: Dict[str, Tuple[float, str]] = {}
+
+_INDICATOR_CACHE_TTL = 60.0
+_INDICATOR_CACHE: Dict[Tuple[str, float], Tuple[float, Dict[str, Any]]] = {}
+_INDICATOR_FETCH_TIMEOUT = 1.2
 
 _FUTURES_PROXY_MAP: Dict[str, str] = {
     "es_proxy": "SPY",
@@ -187,6 +210,18 @@ _STYLE_CHART_HINTS: Dict[str, Tuple[str, str]] = {
     "swing": ("1h", "Focus on 1 hour structure; keep stops below the HTF pivot."),
     "leap": ("d", "Use daily bars for confirmation and management."),
 }
+
+
+def _cache_summary(entries: Iterable[Tuple[float, Any]]) -> Dict[str, Any]:
+    now = time.monotonic()
+    ages = [max(now - stamp, 0.0) for stamp, _ in entries]
+    if not ages:
+        return {"size": 0, "max_age_seconds": 0.0, "min_age_seconds": 0.0}
+    return {
+        "size": len(ages),
+        "max_age_seconds": round(max(ages), 3),
+        "min_age_seconds": round(min(ages), 3),
+    }
 
 
 def _market_snapshot_payload() -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
@@ -225,6 +260,92 @@ def _data_symbol_candidates(symbol: str) -> List[str]:
     return candidates
 
 
+@dataclass(slots=True)
+class ScanContext:
+    as_of: datetime
+    label: Literal["live", "frozen"]
+    is_open: bool
+    data_timeframe: str
+    market_meta: Dict[str, Any]
+    data_meta: Dict[str, Any]
+
+    @property
+    def as_of_iso(self) -> str:
+        return self.as_of.isoformat()
+
+
+@dataclass(slots=True)
+class ScanPrep:
+    candidate: ScanCandidate
+    metrics: Metrics
+    features: RankingFeatures
+
+
+def _scan_timeframe_for_style(style: str) -> str:
+    mapping = {"scalp": "1", "intraday": "5", "swing": "60", "leaps": "D"}
+    return mapping.get(style.lower(), "5")
+
+
+def _cached_chart_url(cache_key: str, builder: Callable[[], str]) -> str:
+    now = time.monotonic()
+    cached = _CHART_URL_CACHE.get(cache_key)
+    if cached and now - cached[0] < _CHART_URL_CACHE_TTL:
+        return cached[1]
+    url = builder()
+    _CHART_URL_CACHE[cache_key] = (now, url)
+    return url
+
+
+def encode_cursor(value: int) -> str:
+    payload = str(max(0, value)).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii")
+
+
+def decode_cursor(token: str | None) -> int:
+    if not token:
+        return 0
+    try:
+        raw = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
+        parsed = int(raw)
+        return parsed if parsed >= 0 else 0
+    except Exception:
+        return 0
+
+
+def _indicator_bundle(symbol: str, history: pd.DataFrame) -> Dict[str, Any]:
+    last_ts = history.index[-1]
+    if not isinstance(last_ts, pd.Timestamp):
+        last_ts = pd.Timestamp(last_ts, tz="UTC")
+    stamp = float(last_ts.timestamp())
+    key = (symbol.upper(), stamp)
+    now = time.monotonic()
+    cached = _INDICATOR_CACHE.get(key)
+    if cached and now - cached[0] < _INDICATOR_CACHE_TTL:
+        return cached[1]
+    key_levels = _extract_key_levels(history)
+    snapshot = _build_market_snapshot(history, key_levels)
+    bundle = {
+        "key_levels": key_levels,
+        "snapshot": snapshot,
+        "indicators": snapshot.get("indicators") or {},
+    }
+    _INDICATOR_CACHE[key] = (now, bundle)
+    return bundle
+
+
+async def _indicator_metrics(symbol: str, history: pd.DataFrame) -> Dict[str, Any]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(get_indicator_bundle, symbol, history),
+            timeout=_INDICATOR_FETCH_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Indicator bundle timeout for %s", symbol)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Indicator bundle failed for %s: %s", symbol, exc)
+    return {}
+
+
 def _normalize_chart_symbol(value: str) -> str:
     token = (value or "").strip()
     if ":" in token:
@@ -244,6 +365,286 @@ def _normalize_chart_interval(value: str) -> str:
     if token in {"d", "1d"}:
         return "1D"
     return token.upper()
+
+
+def _evaluate_scan_context(asof_policy: str, style: str) -> tuple[ScanContext, str | None, Dict[str, Any]]:
+    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload()
+    policy = asof_policy.lower()
+    label: Literal["live", "frozen"]
+    banner: str | None = None
+
+    if policy == "live":
+        label = "live" if is_open else "frozen"
+        if not is_open:
+            banner = "Market closed — using last known good data."
+    elif policy == "frozen":
+        label = "frozen"
+        banner = "Frozen planning context requested."
+    else:  # live_or_lkg
+        label = "live" if is_open else "frozen"
+        if not is_open:
+            banner = "Live feed unavailable — using frozen data."
+
+    data_timeframe = _scan_timeframe_for_style(style)
+    context = ScanContext(
+        as_of=as_of_dt,
+        label=label,
+        is_open=is_open,
+        data_timeframe=data_timeframe,
+        market_meta=market_meta,
+        data_meta=dict(data_meta),
+    )
+    dq = dict(data_meta)
+    return context, banner, dq
+
+
+def _build_stub_chart_url(
+    request: Request,
+    *,
+    symbol: str,
+    direction: str | None,
+    entry: float | None,
+    stop: float | None,
+    targets: Sequence[float],
+    interval: str,
+    levels: Sequence[str] | None = None,
+) -> str | None:
+    if entry is None or stop is None or not targets:
+        return None
+    params: Dict[str, Any] = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "direction": direction or "long",
+        "entry": f"{entry:.2f}",
+        "stop": f"{stop:.2f}",
+        "tp": ",".join(f"{tp:.2f}" for tp in targets[:3]),
+        "focus": "plan",
+        "center_time": "latest",
+        "scale_plan": "auto",
+    }
+    if levels:
+        params["levels"] = ";".join(levels)
+    cache_key = f"chart:{symbol}:{direction}:{params['entry']}:{params['stop']}:{params['tp']}:{interval}"
+    return _cached_chart_url(cache_key, lambda: _build_tv_chart_url(request, params))
+
+
+def _candidate_reasons(signal: Signal) -> List[str]:
+    reasons: List[str] = []
+    description = (signal.description or "").strip()
+    if description:
+        reasons.append(description)
+    features = signal.features or {}
+    for key in ("plan_confidence_reasons", "plan_confidence_factors", "confidence_reasons", "why_this_works"):
+        value = features.get(key)
+        if isinstance(value, str):
+            text = value.strip()
+            if text and text not in reasons:
+                reasons.append(text)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                text = str(item).strip()
+                if text and text not in reasons:
+                    reasons.append(text)
+    return reasons[:5]
+
+
+def _relative_volume(frame: pd.DataFrame) -> float:
+    if "volume" not in frame.columns or frame.empty:
+        return 1.0
+    latest = float(frame["volume"].iloc[-1] or 0.0)
+    baseline = float(frame["volume"].tail(20).mean() or 0.0)
+    if baseline <= 0:
+        return 1.0
+    return round(max(latest / baseline, 0.0), 3)
+
+
+def _liquidity_score(frame: pd.DataFrame) -> float:
+    if frame.empty:
+        return 0.0
+    close_col = frame.get("close")
+    vol_col = frame.get("volume")
+    if close_col is None or vol_col is None:
+        return 0.0
+    try:
+        price = float(close_col.iloc[-1])
+        avg_vol = float(vol_col.tail(20).mean() or 0.0)
+    except Exception:
+        return 0.0
+    return max(price * avg_vol, 0.0)
+
+
+async def _build_scan_stub_candidate(
+    semaphore: asyncio.Semaphore,
+    *,
+    signal: Signal,
+    history: pd.DataFrame,
+    context: ScanContext,
+    request: Request,
+) -> ScanPrep | None:
+    async with semaphore:
+        plan = signal.plan
+        entry = float(plan.entry) if plan and plan.entry is not None else None
+        stop = float(plan.stop) if plan and plan.stop is not None else None
+        targets = [float(t) for t in (plan.targets if plan else []) if math.isfinite(t)]
+        rr_t1 = float(plan.risk_reward) if plan and plan.risk_reward is not None else None
+        confidence = float(plan.confidence) if plan and plan.confidence is not None else None
+        direction_hint = plan.direction if plan and plan.direction else (signal.features or {}).get("direction_bias")
+
+        bundle = _indicator_bundle(signal.symbol, history)
+        key_levels = bundle["key_levels"]
+        snapshot = bundle["snapshot"]
+        level_labels = [f"{label}|{value:.2f}" for label, value in key_levels.items() if math.isfinite(value)]
+
+        plan_id = None
+        if plan is not None:
+            plan_id = _generate_plan_slug(
+                signal.symbol,
+                _style_for_strategy(signal.strategy_id),
+                direction_hint or "long",
+                snapshot,
+            )
+
+        interval_hint, _ = _chart_hint(signal.strategy_id, _style_for_strategy(signal.strategy_id))
+        chart_url = _build_stub_chart_url(
+            request,
+            symbol=signal.symbol,
+            direction=direction_hint,
+            entry=entry,
+            stop=stop,
+            targets=targets,
+            interval=_normalize_chart_interval(interval_hint or context.data_timeframe),
+            levels=level_labels if level_labels else None,
+        )
+
+        fast_indicators = await _indicator_metrics(signal.symbol, history)
+        combined_indicators: Dict[str, Any] = dict(fast_indicators)
+        combined_indicators.update(bundle.get("snapshot", {}).get("indicators") or {})
+        style_token = _ranking_style(_style_for_strategy(signal.strategy_id))
+        metrics_context = MetricsContext(
+            symbol=signal.symbol.upper(),
+            style=style_token,
+            as_of=context.as_of,
+            is_open=context.is_open,
+            history=history,
+            signal=signal,
+            plan=plan,
+            indicator_bundle=combined_indicators,
+            market_meta=dict(context.market_meta),
+            data_meta=dict(context.data_meta),
+        )
+        metrics = compute_metrics_fast(metrics_context.symbol, style_token, metrics_context)
+        confidence = metrics.confidence
+        candidate = ScanCandidate(
+            symbol=signal.symbol.upper(),
+            score=float(signal.score),
+            reasons=_candidate_reasons(signal),
+            plan_id=plan_id,
+            entry=entry,
+            stop=stop,
+            tps=targets,
+            rr_t1=rr_t1,
+            confidence=confidence,
+            chart_url=chart_url,
+        )
+        features = _metrics_to_features(metrics, style_token)
+        return ScanPrep(candidate=candidate, metrics=metrics, features=features)
+
+
+async def _legacy_scan_stub_payload(
+    *,
+    signals: List[Signal],
+    market_data: Dict[str, pd.DataFrame],
+    style_filter: str | None,
+    context: ScanContext,
+    request: Request,
+) -> List[ScanPrep]:
+    if not signals:
+        return []
+
+    style_token = style_filter.lower() if isinstance(style_filter, str) else None
+    best_by_symbol: Dict[str, Signal] = {}
+    for signal in signals:
+        style = _style_for_strategy(signal.strategy_id)
+        if style_token and style_token != style:
+            continue
+        existing = best_by_symbol.get(signal.symbol)
+        if existing is None or signal.score > existing.score:
+            best_by_symbol[signal.symbol] = signal
+
+    if not best_by_symbol:
+        return []
+
+    semaphore = asyncio.Semaphore(8)
+    tasks: List[asyncio.Task[ScanPrep | None]] = []
+    for symbol, signal in best_by_symbol.items():
+        history = market_data.get(symbol)
+        if history is None or history.empty:
+            continue
+        tasks.append(
+            asyncio.create_task(
+                _build_scan_stub_candidate(
+                    semaphore,
+                    signal=signal,
+                    history=history,
+                    context=context,
+                    request=request,
+                )
+            )
+        )
+
+    if not tasks:
+        return []
+
+    results = await asyncio.gather(*tasks)
+    payload: List[ScanPrep] = []
+    for prep in results:
+        if prep is None:
+            continue
+        payload.append(prep)
+    return payload
+
+
+def _apply_scan_filters(
+    symbols: List[str],
+    market_data: Dict[str, pd.DataFrame],
+    filters: ScanFilters | None,
+) -> List[str]:
+    if not filters:
+        return symbols
+    filtered = list(symbols)
+    if filters.min_rvol is not None:
+        threshold = float(filters.min_rvol)
+        filtered = [sym for sym in filtered if _relative_volume(market_data[sym]) >= threshold]
+    if filters.min_liquidity_rank is not None and filters.min_liquidity_rank > 0:
+        ranked = sorted(filtered, key=lambda sym: _liquidity_score(market_data[sym]), reverse=True)
+        filtered = ranked[: int(filters.min_liquidity_rank)]
+    exclude = {sym.strip().upper() for sym in (filters.exclude or []) if sym}
+    if exclude:
+        filtered = [sym for sym in filtered if sym not in exclude]
+    return filtered
+
+
+def _empty_scan_page(
+    request: ScanRequest,
+    context: ScanContext,
+    *,
+    banner: str | None,
+    dq: Dict[str, Any],
+) -> ScanPage:
+    meta = {
+        "style": request.style,
+        "limit": request.limit,
+        "universe_size": 0,
+    }
+    return ScanPage(
+        as_of=context.as_of_iso,
+        planning_context=context.label,
+        banner=banner,
+        meta=meta,
+        candidates=[],
+        data_quality=dq,
+        next_cursor=None,
+    )
 
 
 async def _expand_universe_tokens(symbols: List[str], *, style: str | None, limit: int) -> List[str]:
@@ -637,6 +1038,56 @@ def _normalize_style(style: str | None) -> str | None:
     if token in {"power_hour", "powerhour", "power-hour", "power hour"}:
         token = "scalp"
     return normalize_style_input(token)
+
+
+def _ranking_style(style: str | None) -> RankingStyle:
+    token = (_normalize_style(style) or "intraday").lower()
+    if token == "leap":
+        token = "leaps"
+    if token not in {"scalp", "intraday", "swing", "leaps"}:
+        token = "intraday"
+    return cast(RankingStyle, token)
+
+
+def _clamp01(value: float) -> float:
+    if math.isnan(value):
+        return 0.0
+    return max(0.0, min(1.0, value))
+
+
+def _metrics_to_features(metrics: Metrics, style: RankingStyle) -> RankingFeatures:
+    rr1_norm = min(metrics.rr_t1, 2.5) / 2.5 if metrics.rr_t1 > 0 else 0.0
+    rr2_norm = min(metrics.rr_t2, 3.5) / 3.5 if metrics.rr_t2 > 0 else 0.0
+    rr_multi_norm = min(metrics.rr_multi, 3.0) / 3.0 if metrics.rr_multi > 0 else 0.0
+    penalties = metrics.penalties
+    return RankingFeatures(
+        symbol=metrics.symbol.upper(),
+        style=style,
+        sector=metrics.sector,
+        entry_quality=_clamp01(metrics.entry_quality),
+        rr1=_clamp01(rr1_norm),
+        rr2=_clamp01(rr2_norm),
+        liquidity=_clamp01(metrics.liquidity),
+        confluence=_clamp01(metrics.confluence_micro),
+        momentum=_clamp01(metrics.momentum_micro),
+        vol_constraint=_clamp01(metrics.vol_ok),
+        htf_structure=_clamp01(metrics.struct_d1),
+        confluence_htf=_clamp01(metrics.conf_htf),
+        vol_regime=_clamp01(metrics.vol_regime),
+        momentum_htf=_clamp01(metrics.mom_htf),
+        context=_clamp01(metrics.context_score),
+        weekly_structure=_clamp01(metrics.struct_w1),
+        daily_confluence=_clamp01(metrics.conf_d1),
+        option_efficiency=_clamp01(metrics.opt_eff),
+        rr_multi=_clamp01(rr_multi_norm),
+        macrofit=_clamp01(metrics.macro_fit),
+        confidence=_clamp01(metrics.confidence),
+        pen_event=_clamp01(penalties.pen_event),
+        pen_dq=_clamp01(penalties.pen_dq),
+        pen_spread=_clamp01(penalties.pen_spread),
+        pen_chop=_clamp01(penalties.pen_chop),
+        pen_cluster=_clamp01(penalties.pen_cluster),
+    )
 
 
 def _canonical_style_token(style: str | None) -> str:
@@ -2712,6 +3163,23 @@ async def gpt_health(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]
     }
 
 
+@gpt.get("/health/data", summary="Data cache freshness snapshot")
+async def gpt_health_data(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
+    indicator_summary = _cache_summary(_INDICATOR_CACHE.values())
+    chart_summary = _cache_summary(_CHART_URL_CACHE.values())
+    futures_age = 0.0
+    futures_ts = float(_FUTURES_CACHE.get("ts") or 0.0)
+    if futures_ts:
+        futures_age = max(time.time() - futures_ts, 0.0)
+    return {
+        "status": "ok",
+        "indicator_cache": indicator_summary,
+        "chart_cache": chart_summary,
+        "market_cache_entries": len(_MARKET_DATA_CACHE),
+        "futures_cache_age_seconds": round(futures_age, 3),
+    }
+
+
 @gpt.get("/futures-snapshot", summary="Overnight/offsessions market tape (ETF proxies via Finnhub)")
 async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
     now_ts = time.time()
@@ -2743,18 +3211,249 @@ async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict
     return payload
 
 
-@gpt.post("/scan", summary="Rank trade setups across a list of tickers")
-@gpt.post('/scan', summary='Rank trade setups across a list of tickers')
-async def gpt_scan(
-    universe: ScanUniverse,
+@gpt.post("/scan", summary="Rank trade setups across a universe", response_model=ScanPage)
+async def gpt_scan_endpoint(
+    request_payload: ScanRequest,
     request: Request,
     user: AuthedUser = Depends(require_api_key),
+) -> ScanPage:
+    started = time.perf_counter()
+    context, context_banner, dq = _evaluate_scan_context(request_payload.asof_policy, request_payload.style)
+    try:
+        universe_limit = max(request_payload.limit, 100)
+        tickers = await expand_universe(request_payload.universe, style=request_payload.style, limit=universe_limit)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Universe expansion failed: %s", exc)
+        return _empty_scan_page(
+            request_payload,
+            context,
+            banner=context_banner or "Universe expansion failed.",
+            dq=dq,
+        )
+
+    if request_payload.filters and request_payload.filters.exclude:
+        exclude = {token.strip().upper() for token in request_payload.filters.exclude if token}
+        tickers = [symbol for symbol in tickers if symbol not in exclude]
+
+    if not tickers:
+        return _empty_scan_page(
+            request_payload,
+            context,
+            banner=context_banner or "Empty universe after filters.",
+            dq=dq,
+        )
+
+    data_as_of = None if context.label == "live" and context.is_open else context.as_of
+    banner_override: str | None = None
+    try:
+        market_data, data_source_map = await _collect_market_data(
+            tickers,
+            timeframe=context.data_timeframe,
+            as_of=data_as_of,
+        )
+    except HTTPException as exc:
+        logger.warning("Market data collection failed live: %s", exc)
+        dq = dict(dq)
+        dq["ok"] = False
+        dq["mode"] = "degraded"
+        dq["error"] = "market_data_unavailable"
+        try:
+            market_data, data_source_map = await _collect_market_data(
+                tickers,
+                timeframe=context.data_timeframe,
+                as_of=context.as_of,
+            )
+            context = ScanContext(
+                as_of=context.as_of,
+                label="frozen",
+                is_open=False,
+                data_timeframe=context.data_timeframe,
+                market_meta=context.market_meta,
+                data_meta=dq,
+            )
+            banner_override = "Live feed unavailable — using frozen context."
+        except HTTPException:
+            return _empty_scan_page(
+                request_payload,
+                context,
+                banner="Market data unavailable — using frozen context.",
+                dq=dq,
+            )
+
+    dq = dict(dq)
+    dq["sources"] = data_source_map
+    banner = banner_override or context_banner
+
+    index_mode = _get_index_mode()
+    if index_mode:
+        synthetic_count = 0
+        for symbol in list(tickers):
+            if not index_mode.applies(symbol):
+                continue
+            frame = market_data.get(symbol)
+            if frame is not None and not frame.empty:
+                continue
+            try:
+                synthetic = await index_mode.synthetic_ohlcv(symbol, context.data_timeframe)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("synthetic index build failed", extra={"symbol": symbol, "error": str(exc)})
+                synthetic = None
+            if synthetic is not None and not synthetic.empty:
+                market_data[symbol] = synthetic
+                data_source_map[symbol] = synthetic.attrs.get("source", "proxy_gamma")
+                synthetic_count += 1
+        if synthetic_count:
+            dq.setdefault("mode", "degraded")
+            banner = banner or "Index bars unavailable — translating via ETF proxy."
+
+    missing_symbols = [sym for sym, src in data_source_map.items() if src.startswith("missing") or src.endswith("_empty")]
+    if missing_symbols:
+        dq["ok"] = False
+        dq.setdefault("mode", "degraded")
+        dq["error"] = "data_gap"
+        banner = banner or "Live feed degraded — partial data missing."
+
+    available_symbols = [sym for sym in tickers if sym in market_data and not market_data[sym].empty]
+    if not available_symbols:
+        return _empty_scan_page(
+            request_payload,
+            context,
+            banner=banner or "No market data available for requested universe.",
+            dq=dq,
+        )
+
+    filtered_symbols = _apply_scan_filters(available_symbols, market_data, request_payload.filters)
+    if not filtered_symbols:
+        return _empty_scan_page(
+            request_payload,
+            context,
+            banner=banner or "No tickers passed scan filters.",
+            dq=dq,
+        )
+
+    max_return = min(max(request_payload.limit, 1), 100)
+    subset = filtered_symbols[: max_return * 2]
+    try:
+        market_subset = {symbol: market_data[symbol] for symbol in subset if symbol in market_data}
+        signals = await scan_market(subset, market_subset)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("scan_market failed: %s", exc, exc_info=True)
+        dq["ok"] = False
+        dq.setdefault("mode", "degraded")
+        dq["error"] = "scan_failed"
+        return _empty_scan_page(
+            request_payload,
+            context,
+            banner=banner or "Scan unavailable — using frozen context.",
+            dq=dq,
+        )
+
+    stub_context = ScanContext(
+        as_of=context.as_of,
+        label=context.label,
+        is_open=context.is_open,
+        data_timeframe=context.data_timeframe,
+        market_meta=context.market_meta,
+        data_meta=dq,
+    )
+    preps = await _legacy_scan_stub_payload(
+        signals=signals,
+        market_data=market_subset,
+        style_filter=request_payload.style,
+        context=stub_context,
+        request=request,
+    )
+
+    if not preps:
+        return _empty_scan_page(
+            request_payload,
+            context,
+            banner=banner or "No qualified setups found.",
+            dq=dq,
+        )
+
+    style_literal = _ranking_style(request_payload.style)
+    features = [prep.features for prep in preps]
+    ranked_rollup = rank_candidates(features, style_literal)
+    diversified = diversify_ranked(ranked_rollup, limit=max_return)
+    prep_lookup = {prep.candidate.symbol: prep for prep in preps}
+
+    ordered_candidates: List[ScanCandidate] = []
+    if diversified:
+        for scored in diversified:
+            prep = prep_lookup.get(scored.symbol)
+            if not prep:
+                continue
+            candidate = prep.candidate.model_copy(
+                update={
+                    "score": float(scored.score),
+                    "confidence": float(scored.confidence),
+                }
+            )
+            ordered_candidates.append(candidate)
+    else:
+        fallback = sorted(
+            preps,
+            key=lambda item: (-item.candidate.score, item.candidate.symbol),
+        )
+        ordered_candidates = [item.candidate for item in fallback[:max_return]]
+
+    start_index = decode_cursor(request_payload.cursor)
+    page_size = min(50, max_return)
+    cutoff = min(max_return, len(ordered_candidates))
+    start = min(start_index, cutoff)
+    end = min(start + page_size, cutoff)
+    next_cursor = encode_cursor(end) if end < cutoff else None
+    page_candidates = ordered_candidates[start:end]
+
+    meta = {
+        "style": request_payload.style,
+        "limit": request_payload.limit,
+        "universe_size": len(filtered_symbols),
+        "symbols": filtered_symbols[: min(len(filtered_symbols), 50)],
+    }
+
+    planning_context = "frozen" if str(dq.get("mode")).lower() == "degraded" else context.label
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(
+        "scan completed",
+        extra={
+            "scan_universe_size": len(tickers),
+            "screened": len(filtered_symbols),
+            "returned": len(ordered_candidates),
+            "planning_context": planning_context,
+            "banner_present": bool(banner),
+            "page_size": len(page_candidates),
+            "latency_ms": latency_ms,
+        },
+    )
+    return ScanPage(
+        as_of=context.as_of_iso,
+        planning_context=planning_context,
+        banner=banner,
+        meta=meta,
+        candidates=page_candidates,
+        data_quality=dq,
+        next_cursor=next_cursor,
+    )
+
+
+async def _legacy_scan(
+    universe: ScanUniverse,
+    request: Request,
+    user: AuthedUser,
+    *,
+    stub_mode: bool = False,
+    fetch_options: bool | None = None,
 ) -> List[Dict[str, Any]]:
     resolved_tickers: List[str] = []
     exclude_set = {symbol.upper() for symbol in (universe.exclude or []) if symbol}
     include_symbols = [symbol.upper() for symbol in (universe.include or []) if symbol]
     requested_limit = universe.limit or 60
     limit = max(10, min(requested_limit, 250))
+
+    if fetch_options is None:
+        fetch_options = not stub_mode
 
     if universe.tickers:
         base_symbols = [symbol.upper() for symbol in universe.tickers if symbol]
@@ -2845,6 +3544,24 @@ async def gpt_scan(
     polygon_enabled = bool(settings.polygon_api_key)
     tradier_enabled = bool(settings.tradier_token)
 
+    if stub_mode:
+        stub_context = ScanContext(
+            as_of=as_of_dt,
+            label="live" if is_open else "frozen",
+            is_open=is_open,
+            data_timeframe=data_timeframe,
+            market_meta=market_meta,
+            data_meta=dict(data_meta),
+        )
+        stub_preps = await _legacy_scan_stub_payload(
+            signals=signals,
+            market_data=market_data,
+            style_filter=style_filter,
+            context=stub_context,
+            request=request,
+        )
+        return [prep.candidate.model_dump() for prep in stub_preps]
+
     benchmark_symbol = "SPY"
     benchmark_history: pd.DataFrame | None = market_data.get(benchmark_symbol)
     if benchmark_history is None:
@@ -2908,7 +3625,7 @@ async def gpt_scan(
     data_meta["stale_threshold_ms"] = stale_ms_threshold if is_open else None
 
     polygon_chains: Dict[str, pd.DataFrame] = {}
-    if unique_symbols and polygon_enabled:
+    if fetch_options and unique_symbols and polygon_enabled:
         try:
             as_of_hint = None if is_open else as_of_dt
             tasks = [
@@ -2936,7 +3653,7 @@ async def gpt_scan(
         data_meta.setdefault("options_mode", "tradier")
 
     tradier_suggestions: Dict[str, Dict[str, Any] | None] = {}
-    if unique_symbols and tradier_enabled:
+    if fetch_options and unique_symbols and tradier_enabled:
         try:
             tasks = [select_tradier_contract(symbol) for symbol in unique_symbols]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -3003,7 +3720,7 @@ async def gpt_scan(
 
         base_url = str(request.base_url).rstrip("/")
         interval = _timeframe_for_style(style)
-        chart_query: Dict[str, Any] = {}
+        chart_query: Dict[str, str] = {}
         hint_interval_raw, hint_guidance = _chart_hint(signal.strategy_id, style)
         try:
             chart_interval_hint = normalize_interval(hint_interval_raw)
@@ -3206,7 +3923,7 @@ async def gpt_scan(
 
         chart_links = None
         required_chart_keys = {"direction", "entry", "stop", "tp"}
-        if required_chart_keys.issubset(chart_query.keys()):
+        if chart_query and required_chart_keys.issubset(chart_query.keys()):
             try:
                 chart_links = await gpt_chart_url(ChartParams(**chart_query), request)
             except HTTPException as exc:
@@ -3231,7 +3948,7 @@ async def gpt_scan(
             charts_payload["interactive"] = chart_links.interactive
             if chart_links.png:
                 charts_payload["png"] = chart_links.png
-        elif required_chart_keys.issubset(chart_query.keys()):
+        elif chart_query and required_chart_keys.issubset(chart_query.keys()):
             fallback_chart_url = _build_tv_chart_url(request, chart_query)
             charts_payload["interactive"] = fallback_chart_url
             logger.debug(
@@ -3408,6 +4125,16 @@ async def gpt_scan(
 
     logger.info("scan universe=%s user=%s results=%d", resolved_tickers, user.user_id, len(payload))
     return payload
+
+
+async def gpt_scan(
+    universe: ScanUniverse,
+    request: Request,
+    user: AuthedUser,
+) -> List[Dict[str, Any]]:
+    """Backward-compatible helper used by legacy tests and gpt_plan."""
+
+    return await _legacy_scan(universe, request, user)
 
 
 async def _generate_fallback_plan(
@@ -3776,6 +4503,8 @@ async def gpt_plan(
     symbol = (request_payload.symbol or "").strip().upper()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
+    if not _PLAN_SYMBOL_PATTERN.fullmatch(symbol):
+        raise HTTPException(status_code=400, detail="Invalid symbol; use /gpt/scan for universe requests.")
     forced_plan_id = (request_payload.plan_id or "").strip()
     logger.info(
         "gpt_plan received",
@@ -3786,7 +4515,7 @@ async def gpt_plan(
         },
     )
     universe = ScanUniverse(tickers=[symbol], style=request_payload.style)
-    results = await gpt_scan(universe, request, user)
+    results = await _legacy_scan(universe, request, user)
     if not results:
         fallback_plan = await _generate_fallback_plan(symbol, request_payload.style, request, user)
         if fallback_plan is not None:
