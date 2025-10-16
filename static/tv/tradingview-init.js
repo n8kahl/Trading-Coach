@@ -89,6 +89,12 @@
   }
 
   const symbol = resolvedSymbol;
+  const marketStatusParam = (params.get('market_status') || '').trim().toLowerCase();
+  const sessionStatusParam = (params.get('session_status') || '').trim().toLowerCase();
+  const sessionPhaseParam = (params.get('session_phase') || '').trim().toLowerCase();
+  const sessionBannerParamRaw = params.get('session_banner');
+  const sessionBannerParam = typeof sessionBannerParamRaw === 'string' ? sessionBannerParamRaw.trim() : '';
+  const liveFlag = params.get('live') === '1';
   let currentResolution = normalizeResolution(params.get('interval') || '15');
   const theme = params.get('theme') === 'light' ? 'light' : 'dark';
   const baseUrl = `${window.location.protocol}//${window.location.host}`;
@@ -179,7 +185,11 @@
   const dataModeToken = (params.get('data_mode') || '').trim().toLowerCase();
   const dataAgeMsParam = Number(params.get('data_age_ms') || '');
   const lastUpdateRaw = (params.get('last_update') || '').trim();
-  const isDegradedFeed = dataModeToken === 'degraded';
+  const STALE_FEED_THRESHOLD_MS = 120000;
+  let dataAgeMs = Number.isFinite(dataAgeMsParam) ? dataAgeMsParam : null;
+  const isFeedDegraded = () =>
+    dataModeToken === 'degraded' || (Number.isFinite(dataAgeMs) && dataAgeMs > STALE_FEED_THRESHOLD_MS);
+  let lastDegradedState = isFeedDegraded();
 
   const focusToken = (params.get('focus') || '').toLowerCase();
   const centerTimeParamRaw = params.get('center_time');
@@ -301,7 +311,6 @@
   };
 
   let dataLastUpdateDate = parseIsoDate(lastUpdateRaw);
-  let dataAgeMs = Number.isFinite(dataAgeMsParam) ? dataAgeMsParam : null;
 
   const friendlySourceLabel = (token) => {
     const normalized = (token || '').trim().toLowerCase();
@@ -407,6 +416,11 @@
     if (!Number.isFinite(timestampSeconds)) return;
     dataLastUpdateDate = new Date(timestampSeconds * 1000);
     dataAgeMs = 0;
+    const degraded = isFeedDegraded();
+    if (degraded !== lastDegradedState) {
+      lastDegradedState = degraded;
+      applyMarketStatus(currentMarketPhase || 'closed');
+    }
     updateDataMetadata();
   };
 
@@ -424,10 +438,11 @@
     if (headerDataSourceEl) {
       const sourceLabel = friendlySourceLabel(dataSourceRaw);
       const parts = [];
+      const degraded = isFeedDegraded();
       if (sourceLabel) parts.push(`Data: ${sourceLabel}`);
-      if (isDegradedFeed) parts.push('Degraded');
+      if (degraded) parts.push('Degraded');
       headerDataSourceEl.textContent = parts.join(' · ');
-      headerDataSourceEl.classList.toggle('plan-header__meta--alert', isDegradedFeed);
+      headerDataSourceEl.classList.toggle('plan-header__meta--alert', degraded);
     }
   };
 
@@ -442,6 +457,11 @@
   window.setInterval(() => {
     if (!dataLastUpdateDate) return;
     dataAgeMs = Date.now() - dataLastUpdateDate.getTime();
+    const degraded = isFeedDegraded();
+    if (degraded !== lastDegradedState) {
+      lastDegradedState = degraded;
+      applyMarketStatus(currentMarketPhase || 'closed');
+    }
     updateDataMetadata();
   }, 60000);
 
@@ -579,7 +599,7 @@
   let latestPlanNote = 'Plan intact. Risk profile unchanged.';
   let latestNextStep = 'hold_plan';
   let latestMarketNote = null;
-  if (isDegradedFeed) {
+  if (isFeedDegraded()) {
     latestMarketNote = 'Data feed degraded — using last Polygon bars.';
   }
   let currentMarketPhase = null;
@@ -872,6 +892,7 @@
     if (typeof rrValue === 'number' && headerRREl) {
       headerRREl.textContent = `R:R (TP1): ${rrValue.toFixed(2)}`;
     }
+    lastDegradedState = isFeedDegraded();
     updateStatusNote();
   };
 
@@ -891,7 +912,7 @@
     } else {
       latestMarketNote = meta.note;
     }
-    if (isDegradedFeed) {
+    if (isFeedDegraded()) {
       const degradeCopy = 'Data feed degraded — using last Polygon bars.';
       if (latestMarketNote) {
         if (!latestMarketNote.toLowerCase().includes('degraded')) {
@@ -904,8 +925,37 @@
     updateStatusNote();
   };
 
+  const normalizeMarketPhase = (token) => {
+    if (!token) return null;
+    const normalized = token.toLowerCase();
+    if (normalized.includes('pre')) return 'premarket';
+    if (normalized.includes('after') || normalized.includes('post')) return 'afterhours';
+    if (normalized.includes('closed')) return 'closed';
+    if (
+      normalized.includes('regular') ||
+      normalized.includes('open') ||
+      normalized.includes('rth') ||
+      normalized.includes('midday') ||
+      normalized.includes('session') ||
+      normalized.includes('intraday')
+    ) {
+      return 'regular';
+    }
+    return null;
+  };
+
+  const initialMarketPhase =
+    normalizeMarketPhase(sessionPhaseParam) ||
+    normalizeMarketPhase(sessionStatusParam) ||
+    normalizeMarketPhase(marketStatusParam) ||
+    (marketStatusParam === 'open' ? 'regular' : null) ||
+    (liveFlag ? 'regular' : null) ||
+    'closed';
+
+  const initialMarketNote = sessionBannerParam || null;
+
   applyPlanStatus(currentPlanStatus, latestPlanNote, latestNextStep, null);
-  applyMarketStatus('closed', 'Market closed — live updates limited.');
+  applyMarketStatus(initialMarketPhase, initialMarketNote);
 
   const matchesPlan = (incomingPlanId) => {
     if (!planIdParam) return true;
@@ -1322,10 +1372,11 @@
     planLogEmptyEl = document.getElementById('plan_log_empty');
     renderPlanLog();
     if (!loggedInitialPlan) {
-      const initialMessage = isDegradedFeed
+      const degraded = isFeedDegraded();
+      const initialMessage = degraded
         ? 'Plan loaded — data feed degraded; use cached Polygon bars until live resumes.'
         : 'Plan loaded — follow the checklist before acting.';
-      appendPlanLogEntry(initialMessage, Math.floor(Date.now() / 1000), isDegradedFeed ? 'alert' : 'info');
+      appendPlanLogEntry(initialMessage, Math.floor(Date.now() / 1000), degraded ? 'alert' : 'info');
       loggedInitialPlan = true;
     }
     attachReplayControls();

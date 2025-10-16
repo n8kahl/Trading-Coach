@@ -138,6 +138,10 @@ ALLOWED_CHART_KEYS = {
     "data_mode",
     "data_age_ms",
     "last_update",
+    "market_status",
+    "session_status",
+    "session_phase",
+    "session_banner",
 }
 
 _STYLE_DELTA_PREF: Dict[str, float] = {
@@ -1255,6 +1259,56 @@ def _append_query_params(url: str, extra: Dict[str, str]) -> str:
     existing.update({k: v for k, v in extra.items() if v is not None})
     new_query = urlencode(existing, doseq=True)
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
+
+
+def _attach_market_chart_params(
+    payload: Dict[str, Any],
+    market_meta: Optional[Dict[str, Any]],
+    data_meta: Optional[Dict[str, Any]],
+) -> None:
+    if not isinstance(payload, dict):
+        return
+    if isinstance(market_meta, dict):
+        status_token = str(market_meta.get("status") or "").strip().lower()
+        if status_token:
+            payload.setdefault("market_status", status_token)
+        session_state = market_meta.get("session_state")
+        if isinstance(session_state, dict):
+            session_status = str(session_state.get("status") or "").strip().lower()
+            if session_status:
+                payload.setdefault("session_status", session_status)
+            phase_token = str(session_state.get("phase") or "").strip().lower()
+            if not phase_token:
+                if session_status in {"open", "regular", "rth"}:
+                    phase_token = "regular"
+                elif session_status in {"pre", "pre-market", "premarket"}:
+                    phase_token = "premarket"
+                elif session_status in {"post", "afterhours", "after-hours"}:
+                    phase_token = "afterhours"
+                elif session_status in {"closed"}:
+                    phase_token = "closed"
+            if phase_token:
+                payload.setdefault("session_phase", phase_token)
+            banner = session_state.get("banner")
+            if isinstance(banner, str) and banner.strip():
+                payload.setdefault("session_banner", banner.strip())
+        session_token = str(market_meta.get("session") or "").strip().lower()
+        if session_token and "session_phase" not in payload:
+            if session_token in {"regular", "rth"}:
+                payload.setdefault("session_phase", "regular")
+    if isinstance(data_meta, dict):
+        error = data_meta.get("error")
+        if error and "data_error" not in payload:
+            payload.setdefault("data_error", str(error))
+        mode = data_meta.get("mode")
+        if mode and "data_mode" not in payload:
+            payload.setdefault("data_mode", str(mode))
+        freshness = data_meta.get("data_freshness_ms")
+        if freshness is not None and "data_age_ms" not in payload:
+            try:
+                payload.setdefault("data_age_ms", str(int(freshness)))
+            except Exception:
+                payload.setdefault("data_age_ms", str(freshness))
 
 
 def _market_phase_chicago(now: Optional[datetime] = None) -> str:
@@ -4670,6 +4724,7 @@ async def _generate_fallback_plan(
         "range": range_token,
         "theme": "dark",
     }
+    _attach_market_chart_params(chart_params, market_meta, data_meta)
     if is_plan_live:
         live_stamp = datetime.now(timezone.utc).isoformat()
         chart_params["live"] = "1"
@@ -4945,6 +5000,30 @@ async def gpt_plan(
             "source_plan_keys": list(raw_plan.keys()),
         },
     )
+    planning_context_value: str | None = None
+    market_meta_context = first.get("market") or first.get("meta")
+    data_meta_context = first.get("data") or first.get("meta")
+    market_meta = market_meta_context if isinstance(market_meta_context, dict) else None
+    data_meta = data_meta_context if isinstance(data_meta_context, dict) else None
+    if market_meta is None or data_meta is None:
+        fallback_market, fallback_data, _, _ = _market_snapshot_payload()
+        if market_meta is None:
+            market_meta = fallback_market
+        if data_meta is None:
+            data_meta = fallback_data
+        else:
+            data_meta.setdefault("as_of_ts", fallback_data["as_of_ts"])
+            data_meta.setdefault("frozen", fallback_data["frozen"])
+            data_meta.setdefault("ok", fallback_data.get("ok", True))
+    session_state_payload: Dict[str, Any] | None = None
+    if isinstance(market_meta, dict):
+        session_state_payload = market_meta.get("session_state")
+    if session_state_payload is None and isinstance(data_meta, dict):
+        session_state_payload = data_meta.get("session_state")
+    if isinstance(data_meta, dict):
+        mode_token = str(data_meta.get("mode") or "").lower()
+        if mode_token == "degraded" and planning_context_value != "frozen":
+            planning_context_value = "degraded"
     charts_container = first.get("charts") or {}
     charts = charts_container.get("params") if isinstance(charts_container, dict) else None
     chart_params_payload: Dict[str, Any] = charts if isinstance(charts, dict) else {}
@@ -5026,6 +5105,7 @@ async def gpt_plan(
             default_note = _format_chart_note(symbol, first.get("style"), entry_val, stop_val, targets_list)
             if default_note and not chart_params_payload.get("notes"):
                 chart_params_payload["notes"] = default_note
+        _attach_market_chart_params(chart_params_payload, market_meta, data_meta)
         try:
             chart_model = ChartParams(**chart_params_payload)
             chart_links = await gpt_chart_url(chart_model, request)
@@ -5236,19 +5316,6 @@ async def gpt_plan(
     else:
         plan_warnings = []
     plan_warnings = [w for w in plan_warnings if "watch plan" not in str(w).lower()]
-    planning_context_value: str | None = None
-    market_meta_context = first.get("market") or first.get("meta")
-    data_meta_context = first.get("data") or first.get("meta")
-    style_token = plan.get("style") or first.get("style") or request_payload.style
-    session_state_payload: Dict[str, Any] | None = None
-    if isinstance(market_meta_context, dict):
-        session_state_payload = market_meta_context.get("session_state")
-    if session_state_payload is None and isinstance(data_meta_context, dict):
-        session_state_payload = data_meta_context.get("session_state")
-    if isinstance(data_meta_context, dict):
-        mode_token = str(data_meta_context.get("mode") or "").lower()
-        if mode_token == "degraded" and planning_context_value != "frozen":
-            planning_context_value = "degraded"
 
     entry_for_engine = entry_val
     if entry_for_engine is None:
