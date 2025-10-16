@@ -1503,13 +1503,56 @@ async def _next_plan_version(plan_id: str) -> int:
     return latest + 1 if latest is not None else 1
 
 
+def _json_compatible_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _json_compatible_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_compatible_value(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return [_json_compatible_value(v) for v in value.tolist()]
+    if isinstance(value, (pd.Series, pd.Index)):
+        return [_json_compatible_value(v) for v in value.tolist()]
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, pd.Timestamp):
+        ts = value
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return ts.isoformat()
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value.hex()
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    return value
+
+
+def _normalize_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    return cast(Dict[str, Any], _json_compatible_value(snapshot))
+
+
 async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
-    await _cache_snapshot(plan_id, snapshot)
+    normalized_snapshot = _normalize_snapshot(snapshot)
+    await _cache_snapshot(plan_id, normalized_snapshot)
     persisted = False
-    version = _extract_snapshot_version(snapshot)
+    version = _extract_snapshot_version(normalized_snapshot)
     if _IDEA_PERSISTENCE_ENABLED:
         if version is not None:
-            persisted = await db_store_idea_snapshot(plan_id, version, snapshot)
+            persisted = await db_store_idea_snapshot(plan_id, version, normalized_snapshot)
             if not persisted:
                 logger.warning(
                     "idea snapshot persistence failed; continuing with in-memory cache",
@@ -1525,15 +1568,15 @@ async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
         extra={
             "plan_id": plan_id,
             "versions": len((_IDEA_STORE.get(plan_id) or [])),
-            "snapshot_keys": list(snapshot.keys()),
+            "snapshot_keys": list(normalized_snapshot.keys()),
             "persisted": persisted,
         },
     )
-    plan_block = snapshot.get("plan") or {}
+    plan_block = normalized_snapshot.get("plan") or {}
     symbol_for_event = (plan_block.get("symbol") or "").upper()
     plan_full_event = None
     try:
-        plan_state_event = await _LIVE_PLAN_ENGINE.register_snapshot(snapshot)
+        plan_state_event = await _LIVE_PLAN_ENGINE.register_snapshot(normalized_snapshot)
     except Exception:
         logger.exception("live plan engine snapshot registration failed", extra={"plan_id": plan_id})
         plan_state_event = None
@@ -1542,7 +1585,7 @@ async def _store_idea_snapshot(plan_id: str, snapshot: Dict[str, Any]) -> None:
         plan_full_event = {
             "t": "plan_full",
             "plan_id": plan_block.get("plan_id"),
-            "payload": snapshot,
+            "payload": normalized_snapshot,
             "reason": (plan_state_event or {}).get("reason") if isinstance(plan_state_event, dict) else "snapshot_stored",
         }
         await _publish_stream_event(symbol_for_event, plan_full_event)
@@ -5280,7 +5323,7 @@ async def gpt_plan(
             plan_anchor=plan_anchor or None,
         )
         try:
-            options_payload = await gpt_contracts(contract_request, request, user)
+            options_payload = await gpt_contracts(contract_request, user)
             first["options"] = options_payload
         except HTTPException as exc:
             logger.info("contract lookup skipped for %s: %s", symbol, exc)
