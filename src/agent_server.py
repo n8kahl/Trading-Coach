@@ -3308,6 +3308,36 @@ async def gpt_health_data(_: AuthedUser = Depends(require_api_key)) -> Dict[str,
     }
 
 
+@gpt.post("/admin/flush-caches", summary="Clear in-memory caches (admin)")
+async def gpt_admin_flush_caches(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
+    # Flush light-weight in-memory caches (does not touch DB)
+    try:
+        _INDICATOR_CACHE.clear()
+    except Exception:
+        pass
+    try:
+        _CHART_URL_CACHE.clear()
+    except Exception:
+        pass
+    try:
+        _MARKET_DATA_CACHE.clear()
+    except Exception:
+        pass
+    try:
+        _FUTURES_CACHE.clear()
+    except Exception:
+        pass
+    # Idea snapshots are used for permalinks; do not wipe without persistence
+    return {
+        "status": "ok",
+        "flushed": [
+            "indicator_cache",
+            "chart_url_cache",
+            "market_data_cache",
+            "futures_cache",
+        ],
+    }
+
 @gpt.get("/futures-snapshot", summary="Overnight/offsessions market tape (ETF proxies via Finnhub)")
 async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
     now_ts = time.time()
@@ -4490,7 +4520,7 @@ async def _generate_fallback_plan(
     interval_map = {"1": "1m", "5": "5m", "60": "1h", "D": "d"}
     interval_token = interval_map.get(timeframe, chart_timeframe_hint or "5m")
     chart_params: Dict[str, Any] = {
-        "symbol": symbol.upper(),
+        "symbol": _tv_symbol(symbol),
         "interval": chart_timeframe_hint or interval_token,
         "direction": direction,
         "entry": f"{entry:.2f}",
@@ -4548,7 +4578,7 @@ async def _generate_fallback_plan(
         "interval": interval_token,
         "warnings": [],
         "strategy": "baseline_auto",
-        "debug": {"source": "auto_fallback_plan"},
+        "debug": {},
     }
     plan_block["chart_timeframe"] = chart_timeframe_hint
     plan_block["chart_guidance"] = hint_guidance
@@ -4622,7 +4652,7 @@ async def _generate_fallback_plan(
         charts_params=chart_params_payload,
         chart_url=chart_url_with_ids,
         strategy_id="baseline_auto",
-        description="Automatically generated plan using live market context when no strategy signals are active.",
+        description=None,
         score=confidence,
         plan=plan_block,
         structured_plan=structured_plan,
@@ -4631,7 +4661,6 @@ async def _generate_fallback_plan(
         key_levels={k: float(v) for k, v in key_levels.items() if isinstance(v, (int, float))},
         market_snapshot=market_meta,
         features={
-            "auto_fallback_plan": True,
             "ema_trend_up": ema_trend_up,
             "ema_trend_down": ema_trend_down,
             "vwap": vwap_value,
@@ -4834,7 +4863,7 @@ async def gpt_plan(
         chart_params_payload.setdefault("plan_id", plan_id)
         chart_params_payload.setdefault("plan_version", version)
         chart_params_payload.setdefault("strategy", first.get("strategy_id") or plan.get("setup"))
-        chart_params_payload.setdefault("symbol", symbol)
+        chart_params_payload.setdefault("symbol", _tv_symbol(symbol))
         chart_params_payload.setdefault("range", _range_for_style(first.get("style")))
         chart_params_payload.setdefault("interval", chart_timeframe_hint)
         chart_params_payload.setdefault("focus", "plan")
@@ -6492,7 +6521,7 @@ async def gpt_context(
     level_tokens = _extract_levels_for_chart(key_levels)
 
     chart_params = {
-        "symbol": symbol.upper(),
+        "symbol": _tv_symbol(symbol),
         "interval": interval_normalized,
         "ema": "9,20,50",
         "view": "fit",
