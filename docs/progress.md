@@ -151,3 +151,36 @@ Happy shipping!
   - better labeling (`Live liquidity leaders`) with no warning banner during RTH and up to 20 ranked symbols.
   - relaxed, logged handling for slightly stale bars instead of bailing to frozen context immediately.
   - doc note: if upstream watchlist service continues to fail, consider building an internal Top-Liquidity snapshot service for true live rankings.
+
+- 2025-10-16T18:40Z – Stability + TV parity fixes. Addressed several production errors and made the chart viewer respect live session state.
+  - Fixed NameError in fallback planner (`is_plan_live`) and normalized persistence to avoid NumPy/pandas JSON issues.
+  - Corrected contracts helper call signature (`gpt_contracts`) to accept `(payload, user)` from server.
+  - Embedded session metadata into chart links: `market_status`, `session_status`, `session_phase`, `session_banner`, plus `live=1` and `last_update` when applicable.
+  - TV viewer now derives the symbol from `symbol`, `plan_meta`, or `plan_id`, writes it back into the URL, and connects the correct stream; no more fallback to AAPL when query is missing.
+  - TV viewer treats session flags and data freshness properly: shows “Market Open” when session is live and only displays a degraded banner when `data_age_ms > 120s`.
+  - Bumped static bundle version (`tradingview-init.js?v=20251116`) to force fresh assets in production.
+
+### 7. Known issues / next work items
+
+- Data freshness
+  - Stale feed warnings during RTH indicate upstream data delays. Consider adding an adaptive retry/backfill and a “polygon_cached” mode label.
+  - Add Prometheus/Grafana or simple heartbeat metrics for provider latency and last bar age.
+
+- Options data
+  - Sandbox 404s from Tradier spam logs; add feature flag to suppress snapshot/quotes when using sandbox keys and degrade quietly.
+  - Persist IV history to compute true IV rank (see Roadmap 3.1).
+
+- Chart URL service
+  - Make `/gpt/chart-url` add session flags automatically (currently the `/gpt/plan` path injects them).
+  - Add validation that `symbol` is present and normalize from `plan_meta.plan.symbol` if not.
+
+- Viewer
+  - Add a visible “Live” indicator when `live=1` is set and data age < 2 min.
+  - Smooth-retry for SSE reconnects with jitter; display a transient banner when reconnecting.
+
+- Tests & observability
+  - Add integration tests for `/gpt/plan` fallback to cover plan embedding + chart param enrichment.
+  - Add request IDs and structured logs to correlate GPT calls with backend traces.
+
+Deployment notes
+- After pulling `main`, redeploy Railway to pick up the TV bundle bump and server fixes. Hard-refresh `/tv` pages to clear cached JS.
