@@ -58,7 +58,37 @@
     return Number.isFinite(num) ? num : null;
   };
 
-  const symbol = (params.get('symbol') || 'AAPL').toUpperCase();
+  let planMeta = {};
+  try {
+    const rawPlanMeta = params.get('plan_meta');
+    planMeta = rawPlanMeta ? JSON.parse(rawPlanMeta) : {};
+  } catch {
+    planMeta = {};
+  }
+
+  const planMetaSymbol =
+    typeof planMeta.symbol === 'string' && planMeta.symbol.trim()
+      ? planMeta.symbol.trim().toUpperCase()
+      : typeof planMeta.plan === 'object' && typeof planMeta.plan.symbol === 'string'
+        ? planMeta.plan.symbol.trim().toUpperCase()
+        : null;
+
+  const planIdSymbol = (() => {
+    const planId = params.get('plan_id');
+    if (!planId) return null;
+    const token = planId.split('-')[0];
+    return token ? token.trim().toUpperCase() : null;
+  })();
+
+  const rawSymbolParam = params.get('symbol');
+  const resolvedSymbol = (rawSymbolParam || planMetaSymbol || planIdSymbol || 'AAPL').toUpperCase();
+  if (!rawSymbolParam) {
+    params.set('symbol', resolvedSymbol);
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, '', newUrl);
+  }
+
+  const symbol = resolvedSymbol;
   let currentResolution = normalizeResolution(params.get('interval') || '15');
   const theme = params.get('theme') === 'light' ? 'light' : 'dark';
   const baseUrl = `${window.location.protocol}//${window.location.host}`;
@@ -99,13 +129,6 @@
   let currentPlan = clonePlan();
 
   let keyLevels = parseNamedLevels(params.get('levels'));
-
-  let planMeta = {};
-  try {
-    planMeta = JSON.parse(params.get('plan_meta') || '{}');
-  } catch {
-    planMeta = {};
-  }
 
   const paramConfidence = parseNumber(params.get('confidence'));
   const mergedPlanMeta = {
