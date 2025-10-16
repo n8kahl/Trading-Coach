@@ -3395,6 +3395,20 @@ async def _generate_fallback_plan(
     except HTTPException:
         return None
     data_meta["sources"] = data_sources
+    index_mode = _get_index_mode()
+    if index_mode and index_mode.applies(symbol):
+        frame = market_data.get(symbol)
+        if frame is None or frame.empty:
+            try:
+                synthetic = await index_mode.synthetic_ohlcv(symbol, timeframe)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("fallback synthetic build failed for %s: %s", symbol, exc)
+                synthetic = None
+            if synthetic is not None and not synthetic.empty:
+                market_data[symbol] = synthetic
+                data_sources[symbol] = synthetic.attrs.get("source", "proxy_gamma")
+                data_meta.setdefault("mode", "degraded")
+                data_meta.setdefault("banners", []).append("Index bars unavailable — translating via ETF proxy.")
     frame = market_data.get(symbol)
     if frame is None or frame.empty:
         return None
@@ -3820,6 +3834,33 @@ async def gpt_plan(
     chart_params_payload: Dict[str, Any] = charts if isinstance(charts, dict) else {}
     chart_url_value: Optional[str] = charts_container.get("interactive") if isinstance(charts_container, dict) else None
     chart_png_value: Optional[str] = charts_container.get("png") if isinstance(charts_container, dict) else None
+
+    # Ensure plan levels are embedded for /tv rendering even if upstream omitted them.
+    entry_level = plan.get("entry")
+    if isinstance(entry_level, dict):
+        entry_level = entry_level.get("level")
+    stop_level = plan.get("stop")
+    if isinstance(stop_level, dict):
+        stop_level = stop_level.get("level")
+    targets_list = plan.get("targets") or []
+    try:
+        if entry_level is not None:
+            chart_params_payload.setdefault("entry", f"{float(entry_level):.2f}")
+    except (TypeError, ValueError):
+        pass
+    try:
+        if stop_level is not None:
+            chart_params_payload.setdefault("stop", f"{float(stop_level):.2f}")
+    except (TypeError, ValueError):
+        pass
+    cleaned_targets: List[str] = []
+    for target in targets_list:
+        try:
+            cleaned_targets.append(f"{float(target):.2f}")
+        except (TypeError, ValueError):
+            continue
+    if cleaned_targets:
+        chart_params_payload.setdefault("tp", ",".join(cleaned_targets))
 
     def _coerce_float(value: Any) -> Optional[float]:
         try:
