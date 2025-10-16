@@ -195,6 +195,20 @@ _FUTURES_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}
 
 _MARKET_CLOCK = MarketClock()
 
+# Default symbols used when universe expansion fails (closed session or outage)
+_FROZEN_DEFAULT_UNIVERSE: List[str] = [
+    "SPY",
+    "QQQ",
+    "IWM",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "TSLA",
+    "META",
+    "AMZN",
+    "GOOG",
+]
+
 _STRATEGY_CHART_HINTS: Dict[str, Tuple[str, str]] = {
     "orb_retest": ("1m", "Wait for a 1 minute break and retest of the opening range boundary before committing."),
     "power_hour_trend": ("5m", "Manage the trade on 5 minute closes while price holds trend alignment into the close."),
@@ -3382,6 +3396,18 @@ async def gpt_scan_endpoint(
         tickers = await expand_universe(request_payload.universe, style=request_payload.style, limit=universe_limit)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Universe expansion failed: %s", exc)
+        # Present frozen leaders from default universe rather than empty
+        fallback_page = _fallback_scan_page(
+            request_payload,
+            context,
+            symbols=_FROZEN_DEFAULT_UNIVERSE,
+            market_data={},
+            dq=dq,
+            banner=context_banner or "Universe unavailable — showing frozen leaders.",
+            limit=min(10, max(request_payload.limit, 1)),
+        )
+        if fallback_page is not None:
+            return fallback_page
         return _empty_scan_page(
             request_payload,
             context,
@@ -3394,6 +3420,17 @@ async def gpt_scan_endpoint(
         tickers = [symbol for symbol in tickers if symbol not in exclude]
 
     if not tickers:
+        fallback_page = _fallback_scan_page(
+            request_payload,
+            context,
+            symbols=_FROZEN_DEFAULT_UNIVERSE,
+            market_data={},
+            dq=dq,
+            banner=context_banner or "Empty universe — showing frozen leaders.",
+            limit=min(10, max(request_payload.limit, 1)),
+        )
+        if fallback_page is not None:
+            return fallback_page
         return _empty_scan_page(
             request_payload,
             context,
