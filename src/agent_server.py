@@ -1103,6 +1103,72 @@ def _metrics_to_features(metrics: Metrics, style: RankingStyle) -> RankingFeatur
     )
 
 
+def _fallback_scan_candidates(
+    symbols: Sequence[str],
+    market_data: Dict[str, pd.DataFrame],
+    *,
+    limit: int,
+) -> List[ScanCandidate]:
+    ranked: List[Tuple[float, ScanCandidate]] = []
+    for symbol in symbols:
+        frame = market_data.get(symbol)
+        if frame is None or frame.empty:
+            continue
+        rvol = _relative_volume(frame)
+        liq = _liquidity_score(frame)
+        score = max(rvol, 0.05) + min(liq / 1_000_000_000.0, 0.25)
+        confidence = max(min(0.35 + 0.2 * min(rvol, 1.5), 0.65), 0.3)
+        reasons = [
+            f"Fallback candidate — RVOL {rvol:.2f}",
+            "Liquidity baseline applied",
+        ]
+        candidate = ScanCandidate(
+            symbol=symbol.upper(),
+            score=float(round(score, 4)),
+            reasons=reasons,
+            confidence=float(round(confidence, 4)),
+            entry=None,
+            stop=None,
+            tps=[],
+            rr_t1=None,
+            plan_id=None,
+            chart_url=None,
+        )
+        ranked.append((score, candidate))
+    ranked.sort(key=lambda item: (-item[0], item[1].symbol))
+    return [item[1] for item in ranked[:limit]]
+
+
+def _fallback_scan_page(
+    request: ScanRequest,
+    context: ScanContext,
+    *,
+    symbols: Sequence[str],
+    market_data: Dict[str, pd.DataFrame],
+    dq: Dict[str, Any],
+    banner: str,
+    limit: int,
+) -> ScanPage | None:
+    candidates = _fallback_scan_candidates(symbols, market_data, limit=limit)
+    if not candidates:
+        return None
+    meta = {
+        "style": request.style,
+        "limit": request.limit,
+        "universe_size": len(symbols),
+        "fallback": True,
+    }
+    return ScanPage(
+        as_of=context.as_of_iso,
+        planning_context=context.label,
+        banner=banner,
+        meta=meta,
+        candidates=candidates,
+        data_quality=dq,
+        next_cursor=None,
+    )
+
+
 def _canonical_style_token(style: str | None) -> str:
     token = (_normalize_trade_style(style) or "intraday").lower()
     return "leaps" if token == "leap" else token
@@ -3327,7 +3393,21 @@ async def gpt_scan_endpoint(
         banner = banner or "Live feed degraded — partial data missing."
 
     available_symbols = [sym for sym in tickers if sym in market_data and not market_data[sym].empty]
+    requested_limit = max(request_payload.limit, 1)
+    rank_limit = 100 if requested_limit < 100 else min(requested_limit, 100)
+    page_limit = min(requested_limit, rank_limit)
     if not available_symbols:
+        fallback_page = _fallback_scan_page(
+            request_payload,
+            context,
+            symbols=tickers,
+            market_data=market_data,
+            dq=dq,
+            banner=banner or "No live market data — falling back to liquidity snapshot.",
+            limit=page_limit,
+        )
+        if fallback_page is not None:
+            return fallback_page
         return _empty_scan_page(
             request_payload,
             context,
@@ -3338,16 +3418,23 @@ async def gpt_scan_endpoint(
     effective_filters = _effective_scan_filters(request_payload.filters, context=context)
     filtered_symbols = _apply_scan_filters(available_symbols, market_data, effective_filters)
     if not filtered_symbols:
+        fallback_page = _fallback_scan_page(
+            request_payload,
+            context,
+            symbols=available_symbols,
+            market_data=market_data,
+            dq=dq,
+            banner=banner or "Filters removed all symbols — showing liquidity fallback.",
+            limit=page_limit,
+        )
+        if fallback_page is not None:
+            return fallback_page
         return _empty_scan_page(
             request_payload,
             context,
             banner=banner or "No tickers passed scan filters.",
             dq=dq,
         )
-
-    requested_limit = max(request_payload.limit, 1)
-    rank_limit = 100 if requested_limit < 100 else min(requested_limit, 100)
-    page_limit = min(requested_limit, rank_limit)
     subset = filtered_symbols[: rank_limit * 2]
     try:
         market_subset = {symbol: market_data[symbol] for symbol in subset if symbol in market_data}
@@ -3381,6 +3468,17 @@ async def gpt_scan_endpoint(
     )
 
     if not preps:
+        fallback_page = _fallback_scan_page(
+            request_payload,
+            context,
+            symbols=available_symbols,
+            market_data=market_subset,
+            dq=dq,
+            banner=banner or "Scanner returned no signals — showing liquidity fallback.",
+            limit=page_limit,
+        )
+        if fallback_page is not None:
+            return fallback_page
         return _empty_scan_page(
             request_payload,
             context,
@@ -3413,6 +3511,19 @@ async def gpt_scan_endpoint(
             key=lambda item: (-item.candidate.score, item.candidate.symbol),
         )
         ordered_candidates = [item.candidate for item in fallback[:rank_limit]]
+
+    if not ordered_candidates:
+        fallback_page = _fallback_scan_page(
+            request_payload,
+            context,
+            symbols=available_symbols,
+            market_data=market_subset,
+            dq=dq,
+            banner=banner or "Ranking produced no results — showing liquidity fallback.",
+            limit=page_limit,
+        )
+        if fallback_page is not None:
+            return fallback_page
 
     start_index = decode_cursor(request_payload.cursor)
     page_size = min(50, page_limit)
