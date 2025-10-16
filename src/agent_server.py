@@ -1165,14 +1165,25 @@ def _fallback_scan_page(
     banner: str,
     limit: int,
 ) -> ScanPage | None:
-    candidates = _fallback_scan_candidates(symbols, market_data, limit=limit)
+    # Primary frozen list for requested horizon
+    primary_limit = max(1, min(limit, 10))
+    candidates = _fallback_scan_candidates(symbols, market_data, limit=primary_limit)
     if not candidates:
         return None
+    # Prepare alternate horizon preview (intraday vs swing)
+    alt_key = "swing" if request.style != "swing" else "intraday"
+    alt_list = _fallback_scan_candidates(symbols, market_data, limit=10)
+    alt_compact = [
+        {"symbol": c.symbol, "score": c.score, "confidence": c.confidence}
+        for c in alt_list
+    ]
     meta = {
         "style": request.style,
         "limit": request.limit,
         "universe_size": len(symbols),
-        "fallback": True,
+        "mode": "frozen_preview",
+        "label": "Frozen leaders (as of RTH close)",
+        "alt_candidates": {alt_key: alt_compact},
     }
     return ScanPage(
         as_of=context.as_of_iso,
@@ -3419,8 +3430,8 @@ async def gpt_scan_endpoint(
             symbols=tickers,
             market_data=market_data,
             dq=dq,
-            banner=banner or "No live market data — falling back to liquidity snapshot.",
-            limit=page_limit,
+            banner=banner or "Market closed — showing frozen leaders.",
+            limit=min(10, page_limit),
         )
         if fallback_page is not None:
             return fallback_page
@@ -3440,8 +3451,8 @@ async def gpt_scan_endpoint(
             symbols=available_symbols,
             market_data=market_data,
             dq=dq,
-            banner=banner or "Filters removed all symbols — showing liquidity fallback.",
-            limit=page_limit,
+            banner=banner or "Filters removed all symbols — showing frozen leaders.",
+            limit=min(10, page_limit),
         )
         if fallback_page is not None:
             return fallback_page
@@ -3490,8 +3501,8 @@ async def gpt_scan_endpoint(
             symbols=available_symbols,
             market_data=market_subset,
             dq=dq,
-            banner=banner or "Scanner returned no signals — showing liquidity fallback.",
-            limit=page_limit,
+            banner=banner or "Scanner returned no signals — showing frozen leaders.",
+            limit=min(10, page_limit),
         )
         if fallback_page is not None:
             return fallback_page
@@ -3535,8 +3546,8 @@ async def gpt_scan_endpoint(
             symbols=available_symbols,
             market_data=market_subset,
             dq=dq,
-            banner=banner or "Ranking produced no results — showing liquidity fallback.",
-            limit=page_limit,
+            banner=banner or "Ranking produced no results — showing frozen leaders.",
+            limit=min(10, page_limit),
         )
         if fallback_page is not None:
             return fallback_page
