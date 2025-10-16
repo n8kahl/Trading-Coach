@@ -4618,6 +4618,10 @@ async def _generate_fallback_plan(
         "range": range_token,
         "theme": "dark",
     }
+    if is_open:
+        live_stamp = plan_ts_utc.isoformat()
+        chart_params["live"] = "1"
+        chart_params["last_update"] = live_stamp
     levels_param = _fallback_levels_param({k: v for k, v in key_levels.items() if isinstance(v, (int, float))})
     if levels_param:
         chart_params["levels"] = levels_param
@@ -4703,6 +4707,7 @@ async def _generate_fallback_plan(
         structured_plan["confidence_visual"] = confidence_visual
     chart_params_payload = {key: str(value) for key, value in chart_params.items()}
     charts_payload: Dict[str, Any] = {"params": chart_params_payload, "interactive": chart_url_with_ids}
+    charts_payload["live"] = bool(is_open)
     charts_payload["timeframe"] = chart_timeframe_hint
     charts_payload["guidance"] = hint_guidance
     if chart_png:
@@ -4710,7 +4715,10 @@ async def _generate_fallback_plan(
     if inline_markdown:
         charts_payload["inline_markdown"] = inline_markdown
     data_payload = dict(data_meta)
-    data_payload["bars"] = f"{str(request.base_url).rstrip('/')}/gpt/context/{symbol.upper()}?interval={interval_token}&lookback=300"
+    bars_url = f"{str(request.base_url).rstrip('/')}/gpt/context/{symbol.upper()}?interval={interval_token}&lookback=300"
+    if is_open:
+        bars_url += "&live=1"
+    data_payload["bars"] = bars_url
     data_payload["session_state"] = market_meta.get("session_state")
     response = PlanResponse(
         plan_id=plan_id,
@@ -5393,6 +5401,34 @@ async def gpt_plan(
             data_meta.setdefault("ok", fallback_data.get("ok", True))
     if planning_context_value is None:
         planning_context_value = "live"
+
+    is_live_plan = planning_context_value == "live"
+    if chart_params_payload:
+        if is_live_plan:
+            live_stamp = chart_params_payload.get("last_update")
+            if not live_stamp:
+                live_stamp = datetime.now(timezone.utc).isoformat()
+                chart_params_payload["last_update"] = live_stamp
+            chart_params_payload["live"] = "1"
+        else:
+            chart_params_payload.pop("live", None)
+            chart_params_payload.pop("last_update", None)
+    if chart_url_value and is_live_plan:
+        live_stamp = chart_params_payload.get("last_update") if chart_params_payload else None
+        extra_params = {"live": "1"}
+        if live_stamp:
+            extra_params["last_update"] = live_stamp
+        chart_url_value = _append_query_params(chart_url_value, extra_params)
+        if charts_field is not None:
+            charts_field["interactive"] = chart_url_value
+    if charts_field is not None:
+        if chart_params_payload:
+            charts_field["params"] = chart_params_payload
+        charts_field["live"] = is_live_plan
+    if data_payload is not None and isinstance(data_payload, dict) and is_live_plan:
+        bars_url = data_payload.get("bars")
+        if isinstance(bars_url, str):
+            data_payload["bars"] = _append_query_params(bars_url, {"live": "1"})
 
     logger.info(
         "plan response ready",
