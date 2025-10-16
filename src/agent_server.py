@@ -33,6 +33,8 @@ from urllib.parse import urlencode, quote, urlsplit, urlunsplit, parse_qsl
 from fastapi.responses import StreamingResponse
 
 from .config import get_settings
+from .app.engine.index_common import INDEX_BASE_TICKERS
+from .realtime_bars import PolygonRealtimeBarStreamer
 from .calculations import atr, ema, bollinger_bands, keltner_channels, adx, vwap
 from .charts_api import router as charts_router, get_candles, normalize_interval
 from .gpt_sentiment import router as gpt_sentiment_router
@@ -335,6 +337,37 @@ async def _startup_tasks() -> None:
         logger.info("Idea snapshots will be cached in-memory (database unavailable or not configured)")
     _SYMBOL_STREAM_COORDINATOR = SymbolStreamCoordinator(_symbol_stream_emit)
     logger.info("Live symbol streamer initialized")
+
+    settings = get_settings()
+    polygon_key = (settings.polygon_api_key or "").strip() if hasattr(settings, "polygon_api_key") else ""
+    if polygon_key:
+        try:
+            streamer = PolygonRealtimeBarStreamer(
+                polygon_key,
+                symbols=list(INDEX_BASE_TICKERS),
+                on_event=_ingest_stream_event,
+            )
+            streamer.start()
+            global _REALTIME_BAR_STREAM
+            _REALTIME_BAR_STREAM = streamer
+            logger.info(
+                "Polygon realtime bar streamer active for %s",
+                ",".join(INDEX_BASE_TICKERS),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Unable to start realtime bar streamer: %s", exc)
+
+
+@app.on_event("shutdown")
+async def _shutdown_tasks() -> None:
+    global _REALTIME_BAR_STREAM
+    if _REALTIME_BAR_STREAM is not None:
+        try:
+            await _REALTIME_BAR_STREAM.stop()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Error stopping realtime bar streamer")
+        finally:
+            _REALTIME_BAR_STREAM = None
 
 
 # ---------------------------------------------------------------------------
@@ -2155,6 +2188,7 @@ _IDEA_PERSISTENCE_ENABLED = False
 _STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
 _PLAN_STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
 _STREAM_LOCK = asyncio.Lock()
+_REALTIME_BAR_STREAM: Optional[PolygonRealtimeBarStreamer] = None
 _IV_METRICS_CACHE_TTL = 120.0
 _IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 async def _symbol_stream_emit(symbol: str, event: Dict[str, Any]) -> None:

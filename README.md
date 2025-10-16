@@ -133,6 +133,7 @@ npm run start      # start the live plan console (Next.js) on $PORT
 - **Strategy engine (`scanner.py`)** – builds real trade plans from intraday context (anchored VWAPs, ATR, EMA alignment, breakout checks). Plans include direction, entry, stop, target ladder, confidence, ATR, notes, R:R, and overlays.
 - **Volatility metrics** – `_compute_iv_metrics` in `agent_server.py` caches ATM IV, IV rank/percentile, and HV20/60/120 for 2 minutes per symbol.
 - **Chart renderer (`static/tv`)** – Lightweight Charts fallback draws labelled EMAs, white VWAP, plan lines, supply/demand bands, liquidity pools, fair value gaps, and anchored VWAPs. Autoscale + plan rescaling keep everything on-screen.
+- **Realtime bars** – Polygon websocket stream keeps SPX/NDX charts ticking between full plan refreshes (1–2 minute cadence). If Polygon drops, the server falls back to proxy-translated bars and banners the chart as degraded.
 - **Caching** – Multi-context responses (30 s), IV metrics (120 s), Tradier chains/quotes (15 s). All caches are in-memory; restart clears them.
 
 ## Index sniper mode (SPX/NDX)

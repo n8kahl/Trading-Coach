@@ -1317,6 +1317,7 @@
 
   const updateRealtimeBar = (price, payload) => {
     if (!latestCandleData.length || !Number.isFinite(price)) return;
+    const volumeFromPayload = Number.isFinite(payload?.volume) ? Number(payload.volume) : null;
     const secondsPerBar = Math.max(lastSecondsPerBar, 60);
     const eventTs = parseEventTimestamp(payload) ?? Math.floor(Date.now() / 1000);
     const bucketTime = Math.floor(eventTs / secondsPerBar) * secondsPerBar;
@@ -1346,6 +1347,7 @@
       if (volBar) {
         const updatedVol = {
           ...volBar,
+          ...(volumeFromPayload !== null ? { value: volumeFromPayload } : {}),
           color: updated.close >= updated.open ? '#22c55e88' : '#ef444488',
         };
         latestVolumeData[latestVolumeData.length - 1] = updatedVol;
@@ -1367,7 +1369,7 @@
 
     const newVolumeBar = {
       time: bucketTime,
-      value: 0,
+      value: volumeFromPayload !== null ? volumeFromPayload : 0,
       color: price >= newBar.open ? '#22c55e88' : '#ef444488',
     };
     latestVolumeData.push(newVolumeBar);
