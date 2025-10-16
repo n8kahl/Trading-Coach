@@ -11,7 +11,7 @@ import httpx
 from zoneinfo import ZoneInfo
 
 from ...market_clock import MarketClock
-from config import get_settings
+from src.config import get_settings
 
 _ET = ZoneInfo("America/New_York")
 _CLOCK = MarketClock()

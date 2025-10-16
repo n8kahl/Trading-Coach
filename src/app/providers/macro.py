@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from config import get_settings
+from src.config import get_settings
 from ..services.session_state import parse_session_as_of
 
 _DEFAULT_WINDOW_MINUTES = 240

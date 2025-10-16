@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
-from config import get_settings
+from src.config import get_settings
 from .index_common import POLYGON_INDEX_TICKERS
 
 
