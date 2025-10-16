@@ -144,6 +144,8 @@ Happy shipping!
 
 - 2025-10-11T20:37:56.623921-05:00 – Marked commit 23a45da as production ready baseline (docs/gpt_integration.md).
 
+- 2025-10-16T14:45Z – Live plan/chart parity fix. Chart URLs now carry `live=1` and current timestamps whenever the plan context is live, and `/gpt/context` links append `live=1` so the TV surface polls in real time. Also normalized the default universe across swing/intraday fallbacks (hash-based shuffle per RTH day) to avoid static ordering.
+
 - 2025-10-16T13:55Z – Live scan pipeline hardened. Diagnosed that FT-TopLiquidity expansion was intermittently returning empty results during RTH, causing the assistant to fall back to “frozen” lists despite the market being open. Added:
   - deterministic live-default universe (20 high-liquidity names) when expansion or market-data fetch fails.
   - better labeling (`Live liquidity leaders`) with no warning banner during RTH and up to 20 ranked symbols.
