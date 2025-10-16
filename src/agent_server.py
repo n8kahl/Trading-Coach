@@ -1433,6 +1433,7 @@ def _extract_plan_core(first: Dict[str, Any], plan_id: str, version: int, decima
 def _build_snapshot_summary(first: Dict[str, Any]) -> Dict[str, Any]:
     features = first.get("features") or {}
     snapshot = first.get("market_snapshot") or {}
+    is_plan_live = str(first.get("planning_context") or "").strip().lower() == "live"
     volatility = snapshot.get("volatility") or {}
     trend = (snapshot.get("trend") or {}).get("ema_stack")
     summary = {
@@ -4625,7 +4626,7 @@ async def _generate_fallback_plan(
         "range": range_token,
         "theme": "dark",
     }
-    if is_open:
+    if is_plan_live:
         live_stamp = datetime.now(timezone.utc).isoformat()
         chart_params["live"] = "1"
         chart_params["last_update"] = live_stamp
@@ -4714,7 +4715,7 @@ async def _generate_fallback_plan(
         structured_plan["confidence_visual"] = confidence_visual
     chart_params_payload = {key: str(value) for key, value in chart_params.items()}
     charts_payload: Dict[str, Any] = {"params": chart_params_payload, "interactive": chart_url_with_ids}
-    charts_payload["live"] = bool(is_open)
+    charts_payload["live"] = is_plan_live
     charts_payload["timeframe"] = chart_timeframe_hint
     charts_payload["guidance"] = hint_guidance
     if chart_png:
@@ -4723,7 +4724,7 @@ async def _generate_fallback_plan(
         charts_payload["inline_markdown"] = inline_markdown
     data_payload = dict(data_meta)
     bars_url = f"{_resolved_base_url(request)}/gpt/context/{symbol.upper()}?interval={interval_token}&lookback=300"
-    if is_open:
+    if is_plan_live:
         bars_url += "&live=1"
     data_payload["bars"] = bars_url
     data_payload["session_state"] = market_meta.get("session_state")
@@ -4733,7 +4734,7 @@ async def _generate_fallback_plan(
         trade_detail=chart_url_with_ids,
         idea_url=chart_url_with_ids,
         warnings=plan_warnings or None,
-        planning_context="live" if is_open else "frozen",
+        planning_context="live" if is_plan_live else "frozen",
         symbol=symbol.upper(),
         style=style_token,
         bias=direction,
@@ -4996,7 +4997,7 @@ async def gpt_plan(
     live_stamp_payload: Optional[str] = None
     charts_payload: Dict[str, Any] = {}
     if chart_params_payload:
-        if is_open:
+        if is_plan_live:
             live_stamp_payload = chart_params_payload.get("last_update")
             if not live_stamp_payload:
                 live_stamp_payload = datetime.now(timezone.utc).isoformat()
@@ -5015,7 +5016,7 @@ async def gpt_plan(
                 "plan_version": str(version),
             },
         )
-        if is_open:
+        if is_plan_live:
             live_param_stamp = live_stamp_payload or chart_params_payload.get("last_update") if chart_params_payload else None
             if not live_param_stamp:
                 live_param_stamp = datetime.now(timezone.utc).isoformat()
@@ -5042,7 +5043,7 @@ async def gpt_plan(
                 "plan_version": str(version),
             },
         )
-        if is_open:
+        if is_plan_live:
             live_param_stamp = chart_params_payload.get("last_update") or datetime.now(timezone.utc).isoformat()
             chart_params_payload["last_update"] = live_param_stamp
             chart_params_payload["live"] = "1"
@@ -5076,7 +5077,7 @@ async def gpt_plan(
         minimal_params.setdefault("focus", "plan")
         minimal_params.setdefault("center_time", "latest")
         minimal_params.setdefault("scale_plan", "auto")
-        if is_open:
+        if is_plan_live:
             minimal_params["live"] = "1"
             minimal_params["last_update"] = datetime.now(timezone.utc).isoformat()
         chart_url_value = _build_tv_chart_url(request, minimal_params)
