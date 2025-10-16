@@ -1343,7 +1343,7 @@ def _build_trade_detail_url(request: Request, plan_id: str, version: int) -> str
         host = headers.get("host") or request.url.netloc
 
     # Prefer pretty permalink under /idea/{plan_id} (content-negotiated)
-    root = f"{scheme}://{host}" if host else str(request.base_url).rstrip("/")
+    root = f"{scheme}://{host}" if host else _resolved_base_url(request)
     path = f"/idea/{plan_id}/{int(version)}"
     base = f"{root.rstrip('/')}{path}"
     logger.info(
@@ -2370,7 +2370,7 @@ def _swap_chart_path(url: str, source: str, target: str) -> str:
         return url
 
 
-def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
+def _resolved_base_url(request: Request) -> str:
     # Respect reverse-proxy headers to avoid mixed-content (http iframe on https page)
     headers = request.headers
     scheme = None
@@ -2398,7 +2398,12 @@ def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
         scheme = request.url.scheme or "https"
     if not host:
         host = headers.get("host") or request.url.netloc
-    base = f"{scheme}://{host}/tv"
+    return f"{scheme}://{host}".rstrip("/")
+
+
+def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
+    base_root = _resolved_base_url(request)
+    base = f"{base_root}/tv"
     query: Dict[str, str] = {}
     for key, value in params.items():
         if value is None:
@@ -4008,7 +4013,7 @@ async def _legacy_scan(
         if not ema_spans:
             ema_spans = [9, 21]
 
-        base_url = str(request.base_url).rstrip("/")
+        base_url = _resolved_base_url(request)
         interval = _timeframe_for_style(style)
         chart_query: Dict[str, str] = {}
         hint_interval_raw, hint_guidance = _chart_hint(signal.strategy_id, style)
@@ -4715,7 +4720,7 @@ async def _generate_fallback_plan(
     if inline_markdown:
         charts_payload["inline_markdown"] = inline_markdown
     data_payload = dict(data_meta)
-    bars_url = f"{str(request.base_url).rstrip('/')}/gpt/context/{symbol.upper()}?interval={interval_token}&lookback=300"
+    bars_url = f"{_resolved_base_url(request)}/gpt/context/{symbol.upper()}?interval={interval_token}&lookback=300"
     if is_open:
         bars_url += "&live=1"
     data_payload["bars"] = bars_url
@@ -6505,7 +6510,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     if configured_base:
         base = configured_base.rstrip("/")
     else:
-        origin = public_base or str(request.base_url).rstrip("/")
+        origin = public_base or _resolved_base_url(request)
         base = f"{origin}/charts/html"
 
     # Assemble query with normalized fields
@@ -6537,7 +6542,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     encoded = urlencode(query, doseq=False, safe=",", quote_via=quote)
     url = f"{base}?{encoded}" if encoded else base
 
-    png_origin = public_base or str(request.base_url).rstrip("/")
+    png_origin = public_base or _resolved_base_url(request)
     png_base = f"{png_origin.rstrip('/')}/charts/png"
     png_url = f"{png_base}?{encoded}" if encoded else png_base
     return ChartLinks(interactive=url, png=png_url)
