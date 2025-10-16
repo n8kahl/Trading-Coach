@@ -3431,6 +3431,18 @@ async def gpt_scan_endpoint(
             )
             banner_override = "Live feed unavailable — using frozen context."
         except HTTPException:
+            # Absolute outage: still present frozen leaders list instead of empty
+            fallback_page = _fallback_scan_page(
+                request_payload,
+                context,
+                symbols=tickers,
+                market_data={},
+                dq=dq,
+                banner="Market data unavailable — showing frozen leaders.",
+                limit=min(10, max(request_payload.limit, 1)),
+            )
+            if fallback_page is not None:
+                return fallback_page
             return _empty_scan_page(
                 request_payload,
                 context,
