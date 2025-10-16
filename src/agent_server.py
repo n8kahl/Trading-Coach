@@ -1194,6 +1194,8 @@ def _fallback_scan_page(
     dq: Dict[str, Any],
     banner: str,
     limit: int,
+    mode: str | None = None,
+    label: str | None = None,
 ) -> ScanPage | None:
     # Primary frozen list for requested horizon
     primary_limit = max(1, min(limit, 10))
@@ -1211,8 +1213,8 @@ def _fallback_scan_page(
         "style": request.style,
         "limit": request.limit,
         "universe_size": len(symbols),
-        "mode": "frozen_preview",
-        "label": "Frozen leaders (as of RTH close)",
+        "mode": mode or ("frozen_preview" if not context.is_open else "live_default"),
+        "label": label or ("Frozen leaders (as of RTH close)" if not context.is_open else "Default leaders (live)"),
         "alt_candidates": {alt_key: alt_compact},
     }
     return ScanPage(
@@ -3426,8 +3428,10 @@ async def gpt_scan_endpoint(
             symbols=_FROZEN_DEFAULT_UNIVERSE,
             market_data={},
             dq=dq,
-            banner=context_banner or "Empty universe — showing frozen leaders.",
+            banner=(context_banner or ("Empty universe — showing default leaders." if context.is_open else "Empty universe — showing frozen leaders.")),
             limit=min(10, max(request_payload.limit, 1)),
+            mode=("live_default" if context.is_open else None),
+            label=("Default leaders (live)" if context.is_open else None),
         )
         if fallback_page is not None:
             return fallback_page
@@ -3468,15 +3472,21 @@ async def gpt_scan_endpoint(
             )
             banner_override = "Live feed unavailable — using frozen context."
         except HTTPException:
-            # Absolute outage: still present frozen leaders list instead of empty
+            # Absolute outage: still present leaders list instead of empty
             fallback_page = _fallback_scan_page(
                 request_payload,
                 context,
                 symbols=tickers,
                 market_data={},
                 dq=dq,
-                banner="Market data unavailable — showing frozen leaders.",
+                banner=(
+                    "Live data unavailable — showing default leaders."
+                    if context.is_open
+                    else "Market data unavailable — showing frozen leaders."
+                ),
                 limit=min(10, max(request_payload.limit, 1)),
+                mode=("live_default" if context.is_open else None),
+                label=("Default leaders (live)" if context.is_open else None),
             )
             if fallback_page is not None:
                 return fallback_page
@@ -3552,8 +3562,10 @@ async def gpt_scan_endpoint(
             symbols=available_symbols,
             market_data=market_data,
             dq=dq,
-            banner=banner or "Filters removed all symbols — showing frozen leaders.",
+            banner=banner or ("Filters removed all symbols — showing default leaders." if context.is_open else "Filters removed all symbols — showing frozen leaders."),
             limit=min(10, page_limit),
+            mode=("live_default" if context.is_open else None),
+            label=("Default leaders (live)" if context.is_open else None),
         )
         if fallback_page is not None:
             return fallback_page
@@ -3602,8 +3614,10 @@ async def gpt_scan_endpoint(
             symbols=available_symbols,
             market_data=market_subset,
             dq=dq,
-            banner=banner or "Scanner returned no signals — showing frozen leaders.",
+            banner=banner or ("Scanner returned no signals — showing default leaders." if context.is_open else "Scanner returned no signals — showing frozen leaders."),
             limit=min(10, page_limit),
+            mode=("live_default" if context.is_open else None),
+            label=("Default leaders (live)" if context.is_open else None),
         )
         if fallback_page is not None:
             return fallback_page
@@ -3647,8 +3661,10 @@ async def gpt_scan_endpoint(
             symbols=available_symbols,
             market_data=market_subset,
             dq=dq,
-            banner=banner or "Ranking produced no results — showing frozen leaders.",
+            banner=banner or ("Ranking produced no results — showing default leaders." if context.is_open else "Ranking produced no results — showing frozen leaders."),
             limit=min(10, page_limit),
+            mode=("live_default" if context.is_open else None),
+            label=("Default leaders (live)" if context.is_open else None),
         )
         if fallback_page is not None:
             return fallback_page
