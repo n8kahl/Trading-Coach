@@ -60,9 +60,13 @@ async def fetch_polygon_ohlcv(symbol: str, timeframe: str, *, max_days: Optional
         return None
 
     frame = pd.DataFrame(results)
-    frame = frame[["t", "o", "h", "l", "c", "v"]].rename(
-        columns={"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
-    )
+    column_map = {"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close"}
+    if "v" in frame.columns:
+        column_map["v"] = "volume"
+    available_columns = [col for col in column_map.keys() if col in frame.columns]
+    frame = frame[available_columns].rename(columns={key: column_map[key] for key in available_columns})
+    if "volume" not in frame.columns:
+        frame["volume"] = 0.0
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
     frame = frame.set_index("timestamp").sort_index()
     return frame
