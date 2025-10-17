@@ -8,17 +8,18 @@ focuses on data prep; the agent performs the higher-level reasoning.
 
 - API host (production): `https://trading-coach-production.up.railway.app`
 - Charts base (production): `https://trading-coach-production.up.railway.app/tv`
-- Use `POST /gpt/chart-url` and render the returned `interactive` URL verbatim.
+- Use `POST /gpt/chart-url` and render the returned canonical URL verbatim.
+- Persisted overlays: `GET /api/v1/gpt/chart-layers?plan_id={plan_id}`
 - Health: `GET /healthz`
 - Quick checks:
   - `curl -sS https://trading-coach-production.up.railway.app/openapi.json | jq '.paths | keys'`
-- `curl -sS -X POST https://trading-coach-production.up.railway.app/gpt/scan -H 'content-type: application/json' -d '{"universe":"AAPL","style":"intraday"}'`
+  - `curl -sS -X POST https://trading-coach-production.up.railway.app/gpt/scan -H 'content-type: application/json' -d '{"universe":"AAPL","style":"intraday"}'`
 
 ## Prompt & Schema (Live)
 
-- Master prompt (**approved v2.1**): [`docs/prompts/master_prompt_v2.1.md`](prompts/master_prompt_v2.1.md)
-- API schema (**OpenAPI 2.1.0**): see [`docs/openapi_v2.1.0.yaml`](openapi_v2.1.0.yaml) or `https://trading-coach-production.up.railway.app/openapi.json`
-- Deployment status: **Production ready & approved** (2025-10-17 refresh; commit `90fe80d`)
+- Master prompt (**approved v3.9-lite+**): [`docs/prompts/master_prompt_v3.9-lite-plus.md`](prompts/master_prompt_v3.9-lite-plus.md)
+- API schema (**OpenAPI 2.2.1**): see [`docs/openapi_v2.2.1.yaml`](openapi_v2.2.1.yaml) or `https://trading-coach-production.up.railway.app/openapi.json`
+- Deployment status: **Production ready & approved** (2025-10-17 refresh)
 - Persistent storage: set `DB_URL` (Postgres) so `/gpt/plan` snapshots and idea permalinks survive restarts.
 
 ---
