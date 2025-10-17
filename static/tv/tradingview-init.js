@@ -98,14 +98,16 @@
   let currentResolution = normalizeResolution(params.get('interval') || '15');
   const theme = params.get('theme') === 'light' ? 'light' : 'dark';
   const baseUrl = `${window.location.protocol}//${window.location.host}`;
-  const planIdParam = (params.get('plan_id') || '').trim() || null;
-  const planVersionParam = (params.get('plan_version') || '').trim() || null;
+  const initialPlanId = (params.get('plan_id') || '').trim() || null;
+  const initialPlanVersion = (params.get('plan_version') || '').trim() || null;
+  let currentPlanId = initialPlanId;
+  let currentPlanVersion = initialPlanVersion;
   let planLayers = null;
   let planLayersMeta = {};
   let planZones = [];
-  if (planIdParam) {
+  if (currentPlanId) {
     try {
-      const layersResponse = await fetch(`${baseUrl}/api/v1/gpt/chart-layers?plan_id=${encodeURIComponent(planIdParam)}`, {
+      const layersResponse = await fetch(`${baseUrl}/api/v1/gpt/chart-layers?plan_id=${encodeURIComponent(currentPlanId)}`, {
         cache: 'no-store',
       });
       if (layersResponse.ok) {
@@ -127,7 +129,7 @@
     return Number.isFinite(num) ? num : null;
   };
 
-  const basePlan = {
+  let basePlan = {
     entry: parseNumber(params.get('entry')),
     stop: parseNumber(params.get('stop')),
     tps: parseFloatList(params.get('tp')),
@@ -276,6 +278,11 @@
   const PLAN_LOG_LIMIT = 60;
   let planLogListEl = null;
   let planLogEmptyEl = null;
+
+  if (headerLastUpdateEl) {
+    headerLastUpdateEl.style.whiteSpace = 'nowrap';
+    headerLastUpdateEl.style.display = 'inline-block';
+  }
 
   const setSymbolMeta = (text, alert = false) => {
     if (!headerSymbolMetaEl) return;
@@ -1035,19 +1042,45 @@
 
   const initialMarketNote = sessionBannerParam || null;
 
+  const setCurrentPlanId = (planId, planVersion) => {
+    currentPlanId = planId ? planId.trim() : null;
+    currentPlanVersion = planVersion ? String(planVersion).trim() : null;
+    if (currentPlanId) params.set('plan_id', currentPlanId);
+    else params.delete('plan_id');
+    if (currentPlanVersion) params.set('plan_version', currentPlanVersion);
+    else params.delete('plan_version');
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, '', newUrl);
+  };
+
+  const setOrDeleteParam = (key, value) => {
+    if (value === null || value === undefined || value === '') {
+      params.delete(key);
+      return;
+    }
+    params.set(key, String(value));
+  };
+
+  const numericArray = (value) => {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => Number(item))
+      .filter((item) => Number.isFinite(item));
+  };
+
   applyPlanStatus(currentPlanStatus, latestPlanNote, latestNextStep, null);
   applyMarketStatus(initialMarketPhase, initialMarketNote);
 
   const matchesPlan = (incomingPlanId) => {
-    if (!planIdParam) return true;
-    return (incomingPlanId || '').trim() === planIdParam;
+    if (!currentPlanId) return true;
+    return (incomingPlanId || '').trim() === currentPlanId;
   };
 
   const handlePlanStateEvent = (plans) => {
     if (!Array.isArray(plans) || plans.length === 0) return;
     let candidate = null;
-    if (planIdParam) {
-      candidate = plans.find((item) => (item?.plan_id || '').trim() === planIdParam);
+    if (currentPlanId) {
+      candidate = plans.find((item) => (item?.plan_id || '').trim() === currentPlanId);
     }
     if (!candidate) {
       candidate = plans[0];
@@ -1755,7 +1788,156 @@
   setInterval(pulsePlanLogIndicator, 5000);
 
   // --- Scenario Plans (inline) ---
+  const applyPlanResponse = (response, { logMessage } = {}) => {
+    if (!response) return;
+    const planBlock = response.plan || {};
+    const structured = response.structured_plan || planBlock.structured_plan || null;
+    const chartsParams = response.charts_params || (response.charts && response.charts.params) || {};
+
+    const resolveEntry = () => {
+      const candidate = planBlock.entry ?? structured?.entry?.level ?? chartsParams.entry;
+      const value = toNumber(candidate);
+      return Number.isFinite(value) ? value : mergedPlanMeta.entry ?? currentPlan.entry ?? null;
+    };
+    const resolveStop = () => {
+      const candidate = planBlock.stop ?? structured?.stop ?? chartsParams.stop;
+      const value = toNumber(candidate);
+      return Number.isFinite(value) ? value : mergedPlanMeta.stop ?? currentPlan.stop ?? null;
+    };
+    const resolveTargets = () => {
+      const fromPlan = numericArray(planBlock.targets);
+      if (fromPlan.length) return fromPlan;
+      const fromStructured = numericArray(structured?.targets);
+      if (fromStructured.length) return fromStructured;
+      if (typeof chartsParams.tp === 'string') {
+        return chartsParams.tp
+          .split(',')
+          .map((token) => Number(token))
+          .filter((value) => Number.isFinite(value));
+      }
+      return numericArray(currentPlan?.tps);
+    };
+    const resolveTargetMeta = () => {
+      if (Array.isArray(planBlock.target_meta) && planBlock.target_meta.length) return planBlock.target_meta;
+      if (Array.isArray(response.target_meta) && response.target_meta.length) return response.target_meta;
+      if (structured && Array.isArray(structured.meta) && structured.meta.length) return structured.meta;
+      return mergedPlanMeta.target_meta || [];
+    };
+
+    const entry = resolveEntry();
+    const stop = resolveStop();
+    const targets = resolveTargets();
+    const targetMeta = resolveTargetMeta();
+    const directionToken = (planBlock.direction || structured?.direction || response.bias || mergedPlanMeta.bias || 'long')
+      .toString()
+      .toLowerCase();
+    const styleToken = (planBlock.style || response.style || mergedPlanMeta.style || 'intraday').toString().toLowerCase();
+    const runner = planBlock.runner || structured?.runner || mergedPlanMeta.runner || null;
+    const strategyId = planBlock.strategy || structured?.strategy || response.strategy_id || mergedPlanMeta.strategy || null;
+
+    const notesCandidate = planBlock.notes || response.notes || structured?.rationale || mergedPlanMeta.notes || null;
+    const confidenceValue = toNumber(response.confidence ?? planBlock.confidence ?? structured?.confidence ?? mergedPlanMeta.confidence);
+    const rrValue = toNumber(response.rr_to_t1 ?? planBlock.rr_to_t1 ?? mergedPlanMeta.risk_reward);
+
+    basePlan = {
+      entry,
+      stop,
+      tps: targets,
+      direction: directionToken,
+      strategy: strategyId,
+      atr: toNumber(planBlock.atr ?? response.plan?.atr ?? mergedPlanMeta.atr) ?? mergedPlanMeta.atr ?? null,
+      notes: notesCandidate,
+      tpMeta: targetMeta,
+      runner,
+    };
+    currentPlan = JSON.parse(JSON.stringify(basePlan));
+
+    Object.assign(mergedPlanMeta, {
+      symbol: (planBlock.symbol || response.symbol || symbol).toUpperCase(),
+      style: styleToken,
+      style_display: planBlock.style_display || response.style_display || (styleToken ? styleToken.toUpperCase() : mergedPlanMeta.style_display),
+      bias: directionToken,
+      entry,
+      stop,
+      targets,
+      target_meta: targetMeta,
+      runner,
+      confidence: confidenceValue,
+      risk_reward: rrValue,
+      notes: notesCandidate,
+      atr: basePlan.atr,
+      expected_move: toNumber(response.expected_move ?? mergedPlanMeta.expected_move),
+      horizon_minutes: toNumber(response.horizon_minutes ?? mergedPlanMeta.horizon_minutes),
+      warnings: Array.isArray(response.warnings) && response.warnings.length ? response.warnings : planBlock.warnings || [],
+      strategy: strategyId,
+    });
+
+    const layersCandidate = planBlock.plan_layers || response.plan_layers || null;
+    planLayers = layersCandidate;
+    planLayersMeta = (layersCandidate && layersCandidate.meta) || {};
+    planZones = Array.isArray(layersCandidate?.zones) ? layersCandidate.zones : [];
+
+    const rebuildKeyLevels = () => {
+      if (Array.isArray(layersCandidate?.levels) && layersCandidate.levels.length) {
+        return layersCandidate.levels
+          .map((item) => {
+            if (!item || !Number.isFinite(item.price)) return null;
+            return { price: Number(item.price), label: item.label || null };
+          })
+          .filter(Boolean);
+      }
+      const sourceLevels = planBlock.key_levels || response.key_levels || mergedPlanMeta.key_levels || {};
+      if (sourceLevels && typeof sourceLevels === 'object') {
+        return Object.entries(sourceLevels)
+          .map(([label, value]) => {
+            const numeric = toNumber(value);
+            if (!Number.isFinite(numeric)) return null;
+            return {
+              price: numeric,
+              label: label
+                .replace(/_/g, ' ')
+                .replace(/\b([a-z])/g, (match) => match.toUpperCase()),
+            };
+          })
+          .filter(Boolean);
+      }
+      return keyLevels;
+    };
+    keyLevels = rebuildKeyLevels();
+    mergedPlanMeta.key_levels = keyLevels;
+
+    setOrDeleteParam('style', styleToken);
+    setOrDeleteParam('direction', directionToken);
+    if (Number.isFinite(entry)) setOrDeleteParam('entry', entry.toFixed(2)); else params.delete('entry');
+    if (Number.isFinite(stop)) setOrDeleteParam('stop', stop.toFixed(2)); else params.delete('stop');
+    if (targets.length) {
+      setOrDeleteParam('tp', targets.map((value) => (Number.isFinite(value) ? value.toFixed(2) : value)).join(','));
+    } else {
+      params.delete('tp');
+    }
+
+    planLogEntries.length = 0;
+    const banner = planBlock.session_state?.banner;
+    if (banner) {
+      const bannerAsOf = planBlock.session_state?.as_of;
+      const bannerTs = bannerAsOf ? Math.floor(new Date(bannerAsOf).getTime() / 1000) : Math.floor(Date.now() / 1000);
+      appendPlanLogEntry(banner, bannerTs, 'info');
+    }
+    const rationale = structured?.rationale || notesCandidate;
+    if (rationale) {
+      appendPlanLogEntry(rationale, Math.floor(Date.now() / 1000), 'info');
+    }
+    if (logMessage) {
+      appendPlanLogEntry(logMessage, Math.floor(Date.now() / 1000), 'info');
+    }
+
+    renderPlanPanel(lastKnownPrice);
+    applyPlanStatus('intact', notesCandidate || latestPlanNote, planBlock.next_step || 'hold_plan', rrValue);
+  };
+
   const scenarioConfig = { style: 'intraday', baseStyle: 'intraday', busy: false };
+  scenarioConfig.baseStyle = (mergedPlanMeta.style || '').toLowerCase() || scenarioConfig.baseStyle;
+  scenarioConfig.style = scenarioConfig.baseStyle;
   let scenarioOverlayData = null; // { entry, stop, tps[], label, plan_id, plan_version, levels, zones }
   const scenarioLineIds = new Set();
 
@@ -1915,6 +2097,7 @@
         plan_version: extracted.plan_version,
         levels: layerLevels,
         zones: layerZones,
+        snapshot: data,
       };
       setScenarioStatus('Scenario overlay active — use Adopt or Clear');
       applyScenarioOverlayLines();
@@ -1933,6 +2116,39 @@
       removeScenarioLines();
     } finally {
       scenarioConfig.busy = false;
+    }
+  };
+
+  const adoptScenario = async (adoptBtn, clearBtn, setActiveFn) => {
+    if (!scenarioOverlayData || !scenarioOverlayData.plan_id) return;
+    setScenarioStatus('Adopting scenario…');
+    try {
+      let payload = scenarioOverlayData.snapshot;
+      if (!payload) {
+        const resp = await fetch(`${baseUrl}/idea/${encodeURIComponent(scenarioOverlayData.plan_id)}`, { cache: 'no-store' });
+        if (!resp.ok) {
+          throw new Error(`Snapshot unavailable (${resp.status})`);
+        }
+        payload = await resp.json();
+      }
+      applyPlanResponse(payload, { logMessage: scenarioOverlayData.label ? `${scenarioOverlayData.label} adopted.` : 'Scenario adopted.' });
+      const nextPlanId = payload.plan_id || scenarioOverlayData.plan_id;
+      const nextPlanVersion = payload.version || scenarioOverlayData.plan_version;
+      setCurrentPlanId(nextPlanId, nextPlanVersion);
+      scenarioConfig.baseStyle = (mergedPlanMeta.style || '').toLowerCase();
+      scenarioConfig.style = scenarioConfig.baseStyle;
+      scenarioOverlayData = null;
+      removeScenarioLines();
+      if (adoptBtn) adoptBtn.disabled = true;
+      if (clearBtn) clearBtn.disabled = true;
+      if (typeof setActiveFn === 'function') setActiveFn(scenarioConfig.baseStyle);
+      chart.priceScale('right').applyOptions({ autoScale: true });
+      await loadTickerInsights(nextPlanId);
+      await fetchBars();
+      setScenarioStatus('Scenario adopted — live updates active.');
+    } catch (error) {
+      console.error('Scenario adoption failed', error);
+      setScenarioStatus(error instanceof Error ? `Adoption failed: ${error.message}` : 'Adoption failed.', true);
     }
   };
 
@@ -2004,14 +2220,7 @@
     container.appendChild(adoptBtn);
     container.appendChild(clearBtn);
     adoptBtn.addEventListener('click', () => {
-      if (!scenarioOverlayData || !scenarioOverlayData.plan_id) return;
-      setScenarioStatus('Adopting scenario…');
-      const q = new URLSearchParams(window.location.search);
-      q.set('plan_id', scenarioOverlayData.plan_id);
-      if (scenarioOverlayData.plan_version) q.set('plan_version', scenarioOverlayData.plan_version);
-      q.delete('levels');
-      const newUrl = `${window.location.pathname}?${q.toString()}`;
-      window.location.replace(newUrl);
+      adoptScenario(adoptBtn, clearBtn, setActive);
     });
     clearBtn.addEventListener('click', () => {
       scenarioOverlayData = null;
@@ -2034,10 +2243,10 @@
     }
   };
 
-  const loadTickerInsights = async () => {
-    if (!planIdParam || !headerSymbolMetaEl) return;
+  const loadTickerInsights = async (planId = currentPlanId) => {
+    if (!planId || !headerSymbolMetaEl) return;
     try {
-      const resp = await fetch(`${baseUrl}/idea/${encodeURIComponent(planIdParam)}`, { cache: 'no-store' });
+      const resp = await fetch(`${baseUrl}/idea/${encodeURIComponent(planId)}`, { cache: 'no-store' });
       if (!resp.ok) return;
       const data = await resp.json();
       const parts = [];
