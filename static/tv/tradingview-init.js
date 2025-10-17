@@ -1084,6 +1084,7 @@
     try {
       streamSource = new EventSource(streamUrl);
       streamSource.onmessage = (msg) => {
+        try { pulsePlanLogIndicator(); } catch {}
         if (!msg?.data) return;
         let envelope;
         try {
@@ -1214,7 +1215,15 @@
       }
       return `Stay in trade ≈ ${minutes.toFixed(0)} minutes`;
     }
-    const styleToken = (mergedPlanMeta.style || '').toLowerCase();
+    let styleToken = (mergedPlanMeta.style || '').toLowerCase();
+    if (!styleToken) {
+      const minutes = parseInt(currentResolution, 10);
+      if (Number.isFinite(minutes)) {
+        if (minutes <= 5) styleToken = 'scalp';
+        else if (minutes <= 60) styleToken = 'intraday';
+        else styleToken = 'swing';
+      }
+    }
     if (styleToken === 'scalp' || styleToken === '0dte') return 'Stay in trade ≈ 30–60 minutes';
     if (styleToken === 'intraday') return 'Stay in trade ≈ 2–4 hours';
     if (styleToken === 'swing') return 'Stay in trade ≈ 3–5 days';
@@ -1247,7 +1256,8 @@
     const bias = (mergedPlanMeta.bias || currentPlan.direction || '').toLowerCase();
     if (headerSymbolEl) headerSymbolEl.textContent = symbol;
     if (headerStrategyEl) {
-      const styleLabel = mergedPlanMeta.style_display || (mergedPlanMeta.style || '').toUpperCase();
+      const styleTokenRaw = mergedPlanMeta.style_display || mergedPlanMeta.style || '';
+      const styleLabel = styleTokenRaw ? String(styleTokenRaw).toUpperCase() : '';
       const strategyLabel = mergedPlanMeta.strategy || currentPlan.strategy || '';
       headerStrategyEl.textContent = [styleLabel, strategyLabel].filter(Boolean).join(' · ');
     }
@@ -1384,7 +1394,7 @@
         </ul>
       </div>
       <div class="plan-panel__section">
-        <h3>Plan Log</h3>
+        <h3>Plan Log <span id="plan_log_indicator" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-left:6px;opacity:.6;"></span></h3>
         <ul class="plan-log" id="plan_log"></ul>
         <p class="plan-log__empty" id="plan_log_empty">No management updates yet.</p>
       </div>
@@ -1416,7 +1426,6 @@
           />
           <button id="market_replay_start" type="button" class="plan-replay__button" ${startDisabledAttr}>Start Replay</button>
           <button id="market_replay_stop" type="button" class="plan-replay__button" ${stopDisabledAttr}>Stop</button>
-          <a href="${baseUrl}/replay/${encodeURIComponent(symbol)}" target="_blank" rel="noreferrer" class="plan-replay__button" title="Open Scenario Plans (Scalp/Intraday/Swing)">Open Scenario Plans ↗</a>
         </div>
         <p id="market_replay_status" class="plan-replay__status">${replayStatusText}</p>
       </div>
@@ -1520,6 +1529,14 @@
     updateSessionBands(latestCandleData, lastSecondsPerBar);
   };
 
+  // Flashing indicator to show activity
+  const pulsePlanLogIndicator = () => {
+    const el = document.getElementById('plan_log_indicator');
+    if (!el) return;
+    el.style.opacity = el.style.opacity === '1' ? '.4' : '1';
+  };
+  setInterval(pulsePlanLogIndicator, 5000);
+
   // --- Scenario Plans (inline) ---
   const scenarioConfig = { style: 'intraday', busy: false };
   let scenarioOverlayData = null; // { entry, stop, tps[], label, plan_id, plan_version }
@@ -1614,6 +1631,8 @@
         if (!next) return;
         scenarioConfig.style = next;
         setActive(next);
+        // Auto-generate on style click per desired flow
+        scenarioGenerate();
       });
     });
     genBtn.addEventListener('click', () => scenarioGenerate());
