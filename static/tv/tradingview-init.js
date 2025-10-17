@@ -256,10 +256,32 @@
   const planPanelBodyEl = document.getElementById('plan_panel_body');
   const debugEl = document.getElementById('debug_banner');
 
+  const headerSymbolMetaEl = (() => {
+    if (!headerSymbolEl) return null;
+    const parent = headerSymbolEl.parentElement;
+    if (!parent) return null;
+    const node = document.createElement('div');
+    node.id = 'header_symbol_meta';
+    node.className = 'plan-header__meta';
+    parent.appendChild(node);
+    return node;
+  })();
+
   const planLogEntries = [];
   const PLAN_LOG_LIMIT = 60;
   let planLogListEl = null;
   let planLogEmptyEl = null;
+
+  const setSymbolMeta = (text, alert = false) => {
+    if (!headerSymbolMetaEl) return;
+    headerSymbolMetaEl.textContent = text || '';
+    if (alert && text) {
+      headerSymbolMetaEl.classList.add('plan-header__meta--alert');
+    } else {
+      headerSymbolMetaEl.classList.remove('plan-header__meta--alert');
+    }
+  };
+  setSymbolMeta('');
 
   const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const etSessionPartsFormatter = new Intl.DateTimeFormat('en-US', {
@@ -1327,9 +1349,21 @@
       .filter(Boolean)
       .join('');
 
+    const strategyLabel = mergedPlanMeta.strategy || currentPlan.strategy || '';
     const warningsList = warnings
       .map((warning) => `<li>${warning}</li>`)
       .join('');
+    const checklistHtml = (() => {
+      if (warningsList) return warningsList;
+      const lowerStrategy = strategyLabel.toLowerCase();
+      const steps = [];
+      if (/vwap/.test(lowerStrategy)) steps.push('Wait for breakout/retest above VWAP with confirming volume.');
+      if (/orb|opening range/.test(lowerStrategy)) steps.push('Confirm opening range break and successful retest before entry.');
+      if (/pullback|trend/.test(lowerStrategy)) steps.push('Enter on pullback to EMA stack with higher low and momentum rebuild.');
+      if (/reversal/.test(lowerStrategy)) steps.push('Require double-top/bottom with neckline reclaim before entering.');
+      if (!steps.length) steps.push('Confirm structure alignment and reclaim of entry trigger before acting.');
+      return steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('');
+    })();
 
     const horizonCopy = horizonShort() || '—';
     const rrValue = toNumber(mergedPlanMeta.risk_reward);
@@ -1369,6 +1403,11 @@
           <span><small>Horizon</small><strong>${horizonCopy}</strong></span>
           <span><small>R:R (TP1)</small><strong>${rrCopy}</strong></span>
         </div>
+        ${
+          strategyLabel
+            ? `<div style="margin-top:6px;font-size:12px;letter-spacing:0.06em;text-transform:uppercase;color:rgba(148,163,184,0.78);">Strategy: ${escapeHtml(strategyLabel)}</div>`
+            : ''
+        }
       </div>
       <div class="plan-panel__section">
         <h3>Targets</h3>
@@ -1387,10 +1426,7 @@
       <div class="plan-panel__section">
         <h3>Pre-Entry Checklist</h3>
         <ul class="plan-panel__warnings">
-          ${
-            warningsList ||
-            '<li>Confirm structure alignment, volume tone, and that price reclaims entry trigger before committing capital.</li>'
-          }
+          ${checklistHtml}
         </ul>
       </div>
       <div class="plan-panel__section">
@@ -1576,6 +1612,34 @@
       if (!response.ok) throw new Error(`/gpt/plan failed (${response.status})`);
       const data = await response.json();
       const extracted = extractScenarioFromResponse(data);
+      let scenarioLayers = null;
+      if (extracted.plan_id) {
+        try {
+          const layersResp = await fetch(
+            `${baseUrl}/api/v1/gpt/chart-layers?plan_id=${encodeURIComponent(extracted.plan_id)}`,
+            { cache: 'no-store' },
+          );
+          if (layersResp.ok) {
+            scenarioLayers = await layersResp.json();
+          }
+        } catch (layerErr) {
+          console.warn('Scenario layer fetch failed', layerErr);
+        }
+      }
+      const layerLevels = Array.isArray(scenarioLayers?.levels)
+        ? scenarioLayers.levels
+            .map((item) => ({ price: Number(item?.price), label: item?.label || null }))
+            .filter((item) => Number.isFinite(item.price))
+        : [];
+      const layerZones = Array.isArray(scenarioLayers?.zones)
+        ? scenarioLayers.zones
+            .map((item) => ({
+              high: Number(item?.high),
+              low: Number(item?.low),
+              label: item?.label || item?.kind || null,
+            }))
+            .filter((item) => Number.isFinite(item.high) || Number.isFinite(item.low))
+        : [];
       scenarioOverlayData = {
         entry: Number.isFinite(extracted.entry) ? extracted.entry : null,
         stop: Number.isFinite(extracted.stop) ? extracted.stop : null,
@@ -1583,6 +1647,8 @@
         label: `Scenario · ${scenarioConfig.style}`,
         plan_id: extracted.plan_id,
         plan_version: extracted.plan_version,
+        levels: layerLevels,
+        zones: layerZones,
       };
       setScenarioStatus('Scenario overlay active — use Adopt or Clear');
       // Force a re-render to draw overlay lines
@@ -1655,6 +1721,60 @@
       clearBtn.disabled = true;
     });
     setActive(scenarioConfig.style);
+  };
+
+  const loadTickerInsights = async () => {
+    if (!planIdParam || !headerSymbolMetaEl) return;
+    try {
+      const resp = await fetch(`${baseUrl}/idea/${encodeURIComponent(planIdParam)}`, { cache: 'no-store' });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const parts = [];
+      let highlight = false;
+      const earnings = data?.earnings || null;
+      if (earnings) {
+        const nextAt = earnings.next_earnings_at ? new Date(earnings.next_earnings_at) : null;
+        let dte = Number.isFinite(Number(earnings.dte_to_earnings)) ? Number(earnings.dte_to_earnings) : null;
+        if (dte === null && nextAt) {
+          dte = Math.round((nextAt.getTime() - Date.now()) / 86400000);
+        }
+        const slot = (earnings.pre_or_post || '').toUpperCase();
+        const formatter = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
+        const dateLabel = nextAt ? formatter.format(nextAt) : '';
+        let windowLabel = '';
+        if (dte !== null) {
+          if (dte === 0) windowLabel = 'today';
+          else if (dte > 0) windowLabel = `in ${dte}d`;
+          else windowLabel = `${Math.abs(dte)}d ago`;
+        }
+        const earningsPieces = ['Earnings'];
+        if (windowLabel) earningsPieces.push(windowLabel);
+        if (dateLabel) {
+          const slotLabel = slot && slot !== 'NONE' ? ` ${slot}` : '';
+          earningsPieces.push(`(${dateLabel}${slotLabel})`);
+        }
+        parts.push(earningsPieces.join(' '));
+        if (earnings.earnings_flag === 'today' || earnings.earnings_flag === 'near') {
+          highlight = true;
+        }
+      }
+      const sentiment = data?.sentiment || null;
+      if (sentiment && typeof sentiment.symbol_sentiment === 'number') {
+        const score = Number(sentiment.symbol_sentiment);
+        const scoreLabel = `${score >= 0 ? '+' : ''}${(score * 100).toFixed(0)}bps`;
+        const riskLabel = sentiment.headline_risk && sentiment.headline_risk !== 'normal' ? sentiment.headline_risk : null;
+        const sentimentPieces = [`Sentiment ${scoreLabel}`];
+        if (riskLabel) sentimentPieces.push(riskLabel);
+        parts.push(sentimentPieces.join(' · '));
+      }
+      if (parts.length) {
+        setSymbolMeta(parts.join(' • '), highlight);
+      } else {
+        setSymbolMeta('');
+      }
+    } catch (error) {
+      console.warn('ticker insight fetch failed', error);
+    }
   };
 
   const setReplayStatusMessage = (message) => {
@@ -2285,6 +2405,40 @@
             lineStyle: LightweightCharts.LineStyle.Dashed,
           });
         });
+        (scenarioOverlayData.levels || []).forEach((level, idx) => {
+          const price = Number(level?.price);
+          if (!Number.isFinite(price)) return;
+          const label = level?.label ? `${level.label} (Scenario)` : `Scenario Level ${idx + 1}`;
+          registerLine(`scenario:level:${idx}:${price.toFixed(4)}`, {
+            price,
+            color: '#a5b4fc',
+            title: label,
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+          });
+        });
+        (scenarioOverlayData.zones || []).forEach((zone, idx) => {
+          const high = Number(zone?.high);
+          const low = Number(zone?.low);
+          if (Number.isFinite(high)) {
+            registerLine(`scenario:zone:${idx}:high`, {
+              price: high,
+              color: '#bfdbfe',
+              title: (zone?.label || 'Scenario Zone') + ' High',
+              lineWidth: 1,
+              lineStyle: LightweightCharts.LineStyle.Dashed,
+            });
+          }
+          if (Number.isFinite(low)) {
+            registerLine(`scenario:zone:${idx}:low`, {
+              price: low,
+              color: '#bfdbfe',
+              title: (zone?.label || 'Scenario Zone') + ' Low',
+              lineWidth: 1,
+              lineStyle: LightweightCharts.LineStyle.Dashed,
+            });
+          }
+        });
       }
 
       [...keyLevels]
@@ -2345,6 +2499,7 @@
   setWatermark();
   fetchBars();
   connectStream();
+  loadTickerInsights();
   window.addEventListener('resize', () => {
     chart.resize(container.clientWidth, container.clientHeight);
     if (planPanelEl && window.innerWidth > 1024) {
