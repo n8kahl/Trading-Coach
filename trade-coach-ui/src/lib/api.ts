@@ -20,23 +20,43 @@ export async function fetchPlanSnapshot(planId: string): Promise<PlanSnapshot> {
 }
 
 export async function fetchLatestPlanId(symbol: string, style?: string): Promise<string | null> {
-  const searchParams = new URLSearchParams({ symbol: symbol.toUpperCase() });
-  if (style) {
-    searchParams.set("style", style);
-  }
+  // Not available on the server yet; return null to avoid 404s
+  return null;
+}
 
-  const url = `${API_BASE_URL}/internal/idea/latest?${searchParams.toString()}`;
-  const res = await fetch(url, {
-    headers: withAuthHeaders({
-      Accept: "application/json",
-    }),
-    cache: "no-store",
+export async function fetchPlanForSymbol(symbol: string, style?: string): Promise<PlanSnapshot | null> {
+  const body: Record<string, unknown> = { symbol: symbol.toUpperCase() };
+  if (style) body.style = style;
+  const res = await fetch(`${API_BASE_URL}/gpt/plan`, {
+    method: 'POST',
+    headers: withAuthHeaders({ 'Content-Type': 'application/json', Accept: 'application/json' }),
+    body: JSON.stringify(body),
+    cache: 'no-store',
   });
-
-  if (!res.ok) {
-    return null;
-  }
-
-  const data = (await res.json()) as { plan_id?: string };
-  return data.plan_id ?? null;
+  if (!res.ok) return null;
+  const data = await res.json();
+  const plan = data?.plan ?? data ?? {};
+  const plan_id: string | undefined = plan.plan_id;
+  if (!plan_id) return null;
+  const structured = plan.structured_plan ?? null;
+  const entry = plan.entry ?? structured?.entry?.level ?? null;
+  const stop = plan.stop ?? structured?.stop ?? null;
+  const targets = Array.isArray(plan.targets) ? plan.targets : structured?.targets ?? [];
+  const snapshot: PlanSnapshot = {
+    plan: {
+      plan_id,
+      symbol: plan.symbol ?? symbol.toUpperCase(),
+      style: plan.style ?? structured?.style ?? null,
+      entry,
+      stop,
+      targets,
+      rr_to_t1: plan.rr_to_t1 ?? null,
+      confidence: plan.confidence ?? null,
+      session_state: plan.session_state ?? null,
+      structured_plan: structured,
+    },
+    chart_url: plan.trade_detail ?? plan.idea_url ?? data?.charts?.interactive ?? null,
+    idea_url: plan.trade_detail ?? plan.idea_url ?? null,
+  } as PlanSnapshot;
+  return snapshot;
 }

@@ -81,7 +81,7 @@ from .app.engine.execution_profiles import ExecutionContext as PlanExecutionCont
 from .app.engine.options_select import score_contract, best_contract_example
 from .app.middleware import SessionMiddleware
 from .app.routers.session import router as session_router
-from .app.services import session_now, parse_session_as_of
+from .app.services import session_now, parse_session_as_of, make_chart_url, build_plan_layers
 from .app.providers.universe import load_universe
 from .context_overlays import compute_context_overlays
 from .db import (
@@ -1003,6 +1003,7 @@ class PlanResponse(BaseModel):
     data: Dict[str, Any] | None = None
     session_state: Dict[str, Any] | None = None
     confidence_visual: str | None = None
+    plan_layers: Dict[str, Any] | None = None
 
 
 class AssistantExecRequest(BaseModel):
@@ -4560,6 +4561,7 @@ async def _generate_fallback_plan(
     request: Request,
     user: AuthedUser,
 ) -> PlanResponse | None:
+    settings = get_settings()
     style_token = _fallback_style_token(style)
     session_payload = _session_payload_from_request(request)
     market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(session_payload)
@@ -4897,6 +4899,17 @@ async def _generate_fallback_plan(
         chart_guidance=hint_guidance,
         confidence_visual=confidence_visual,
     )
+    if getattr(settings, "ff_chart_canonical_v1", False):
+        layers = build_plan_layers(
+            symbol=symbol.upper(),
+            interval=str(chart_timeframe_hint or timeframe),
+            as_of=session_payload.get("as_of"),
+            planning_context="live" if is_plan_live else "frozen",
+            key_levels={k: v for k, v in key_levels.items() if isinstance(v, (int, float))},
+            overlays=None,
+        )
+        layers["plan_id"] = plan_id
+        response.plan_layers = layers
     return response
 
 
@@ -4917,6 +4930,7 @@ async def gpt_plan(
     if not _PLAN_SYMBOL_PATTERN.fullmatch(symbol):
         raise HTTPException(status_code=400, detail="Invalid symbol; use /gpt/scan for universe requests.")
     forced_plan_id = (request_payload.plan_id or "").strip()
+    settings = get_settings()
     session_payload = _session_payload_from_request(request)
     logger.info(
         "gpt_plan received",
@@ -5419,6 +5433,23 @@ async def gpt_plan(
         plan_core["target_profile"] = target_profile_dict
     if session_state_payload:
         plan_core.setdefault("session_state", session_state_payload)
+    plan_layers: Dict[str, Any] | None = None
+    if getattr(settings, "ff_chart_canonical_v1", False):
+        overlays_payload = first.get("context_overlays")
+        interval_token = None
+        if chart_params_payload and chart_params_payload.get("interval"):
+            interval_token = chart_params_payload.get("interval")
+        interval_token = interval_token or chart_timeframe_hint or "5m"
+        plan_layers = build_plan_layers(
+            symbol=symbol,
+            interval=str(interval_token),
+            as_of=session_payload.get("as_of"),
+            planning_context=planning_context_value,
+            key_levels=first.get("key_levels"),
+            overlays=overlays_payload,
+        )
+        plan_layers["plan_id"] = plan_id
+        plan_core["plan_layers"] = plan_layers
     summary_snapshot = _build_snapshot_summary(first)
     idea_snapshot = {
         "plan": plan_core,
@@ -5431,6 +5462,7 @@ async def gpt_plan(
         "why_this_works": [],
         "invalidation": [],
         "risk_note": None,
+        "plan_layers": plan_layers,
     }
     await _store_idea_snapshot(plan_id, idea_snapshot)
     logger.info(
@@ -5620,6 +5652,7 @@ async def gpt_plan(
         data=data_meta,
         session_state=session_state_payload,
         confidence_visual=confidence_visual_value,
+        plan_layers=plan_layers,
     )
 
 
@@ -6609,28 +6642,82 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
                 if not has_confluence:
                     raise HTTPException(status_code=422, detail={"error": "TP1 too close; fails ATR gate"})
 
-    # Build base URL
-    # If `BASE_URL`/`CHART_BASE_URL` is configured, use it verbatim.
-    # Otherwise default to the local charts HTML renderer.
     settings = get_settings()
-    configured_base = (settings.chart_base_url or "").strip()
+    session_snapshot = _session_payload_from_request(request)
+    canonical_flag = bool(getattr(settings, "ff_chart_canonical_v1", False))
     public_base = (getattr(settings, "public_base_url", None) or "").strip()
-    if configured_base:
-        base = configured_base.rstrip("/")
-    else:
-        origin = public_base or _resolved_base_url(request)
-        base = f"{origin}/charts/html"
+    origin = public_base or _resolved_base_url(request)
 
-    # Assemble query with normalized fields
-    data["symbol"] = _normalize_chart_symbol(raw_symbol)
-    # For charts/html we prefer canonical interval tokens (1m/5m/15m/1h/d)
+    symbol_token = _normalize_chart_symbol(raw_symbol)
+    data["symbol"] = symbol_token
     data["interval"] = interval_norm
     data["direction"] = direction
     data["entry"] = f"{entry_f:.2f}"
     data["stop"] = f"{stop_f:.2f}"
     data["tp"] = str(tp_csv)
 
-    # Whitelist keys and encode
+    metric_count = _record_metric(
+        "gpt_chart_url",
+        session=str(session_snapshot.get("status") or "unknown"),
+    )
+
+    if canonical_flag:
+        tv_base = f"{(public_base or origin).rstrip('/')}/tv"
+        canonical_payload: Dict[str, object] = {
+            "symbol": symbol_token,
+            "interval": interval_norm,
+            "direction": direction,
+            "entry": entry_f,
+            "stop": stop_f,
+        }
+
+        if tp_csv:
+            try:
+                canonical_payload["tp"] = [float(chunk) for chunk in str(tp_csv).split(",") if chunk]
+            except ValueError:
+                canonical_payload["tp"] = tp_csv
+        ema_value = data.get("ema")
+        if ema_value:
+            if isinstance(ema_value, (list, tuple)):
+                canonical_payload["ema"] = ema_value
+            else:
+                canonical_payload["ema"] = [token.strip() for token in str(ema_value).split(",") if token.strip()]
+
+        for optional_key in (
+            "focus",
+            "center_time",
+            "scale_plan",
+            "view",
+            "range",
+            "theme",
+            "plan_id",
+            "plan_version",
+        ):
+            if optional_key in data and data[optional_key] not in (None, ""):
+                canonical_payload[optional_key] = data[optional_key]
+
+        canonical_url = make_chart_url(
+            canonical_payload,
+            base_url=tv_base,
+            precision_map=None,
+        )
+        logger.info(
+            "chart_url built",
+            extra={
+                "endpoint": "gpt_chart_url",
+                "symbol": symbol_token,
+                "interval": interval_norm,
+                "session_status": session_snapshot.get("status"),
+                "session_as_of": session_snapshot.get("as_of"),
+                "metric_count": metric_count,
+                "canonical": True,
+            },
+        )
+        return ChartLinks(interactive=canonical_url)
+
+    configured_base = (settings.chart_base_url or "").strip()
+    base = (configured_base or f"{origin}/charts/html").rstrip("/")
+
     query: Dict[str, str] = {}
     for key, value in data.items():
         if key not in ALLOWED_CHART_KEYS or value is None:
@@ -6639,7 +6726,6 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
             value = ",".join(str(item) for item in value if item is not None)
         query[key] = str(value)
 
-    # Percent-encode strategy/levels/notes explicitly
     if "strategy" in query:
         query["strategy"] = quote(query["strategy"], safe="|;:,.+-_() ")
     if "levels" in data and data.get("levels"):
@@ -6650,20 +6736,16 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     encoded = urlencode(query, doseq=False, safe=",", quote_via=quote)
     url = f"{base}?{encoded}" if encoded else base
 
-    session_snapshot = _session_payload_from_request(request)
-    metric_count = _record_metric(
-        "gpt_chart_url",
-        session=str(session_snapshot.get("status") or "unknown"),
-    )
     logger.info(
         "chart_url built",
         extra={
             "endpoint": "gpt_chart_url",
-            "symbol": data["symbol"],
-            "interval": data["interval"],
+            "symbol": symbol_token,
+            "interval": interval_norm,
             "session_status": session_snapshot.get("status"),
             "session_as_of": session_snapshot.get("as_of"),
             "metric_count": metric_count,
+            "canonical": False,
         },
     )
     return ChartLinks(interactive=url)
@@ -6779,6 +6861,26 @@ async def gpt_context(
         chart_params["levels"] = ",".join(level_tokens)
     response["charts"] = {"params": {key: str(value) for key, value in chart_params.items()}}
     return response
+
+
+@app.get(
+    "/api/v1/gpt/chart-layers",
+    summary="Return plan-bound chart layers",
+    tags=["charts"],
+)
+async def chart_layers_endpoint(
+    request: Request,
+    plan_id: str = Query(..., min_length=3),
+) -> Dict[str, Any]:
+    settings = get_settings()
+    if not getattr(settings, "ff_chart_canonical_v1", False):
+        raise HTTPException(status_code=404, detail="Plan layers unavailable")
+    snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
+    plan_block = snapshot.get("plan") or {}
+    layers = plan_block.get("plan_layers") or snapshot.get("plan_layers")
+    if not layers:
+        raise HTTPException(status_code=404, detail="Plan layers unavailable")
+    return layers
 
 
 @gpt.get("/widgets/{kind}", summary="Generate lightweight dashboard widgets")

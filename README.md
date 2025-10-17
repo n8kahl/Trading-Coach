@@ -1,10 +1,21 @@
 # Trading Coach GPT Backend
 
-_Latest deploy refresh: 2025‑10‑10 14:10 UTC_
+_Latest deploy refresh: 2025‑10‑17 04:49 UTC_
 
 A lightweight FastAPI service that prepares market data, trading plans, volatility context, and option contract picks for a custom GPT agent. The backend owns the quantitative plumbing so the GPT can focus on reasoning with traders.
 
 > ⚠️ **Disclaimer:** All code and strategy examples are for educational purposes only. Nothing here is a recommendation to trade securities.
+
+---
+
+## Production Status
+
+- Status: Production ready (current GitHub build)
+- Branch: `main`
+- Commit: `90fe80d`
+- Host: `https://trading-coach-production.up.railway.app`
+
+See `docs/production_readiness.md` for scope, validation checks, and verification steps.
 
 ---
 
@@ -16,12 +27,23 @@ A lightweight FastAPI service that prepares market data, trading plans, volatili
 | `GET /gpt/context/{symbol}` | Stream the latest OHLCV bars + indicator series for a single interval. | Use when the GPT needs extra bars for bespoke analysis. |
 | `POST /gpt/multi-context` | Fetch multiple intervals in one call (e.g., `["5m","1h","4h","1D"]`) and attach a volatility regime block (ATM IV, IV rank/percentile, HV20/60/120, IV↔HV ratio). | Responses are cached for 30 s per symbol+interval+lookback. |
 | `POST /gpt/contracts` | Rank Tradier option contracts with liquidity gates (spread, Δ, DTE, OI) and compute scenario P/L using plan anchors (delta/gamma/vega/theta). | `risk_amount` (defaults $100) is used only for sizing projections; no budget filtering occurs. |
-| `POST /gpt/chart-url` | Normalise chart parameters and return a `/tv` URL containing plan lines, overlays, and metadata. | Supports plan rescaling, supply/demand zones, liquidity pools, FVG bands, and anchored VWAPs. |
+| `POST /gpt/chart-url` | Return a canonical `/tv` link (symbol, price targets, plan metadata only). | Canonicalises params; no session/market keys or inline levels when `FF_CHART_CANONICAL_V1=1`. |
+| `GET /api/v1/gpt/chart-layers` | Fetch plan-bound levels/zones/annotations for a given `plan_id`. | Drives overlays for `/tv`; layers persisted with each generated plan. |
 | `GET /tv` | Serves the TradingView Advanced UI when bundled; otherwise falls back to Lightweight Charts with EMA labels, white VWAP, plan bands, and overlay lines. | `scale_plan=auto` rescales historic plans to current price regimes. |
 
-Support routes: `/tv-api/*` (Lightweight Charts datafeed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html` (static renderer).
+Support routes: `/tv-api/*` (Lightweight Charts datafeed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html` (static renderer), `/api/v1/gpt/chart-layers` (plan overlays).
 
 Authentication is optional. Set `BACKEND_API_KEY` to require Bearer tokens; include `X-User-Id` to scope data per user.
+
+---
+
+## Scenario Plans (Market Replay)
+
+- Live plan: one auto-updating plan per symbol (single source of truth).
+- Scenarios: zero or more frozen snapshots per style (Scalp/Intraday/Swing; Reversal gated until server strategy exists).
+- Adopt: promote a scenario to Live in the UI; optionally regenerate via `/gpt/plan` first.
+- Charts: canonical `/tv` URLs only; no `session_*` or inline levels in links. Overlays fetched by `plan_id` via `GET /api/v1/gpt/chart-layers`.
+  Access in `trade-coach-ui` under `/replay/:symbol`.
 
 ---
 
@@ -157,7 +179,7 @@ npm run start      # start the live plan console (Next.js) on $PORT
    - Start every analysis with /gpt/scan.
    - Pull additional bars with /gpt/context or /gpt/multi-context.
    - Use /gpt/contracts with plan anchors to source option ideas.
-   - Generate shareable charts using /gpt/chart-url and present the returned /tv link.
+- Generate shareable charts using /gpt/chart-url and present the returned /tv link (plan overlays fetched by `plan_id`).
    ```
 
 See `docs/gpt_integration.md` for full schemas and sample payloads.
@@ -171,7 +193,7 @@ See `docs/gpt_integration.md` for full schemas and sample payloads.
 | `Polygon option snapshot failed ... 400 Bad Request` spam | The account tied to `POLYGON_API_KEY` lacks the options snapshot entitlement. These warnings are expected; the service automatically falls back to Tradier quotes. |
 | `/gpt/multi-context` returns 400 | At least one interval token is invalid. Use tokens such as `1m`, `5m`, `15m`, `1h`, `4h`, `1D`. Duplicates are ignored silently. |
 | `/gpt/contracts` returns empty `best` | Liquidity filters removed everything. The service widens Δ by ±0.05 and DTE by ±2 once each; if it still returns empty there genuinely isn’t a liquid contract under the constraints. |
-| Chart missing plan bands | Ensure you pass `entry`, `stop`, and `tp` (comma separated) when calling `/gpt/chart-url`. The GPT should forward the plan payload from `/gpt/scan`. |
+| Chart missing plan bands | Ensure you pass `entry`, `stop`, and `tp` (comma separated) when calling `/gpt/chart-url`. The GPT should forward the plan payload (including `plan_id`) from `/gpt/scan`. |
 | Plan URLs stop working after restart | Configure `DB_URL` with your Railway Postgres connection so plan/idea snapshots persist across deploys; otherwise the in-memory cache resets. |
 
 Deployment is currently handled by Railway (`nixpacks.toml` + `Procfile`). Logs will show cache hits (`cached=true`) and option snapshot warnings.

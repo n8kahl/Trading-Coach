@@ -24,3 +24,5 @@ export function withAuthHeaders(headers: HeadersInit = {}): HeadersInit {
     Authorization: `Bearer ${API_KEY_HEADER}`,
   };
 }
+
+// Scenario Plans UI ships without a feature flag.

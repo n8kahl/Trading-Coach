@@ -18,9 +18,15 @@ type PriceChartProps = {
   stop?: number | null;
   trailingStop?: number | null;
   targets?: number[];
+  compare?: {
+    entry?: number | null;
+    stop?: number | null;
+    targets?: number[];
+    label?: string;
+  } | null;
 };
 
-export default function PriceChart({ data, lastPrice, entry, stop, trailingStop, targets }: PriceChartProps) {
+export default function PriceChart({ data, lastPrice, entry, stop, trailingStop, targets, compare }: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
@@ -28,6 +34,9 @@ export default function PriceChart({ data, lastPrice, entry, stop, trailingStop,
   const stopLineRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
   const trailLineRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
   const targetLinesRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]>[]>([]);
+  const ghostEntryRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
+  const ghostStopRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
+  const ghostTargetRefs = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]>[]>([]);
 
   useEffect(() => {
     if (!containerRef.current || chartRef.current) return;
@@ -166,6 +175,66 @@ export default function PriceChart({ data, lastPrice, entry, stop, trailingStop,
       targetLinesRef.current = [];
     };
   }, [entry, stop, trailingStop, targets]);
+
+  // Compare/ghost overlay
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+
+    const clearGhost = () => {
+      if (ghostEntryRef.current) {
+        series.removePriceLine(ghostEntryRef.current);
+        ghostEntryRef.current = null;
+      }
+      if (ghostStopRef.current) {
+        series.removePriceLine(ghostStopRef.current);
+        ghostStopRef.current = null;
+      }
+      ghostTargetRefs.current.forEach((line) => series.removePriceLine(line));
+      ghostTargetRefs.current = [];
+    };
+
+    clearGhost();
+
+    if (!compare) return;
+
+    const ghostColor = "rgba(148, 163, 184, 0.5)"; // slate-400 at 50%
+    const ghostLabel = compare.label ? `${compare.label} ` : "Scenario ";
+
+    if (Number.isFinite(compare.entry as number)) {
+      ghostEntryRef.current = series.createPriceLine({
+        price: Number(compare.entry),
+        color: ghostColor,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        title: `${ghostLabel}Entry`,
+      });
+    }
+    if (Number.isFinite(compare.stop as number)) {
+      ghostStopRef.current = series.createPriceLine({
+        price: Number(compare.stop),
+        color: "rgba(244, 114, 182, 0.6)", // pink-400-ish
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        title: `${ghostLabel}Stop`,
+      });
+    }
+    (compare.targets || []).forEach((t, idx) => {
+      if (!Number.isFinite(t)) return;
+      const line = series.createPriceLine({
+        price: Number(t),
+        color: "rgba(96, 165, 250, 0.5)", // blue-400-ish
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        title: `${ghostLabel}TP${idx + 1}`,
+      });
+      ghostTargetRefs.current.push(line);
+    });
+
+    return () => {
+      clearGhost();
+    };
+  }, [JSON.stringify(compare)]);
 
   return <div ref={containerRef} className="h-[360px] w-full" />;
 }

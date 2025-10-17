@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     self_base_url: str | None = Field(None, env="SELF_API_BASE_URL")
     public_base_url: str | None = Field(None, env="PUBLIC_BASE_URL")
     index_sniper_mode: bool = Field(False, env="INDEX_SNIPER_MODE")
+    ff_chart_canonical_v1: bool = Field(False, env="FF_CHART_CANONICAL_V1")
 
 @lru_cache()
 def get_settings() -> Settings:

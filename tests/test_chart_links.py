@@ -2,10 +2,14 @@ import pytest
 from starlette.requests import Request
 
 from src.agent_server import ChartParams, gpt_chart_url
+from src.config import get_settings
 
 
 @pytest.mark.asyncio
-async def test_gpt_chart_url_returns_interactive_focus_params():
+async def test_gpt_chart_url_returns_interactive_focus_params(monkeypatch):
+    monkeypatch.setenv("FF_CHART_CANONICAL_V1", "1")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://test.local")
+    get_settings.cache_clear()
     scope = {
         "type": "http",
         "method": "POST",
@@ -30,14 +34,19 @@ async def test_gpt_chart_url_returns_interactive_focus_params():
 
     links = await gpt_chart_url(params, request)
 
-    assert links.interactive.startswith("https://test.local/charts/html?")
-    assert "focus=plan" in links.interactive
-    assert "center_time=latest" in links.interactive
+    assert (
+        links.interactive
+        == "https://test.local/tv?center_time=latest&direction=long&entry=430.1&focus=plan&interval=5m&stop=428.8&symbol=SPY&tp=432.1,433.55&view=6M"
+    )
     assert not hasattr(links, "png")
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
-async def test_gpt_chart_url_carries_data_metadata():
+async def test_gpt_chart_url_strips_non_canonical_params(monkeypatch):
+    monkeypatch.setenv("FF_CHART_CANONICAL_V1", "1")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://test.local")
+    get_settings.cache_clear()
     scope = {
         "type": "http",
         "method": "POST",
@@ -64,6 +73,11 @@ async def test_gpt_chart_url_carries_data_metadata():
 
     links = await gpt_chart_url(params, request)
 
-    assert "last_update=2025-10-15T20%3A05%3A00Z" in links.interactive
-    assert "data_source=polygon_cached" in links.interactive
-    assert "data_mode=degraded" in links.interactive
+    assert (
+        links.interactive
+        == "https://test.local/tv?direction=short&entry=177&interval=5m&stop=178&symbol=NVDA&tp=175.5,175.1,174.8&view=6M"
+    )
+    assert "data_source" not in links.interactive
+    assert "data_mode" not in links.interactive
+    assert "last_update" not in links.interactive
+    get_settings.cache_clear()

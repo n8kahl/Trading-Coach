@@ -1,4 +1,4 @@
-(function () {
+(async function () {
   const params = new URLSearchParams(window.location.search);
 
   const normalizeResolution = (value) => {
@@ -100,6 +100,23 @@
   const baseUrl = `${window.location.protocol}//${window.location.host}`;
   const planIdParam = (params.get('plan_id') || '').trim() || null;
   const planVersionParam = (params.get('plan_version') || '').trim() || null;
+  let planLayers = null;
+  let planZones = [];
+  if (planIdParam) {
+    try {
+      const layersResponse = await fetch(`${baseUrl}/api/v1/gpt/chart-layers?plan_id=${encodeURIComponent(planIdParam)}`, {
+        cache: 'no-store',
+      });
+      if (layersResponse.ok) {
+        planLayers = await layersResponse.json();
+        if (planLayers && Array.isArray(planLayers.zones)) {
+          planZones = planLayers.zones;
+        }
+      }
+    } catch (error) {
+      console.warn('chart-layers fetch failed', error);
+    }
+  }
 
   const toNumber = (value) => {
     const num = Number(value);
@@ -135,6 +152,28 @@
   let currentPlan = clonePlan();
 
   let keyLevels = parseNamedLevels(params.get('levels'));
+  if ((!keyLevels || !keyLevels.length) && planLayers && Array.isArray(planLayers.levels)) {
+    keyLevels = planLayers.levels
+      .map((item) => {
+        if (!item || !Number.isFinite(item.price)) return null;
+        return { price: Number(item.price), label: item.label || null };
+      })
+      .filter(Boolean);
+  }
+  if (planZones.length) {
+    planZones.forEach((zone, index) => {
+      if (!zone || (!Number.isFinite(zone.high) && !Number.isFinite(zone.low))) {
+        return;
+      }
+      const baseLabel = zone.label || zone.kind || `Zone ${index + 1}`;
+      if (Number.isFinite(zone.high)) {
+        keyLevels.push({ price: Number(zone.high), label: `${baseLabel} High` });
+      }
+      if (Number.isFinite(zone.low)) {
+        keyLevels.push({ price: Number(zone.low), label: `${baseLabel} Low` });
+      }
+    });
+  }
 
   const paramConfidence = parseNumber(params.get('confidence'));
   const mergedPlanMeta = {
@@ -2128,4 +2167,6 @@
       }
     }
   });
-})();
+})().catch((error) => {
+  console.error('tv bootstrap error', error);
+});

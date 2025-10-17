@@ -16,6 +16,16 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+Routes
+- `/plan/:planId` – Live plan console with deltas, coaching timeline, and price stream.
+- `/replay/:symbol` – Market Replay with Scenario Plans (generate Scalp/Intraday/Swing scenarios, compare overlays, adopt/regenerate).
+
+Feature Flags
+- `NEXT_PUBLIC_API_BASE_URL` – Backend REST base URL.
+- `NEXT_PUBLIC_WS_BASE_URL` – Backend WebSocket base URL.
+- `NEXT_PUBLIC_BACKEND_API_KEY` – Optional Bearer token.
+  Scenario Plans UI is enabled by default (no feature flag).
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
