@@ -1222,6 +1222,27 @@
     return null;
   };
 
+  const horizonShort = () => {
+    if (Number.isFinite(mergedPlanMeta.horizon_minutes)) {
+      const minutes = mergedPlanMeta.horizon_minutes;
+      if (minutes >= 1440) {
+        const days = minutes / 1440;
+        return `${days.toFixed(days >= 2 ? 0 : 1)}d`;
+      }
+      if (minutes >= 60) {
+        const hours = minutes / 60;
+        return `${hours.toFixed(hours >= 2 ? 0 : 1)}h`;
+      }
+      return `${minutes.toFixed(0)}m`;
+    }
+    const styleToken = (mergedPlanMeta.style || '').toLowerCase();
+    if (styleToken === 'scalp' || styleToken === '0dte') return '30–60m';
+    if (styleToken === 'intraday') return '2–4h';
+    if (styleToken === 'swing') return '3–5d';
+    if (styleToken === 'leaps') return 'multi‑week';
+    return null;
+  };
+
   const renderHeader = () => {
     const bias = (mergedPlanMeta.bias || currentPlan.direction || '').toLowerCase();
     if (headerSymbolEl) headerSymbolEl.textContent = symbol;
@@ -1300,13 +1321,7 @@
       .map((warning) => `<li>${warning}</li>`)
       .join('');
 
-    const rawConfidence =
-      toNumber(mergedPlanMeta.confidence) ??
-      toNumber(planMeta.confidence_score) ??
-      toNumber(planMeta.plan_confidence) ??
-      toNumber(planMeta.plan?.confidence) ??
-      paramConfidence;
-    const confidenceCopy = rawConfidence !== null && rawConfidence > 0 ? `${(rawConfidence * 100).toFixed(0)}%` : '—';
+    const horizonCopy = horizonShort() || '—';
     const rrValue = toNumber(mergedPlanMeta.risk_reward);
     const rrFallback = (() => {
       const useScaled = Number.isFinite(currentPlan.entry) && Number.isFinite(currentPlan.stop);
@@ -1341,7 +1356,7 @@
           <span><small>Entry</small><strong>${formatPrice(mergedPlanMeta.entry)}</strong></span>
           <span><small>Stop</small><strong>${formatPrice(mergedPlanMeta.stop)}</strong></span>
           <span><small>Last Price</small><strong id="plan_last_price_value">${lastPriceCopy}</strong></span>
-          <span><small>Confidence</small><strong>${confidenceCopy}</strong></span>
+          <span><small>Horizon</small><strong>${horizonCopy}</strong></span>
           <span><small>R:R (TP1)</small><strong>${rrCopy}</strong></span>
         </div>
       </div>
@@ -1388,6 +1403,7 @@
           />
           <button id="market_replay_start" type="button" class="plan-replay__button" ${startDisabledAttr}>Start Replay</button>
           <button id="market_replay_stop" type="button" class="plan-replay__button" ${stopDisabledAttr}>Stop</button>
+          <a href="${baseUrl}/replay/${encodeURIComponent(symbol)}" target="_blank" rel="noreferrer" class="plan-replay__button" title="Open Scenario Plans (Scalp/Intraday/Swing)">Open Scenario Plans ↗</a>
         </div>
         <p id="market_replay_status" class="plan-replay__status">${replayStatusText}</p>
       </div>
