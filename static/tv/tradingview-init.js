@@ -101,6 +101,7 @@
   const planIdParam = (params.get('plan_id') || '').trim() || null;
   const planVersionParam = (params.get('plan_version') || '').trim() || null;
   let planLayers = null;
+  let planLayersMeta = {};
   let planZones = [];
   if (planIdParam) {
     try {
@@ -111,6 +112,9 @@
         planLayers = await layersResponse.json();
         if (planLayers && Array.isArray(planLayers.zones)) {
           planZones = planLayers.zones;
+        }
+        if (planLayers && typeof planLayers === 'object' && planLayers.meta && typeof planLayers.meta === 'object') {
+          planLayersMeta = planLayers.meta;
         }
       }
     } catch (error) {
@@ -358,6 +362,12 @@
     hour: '2-digit',
     minute: '2-digit',
   });
+  const etClockFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 
   const formatRelativeDuration = (ms) => {
     if (!Number.isFinite(ms) || ms < 0) return '';
@@ -487,14 +497,18 @@
 
   const updateDataMetadata = () => {
     if (headerLastUpdateEl) {
+      const parts = [];
+      const nowEt = etClockFormatter.format(new Date());
+      parts.push(`Live ${nowEt} ET`);
       if (dataLastUpdateDate) {
         const age = Number.isFinite(dataAgeMs) ? dataAgeMs : Date.now() - dataLastUpdateDate.getTime();
         const rel = Number.isFinite(age) ? formatRelativeDuration(age) : '';
         const formatted = etDateFormatter.format(dataLastUpdateDate);
-        headerLastUpdateEl.textContent = `Last update: ${formatted} ET${rel ? ` · ${rel} ago` : ''}`;
+        parts.push(`Last update ${formatted} ET${rel ? ` (${rel} ago)` : ''}`);
       } else {
-        headerLastUpdateEl.textContent = '';
+        parts.push('Awaiting first tick');
       }
+      headerLastUpdateEl.textContent = parts.join(' · ');
     }
     if (headerDataSourceEl) {
       const sourceLabel = friendlySourceLabel(dataSourceRaw);
@@ -524,7 +538,7 @@
       applyMarketStatus(currentMarketPhase || 'closed');
     }
     updateDataMetadata();
-  }, 60000);
+  }, 1000);
 
   const showError = (message) => {
     if (!debugEl) return;
@@ -1366,71 +1380,125 @@
     })();
 
     const buildConfluence = () => {
-      const CATEGORY_RULES = [
-        { id: 'mtf', label: 'MTF Alignment', color: 'green', match: (tokens) => /mtf|multi-timeframe|htf/.test(tokens) },
-        { id: 'ema', label: 'EMA Stack', color: 'green', match: (tokens) => /ema|ma_align|crossover/.test(tokens) },
-        { id: 'vwap', label: 'VWAP Structure', color: 'green', match: (tokens) => /vwap|avwap|anchored/.test(tokens) },
-        { id: 'volume', label: 'Volume Profile', color: 'yellow', match: (tokens) => /volume|poc|vah|val/.test(tokens) },
-        { id: 'liquidity', label: 'Liquidity Pools', color: 'yellow', match: (tokens) => /liquidity|stoprun|liquidity_pool/.test(tokens) },
-        { id: 'fvg', label: 'Fair Value Gap', color: 'yellow', match: (tokens) => /fvg|imbalance/.test(tokens) },
-        { id: 'gamma', label: 'Gamma Magnet', color: 'yellow', match: (tokens) => /gamma|dealer|oi_wall/.test(tokens) },
-        { id: 'stats', label: 'Historical Stats', color: 'green', match: (tokens) => /stats|prob/.test(tokens) },
-        { id: 'trend', label: 'Trend Structure', color: 'green', match: (tokens) => /trend|structure/.test(tokens) },
-      ];
-      const colorPriority = { red: 0, yellow: 1, green: 2 };
-      const confluenceMap = new Map();
+      const biasToken = (mergedPlanMeta.bias || currentPlan.direction || '').toLowerCase();
+      const COLOR_PRIORITY = { red: 0, yellow: 1, green: 2 };
+      const itemsMap = new Map();
 
-      const scoreColor = (meta, baseColor) => {
-        let color = baseColor || 'green';
-        const prob = toNumber(meta?.prob_touch);
-        const rr = toNumber(meta?.rr);
-        if (prob !== null) {
-          if (prob >= 0.6) color = 'green';
-          else if (prob >= 0.4) color = 'yellow';
-          else color = 'red';
-        } else if (rr !== null) {
-          if (rr >= 2.0) color = 'green';
-          else if (rr >= 1.2) color = 'yellow';
-          else color = 'red';
+      const normalizeLabel = (value) =>
+        value
+          .replace(/_/g, ' ')
+          .replace(/\b([a-z])/g, (match) => match.toUpperCase())
+          .replace(/\s+/g, ' ')
+          .trim();
+
+      const pushItem = (item) => {
+        if (!item || !item.id) return;
+        const existing = itemsMap.get(item.id);
+        if (!existing || COLOR_PRIORITY[item.color] > COLOR_PRIORITY[existing.color]) {
+          itemsMap.set(item.id, item);
         }
-        if (meta?.optional) {
-          color = color === 'green' ? 'yellow' : color;
-        }
-        return color;
       };
 
-      (targetsMeta || []).forEach((meta) => {
-        if (!meta) return;
-        const tokens = `${meta.source || ''} ${meta.snap_tag || ''}`.toLowerCase();
-        if (!tokens.trim()) return;
-        const rule = CATEGORY_RULES.find((candidate) => candidate.match(tokens));
-        if (!rule) return;
-        const color = scoreColor(meta, rule.color);
-        const current = confluenceMap.get(rule.id);
-        if (!current || colorPriority[color] > colorPriority[current.color]) {
-          confluenceMap.set(rule.id, { label: rule.label, color });
-        }
-      });
+      const classifyToken = (rawToken) => {
+        if (!rawToken && rawToken !== 0) return null;
+        const original = String(rawToken).trim();
+        if (!original) return null;
+        const normalized = original.toLowerCase();
 
-      const items = Array.from(confluenceMap.values());
+        const positiveForBias = (flag) => {
+          if (!biasToken) return flag;
+          if (biasToken === 'long') return flag;
+          if (biasToken === 'short') return !flag;
+          return flag;
+        };
 
-      if (!items.length) {
-        if (mergedPlanMeta.bias) {
-          items.push({ label: `Trend ${mergedPlanMeta.bias.toString().toUpperCase()}`, color: 'green' });
+        if (/ema/.test(normalized)) {
+          const isDown = /down/.test(normalized);
+          const color = positiveForBias(!isDown) ? 'green' : 'red';
+          return { id: 'ema', label: 'EMA Alignment', color };
         }
-        if (strategyLabel) {
-          const friendly = strategyLabel
-            .toString()
-            .replace(/_/g, ' ')
-            .replace(/\b([a-z])/g, (match) => match.toUpperCase());
-          items.push({ label: `Strategy ${friendly}`, color: 'green' });
+        if (/vwap|avwap/.test(normalized)) {
+          const isBelow = /below/.test(normalized);
+          const color = positiveForBias(!isBelow) ? 'green' : 'red';
+          return { id: 'vwap', label: 'VWAP Context', color };
         }
-        if (mergedPlanMeta.runner) {
-          items.push({ label: 'Runner Active', color: 'green' });
+        if (/mtf|multi-timeframe|htf/.test(normalized)) {
+          return { id: 'mtf', label: 'MTF Alignment', color: 'green' };
+        }
+        if (/volume|poc|vah|val/.test(normalized)) {
+          return { id: 'volume', label: 'Volume Profile', color: 'yellow' };
+        }
+        if (/liquidity|stoprun|liquidity_pool/.test(normalized)) {
+          return { id: 'liquidity', label: 'Liquidity Pools', color: 'yellow' };
+        }
+        if (/fvg|imbalance/.test(normalized)) {
+          return { id: 'fvg', label: 'Fair Value Gap', color: 'yellow' };
+        }
+        if (/gamma|dealer|oi_wall/.test(normalized)) {
+          return { id: 'gamma', label: 'Gamma Magnet', color: 'yellow' };
+        }
+        if (/opening\s*range|orh|orl/.test(normalized)) {
+          return { id: 'opening_range', label: 'Opening Range Levels', color: 'green' };
+        }
+        if (/session\s*(high|low)|daily/.test(normalized)) {
+          return { id: 'session_levels', label: 'Session Levels', color: 'green' };
+        }
+        if (/prob|stat|quantile/.test(normalized)) {
+          return { id: 'stats', label: 'Historical Stats', color: 'green' };
+        }
+        if (/trend/.test(normalized)) {
+          const aligned = !/misaligned|weak/.test(normalized);
+          return { id: 'trend', label: 'Trend Structure', color: aligned ? 'green' : 'yellow' };
+        }
+        if (/runner/.test(normalized)) {
+          return { id: 'runner', label: 'Runner Management', color: 'green' };
+        }
+        const id = normalized.replace(/[^a-z0-9]+/g, '_');
+        return { id, label: normalizeLabel(original), color: 'green' };
+      };
+
+      const registerStrings = (values) => {
+        if (!Array.isArray(values)) return;
+        values.forEach((value) => {
+          const item = classifyToken(value);
+          if (item) pushItem(item);
+        });
+      };
+
+      registerStrings(planLayersMeta.confidence_factors);
+      registerStrings(planLayersMeta.confluence);
+      registerStrings(mergedPlanMeta.confidence_factors);
+      registerStrings(mergedPlanMeta.confluence);
+
+      if (planLayersMeta.features && typeof planLayersMeta.features === 'object') {
+        const features = planLayersMeta.features;
+        if (features.ema_trend_up === true) registerStrings(['EMA trend up']);
+        if (features.ema_trend_down === true) registerStrings(['EMA trend down']);
+        if (Number.isFinite(features.vwap) && Number.isFinite(lastKnownPrice)) {
+          const above = lastKnownPrice >= features.vwap;
+          registerStrings([above ? 'Above VWAP' : 'Below VWAP']);
         }
       }
 
-      return items.slice(0, 5);
+      if (!itemsMap.size) {
+        if (mergedPlanMeta.bias) {
+          pushItem({
+            id: 'trend_bias',
+            label: `Trend ${mergedPlanMeta.bias.toString().toUpperCase()}`,
+            color: 'green',
+          });
+        }
+        if (strategyLabel) {
+          pushItem({ id: 'strategy', label: `Strategy ${normalizeLabel(strategyLabel)}`, color: 'green' });
+        }
+        if (!itemsMap.size) {
+          pushItem({ id: 'monitor', label: 'Monitor structure', color: 'yellow' });
+        }
+      }
+
+      return Array.from(itemsMap.values())
+        .sort((a, b) => COLOR_PRIORITY[b.color] - COLOR_PRIORITY[a.color])
+        .slice(0, 5);
     };
 
     const confluenceItems = buildConfluence();
@@ -1594,6 +1662,15 @@
     lastEl.textContent = Number.isFinite(value) ? formatPrice(value) : '—';
   };
 
+  const ensureScrollToRealTime = () => {
+    if (isReplaying) return;
+    try {
+      chart.timeScale().scrollToRealTime();
+    } catch (error) {
+      // ignore
+    }
+  };
+
   const updateRealtimeBar = (price, payload) => {
     if (!latestCandleData.length || !Number.isFinite(price)) return;
     const volumeFromPayload = Number.isFinite(payload?.volume) ? Number(payload.volume) : null;
@@ -1632,6 +1709,7 @@
         latestVolumeData[latestVolumeData.length - 1] = updatedVol;
         volumeSeries.update(updatedVol);
       }
+      ensureScrollToRealTime();
       return;
     }
 
@@ -1654,6 +1732,7 @@
     latestVolumeData.push(newVolumeBar);
     volumeSeries.update(newVolumeBar);
     updateSessionBands(latestCandleData, lastSecondsPerBar);
+    ensureScrollToRealTime();
   };
 
   // Flashing indicator to show activity

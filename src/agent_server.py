@@ -4909,6 +4909,28 @@ async def _generate_fallback_plan(
             overlays=None,
         )
         layers["plan_id"] = plan_id
+        meta = layers.setdefault("meta", {})
+        if confidence_factors:
+            meta["confidence_factors"] = list(confidence_factors)
+        meta.setdefault(
+            "confluence",
+            [
+                label
+                for label in (
+                    "EMA alignment" if (direction == "long" and ema_trend_up) or (direction == "short" and ema_trend_down) else None,
+                    "VWAP confirmation" if isinstance(vwap_value, (int, float)) else None,
+                )
+                if label
+            ],
+        )
+        meta.setdefault(
+            "features",
+            {
+                "ema_trend_up": bool(ema_trend_up),
+                "ema_trend_down": bool(ema_trend_down),
+                "vwap": float(vwap_value) if isinstance(vwap_value, (int, float)) else None,
+            },
+        )
         response.plan_layers = layers
     return response
 
@@ -5530,6 +5552,23 @@ async def gpt_plan(
         if isinstance(raw, (list, tuple)):
             confidence_factors = [str(item) for item in raw if item]
             break
+    if plan_layers is not None:
+        meta = plan_layers.setdefault("meta", {})
+        if confidence_factors:
+            meta["confidence_factors"] = list(confidence_factors)
+        structured_confluence = None
+        if structured_plan_payload and structured_plan_payload.get("confluence"):
+            structured_confluence = list(structured_plan_payload.get("confluence") or [])
+        elif snapped_names:
+            structured_confluence = list(snapped_names)
+        if structured_confluence:
+            meta["confluence"] = structured_confluence
+        if feature_block:
+            meta["features"] = {
+                key: value
+                for key, value in feature_block.items()
+                if isinstance(value, (bool, int, float, str))
+            }
     calc_notes_output = calc_notes or None
     if calc_notes_output is not None and not calc_notes_output:
         calc_notes_output = None
