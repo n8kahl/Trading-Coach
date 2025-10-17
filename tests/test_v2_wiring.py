@@ -128,7 +128,7 @@ async def test_symbol_diagnostics_uses_normalised_interval(monkeypatch):
             return {"status": "closed", "as_of": "2024-01-01T21:00:00Z", "tz": "America/New_York", "banner": "Closed", "next_open": "2024-01-02T09:30:00-05:00"}
 
     monkeypatch.setattr("src.agent_server._build_interval_context", fake_context)
-    monkeypatch.setattr("src.agent_server.session_now", lambda: DummySession())
+    monkeypatch.setattr("src.app.middleware.session.session_now", lambda: DummySession())
 
     request = Request({"type": "http", "method": "GET", "headers": []})
 

@@ -80,9 +80,9 @@ from .app.engine import (
 )
 from .app.engine.execution_profiles import ExecutionContext as PlanExecutionContext, refine_plan as refine_execution_plan
 from .app.engine.options_select import score_contract, best_contract_example
-from .app.middleware import SessionMiddleware
+from .app.middleware import SessionMiddleware, get_session
 from .app.routers.session import router as session_router
-from .app.services import session_now, parse_session_as_of, make_chart_url, build_plan_layers
+from .app.services import parse_session_as_of, make_chart_url, build_plan_layers
 from .app.providers.universe import load_universe
 from .context_overlays import compute_context_overlays
 from .db import (
@@ -146,14 +146,6 @@ ALLOWED_CHART_KEYS = {
     "session_status",
     "session_phase",
     "session_banner",
-}
-
-_DEFAULT_SESSION_FALLBACK: Dict[str, str] = {
-    "status": "closed",
-    "as_of": "",
-    "next_open": "",
-    "tz": "America/New_York",
-    "banner": "Session unavailable",
 }
 
 _METRIC_COUNTER: Counter[str] = Counter()
@@ -274,19 +266,13 @@ def _cache_summary(entries: Iterable[Tuple[float, Any]]) -> Dict[str, Any]:
 
 
 def _session_payload_from_request(request: Request) -> Dict[str, Any]:
-    candidate = getattr(request.state, "session", None)
-    if isinstance(candidate, dict):
-        return dict(candidate)
-    try:
-        return session_now().to_dict()
-    except Exception:  # pragma: no cover - defensive
-        return dict(_DEFAULT_SESSION_FALLBACK)
+    return dict(get_session(request))
 
 
 def _market_snapshot_payload(session_payload: Mapping[str, Any] | None = None) -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
     snapshot = _MARKET_CLOCK.snapshot()
     if session_payload is None:
-        session_payload = session_now().to_dict()
+        session_payload = get_session()
     else:
         session_payload = dict(session_payload)
     as_of_dt = parse_session_as_of(session_payload) or _MARKET_CLOCK.last_rth_close(at=snapshot.now_et)
@@ -705,7 +691,10 @@ def _effective_scan_filters(filters: ScanFilters | None, *, context: ScanContext
     if not filters:
         return None
     payload = filters.model_dump(exclude_none=True)
-    if context.label != "live" or not context.is_open:
+    if not context.is_open:
+        payload.pop("min_rvol", None)
+        payload.pop("min_liquidity_rank", None)
+    elif context.label != "live":
         min_rvol = payload.get("min_rvol")
         if min_rvol is not None and min_rvol > 1.0:
             payload["min_rvol"] = 1.0
@@ -970,7 +959,9 @@ class PlanResponse(BaseModel):
     target_meta: List[Dict[str, Any]] | None = None
     rr_to_t1: float | None = None
     confidence: float | None = None
+    confluence_tags: List[str] = []
     confidence_factors: List[str] | None = None
+    confluence_tags: List[str] | None = None
     notes: str | None = None
     relevant_levels: Dict[str, Any] | None = None
     expected_move_basis: str | None = None
@@ -992,6 +983,8 @@ class PlanResponse(BaseModel):
     market_snapshot: Dict[str, Any] | None = None
     features: Dict[str, Any] | None = None
     options: Dict[str, Any] | None = None
+    options_contracts: List[Dict[str, Any]] | None = None
+    options_note: str | None = None
     calc_notes: Dict[str, Any] | None = None
     htf: Dict[str, Any] | None = None
     decimals: int | None = None
@@ -1005,6 +998,7 @@ class PlanResponse(BaseModel):
     session_state: Dict[str, Any] | None = None
     confidence_visual: str | None = None
     plan_layers: Dict[str, Any] | None = None
+    tp_reasons: List[Dict[str, Any]] | None = None
 
 
 class AssistantExecRequest(BaseModel):
@@ -1982,11 +1976,18 @@ async def _collect_market_data(
     source_map: Dict[str, str] = {}
 
     now_monotonic = time.monotonic()
+    as_of_token = None
+    if as_of is not None:
+        as_of_value = as_of
+        if as_of_value.tzinfo is None:
+            as_of_value = as_of_value.replace(tzinfo=timezone.utc)
+        as_of_token = as_of_value.astimezone(timezone.utc).isoformat()
+    cache_suffix = as_of_token or "live"
 
     for ticker, result in zip(tickers, results):
         frame: pd.DataFrame | None = None
         source_label = "unknown"
-        cache_key = (ticker.upper(), timeframe)
+        cache_key = (ticker.upper(), timeframe, cache_suffix)
         if isinstance(result, Exception):
             logger.warning("Data fetch raised for %s: %s", ticker, result)
         elif isinstance(result, pd.DataFrame) and not result.empty:
@@ -2014,6 +2015,7 @@ async def _collect_market_data(
                 "frame": frame.copy(deep=True),
                 "source": source_label,
                 "ts": now_monotonic,
+                "as_of": as_of_token,
             }
 
         if as_of is not None:
@@ -2175,6 +2177,131 @@ def _safe_number(value: Any) -> Optional[float]:
             return None
         return val
     return None
+
+
+def _unique_tags(values: Iterable[Any]) -> List[str]:
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for value in values or []:
+        token = str(value or "").strip()
+        if not token:
+            continue
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(token)
+    return ordered
+
+
+def _tp_reason_entries(meta_list: Sequence[Mapping[str, Any]] | None) -> List[Dict[str, Any]]:
+    if not meta_list:
+        return []
+    reasons: List[Dict[str, Any]] = []
+    for idx, meta in enumerate(meta_list, start=1):
+        if not isinstance(meta, Mapping):
+            continue
+        label = str(meta.get("label") or f"TP{idx}")
+        parts: List[str] = []
+        source = str(meta.get("source") or "").strip().lower()
+        if source == "stats":
+            parts.append("Stats-derived")
+        elif source == "fallback":
+            parts.append("Fallback sizing")
+        elif source == "constructed":
+            parts.append("Constructed spacing")
+        elif source:
+            parts.append(source.replace("_", " ").title())
+        snap_tag = meta.get("snap_tag")
+        if snap_tag:
+            parts.append(f"Snapped to {snap_tag}")
+        em_fraction = meta.get("em_fraction")
+        if em_fraction is not None:
+            try:
+                pct = float(em_fraction) * 100.0
+                parts.append(f"{pct:.0f}% expected move cap")
+            except (TypeError, ValueError):
+                pass
+        mfe_quantile = meta.get("mfe_quantile")
+        if mfe_quantile:
+            parts.append(f"MFE {str(mfe_quantile).upper()}")
+        prob_touch = meta.get("prob_touch") or meta.get("probability")
+        if prob_touch is not None:
+            try:
+                parts.append(f"{float(prob_touch) * 100.0:.0f}% touch probability")
+            except (TypeError, ValueError):
+                pass
+        rr_val = meta.get("rr")
+        if rr_val is not None:
+            try:
+                parts.append(f"R:R {float(rr_val):.2f}")
+            except (TypeError, ValueError):
+                pass
+        distance_val = meta.get("distance")
+        if isinstance(distance_val, (int, float)) and math.isfinite(distance_val):
+            parts.append(f"Δ {float(distance_val):.2f}")
+        reason = "; ".join(parts) if parts else "Algorithmic target"
+        reasons.append({
+            "label": label,
+            "reason": reason,
+            "source": source or None,
+        })
+    return reasons
+
+
+def _extract_options_contracts(options_payload: Mapping[str, Any] | None) -> List[Dict[str, Any]]:
+    if not isinstance(options_payload, Mapping):
+        return []
+    best = options_payload.get("best")
+    if not isinstance(best, list):
+        return []
+    contracts: List[Dict[str, Any]] = []
+    for item in best:
+        if not isinstance(item, Mapping):
+            continue
+        contract = {
+            "symbol": item.get("symbol"),
+            "label": item.get("label") or item.get("symbol"),
+            "type": item.get("option_type") or item.get("type"),
+            "dte": item.get("dte"),
+            "strike": _safe_number(item.get("strike")),
+            "price": _safe_number(item.get("price") or item.get("mark") or item.get("mid")),
+            "bid": _safe_number(item.get("bid")),
+            "ask": _safe_number(item.get("ask")),
+            "delta": _safe_number(item.get("delta")),
+            "gamma": _safe_number(item.get("gamma")),
+            "theta": _safe_number(item.get("theta")),
+            "vega": _safe_number(item.get("vega")),
+            "open_interest": item.get("open_interest") or item.get("oi"),
+            "volume": item.get("volume"),
+            "liquidity_score": _safe_number(item.get("liquidity_score") or item.get("tradeability")),
+            "spread_pct": _safe_number(item.get("spread_pct")),
+        }
+        pnl_block = item.get("pnl") if isinstance(item.get("pnl"), Mapping) else None
+        if pnl_block:
+            contract["pnl"] = {
+                key: value
+                for key, value in pnl_block.items()
+                if value is not None
+            }
+        projection_block = item.get("pl_projection") if isinstance(item.get("pl_projection"), Mapping) else None
+        if projection_block:
+            contract["pl_projection"] = {
+                key: value
+                for key, value in projection_block.items()
+                if value is not None
+            }
+        cost_basis = item.get("cost_basis") if isinstance(item.get("cost_basis"), Mapping) else None
+        if cost_basis:
+            contract["cost_basis"] = {
+                key: value
+                for key, value in cost_basis.items()
+                if value is not None
+            }
+        trimmed = {key: val for key, val in contract.items() if val is not None}
+        if trimmed:
+            contracts.append(trimmed)
+    return contracts
 
 
 def _build_market_snapshot(history: pd.DataFrame, key_levels: Dict[str, float]) -> Dict[str, Any]:
@@ -3791,7 +3918,7 @@ async def gpt_scan_endpoint(
     subset = filtered_symbols[: rank_limit * 2]
     try:
         market_subset = {symbol: market_data[symbol] for symbol in subset if symbol in market_data}
-        signals = await scan_market(subset, market_subset)
+        signals = await scan_market(subset, market_subset, as_of=context.as_of)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("scan_market failed: %s", exc, exc_info=True)
         dq["ok"] = False
@@ -4026,7 +4153,7 @@ async def _legacy_scan(
     if not market_data:
         logger.warning("No market data available after fallbacks for %s", resolved_tickers)
         return []
-    signals = await scan_market(resolved_tickers, market_data)
+    signals = await scan_market(resolved_tickers, market_data, as_of=as_of_dt)
 
     unique_symbols = sorted({signal.symbol for signal in signals})
 
@@ -4627,6 +4754,12 @@ async def _generate_fallback_plan(
 ) -> PlanResponse | None:
     settings = get_settings()
     style_token = _fallback_style_token(style)
+    include_plan_layers = bool(
+        getattr(settings, "ff_chart_canonical_v1", False) or getattr(settings, "ff_layers_endpoint", False)
+    )
+    include_options_contracts = bool(getattr(settings, "ff_options_always", False))
+    options_contracts: List[Dict[str, Any]] | None = None
+    options_note: str | None = "Options selection unavailable in fallback mode" if include_options_contracts else None
     session_payload = _session_payload_from_request(request)
     market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(session_payload)
     is_plan_live = bool(is_open)
@@ -4758,6 +4891,7 @@ async def _generate_fallback_plan(
             confidence_factors.append("Above VWAP")
         if direction == "short" and close_price <= vwap_value:
             confidence_factors.append("Below VWAP")
+    confluence_tags = _unique_tags(confidence_factors)
     expected_move_abs = context.get("expected_move_horizon")
     expected_move_basis = None
     if isinstance(expected_move_abs, (int, float)) and math.isfinite(expected_move_abs) and expected_move_abs > 0:
@@ -4777,6 +4911,7 @@ async def _generate_fallback_plan(
                 "distance": distance,
             }
         )
+    tp_reasons = _tp_reason_entries(target_meta)
     runner_trail = "ATR(14) x 0.8" if style_token in {"scalp", "intraday"} else "ATR(14) x 1.0"
     runner = {"trail": runner_trail}
     direction_label = "Long" if direction == "long" else "Short"
@@ -4861,6 +4996,12 @@ async def _generate_fallback_plan(
     plan_block["chart_guidance"] = hint_guidance
     if confidence_visual:
         plan_block["confidence_visual"] = confidence_visual
+    if confluence_tags:
+        plan_block["confluence_tags"] = confluence_tags
+    if tp_reasons:
+        plan_block["tp_reasons"] = tp_reasons
+    if include_options_contracts and options_note:
+        plan_block["options_note"] = options_note
     plan_warnings: List[str] = []
     target_profile = build_target_profile(
         entry=entry,
@@ -4886,11 +5027,17 @@ async def _generate_fallback_plan(
         options_block=None,
         chart_url=chart_url_with_ids,
         session=market_meta.get("session_state"),
-        confluence=confidence_factors or None,
+        confluence=confluence_tags or None,
     )
     if confidence_visual:
         structured_plan["confidence_visual"] = confidence_visual
     structured_plan["trade_detail"] = chart_url_with_ids
+    if tp_reasons:
+        structured_plan["tp_reasons"] = tp_reasons
+    if confluence_tags:
+        structured_plan["confluence_tags"] = confluence_tags
+    if include_options_contracts and options_note:
+        structured_plan["options_note"] = options_note
     chart_params_payload = {key: str(value) for key, value in chart_params.items()}
     charts_payload: Dict[str, Any] = {"params": chart_params_payload, "interactive": chart_url_with_ids}
     charts_payload["live"] = is_plan_live
@@ -4920,6 +5067,7 @@ async def _generate_fallback_plan(
         rr_to_t1=rr_to_t1,
         confidence=confidence,
         confidence_factors=confidence_factors or None,
+        confluence_tags=confluence_tags or None,
         notes=notes,
         relevant_levels={k: float(v) for k, v in key_levels.items() if isinstance(v, (int, float))},
         expected_move_basis=expected_move_basis,
@@ -4940,6 +5088,8 @@ async def _generate_fallback_plan(
             "vwap": vwap_value,
         },
         options=None,
+        options_contracts=options_contracts if include_options_contracts else None,
+        options_note=options_note if include_options_contracts else None,
         calc_notes={
             "atr14": round(float(atr_value), 4),
             "rr_inputs": {"entry": entry, "stop": stop, "tp1": targets[0]},
@@ -4962,8 +5112,9 @@ async def _generate_fallback_plan(
         chart_timeframe=chart_timeframe_hint,
         chart_guidance=hint_guidance,
         confidence_visual=confidence_visual,
+        tp_reasons=tp_reasons or None,
     )
-    if getattr(settings, "ff_chart_canonical_v1", False):
+    if include_plan_layers:
         layers = build_plan_layers(
             symbol=symbol.upper(),
             interval=str(chart_timeframe_hint or timeframe),
@@ -4976,17 +5127,20 @@ async def _generate_fallback_plan(
         meta = layers.setdefault("meta", {})
         if confidence_factors:
             meta["confidence_factors"] = list(confidence_factors)
-        meta.setdefault(
-            "confluence",
-            [
-                label
-                for label in (
-                    "EMA alignment" if (direction == "long" and ema_trend_up) or (direction == "short" and ema_trend_down) else None,
-                    "VWAP confirmation" if isinstance(vwap_value, (int, float)) else None,
-                )
-                if label
-            ],
-        )
+        if confluence_tags:
+            meta["confluence"] = list(confluence_tags)
+        else:
+            meta.setdefault(
+                "confluence",
+                [
+                    label
+                    for label in (
+                        "EMA alignment" if (direction == "long" and ema_trend_up) or (direction == "short" and ema_trend_down) else None,
+                        "VWAP confirmation" if isinstance(vwap_value, (int, float)) else None,
+                    )
+                    if label
+                ],
+            )
         meta.setdefault(
             "features",
             {
@@ -5018,6 +5172,10 @@ async def gpt_plan(
     forced_plan_id = (request_payload.plan_id or "").strip()
     settings = get_settings()
     session_payload = _session_payload_from_request(request)
+    include_plan_layers = bool(
+        getattr(settings, "ff_chart_canonical_v1", False) or getattr(settings, "ff_layers_endpoint", False)
+    )
+    include_options_contracts = bool(getattr(settings, "ff_options_always", False))
     logger.info(
         "gpt_plan received",
         extra={
@@ -5458,6 +5616,13 @@ async def gpt_plan(
     if isinstance(market_meta_context, dict) and market_meta_context.get("status") != "open":
         planning_context_value = "frozen"
 
+    tp_meta_source: Sequence[Mapping[str, Any]] | None = None
+    if target_profile is not None:
+        tp_meta_source = target_profile.meta
+    elif isinstance(plan.get("target_meta"), list):
+        tp_meta_source = plan.get("target_meta")  # type: ignore[assignment]
+    tp_reasons = _tp_reason_entries(tp_meta_source)
+
     style_public = public_style(style_token) or "intraday"
     side_hint = _infer_contract_side(plan.get("side"), plan.get("direction") or direction_hint)
     options_payload = first.get("options")
@@ -5484,6 +5649,18 @@ async def gpt_plan(
             logger.info("contract lookup skipped for %s: %s", symbol, exc)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("contract lookup error for %s: %s", symbol, exc)
+
+    options_contracts: List[Dict[str, Any]] | None = None
+    options_note: str | None = None
+    if include_options_contracts:
+        options_contracts = _extract_options_contracts(options_payload) or None
+        if not options_contracts:
+            if isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
+                options_note = str(options_payload["quotes_notice"])
+            elif not side_hint:
+                options_note = "Options side unavailable for this plan"
+            else:
+                options_note = "No tradeable contracts met filters"
 
     price_close = snapshot.get("price", {}).get("close")
     decimals_value = 2
@@ -5520,7 +5697,7 @@ async def gpt_plan(
     if session_state_payload:
         plan_core.setdefault("session_state", session_state_payload)
     plan_layers: Dict[str, Any] | None = None
-    if getattr(settings, "ff_chart_canonical_v1", False):
+    if include_plan_layers:
         overlays_payload = first.get("context_overlays")
         interval_token = None
         if chart_params_payload and chart_params_payload.get("interval"):
@@ -5609,25 +5786,26 @@ async def gpt_plan(
             events_block = (enrichment or {}).get("events")
         if not earnings_block:
             earnings_block = (enrichment or {}).get("earnings")
-    confidence_factors = None
+    confidence_factors: List[str] | None = None
     feature_block = first.get("features") or {}
     for key in ("plan_confidence_factors", "plan_confidence_reasons", "confidence_reasons"):
         raw = feature_block.get(key)
         if isinstance(raw, (list, tuple)):
             confidence_factors = [str(item) for item in raw if item]
             break
+    confidence_values = list(confidence_factors or [])
+    confluence_tags = _unique_tags(confidence_values + list(snapped_names))
     if plan_layers is not None:
         meta = plan_layers.setdefault("meta", {})
         if not isinstance(meta.get("level_groups"), dict):
             meta["level_groups"] = {"primary": [], "supplemental": []}
-        confidence_values = list(confidence_factors or meta.get("confidence_factors") or [])
+        if not confidence_values:
+            confidence_values = list(meta.get("confidence_factors") or [])
         meta["confidence_factors"] = confidence_values
-        structured_confluence = None
-        if structured_plan_payload and structured_plan_payload.get("confluence"):
-            structured_confluence = list(structured_plan_payload.get("confluence") or [])
-        elif snapped_names:
-            structured_confluence = list(snapped_names)
-        meta["confluence"] = list(structured_confluence or meta.get("confluence") or [])
+        if not confluence_tags:
+            existing_tags = meta.get("confluence") or []
+            confluence_tags = _unique_tags(confidence_values + list(snapped_names) + list(existing_tags))
+        meta["confluence"] = confluence_tags if confluence_tags else list(meta.get("confluence") or [])
         if feature_block:
             meta["features"] = {
                 key: value
@@ -5638,6 +5816,30 @@ async def gpt_plan(
             meta.setdefault("features", {})
         if isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
             meta["quotes_notice"] = options_payload["quotes_notice"]
+    if structured_plan_payload is not None:
+        if confluence_tags:
+            structured_plan_payload["confluence"] = confluence_tags
+            structured_plan_payload["confluence_tags"] = confluence_tags
+        if tp_reasons:
+            structured_plan_payload["tp_reasons"] = tp_reasons
+        if include_options_contracts:
+            if options_contracts:
+                structured_plan_payload["options_contracts"] = options_contracts
+            elif options_note:
+                structured_plan_payload["options_note"] = options_note
+    if confluence_tags:
+        plan_core["confluence_tags"] = confluence_tags
+        plan.setdefault("confluence_tags", confluence_tags)
+    if tp_reasons:
+        plan_core["tp_reasons"] = tp_reasons
+        plan.setdefault("tp_reasons", tp_reasons)
+    if include_options_contracts:
+        if options_contracts:
+            plan_core["options_contracts"] = options_contracts
+            plan.setdefault("options_contracts", options_contracts)
+        if options_note:
+            plan_core["options_note"] = options_note
+            plan.setdefault("options_note", options_note)
     calc_notes_output = calc_notes or None
     if calc_notes_output is not None and not calc_notes_output:
         calc_notes_output = None
@@ -5727,6 +5929,7 @@ async def gpt_plan(
         rr_to_t1=rr_output,
         confidence=confidence_output,
         confidence_factors=confidence_factors,
+        confluence_tags=confluence_tags or None,
         notes=notes_output,
         relevant_levels=relevant_levels or None,
         expected_move_basis=expected_move_basis,
@@ -5748,6 +5951,8 @@ async def gpt_plan(
         market_snapshot=first.get("market_snapshot"),
         features=first.get("features"),
         options=first.get("options"),
+        options_contracts=options_contracts if include_options_contracts else None,
+        options_note=options_note if include_options_contracts else None,
         calc_notes=calc_notes_output,
         htf=htf,
         decimals=decimals_value,
@@ -5761,6 +5966,7 @@ async def gpt_plan(
         session_state=session_state_payload,
         confidence_visual=confidence_visual_value,
         plan_layers=plan_layers,
+        tp_reasons=tp_reasons or None,
     )
 
 
@@ -5803,6 +6009,8 @@ async def assistant_exec(
     }
 
     options_block = plan_response.options or {}
+    if not options_block and plan_response.options_contracts:
+        options_block = {"best": plan_response.options_contracts, "source": "plan_snapshot"}
     if not options_block or not options_block.get("best"):
         example = None
         try:
@@ -5838,6 +6046,14 @@ async def assistant_exec(
         "trade_detail": plan_response.trade_detail,
         "idea_url": plan_response.idea_url,
     }
+    if plan_response.confluence_tags:
+        meta_block["confluence_tags"] = plan_response.confluence_tags
+    if plan_response.tp_reasons:
+        meta_block["tp_reasons"] = plan_response.tp_reasons
+    if plan_response.options_contracts:
+        meta_block["options_contracts"] = plan_response.options_contracts
+    if plan_response.options_note:
+        meta_block["options_note"] = plan_response.options_note
 
     return AssistantExecResponse(
         plan=plan_block,
@@ -6980,6 +7196,26 @@ async def gpt_context(
     return response
 
 
+async def _rebuild_plan_layers(plan_id: str, snapshot: Dict[str, Any], request: Request) -> Dict[str, Any] | None:
+    plan_block = snapshot.get("plan") or {}
+    symbol = (plan_block.get("symbol") or "").strip()
+    style = plan_block.get("style")
+    slug_meta = _parse_plan_slug(plan_id)
+    if not symbol and slug_meta:
+        symbol = (slug_meta.get("symbol") or "").strip()
+        style = style or slug_meta.get("style")
+    if not symbol:
+        return None
+
+    plan_request = PlanRequest(symbol=symbol, style=style, plan_id=plan_id)
+    backfill_user = AuthedUser(user_id="layers_backfill")
+    try:
+        response = await gpt_plan(plan_request, request, backfill_user)
+    except HTTPException:
+        return None
+    return response.plan_layers
+
+
 @app.get(
     "/api/v1/gpt/chart-layers",
     summary="Return plan-bound chart layers",
@@ -6988,16 +7224,58 @@ async def gpt_context(
 async def chart_layers_endpoint(
     request: Request,
     plan_id: str = Query(..., min_length=3),
+    refresh: bool = Query(False),
 ) -> Dict[str, Any]:
     settings = get_settings()
-    if not getattr(settings, "ff_chart_canonical_v1", False):
+    if not getattr(settings, "ff_layers_endpoint", False):
         raise HTTPException(status_code=404, detail="Plan layers unavailable")
     snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
     plan_block = snapshot.get("plan") or {}
     layers = plan_block.get("plan_layers") or snapshot.get("plan_layers")
-    if not layers:
+
+    if refresh and not isinstance(layers, dict):
+        rebuilt = await _rebuild_plan_layers(plan_id, snapshot, request)
+        if rebuilt:
+            snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
+            plan_block = snapshot.get("plan") or {}
+            layers = plan_block.get("plan_layers") or snapshot.get("plan_layers")
+
+    if not layers or not isinstance(layers, dict):
         raise HTTPException(status_code=404, detail="Plan layers unavailable")
-    return layers
+
+    plan_session = plan_block.get("session_state") or {}
+    plan_as_of = str(plan_session.get("as_of") or "").strip()
+    layers_as_of = str(layers.get("as_of") or "").strip()
+
+    if plan_as_of and layers_as_of and plan_as_of != layers_as_of:
+        if refresh:
+            rebuilt = await _rebuild_plan_layers(plan_id, snapshot, request)
+            if rebuilt:
+                snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
+                plan_block = snapshot.get("plan") or {}
+                layers = plan_block.get("plan_layers") or snapshot.get("plan_layers")
+                if not layers or not isinstance(layers, dict):
+                    raise HTTPException(status_code=409, detail="Plan layers stale for requested plan")
+                plan_session = plan_block.get("session_state") or {}
+                plan_as_of = str(plan_session.get("as_of") or "").strip()
+                layers_as_of = str(layers.get("as_of") or "").strip()
+
+        if plan_as_of and layers_as_of and plan_as_of != layers_as_of:
+            logger.warning(
+                "plan_layers_asof_mismatch",
+                extra={
+                    "plan_id": plan_id,
+                    "plan_as_of": plan_as_of,
+                    "layers_as_of": layers_as_of,
+                },
+            )
+            raise HTTPException(status_code=409, detail="Plan layers stale for requested plan")
+
+    payload = copy.deepcopy(layers)
+    payload.setdefault("plan_id", plan_id)
+    if str(payload.get("plan_id")) != plan_id:
+        payload["plan_id"] = plan_id
+    return payload
 
 
 @gpt.get("/widgets/{kind}", summary="Generate lightweight dashboard widgets")

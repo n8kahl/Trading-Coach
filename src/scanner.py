@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import json
@@ -2549,11 +2550,22 @@ STRATEGY_DETECTORS: Dict[str, Callable[[str, Strategy, Dict[str, Any]], Optional
 }
 
 
-async def scan_market(tickers: List[str], market_data: Dict[str, pd.DataFrame]) -> List[Signal]:
+async def scan_market(
+    tickers: List[str],
+    market_data: Dict[str, pd.DataFrame],
+    *,
+    as_of: datetime | None = None,
+) -> List[Signal]:
     """Scan the provided tickers for strategy setups using real indicator data."""
 
     strategies = load_strategies()
     signals: List[Signal] = []
+    as_of_token = None
+    if as_of is not None:
+        as_of_value = as_of
+        if as_of_value.tzinfo is None:
+            as_of_value = as_of_value.replace(tzinfo=timezone.utc)
+        as_of_token = as_of_value.astimezone(timezone.utc).isoformat()
 
     for symbol in tickers:
         raw_frame = market_data.get(symbol)
@@ -2567,7 +2579,7 @@ async def scan_market(tickers: List[str], market_data: Dict[str, pd.DataFrame]) 
 
         ctx = _build_context(frame)
         ctx.setdefault("target_stats", {})
-        style_stats_cache: Dict[str, Dict[str, object] | None] = {}
+        style_stats_cache: Dict[Tuple[str, Optional[str]], Dict[str, object] | None] = {}
 
         for strategy in strategies:
             detector = STRATEGY_DETECTORS.get(strategy.id)
@@ -2575,9 +2587,10 @@ async def scan_market(tickers: List[str], market_data: Dict[str, pd.DataFrame]) 
                 continue
             style_token = _style_for_strategy_id(strategy.id)
             style_key = _canonical_style_token(style_token)
-            if style_key and style_key not in style_stats_cache:
-                style_stats_cache[style_key] = await get_style_stats(symbol, style_key)
-            stats_bundle = style_stats_cache.get(style_key)
+            cache_key = (style_key, as_of_token)
+            if style_key and cache_key not in style_stats_cache:
+                style_stats_cache[cache_key] = await get_style_stats(symbol, style_key, as_of=as_of_token)
+            stats_bundle = style_stats_cache.get(cache_key)
             if stats_bundle:
                 ctx["target_stats"][style_key] = stats_bundle
             signal = detector(symbol, strategy, ctx)

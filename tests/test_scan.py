@@ -129,7 +129,7 @@ async def test_scan_top100_paging(monkeypatch):
         sources = {sym: "polygon" for sym in symbols}
         return frames, sources
 
-    async def fake_scan_market(symbols, market_data):  # noqa: ARG001
+    async def fake_scan_market(symbols, market_data, **kwargs):  # noqa: ARG001
         signals: list[Signal] = []
         for idx, sym in enumerate(symbols):
             sector = f"SEC{idx % 10}"
@@ -193,7 +193,7 @@ async def test_scan_never_5xx_on_stale(monkeypatch):
         frames = {sym: _make_history() for sym in symbols}
         return frames, {sym: "polygon" for sym in symbols}
 
-    async def fake_scan_market(symbols, market_data):  # noqa: ARG001
+    async def fake_scan_market(symbols, market_data, **kwargs):  # noqa: ARG001
         return [_make_signal(sym, idx, "TECH") for idx, sym in enumerate(symbols)]
 
     def fake_indicator_bundle(symbol, history):  # noqa: ARG001
@@ -237,7 +237,7 @@ async def test_scan_relaxes_min_rvol_when_frozen(monkeypatch):
         frames = {sym: _make_history() for sym in symbols}
         return frames, {sym: "polygon" for sym in symbols}
 
-    async def fake_scan_market(symbols, market_data):  # noqa: ARG001
+    async def fake_scan_market(symbols, market_data, **kwargs):  # noqa: ARG001
         return [_make_signal(sym, idx, "TECH") for idx, sym in enumerate(symbols)]
 
     def fake_indicator_bundle(symbol, history):  # noqa: ARG001
@@ -301,7 +301,7 @@ async def test_scan_fallback_limits_and_confidence_sort(monkeypatch):
                 frames[sym] = history
         return frames, {sym: "polygon" for sym in symbols}
 
-    async def fake_scan_market(symbols, market_data):  # noqa: ARG001
+    async def fake_scan_market(symbols, market_data, **kwargs):  # noqa: ARG001
         return []  # force fallback
 
     def frozen_context(policy, style):  # noqa: ARG001
@@ -339,7 +339,7 @@ async def test_scan_fallback_limits_and_confidence_sort(monkeypatch):
 async def test_universe_not_symbol(monkeypatch):
     monkeypatch.setattr("src.agent_server.expand_universe", lambda universe, style, limit: ["AAPL"])  # noqa: ARG001
     monkeypatch.setattr("src.agent_server._collect_market_data", lambda symbols, timeframe, as_of=None: ({sym: _make_history() for sym in symbols}, {sym: "polygon" for sym in symbols}))  # noqa: ARG001
-    monkeypatch.setattr("src.agent_server.scan_market", lambda symbols, market_data: [])  # noqa: ARG001
+    monkeypatch.setattr("src.agent_server.scan_market", lambda symbols, market_data, **kwargs: [])  # noqa: ARG001
     monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style, session: _context_stub())
 
     request = _make_request()
@@ -359,7 +359,7 @@ async def test_chart_query_guard(monkeypatch):
         frames = {sym: _make_history() for sym in symbols}
         return frames, {sym: "polygon" for sym in symbols}
 
-    async def fake_scan_market(symbols, market_data):  # noqa: ARG001
+    async def fake_scan_market(symbols, market_data, **kwargs):  # noqa: ARG001
         signal = Signal(symbol="AAPL", strategy_id="baseline_auto", description="Test setup", score=1.0)
         signal.plan = None
         signal.features = {"direction_bias": "long"}
@@ -401,7 +401,7 @@ async def test_sector_cap_and_min_quality(monkeypatch):
         frames = {sym: _make_history() for sym in symbols}
         return frames, {sym: "polygon" for sym in symbols}
 
-    async def fake_scan_market(symbols, market_data):  # noqa: ARG001
+    async def fake_scan_market(symbols, market_data, **kwargs):  # noqa: ARG001
         return [_make_signal(sym, idx, "ONESECTOR") for idx, sym in enumerate(symbols)]
 
     def fake_indicator_bundle(symbol, history):  # noqa: ARG001

@@ -44,7 +44,7 @@ STYLE_CONFIG: Dict[str, Dict[str, float | int | str]] = {
     },
 }
 
-_CACHE: Dict[Tuple[str, str], Tuple[float, Dict[str, object]]] = {}
+_CACHE: Dict[Tuple[str, str, str], Tuple[float, Dict[str, object]]] = {}
 _CACHE_TTL = 30 * 60  # seconds
 _LOCK = asyncio.Lock()
 
@@ -190,9 +190,10 @@ async def _compute_stats(symbol: str, style: str) -> Optional[Dict[str, object]]
     return stats
 
 
-async def get_style_stats(symbol: str, style: str) -> Optional[Dict[str, object]]:
+async def get_style_stats(symbol: str, style: str, *, as_of: str | None = None) -> Optional[Dict[str, object]]:
     """Return cached statistical profile for symbol/style."""
-    key = (symbol.upper(), style)
+    token = as_of or "live"
+    key = (symbol.upper(), style, token)
     async with _LOCK:
         entry = _CACHE.get(key)
         now = time.monotonic()

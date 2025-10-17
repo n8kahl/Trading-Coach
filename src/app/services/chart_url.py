@@ -5,7 +5,7 @@ from __future__ import annotations
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from typing import Dict, Iterable
 
-from .precision import get_price_precision
+from .instrument_precision import get_precision
 
 ALLOWED_KEYS: frozenset[str] = frozenset(
     {
@@ -51,7 +51,7 @@ def make_chart_url(
     """Return canonical /tv URL composed from allow-listed params."""
 
     symbol = str(params.get("symbol") or "").upper()
-    precision = get_price_precision(symbol, precision_map=precision_map)
+    precision = get_precision(symbol, precision_map=precision_map)
 
     payload: Dict[str, str] = {}
     if symbol:

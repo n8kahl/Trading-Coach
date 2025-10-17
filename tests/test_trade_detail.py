@@ -8,6 +8,7 @@ from starlette.requests import Request
 from urllib.parse import parse_qs, urlparse
 
 from src import agent_server
+from src.config import get_settings
 
 
 @pytest.mark.asyncio
@@ -92,3 +93,141 @@ async def test_simulate_generator_serializes_timestamp(monkeypatch):
     payload = json.loads(chunk[len("data: ") :].strip())
     assert payload["time"].endswith("+00:00")
     await generator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gpt_plan_populates_completeness_fields(monkeypatch):
+    monkeypatch.setenv("FF_OPTIONS_ALWAYS", "1")
+    monkeypatch.setenv("FF_CHART_CANONICAL_V1", "1")
+    get_settings.cache_clear()
+
+    async def fake_scan(universe, request, user):  # noqa: ARG001
+        return [
+            {
+                "symbol": "AAPL",
+                "style": "intraday",
+                "plan": {
+                    "plan_id": "AAPL-INTRADAY-TEST",
+                    "entry": 150.0,
+                    "stop": 148.5,
+                    "targets": [151.8, 153.2],
+                    "target_meta": [
+                        {
+                            "label": "TP1",
+                            "source": "stats",
+                            "distance": 1.8,
+                            "rr": 1.2,
+                            "snap_tag": "POC",
+                            "prob_touch": 0.62,
+                        },
+                        {
+                            "label": "TP2",
+                            "source": "fallback",
+                            "distance": 3.2,
+                            "rr": 1.9,
+                        },
+                    ],
+                    "direction": "long",
+                    "runner": {"trail": "ATR"},
+                    "confidence": 0.74,
+                    "notes": "Structure aligned",
+                },
+                "charts": {
+                    "params": {
+                        "symbol": "AAPL",
+                        "interval": "5m",
+                        "direction": "long",
+                        "entry": "150.0",
+                        "stop": "148.5",
+                        "tp": "151.8,153.2",
+                    }
+                },
+                "market_snapshot": {
+                    "indicators": {"atr14": 1.2},
+                    "volatility": {"expected_move_horizon": 2.5},
+                    "trend": {"direction_hint": "long", "ema_stack": "bullish"},
+                },
+                "key_levels": {"session_high": 152.0, "session_low": 147.5},
+                "context_overlays": {
+                    "volume_profile": {"poc": 151.78},
+                    "avwap": {"from_session_low": 149.2},
+                },
+                "features": {"plan_confidence_factors": ["EMA alignment", "VWAP confirmation"]},
+                "options": {
+                    "best": [
+                        {
+                            "symbol": "AAPL241122C00150000",
+                            "label": "C150",
+                            "option_type": "call",
+                            "dte": 5,
+                            "strike": 150.0,
+                            "price": 2.35,
+                            "bid": 2.3,
+                            "ask": 2.4,
+                            "delta": 0.55,
+                            "gamma": 0.12,
+                            "theta": -0.04,
+                            "vega": 0.08,
+                            "open_interest": 2500,
+                            "volume": 980,
+                            "liquidity_score": 0.82,
+                            "spread_pct": 6.5,
+                            "pnl": {"per_contract_cost": 235.0, "rr_to_tp1": 1.4},
+                            "pl_projection": {"contracts_possible": 1, "risk_budget": 100.0},
+                        }
+                    ]
+                },
+            }
+        ]
+
+    async def fake_chart_url(params, request):  # noqa: ARG001
+        return agent_server.ChartLinks(interactive="https://example.com/chart")
+
+    async def fake_contracts(request_payload, user):  # noqa: ARG001
+        return {
+            "best": [
+                {
+                    "symbol": "AAPL241122C00150000",
+                    "label": "C150",
+                    "option_type": "call",
+                    "dte": 5,
+                    "strike": 150.0,
+                    "price": 2.35,
+                    "bid": 2.3,
+                    "ask": 2.4,
+                    "delta": 0.55,
+                    "gamma": 0.12,
+                    "theta": -0.04,
+                    "vega": 0.08,
+                    "open_interest": 2500,
+                    "volume": 980,
+                    "liquidity_score": 0.82,
+                    "spread_pct": 6.5,
+                    "pnl": {"per_contract_cost": 235.0, "rr_to_tp1": 1.4},
+                    "pl_projection": {"contracts_possible": 1, "risk_budget": 100.0},
+                }
+            ],
+            "alternatives": [],
+            "filters": {},
+            "relaxed_filters": False,
+            "symbol": "AAPL",
+        }
+
+    monkeypatch.setattr(agent_server, "gpt_scan", fake_scan)
+    monkeypatch.setattr(agent_server, "gpt_chart_url", fake_chart_url)
+    monkeypatch.setattr(agent_server, "gpt_contracts", fake_contracts)
+
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": b""}
+    request = Request(scope)
+    user = agent_server.AuthedUser(user_id="test-user")
+
+    response = await agent_server.gpt_plan(agent_server.PlanRequest(symbol="AAPL", style="intraday"), request, user)
+
+    assert response.confluence_tags, "should emit confluence tags"
+    assert any("TP1" in item["label"] for item in response.tp_reasons), "tp reasons should describe targets"
+    assert response.options_contracts and response.options_contracts[0]["symbol"].startswith("AAPL"), "contracts list should surface best picks"
+    assert response.options_note is None
+    assert response.plan.get("tp_reasons"), "plan payload should include tp_reasons"
+    assert response.plan.get("confluence_tags"), "plan payload should include confluence tags"
+
+    get_settings.cache_clear()

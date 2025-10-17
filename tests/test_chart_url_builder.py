@@ -1,4 +1,5 @@
 from src.app.services.chart_url import make_chart_url
+from src.app.services.instrument_precision import get_precision
 
 
 def test_make_chart_url_orders_params_and_formats_precision():
@@ -24,3 +25,32 @@ def test_make_chart_url_orders_params_and_formats_precision():
         url
         == "https://example.com/tv?center_time=latest&direction=long&ema=9,21&entry=430.12&focus=plan&interval=5m&plan_id=SPY-PLAN&plan_version=2&scale_plan=auto&stop=428.99&symbol=SPY&theme=dark&tp=432.55,435"
     )
+
+
+def test_make_chart_url_ignores_non_allowlisted_keys():
+    url = make_chart_url(
+        {
+            "symbol": "NDX",
+            "interval": "15m",
+            "direction": "short",
+            "entry": 16050.25,
+            "stop": 16120.75,
+            "tp": [15890.5],
+            "session_status": "open",
+            "session_as_of": "2024-01-01T21:00:00Z",
+        },
+        base_url="https://example.com/tv",
+        precision_map={"NDX": 2},
+    )
+
+    assert "session_status" not in url
+    assert "session_as_of" not in url
+    assert url.endswith("entry=16050.25&interval=15m&stop=16120.75&symbol=NDX&tp=15890.5")
+
+
+def test_get_precision_resolves_aliases():
+    mapping = {"SPX": 1, "DEFAULT": 3}
+
+    assert get_precision("I:SPX", precision_map=mapping) == 1
+    assert get_precision("spx", precision_map=mapping) == 1
+    assert get_precision("UNKNOWN", precision_map=mapping) == 3

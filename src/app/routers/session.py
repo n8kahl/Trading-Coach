@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
-from src.app.services import session_now
+from src.app.middleware import get_session
 
 router = APIRouter(prefix="/api/v1", tags=["session"])
 
 
 @router.get("/session")
-def get_session() -> dict:
+def session_snapshot(request: Request) -> dict:
     """Return the current market session snapshot."""
-    return session_now().to_dict()
+    return get_session(request)

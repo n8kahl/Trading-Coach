@@ -47,6 +47,7 @@ What’s included
   - Returns: `plan`, `charts`, `key_levels`, `market_snapshot`, `features`, `options`, `trade_detail`
   - Provenance: `calc_notes` (atr14, rr_inputs, em_cap_applied), `htf` (bias, snapped_targets), `debug.tp1` (when structural TP1 is used)
   - Targets carry `plan.target_meta` (per-TP `price`, `distance`, `rr`, `em_fraction`, `mfe_quantile`, `prob_touch`, `source`, `snap_tag`, `optional`) and `plan.runner` (trailing-stop settings: `type`, `timeframe`, `length`, `multiplier`, `anchor`, `initial_stop`, `note`, `bias`).
+  - When `FF_OPTIONS_ALWAYS=1`, responses also include `confluence_tags` (deduped from confidence factors and snapped levels), `tp_reasons` (per-target rationale strings), and `options_contracts` (server-picked contracts with enriched P/L blocks). If no eligible contracts are found, `options_note` communicates why.
 - `/gpt/multi-context`
   - Request: `include_series` (default false), `intervals` (aka `frames`)
   - Response: `contexts` (series trimmed when gated), `summary` (frames_used, confluence_score, trend_notes, volatility_regime+label, expected_move_horizon, nearby_levels), `decimals`, `data_quality`

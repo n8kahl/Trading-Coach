@@ -101,7 +101,7 @@ async def test_plan_renderer_adds_index_fallback_metadata(monkeypatch):
         features={"direction_bias": "long"},
     )
 
-    async def fake_scan_market(tickers, market_data):  # noqa: ARG001
+    async def fake_scan_market(tickers, market_data, **kwargs):  # noqa: ARG001
         return [signal]
 
     monkeypatch.setattr("src.agent_server._get_index_mode", lambda: stub_mode)

@@ -37,12 +37,21 @@ Authentication is optional. Set `BACKEND_API_KEY` to require Bearer tokens; incl
 
 ---
 
+## Feature flags
+
+- `FF_CHART_CANONICAL_V1` – emit canonical `/tv` links and persist `plan_layers` with every plan.
+- `FF_LAYERS_ENDPOINT` – expose `GET /api/v1/gpt/chart-layers` and require persisted plan overlays for rendering.
+- `FF_OPTIONS_ALWAYS` – append deterministic `confluence_tags`, `tp_reasons`, and `options_contracts` (plus fallback `options_note`) to plan payloads, ensuring the GPT never fabricates contract picks.
+
+---
+
 ## Scenario Plans (Market Replay)
 
 - Live plan: one auto-updating plan per symbol (single source of truth).
 - Scenarios: zero or more frozen snapshots per style (Scalp/Intraday/Swing; Reversal gated until server strategy exists).
 - Adopt: promote a scenario to Live in the UI; optionally regenerate via `/gpt/plan` first.
 - Charts: canonical `/tv` URLs only; no `session_*` or inline levels in links. Overlays fetched by `plan_id` via `GET /api/v1/gpt/chart-layers`.
+  Plans also surface `confluence_tags`, `tp_reasons`, and (when `FF_OPTIONS_ALWAYS=1`) top-ranked `options_contracts` so the GPT can explain targets and contract selection without fabricating details.
   Access in `trade-coach-ui` under `/replay/:symbol`.
 
 ---
