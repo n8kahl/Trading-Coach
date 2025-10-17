@@ -273,7 +273,9 @@
   let hasAppliedTimeCenter = false;
   let hasAppliedTimeWindow = false;
 
-  const headerSymbolEl = document.getElementById('header_symbol');
+let levelsToggleEl;
+
+const headerSymbolEl = document.getElementById('header_symbol');
   const headerStrategyEl = document.getElementById('header_strategy');
   const headerBiasEl = document.getElementById('header_bias');
   const headerConfidenceEl = document.getElementById('header_confidence');
@@ -285,8 +287,8 @@
   const headerLastUpdateEl = document.getElementById('header_lastupdate');
   const headerDataSourceEl = document.getElementById('header_datasource');
   const streamingStatusEl = document.getElementById('streaming_status');
-  const followLiveToggleEl = document.getElementById('follow_live_toggle');
-  const levelsToggleEl = document.getElementById('levels_toggle');
+const followLiveToggleEl = document.getElementById('follow_live_toggle');
+levelsToggleEl = document.getElementById('levels_toggle');
   const planStatusNoteEl = document.getElementById('plan_status_note');
   const timeframeSwitcherEl = document.getElementById('timeframe_switcher');
   const planPanelEl = document.getElementById('plan_panel');

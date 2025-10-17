@@ -82,7 +82,7 @@ from .app.engine.execution_profiles import ExecutionContext as PlanExecutionCont
 from .app.engine.options_select import score_contract, best_contract_example
 from .app.middleware import SessionMiddleware, get_session
 from .app.routers.session import router as session_router
-from .app.services import parse_session_as_of, make_chart_url, build_plan_layers
+from .app.services import parse_session_as_of, make_chart_url, build_plan_layers, get_precision
 from .app.providers.universe import load_universe
 from .context_overlays import compute_context_overlays
 from .db import (
@@ -7216,6 +7216,38 @@ async def _rebuild_plan_layers(plan_id: str, snapshot: Dict[str, Any], request: 
     return response.plan_layers
 
 
+def _fallback_plan_layers(plan_block: Mapping[str, Any], plan_id: str) -> Dict[str, Any]:
+    session_state = plan_block.get("session_state") or {}
+    as_of = str(session_state.get("as_of") or "")
+    symbol = (plan_block.get("symbol") or "").strip().upper()
+    interval = (
+        plan_block.get("chart_timeframe")
+        or plan_block.get("interval")
+        or plan_block.get("charts", {}).get("params", {}).get("interval")
+        or ""
+    )
+    precision = get_precision(symbol) if symbol else 2
+    planning_context = plan_block.get("planning_context") or plan_block.get("planningContext") or "unknown"
+    meta: Dict[str, Any] = {
+        "confidence_factors": [],
+        "confluence": [],
+        "status": "missing",
+        "notes": ["Plan layers unavailable; showing chart without annotations"],
+    }
+    return {
+        "plan_id": plan_id,
+        "symbol": symbol or None,
+        "interval": interval,
+        "as_of": as_of,
+        "planning_context": planning_context,
+        "precision": precision,
+        "levels": [],
+        "zones": [],
+        "annotations": [],
+        "meta": meta,
+    }
+
+
 @app.get(
     "/api/v1/gpt/chart-layers",
     summary="Return plan-bound chart layers",
@@ -7241,7 +7273,12 @@ async def chart_layers_endpoint(
                 raise HTTPException(status_code=404, detail="Plan layers unavailable")
             rebuilt = await _rebuild_plan_layers(plan_id, snapshot, request)
             if rebuilt is None:
-                raise HTTPException(status_code=404, detail="Plan layers unavailable")
+                logger.warning(
+                    "plan_layers_missing_backfill_failed",
+                    extra={"plan_id": plan_id},
+                )
+                layers = _fallback_plan_layers(plan_block, plan_id)
+                break
             refreshed = True
             snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
             plan_block = snapshot.get("plan") or {}
@@ -7272,7 +7309,8 @@ async def chart_layers_endpoint(
         break
 
     if not layers or not isinstance(layers, dict):
-        raise HTTPException(status_code=404, detail="Plan layers unavailable")
+        logger.warning("plan_layers_missing", extra={"plan_id": plan_id})
+        layers = _fallback_plan_layers(plan_block, plan_id)
 
     payload = copy.deepcopy(layers)
     payload.setdefault("plan_id", plan_id)

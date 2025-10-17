@@ -79,3 +79,35 @@ async def test_chart_layers_endpoint_detects_asof_mismatch(monkeypatch):
 
     assert getattr(excinfo.value, "status_code", None) == 409
     get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_chart_layers_endpoint_returns_fallback_when_missing(monkeypatch):
+    monkeypatch.setenv("FF_LAYERS_ENDPOINT", "1")
+    get_settings.cache_clear()
+
+    async def fake_rebuild(plan_id, snapshot, request):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("src.agent_server._rebuild_plan_layers", fake_rebuild)
+
+    plan_id = "PLAN-NO-LAYERS"
+    await _store_idea_snapshot(
+        plan_id,
+        {
+            "plan": {
+                "plan_id": plan_id,
+                "symbol": "AAPL",
+                "chart_timeframe": "5m",
+                "session_state": {"as_of": "2025-10-17T18:30:00Z"},
+            },
+        },
+    )
+
+    request = Request({"type": "http", "method": "GET", "path": "/api/v1/gpt/chart-layers", "headers": []})
+    payload = await chart_layers_endpoint(plan_id=plan_id, request=request)
+
+    assert payload["plan_id"] == plan_id
+    assert payload["levels"] == []
+    assert payload["meta"]["status"] == "missing"
+    get_settings.cache_clear()
