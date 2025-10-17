@@ -1388,6 +1388,19 @@
         <ul class="plan-log" id="plan_log"></ul>
         <p class="plan-log__empty" id="plan_log_empty">No management updates yet.</p>
       </div>
+      <div class="plan-panel__section" id="scenario_plans_section">
+        <h3>Scenario Plans</h3>
+        <div class="plan-replay__controls" id="scenario_controls">
+          <div class="scenario-style-group" role="group" aria-label="Scenario style">
+            <button type="button" class="plan-replay__button" data-scenario-style="scalp">Scalp</button>
+            <button type="button" class="plan-replay__button plan-replay__button--active" data-scenario-style="intraday">Intraday</button>
+            <button type="button" class="plan-replay__button" data-scenario-style="swing">Swing</button>
+            <button type="button" class="plan-replay__button" data-scenario-style="reversal" disabled title="Reversal strategy coming soon">Reversal</button>
+          </div>
+          <button id="scenario_generate" type="button" class="plan-replay__button">Generate Plan</button>
+        </div>
+        <p id="scenario_status" class="plan-replay__status"></p>
+      </div>
       <div class="plan-panel__section plan-replay">
         <h3>Market Replay</h3>
         <div class="plan-replay__controls">
@@ -1435,6 +1448,7 @@
       loggedInitialPlan = true;
     }
     attachReplayControls();
+    attachScenarioControls();
     updatePlanPanelLastPrice(lastPrice);
   };
 
@@ -1504,6 +1518,81 @@
     latestVolumeData.push(newVolumeBar);
     volumeSeries.update(newVolumeBar);
     updateSessionBands(latestCandleData, lastSecondsPerBar);
+  };
+
+  // --- Scenario Plans (inline) ---
+  const scenarioConfig = { style: 'intraday', busy: false };
+
+  const setScenarioStatus = (message, isError = false) => {
+    const el = document.getElementById('scenario_status');
+    if (el) {
+      el.textContent = message || '';
+      el.style.color = isError ? '#fca5a5' : '';
+    }
+  };
+
+  const extractScenarioUrlFromResponse = (data) => {
+    try {
+      const plan = data?.plan || data || {};
+      return (
+        plan.trade_detail ||
+        plan.idea_url ||
+        (data?.charts && data.charts.interactive) ||
+        null
+      );
+    } catch {
+      return null;
+    }
+  };
+
+  const scenarioGenerate = async () => {
+    if (scenarioConfig.busy) return;
+    scenarioConfig.busy = true;
+    setScenarioStatus('Generating scenario…');
+    try {
+      const response = await fetch(`${baseUrl}/gpt/plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, style: scenarioConfig.style }),
+      });
+      if (!response.ok) throw new Error(`/gpt/plan failed (${response.status})`);
+      const data = await response.json();
+      const url = extractScenarioUrlFromResponse(data);
+      if (!url) throw new Error('No chart URL returned');
+      setScenarioStatus('Scenario ready — opening chart…');
+      window.open(url, '_blank', 'noopener');
+      setTimeout(() => setScenarioStatus(''), 1500);
+    } catch (err) {
+      setScenarioStatus(err?.message || String(err) || 'Scenario generation failed', true);
+    } finally {
+      scenarioConfig.busy = false;
+    }
+  };
+
+  const attachScenarioControls = () => {
+    const container = document.getElementById('scenario_controls');
+    const genBtn = document.getElementById('scenario_generate');
+    if (!container || !genBtn) return;
+    const buttons = Array.from(container.querySelectorAll('button[data-scenario-style]'));
+    const setActive = (style) => {
+      buttons.forEach((btn) => {
+        if (btn.getAttribute('data-scenario-style') === style) {
+          btn.classList.add('plan-replay__button--active');
+        } else {
+          btn.classList.remove('plan-replay__button--active');
+        }
+      });
+    };
+    buttons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const next = btn.getAttribute('data-scenario-style');
+        if (!next) return;
+        scenarioConfig.style = next;
+        setActive(next);
+      });
+    });
+    genBtn.addEventListener('click', () => scenarioGenerate());
+    setActive(scenarioConfig.style);
   };
 
   const setReplayStatusMessage = (message) => {
