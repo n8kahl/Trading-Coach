@@ -1365,6 +1365,44 @@
       return steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('');
     })();
 
+    const buildConfluence = () => {
+      const items = [];
+      const seenSources = new Set();
+      targetsMeta.forEach((meta) => {
+        if (!meta) return;
+        const source = (meta.source || meta.snap_tag || '').toString();
+        if (!source || seenSources.has(source)) return;
+        seenSources.add(source);
+        const prob = toNumber(meta.prob_touch);
+        const rr = toNumber(meta.rr);
+        let score = null;
+        if (prob !== null) score = prob;
+        else if (rr !== null) score = Math.min(Math.max(rr / 3, 0), 1);
+        let color = 'green';
+        if (score !== null) {
+          if (score >= 0.6) color = 'green';
+          else if (score >= 0.4) color = 'yellow';
+          else color = 'red';
+        }
+        const label = source
+          .replace(/_/g, ' ')
+          .replace(/\b([a-z])/g, (match) => match.toUpperCase());
+        items.push({ label, color });
+      });
+      if (mergedPlanMeta.bias) {
+        items.push({
+          label: `Trend ${mergedPlanMeta.bias.toString().toUpperCase()}`,
+          color: 'green',
+        });
+      }
+      if (mergedPlanMeta.runner) {
+        items.push({ label: 'Runner active', color: 'green' });
+      }
+      return items.slice(0, 5);
+    };
+
+    const confluenceItems = buildConfluence();
+
     const horizonCopy = horizonShort() || '—';
     const rrValue = toNumber(mergedPlanMeta.risk_reward);
     const rrFallback = (() => {
@@ -1429,6 +1467,28 @@
           ${checklistHtml}
         </ul>
       </div>
+      ${
+        confluenceItems.length
+          ? `<div class="plan-panel__section">
+              <h3>Confluence</h3>
+              <ul class="plan-panel__confluence">
+                ${confluenceItems
+                  .map(
+                    (item) =>
+                      `<li style="display:flex;align-items:center;gap:8px;font-size:13px;">` +
+                      `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${
+                        item.color === 'green'
+                          ? '#4ade80'
+                          : item.color === 'yellow'
+                            ? '#facc15'
+                            : '#f87171'
+                      }"></span>${escapeHtml(item.label)}</li>`,
+                  )
+                  .join('')}
+              </ul>
+            </div>`
+          : ''
+      }
       <div class="plan-panel__section">
         <h3>Plan Log <span id="plan_log_indicator" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-left:6px;opacity:.6;"></span></h3>
         <ul class="plan-log" id="plan_log"></ul>
@@ -1443,7 +1503,6 @@
             <button type="button" class="plan-replay__button" data-scenario-style="swing">Swing</button>
             <button type="button" class="plan-replay__button" data-scenario-style="reversal" disabled title="Reversal strategy coming soon">Reversal</button>
           </div>
-          <button id="scenario_generate" type="button" class="plan-replay__button">Generate Plan</button>
         </div>
         <p id="scenario_status" class="plan-replay__status"></p>
       </div>
@@ -1574,8 +1633,9 @@
   setInterval(pulsePlanLogIndicator, 5000);
 
   // --- Scenario Plans (inline) ---
-  const scenarioConfig = { style: 'intraday', busy: false };
-  let scenarioOverlayData = null; // { entry, stop, tps[], label, plan_id, plan_version }
+  const scenarioConfig = { style: 'intraday', baseStyle: 'intraday', busy: false };
+  let scenarioOverlayData = null; // { entry, stop, tps[], label, plan_id, plan_version, levels, zones }
+  const scenarioLineIds = new Set();
 
   const setScenarioStatus = (message, isError = false) => {
     const el = document.getElementById('scenario_status');
@@ -1597,6 +1657,89 @@
     } catch {
       return { entry: null, stop: null, tps: [], plan_id: null, plan_version: null };
     }
+  };
+
+  const removeScenarioLines = () => {
+    scenarioLineIds.forEach((id) => {
+      const line = priceLineMap.get(id);
+      if (line) {
+        candleSeries.removePriceLine(line);
+        priceLineMap.delete(id);
+      }
+    });
+    scenarioLineIds.clear();
+  };
+
+  const applyScenarioOverlayLines = (activeIds) => {
+    removeScenarioLines();
+    if (!scenarioOverlayData) return;
+    const addLine = (id, options) => {
+      scenarioLineIds.add(id);
+      const line = setPriceLine(id, options);
+      if (line && activeIds) activeIds.add(id);
+    };
+    if (Number.isFinite(scenarioOverlayData.entry)) {
+      addLine('scenario:entry', {
+        price: scenarioOverlayData.entry,
+        color: '#60a5fa',
+        title: (scenarioOverlayData.label || 'Scenario') + ' Entry',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+      });
+    }
+    if (Number.isFinite(scenarioOverlayData.stop)) {
+      addLine('scenario:stop', {
+        price: scenarioOverlayData.stop,
+        color: '#fb7185',
+        title: (scenarioOverlayData.label || 'Scenario') + ' Stop',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+      });
+    }
+    (scenarioOverlayData.tps || []).forEach((tp, idx) => {
+      if (!Number.isFinite(tp)) return;
+      addLine(`scenario:tp:${idx + 1}`, {
+        price: tp,
+        color: '#93c5fd',
+        title: (scenarioOverlayData.label || 'Scenario') + ` TP${idx + 1}`,
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+      });
+    });
+    (scenarioOverlayData.levels || []).forEach((level, idx) => {
+      const price = Number(level?.price);
+      if (!Number.isFinite(price)) return;
+      const label = level?.label ? `${level.label} (Scenario)` : `Scenario Level ${idx + 1}`;
+      addLine(`scenario:level:${idx}:${price.toFixed(4)}`, {
+        price,
+        color: '#a5b4fc',
+        title: label,
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+      });
+    });
+    (scenarioOverlayData.zones || []).forEach((zone, idx) => {
+      const high = Number(zone?.high);
+      const low = Number(zone?.low);
+      if (Number.isFinite(high)) {
+        addLine(`scenario:zone:${idx}:high`, {
+          price: high,
+          color: '#bfdbfe',
+          title: (zone?.label || 'Scenario Zone') + ' High',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+        });
+      }
+      if (Number.isFinite(low)) {
+        addLine(`scenario:zone:${idx}:low`, {
+          price: low,
+          color: '#bfdbfe',
+          title: (zone?.label || 'Scenario Zone') + ' Low',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+        });
+      }
+    });
   };
 
   const scenarioGenerate = async () => {
@@ -1640,25 +1783,32 @@
             }))
             .filter((item) => Number.isFinite(item.high) || Number.isFinite(item.low))
         : [];
+      const styleLabel = `${scenarioConfig.style.charAt(0).toUpperCase()}${scenarioConfig.style.slice(1)}`;
       scenarioOverlayData = {
         entry: Number.isFinite(extracted.entry) ? extracted.entry : null,
         stop: Number.isFinite(extracted.stop) ? extracted.stop : null,
         tps: (extracted.tps || []).filter((v) => Number.isFinite(v)),
-        label: `Scenario · ${scenarioConfig.style}`,
+        label: `Scenario · ${styleLabel}`,
         plan_id: extracted.plan_id,
         plan_version: extracted.plan_version,
         levels: layerLevels,
         zones: layerZones,
       };
       setScenarioStatus('Scenario overlay active — use Adopt or Clear');
-      // Force a re-render to draw overlay lines
-      try { applyPlanPriceFocus(currentPlan, { force: true }); } catch {}
+      applyScenarioOverlayLines();
       const adoptBtn = document.getElementById('scenario_adopt');
       const clearBtn = document.getElementById('scenario_clear');
       if (adoptBtn) adoptBtn.disabled = false;
       if (clearBtn) clearBtn.disabled = false;
+      chart.priceScale('right').applyOptions({ autoScale: true });
     } catch (err) {
       setScenarioStatus(err?.message || String(err) || 'Scenario generation failed', true);
+      const adoptBtn = document.getElementById('scenario_adopt');
+      const clearBtn = document.getElementById('scenario_clear');
+      if (adoptBtn) adoptBtn.disabled = true;
+      if (clearBtn) clearBtn.disabled = true;
+      scenarioOverlayData = null;
+      removeScenarioLines();
     } finally {
       scenarioConfig.busy = false;
     }
@@ -1666,8 +1816,7 @@
 
   const attachScenarioControls = () => {
     const container = document.getElementById('scenario_controls');
-    const genBtn = document.getElementById('scenario_generate');
-    if (!container || !genBtn) return;
+    if (!container) return;
     // Add Adopt and Clear buttons inline
     const adoptBtn = document.createElement('button');
     adoptBtn.id = 'scenario_adopt';
@@ -1691,17 +1840,45 @@
         }
       });
     };
+    const baseStyle = (mergedPlanMeta.style || '').toLowerCase();
+    scenarioConfig.baseStyle = baseStyle || scenarioConfig.baseStyle;
+    const overlayActive = !!scenarioOverlayData && scenarioOverlayData.plan_id;
+    if (!overlayActive) {
+      scenarioConfig.style = scenarioConfig.baseStyle;
+    }
+    let matchedInitial = false;
     buttons.forEach((btn) => {
       btn.addEventListener('click', () => {
         const next = btn.getAttribute('data-scenario-style');
         if (!next) return;
         scenarioConfig.style = next;
         setActive(next);
-        // Auto-generate on style click per desired flow
-        scenarioGenerate();
+        if (next === scenarioConfig.baseStyle) {
+          scenarioOverlayData = null;
+          removeScenarioLines();
+          setScenarioStatus('Using live plan (no scenario overlay).');
+          adoptBtn.disabled = true;
+          clearBtn.disabled = true;
+          chart.priceScale('right').applyOptions({ autoScale: true });
+        } else {
+          scenarioGenerate();
+        }
       });
+      if (!matchedInitial && btn.getAttribute('data-scenario-style') === scenarioConfig.baseStyle) {
+        matchedInitial = true;
+        setActive(scenarioConfig.baseStyle);
+      }
     });
-    genBtn.addEventListener('click', () => scenarioGenerate());
+    if (!matchedInitial && buttons.length) {
+      const fallbackStyle = buttons[0].getAttribute('data-scenario-style');
+      if (fallbackStyle) {
+        scenarioConfig.baseStyle = fallbackStyle;
+        if (!overlayActive) {
+          scenarioConfig.style = fallbackStyle;
+        }
+        setActive(fallbackStyle);
+      }
+    }
     container.appendChild(adoptBtn);
     container.appendChild(clearBtn);
     adoptBtn.addEventListener('click', () => {
@@ -1715,12 +1892,23 @@
     });
     clearBtn.addEventListener('click', () => {
       scenarioOverlayData = null;
-      setScenarioStatus('');
-      try { applyPlanPriceFocus(currentPlan, { force: true }); } catch {}
+      setScenarioStatus('Scenario cleared.');
+      removeScenarioLines();
       adoptBtn.disabled = true;
       clearBtn.disabled = true;
+      chart.priceScale('right').applyOptions({ autoScale: true });
     });
-    setActive(scenarioConfig.style);
+    const styleToHighlight = overlayActive ? scenarioConfig.style : scenarioConfig.baseStyle;
+    setActive(styleToHighlight);
+    if (overlayActive) {
+      adoptBtn.disabled = false;
+      clearBtn.disabled = false;
+      setScenarioStatus('Scenario overlay active — use Adopt or Clear');
+    } else {
+      adoptBtn.disabled = true;
+      clearBtn.disabled = true;
+      setScenarioStatus('Select a style to generate a scenario overlay.');
+    }
   };
 
   const loadTickerInsights = async () => {
@@ -2375,70 +2563,8 @@
         });
       }
 
-      // Scenario overlay ghost lines (if present)
       if (scenarioOverlayData) {
-        if (Number.isFinite(scenarioOverlayData.entry)) {
-          registerLine('scenario:entry', {
-            price: scenarioOverlayData.entry,
-            color: '#60a5fa',
-            title: (scenarioOverlayData.label || 'Scenario') + ' Entry',
-            lineWidth: 1,
-            lineStyle: LightweightCharts.LineStyle.Dotted,
-          });
-        }
-        if (Number.isFinite(scenarioOverlayData.stop)) {
-          registerLine('scenario:stop', {
-            price: scenarioOverlayData.stop,
-            color: '#fb7185',
-            title: (scenarioOverlayData.label || 'Scenario') + ' Stop',
-            lineWidth: 1,
-            lineStyle: LightweightCharts.LineStyle.Dashed,
-          });
-        }
-        (scenarioOverlayData.tps || []).forEach((tp, idx) => {
-          if (!Number.isFinite(tp)) return;
-          registerLine(`scenario:tp:${idx + 1}`, {
-            price: tp,
-            color: '#93c5fd',
-            title: (scenarioOverlayData.label || 'Scenario') + ` TP${idx + 1}`,
-            lineWidth: 1,
-            lineStyle: LightweightCharts.LineStyle.Dashed,
-          });
-        });
-        (scenarioOverlayData.levels || []).forEach((level, idx) => {
-          const price = Number(level?.price);
-          if (!Number.isFinite(price)) return;
-          const label = level?.label ? `${level.label} (Scenario)` : `Scenario Level ${idx + 1}`;
-          registerLine(`scenario:level:${idx}:${price.toFixed(4)}`, {
-            price,
-            color: '#a5b4fc',
-            title: label,
-            lineWidth: 1,
-            lineStyle: LightweightCharts.LineStyle.Dotted,
-          });
-        });
-        (scenarioOverlayData.zones || []).forEach((zone, idx) => {
-          const high = Number(zone?.high);
-          const low = Number(zone?.low);
-          if (Number.isFinite(high)) {
-            registerLine(`scenario:zone:${idx}:high`, {
-              price: high,
-              color: '#bfdbfe',
-              title: (zone?.label || 'Scenario Zone') + ' High',
-              lineWidth: 1,
-              lineStyle: LightweightCharts.LineStyle.Dashed,
-            });
-          }
-          if (Number.isFinite(low)) {
-            registerLine(`scenario:zone:${idx}:low`, {
-              price: low,
-              color: '#bfdbfe',
-              title: (zone?.label || 'Scenario Zone') + ' Low',
-              lineWidth: 1,
-              lineStyle: LightweightCharts.LineStyle.Dashed,
-            });
-          }
-        });
+        applyScenarioOverlayLines(activeLineIds);
       }
 
       [...keyLevels]
