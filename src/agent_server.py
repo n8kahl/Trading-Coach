@@ -17,6 +17,7 @@ import logging
 import time
 import uuid
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1732,6 +1733,39 @@ def _extract_event_plan_id(event: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+async def _ensure_stream_heartbeat(symbol: str) -> None:
+    symbol_key = (symbol or "").upper()
+    if not symbol_key:
+        return
+
+    async with _STREAM_LOCK:
+        if symbol_key in _STREAM_HEARTBEAT_TASKS:
+            return
+
+        async def _heartbeat() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(_STREAM_HEARTBEAT_INTERVAL)
+                    async with _STREAM_LOCK:
+                        active = bool(_STREAM_SUBSCRIBERS.get(symbol_key))
+                    if not active:
+                        break
+                    await _publish_stream_event(
+                        symbol_key,
+                        {
+                            "t": "heartbeat",
+                            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        },
+                    )
+            except asyncio.CancelledError:
+                pass
+            finally:
+                async with _STREAM_LOCK:
+                    _STREAM_HEARTBEAT_TASKS.pop(symbol_key, None)
+
+        _STREAM_HEARTBEAT_TASKS[symbol_key] = asyncio.create_task(_heartbeat())
+
+
 async def _get_idea_snapshot(plan_id: str, version: Optional[int] = None) -> Dict[str, Any]:
     cached = await _get_cached_snapshot(plan_id, version)
     if cached:
@@ -1792,6 +1826,7 @@ async def _stream_generator(symbol: str) -> Any:
     async with _STREAM_LOCK:
         _STREAM_SUBSCRIBERS.setdefault(symbol, []).append(queue)
     await _ensure_symbol_stream(symbol)
+    await _ensure_stream_heartbeat(symbol)
     try:
         while True:
             data = await queue.get()
@@ -2921,6 +2956,8 @@ _IDEA_PERSISTENCE_ENABLED = False
 _STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
 _PLAN_STREAM_SUBSCRIBERS: Dict[str, List[asyncio.Queue]] = {}
 _STREAM_LOCK = asyncio.Lock()
+_STREAM_HEARTBEAT_TASKS: Dict[str, asyncio.Task] = {}
+_STREAM_HEARTBEAT_INTERVAL = 5.0
 _REALTIME_BAR_STREAM: Optional[PolygonRealtimeBarStreamer] = None
 _IV_METRICS_CACHE_TTL = 120.0
 _IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -5922,6 +5959,7 @@ async def stream_symbol_ws(websocket: WebSocket, symbol: str) -> None:
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
     async with _STREAM_LOCK:
         _STREAM_SUBSCRIBERS.setdefault(uppercase, []).append(queue)
+    await _ensure_stream_heartbeat(uppercase)
     try:
         initial_states = await _LIVE_PLAN_ENGINE.active_plan_states(uppercase)
         if initial_states:

@@ -229,6 +229,7 @@
   const dataAgeMsParam = Number(params.get('data_age_ms') || '');
   const lastUpdateRaw = (params.get('last_update') || '').trim();
   const STALE_FEED_THRESHOLD_MS = 120000;
+  const LIVE_STALE_THRESHOLD_MS = 15000;
   let dataAgeMs = Number.isFinite(dataAgeMsParam) ? dataAgeMsParam : null;
   const isFeedDegraded = () =>
     dataModeToken === 'degraded' || (Number.isFinite(dataAgeMs) && dataAgeMs > STALE_FEED_THRESHOLD_MS);
@@ -505,10 +506,15 @@
         const rel = Number.isFinite(age) ? formatRelativeDuration(age) : '';
         const formatted = etDateFormatter.format(dataLastUpdateDate);
         parts.push(`Last update ${formatted} ET${rel ? ` (${rel} ago)` : ''}`);
+        if (Number.isFinite(age) && age > LIVE_STALE_THRESHOLD_MS) {
+          parts.push('⚠️ Streaming paused');
+        }
       } else {
         parts.push('Awaiting first tick');
       }
       headerLastUpdateEl.textContent = parts.join(' · ');
+      const stale = dataLastUpdateDate && Date.now() - dataLastUpdateDate.getTime() > LIVE_STALE_THRESHOLD_MS;
+      headerLastUpdateEl.classList.toggle('plan-header__meta--alert', Boolean(stale));
     }
     if (headerDataSourceEl) {
       const sourceLabel = friendlySourceLabel(dataSourceRaw);
@@ -1150,6 +1156,11 @@
           case 'market_status':
             applyMarketStatus(event.phase, event.note);
             break;
+          case 'heartbeat': {
+            const ts = parseEventTimestamp(event) ?? Math.floor(Date.now() / 1000);
+            setDataLastUpdate(ts);
+            break;
+          }
           default:
             break;
         }
