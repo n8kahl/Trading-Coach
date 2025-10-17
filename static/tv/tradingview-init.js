@@ -1522,6 +1522,7 @@
 
   // --- Scenario Plans (inline) ---
   const scenarioConfig = { style: 'intraday', busy: false };
+  let scenarioOverlayData = null; // { entry, stop, tps[], label, plan_id, plan_version }
 
   const setScenarioStatus = (message, isError = false) => {
     const el = document.getElementById('scenario_status');
@@ -1531,17 +1532,17 @@
     }
   };
 
-  const extractScenarioUrlFromResponse = (data) => {
+  const extractScenarioFromResponse = (data) => {
     try {
       const plan = data?.plan || data || {};
-      return (
-        plan.trade_detail ||
-        plan.idea_url ||
-        (data?.charts && data.charts.interactive) ||
-        null
-      );
+      const entry = Number.isFinite(plan.entry) ? plan.entry : Number(plan?.structured_plan?.entry?.level);
+      const stop = Number.isFinite(plan.stop) ? plan.stop : Number(plan?.structured_plan?.stop);
+      const tps = Array.isArray(plan.targets) ? plan.targets : (plan?.structured_plan?.targets || []);
+      const plan_id = String(plan.plan_id || '').trim();
+      const plan_version = Number.isFinite(Number(plan.version)) ? String(plan.version) : null;
+      return { entry, stop, tps, plan_id, plan_version };
     } catch {
-      return null;
+      return { entry: null, stop: null, tps: [], plan_id: null, plan_version: null };
     }
   };
 
@@ -1557,11 +1558,22 @@
       });
       if (!response.ok) throw new Error(`/gpt/plan failed (${response.status})`);
       const data = await response.json();
-      const url = extractScenarioUrlFromResponse(data);
-      if (!url) throw new Error('No chart URL returned');
-      setScenarioStatus('Scenario ready — opening chart…');
-      window.open(url, '_blank', 'noopener');
-      setTimeout(() => setScenarioStatus(''), 1500);
+      const extracted = extractScenarioFromResponse(data);
+      scenarioOverlayData = {
+        entry: Number.isFinite(extracted.entry) ? extracted.entry : null,
+        stop: Number.isFinite(extracted.stop) ? extracted.stop : null,
+        tps: (extracted.tps || []).filter((v) => Number.isFinite(v)),
+        label: `Scenario · ${scenarioConfig.style}`,
+        plan_id: extracted.plan_id,
+        plan_version: extracted.plan_version,
+      };
+      setScenarioStatus('Scenario overlay active — use Adopt or Clear');
+      // Force a re-render to draw overlay lines
+      try { applyPlanPriceFocus(currentPlan, { force: true }); } catch {}
+      const adoptBtn = document.getElementById('scenario_adopt');
+      const clearBtn = document.getElementById('scenario_clear');
+      if (adoptBtn) adoptBtn.disabled = false;
+      if (clearBtn) clearBtn.disabled = false;
     } catch (err) {
       setScenarioStatus(err?.message || String(err) || 'Scenario generation failed', true);
     } finally {
@@ -1573,6 +1585,19 @@
     const container = document.getElementById('scenario_controls');
     const genBtn = document.getElementById('scenario_generate');
     if (!container || !genBtn) return;
+    // Add Adopt and Clear buttons inline
+    const adoptBtn = document.createElement('button');
+    adoptBtn.id = 'scenario_adopt';
+    adoptBtn.type = 'button';
+    adoptBtn.className = 'plan-replay__button';
+    adoptBtn.textContent = 'Adopt as Live';
+    adoptBtn.disabled = true;
+    const clearBtn = document.createElement('button');
+    clearBtn.id = 'scenario_clear';
+    clearBtn.type = 'button';
+    clearBtn.className = 'plan-replay__button';
+    clearBtn.textContent = 'Clear Overlay';
+    clearBtn.disabled = true;
     const buttons = Array.from(container.querySelectorAll('button[data-scenario-style]'));
     const setActive = (style) => {
       buttons.forEach((btn) => {
@@ -1592,6 +1617,24 @@
       });
     });
     genBtn.addEventListener('click', () => scenarioGenerate());
+    container.appendChild(adoptBtn);
+    container.appendChild(clearBtn);
+    adoptBtn.addEventListener('click', () => {
+      if (!scenarioOverlayData || !scenarioOverlayData.plan_id) return;
+      const q = new URLSearchParams(window.location.search);
+      q.set('plan_id', scenarioOverlayData.plan_id);
+      if (scenarioOverlayData.plan_version) q.set('plan_version', scenarioOverlayData.plan_version);
+      q.delete('levels');
+      const newUrl = `${window.location.pathname}?${q.toString()}`;
+      window.location.replace(newUrl);
+    });
+    clearBtn.addEventListener('click', () => {
+      scenarioOverlayData = null;
+      setScenarioStatus('');
+      try { applyPlanPriceFocus(currentPlan, { force: true }); } catch {}
+      adoptBtn.disabled = true;
+      clearBtn.disabled = true;
+    });
     setActive(scenarioConfig.style);
   };
 
@@ -2190,6 +2233,38 @@
           title: 'VWAP',
           lineWidth: 2,
           lineStyle: LightweightCharts.LineStyle.Solid,
+        });
+      }
+
+      // Scenario overlay ghost lines (if present)
+      if (scenarioOverlayData) {
+        if (Number.isFinite(scenarioOverlayData.entry)) {
+          registerLine('scenario:entry', {
+            price: scenarioOverlayData.entry,
+            color: '#60a5fa',
+            title: (scenarioOverlayData.label || 'Scenario') + ' Entry',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+          });
+        }
+        if (Number.isFinite(scenarioOverlayData.stop)) {
+          registerLine('scenario:stop', {
+            price: scenarioOverlayData.stop,
+            color: '#fb7185',
+            title: (scenarioOverlayData.label || 'Scenario') + ' Stop',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+          });
+        }
+        (scenarioOverlayData.tps || []).forEach((tp, idx) => {
+          if (!Number.isFinite(tp)) return;
+          registerLine(`scenario:tp:${idx + 1}`, {
+            price: tp,
+            color: '#93c5fd',
+            title: (scenarioOverlayData.label || 'Scenario') + ` TP${idx + 1}`,
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+          });
         });
       }
 
