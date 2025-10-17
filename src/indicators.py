@@ -56,7 +56,15 @@ def _build_bundle(history: pd.DataFrame) -> Dict[str, Any]:
     last_range = float(highs.iloc[-1] - lows.iloc[-1]) if not history.empty else 0.0
     bundle["atr_multiple"] = _safe_div(last_range, atr_val)
 
-    bundle["vwap"] = _last_value(vwap(history))
+    volumes = history.get("volume")
+    if volumes is not None and not volumes.empty:
+        if {"high", "low", "close"}.issubset(history.columns):
+            typical_price = (history["high"] + history["low"] + history["close"]) / 3.0
+        else:
+            typical_price = history["close"]
+        bundle["vwap"] = _last_value(vwap(typical_price, volumes))
+    else:
+        bundle["vwap"] = 0.0
     bundle["impulse"] = _impulse(closes)
     bundle["htf"] = _htf_hint(history)
     return bundle

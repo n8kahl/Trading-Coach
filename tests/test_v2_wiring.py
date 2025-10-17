@@ -130,7 +130,9 @@ async def test_symbol_diagnostics_uses_normalised_interval(monkeypatch):
     monkeypatch.setattr("src.agent_server._build_interval_context", fake_context)
     monkeypatch.setattr("src.agent_server.session_now", lambda: DummySession())
 
-    response = await symbol_diagnostics("spy", interval="15m", lookback=200)
+    request = Request({"type": "http", "method": "GET", "headers": []})
+
+    response = await symbol_diagnostics("spy", request, interval="15m", lookback=200)
 
     assert response.symbol == "SPY"
     assert response.interval == "15m"

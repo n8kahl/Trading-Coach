@@ -1,31 +1,95 @@
 from __future__ import annotations
 
+import pandas as pd
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Iterable, Optional, Set, Tuple
+from typing import Dict, Iterable, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
-
-_DEFAULT_HOLIDAYS_2025: Set[str] = {
-    "2025-01-01",  # New Year's Day
-    "2025-01-20",  # MLK Jr. Day
-    "2025-02-17",  # Presidents' Day
-    "2025-04-18",  # Good Friday
-    "2025-05-26",  # Memorial Day
-    "2025-06-19",  # Juneteenth
-    "2025-07-04",  # Independence Day
-    "2025-09-01",  # Labor Day
-    "2025-11-27",  # Thanksgiving
-    "2025-12-25",  # Christmas
-}
-
+from pandas.tseries.holiday import (
+    AbstractHolidayCalendar,
+    GoodFriday,
+    Holiday,
+    USLaborDay,
+    USMartinLutherKingJr,
+    USMemorialDay,
+    USPresidentsDay,
+    USThanksgivingDay,
+    nearest_workday,
+)
 
 _TZ_NEW_YORK = ZoneInfo("America/New_York")
 
 _PRE_START = time(4, 0)
 _RTH_START = time(9, 30)
 _RTH_END = time(16, 0)
+_HALF_DAY_END = time(13, 0)
 _POST_END = time(20, 0)
+
+
+US_NEW_YEARS_DAY = Holiday("NewYearsDay", month=1, day=1, observance=nearest_workday)
+US_JUNETEENTH = Holiday("Juneteenth", month=6, day=19, observance=nearest_workday)
+US_INDEPENDENCE_DAY = Holiday("IndependenceDay", month=7, day=4, observance=nearest_workday)
+US_CHRISTMAS_DAY = Holiday("ChristmasDay", month=12, day=25, observance=nearest_workday)
+
+
+class NYSEHolidayCalendar(AbstractHolidayCalendar):
+    """NYSE holiday calendar including federal holidays observed by the exchange."""
+
+    rules = [
+        US_NEW_YEARS_DAY,
+        USMartinLutherKingJr,
+        USPresidentsDay,
+        GoodFriday,
+        USMemorialDay,
+        US_JUNETEENTH,
+        US_INDEPENDENCE_DAY,
+        USLaborDay,
+        USThanksgivingDay,
+        US_CHRISTMAS_DAY,
+    ]
+
+
+def _build_nyse_calendar(start_year: int, end_year: int) -> Tuple[Set[str], Dict[str, time]]:
+    """Return NYSE full-day holidays and early-closing half days."""
+
+    calendar = NYSEHolidayCalendar()
+    start = f"{start_year}-01-01"
+    end = f"{end_year}-12-31"
+    holiday_dates = calendar.holidays(start=start, end=end)
+    holidays = {stamp.strftime("%Y-%m-%d") for stamp in holiday_dates}
+
+    half_days: Dict[str, time] = {}
+    for year in range(start_year, end_year + 1):
+        thanksgiving = USThanksgivingDay.dates(
+            pd.Timestamp(year=year, month=1, day=1),
+            pd.Timestamp(year=year, month=12, day=31),
+        )
+        if len(thanksgiving) > 0:
+            day_after = thanksgiving[0] + pd.Timedelta(days=1)
+            if day_after.weekday() < 5:
+                key = day_after.strftime("%Y-%m-%d")
+                if key not in holidays:
+                    half_days[key] = _HALF_DAY_END
+
+        christmas_eve = pd.Timestamp(year=year, month=12, day=24)
+        if christmas_eve.weekday() < 5:
+            key = christmas_eve.strftime("%Y-%m-%d")
+            if key not in holidays:
+                half_days[key] = _HALF_DAY_END
+
+        july_third = pd.Timestamp(year=year, month=7, day=3)
+        if july_third.weekday() < 5:
+            key = july_third.strftime("%Y-%m-%d")
+            if key not in holidays:
+                half_days[key] = _HALF_DAY_END
+
+    return holidays, half_days
+
+
+_CAL_START_YEAR = date.today().year - 1
+_CAL_END_YEAR = _CAL_START_YEAR + 5
+_DEFAULT_HOLIDAYS, _DEFAULT_HALF_DAYS = _build_nyse_calendar(_CAL_START_YEAR, _CAL_END_YEAR)
 
 
 @dataclass(frozen=True)
@@ -40,8 +104,14 @@ class MarketSessionSnapshot:
 class MarketClock:
     """Utility for determining US equity market session state."""
 
-    def __init__(self, *, holidays: Optional[Iterable[str]] = None) -> None:
-        self._holidays: Set[str] = set(holidays or _DEFAULT_HOLIDAYS_2025)
+    def __init__(
+        self,
+        *,
+        holidays: Optional[Iterable[str]] = None,
+        half_days: Optional[Dict[str, time]] = None,
+    ) -> None:
+        self._holidays: Set[str] = set(holidays or _DEFAULT_HOLIDAYS)
+        self._half_days: Dict[str, time] = dict(half_days or _DEFAULT_HALF_DAYS)
 
     def now_et(self) -> datetime:
         return datetime.now(tz=_TZ_NEW_YORK)
@@ -54,7 +124,9 @@ class MarketClock:
 
     def _session_bounds(self, day: datetime) -> Tuple[datetime, datetime]:
         open_dt = day.replace(hour=_RTH_START.hour, minute=_RTH_START.minute, second=0, microsecond=0)
-        close_dt = day.replace(hour=_RTH_END.hour, minute=_RTH_END.minute, second=0, microsecond=0)
+        key = day.strftime("%Y-%m-%d")
+        close_time = self._half_days.get(key, _RTH_END)
+        close_dt = day.replace(hour=close_time.hour, minute=close_time.minute, second=0, microsecond=0)
         return open_dt, close_dt
 
     def _next_trading_day(self, dt: datetime) -> datetime:
@@ -128,3 +200,4 @@ class MarketClock:
             next_open_et=next_open,
             next_close_et=next_close,
         )
+

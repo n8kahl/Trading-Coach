@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import math
 import time
+import zlib
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -45,6 +47,50 @@ STYLE_CONFIG: Dict[str, Dict[str, float | int | str]] = {
 _CACHE: Dict[Tuple[str, str], Tuple[float, Dict[str, object]]] = {}
 _CACHE_TTL = 30 * 60  # seconds
 _LOCK = asyncio.Lock()
+
+
+def _compress_array(values: np.ndarray) -> bytes:
+    if values is None or values.size == 0:
+        return b""
+    buffer = io.BytesIO()
+    np.save(buffer, values.astype(np.float32, copy=False), allow_pickle=False)
+    return zlib.compress(buffer.getvalue(), level=3)
+
+
+def _decompress_array(blob: bytes) -> np.ndarray:
+    if not blob:
+        return np.array([], dtype=np.float32)
+    try:
+        payload = zlib.decompress(blob)
+    except zlib.error:  # pragma: no cover - defensive
+        return np.array([], dtype=np.float32)
+    buffer = io.BytesIO(payload)
+    return np.load(buffer, allow_pickle=False)
+
+
+def _pack_stats_for_cache(stats: Dict[str, object]) -> Dict[str, object]:
+    packed = dict(stats)
+    for side in ("long", "short"):
+        segment = dict(packed.get(side) or {})
+        array = segment.pop("mfe", None)
+        if array is None:
+            normalized = np.array([], dtype=np.float32)
+        else:
+            normalized = np.asarray(array, dtype=np.float32)
+        segment["mfe_bytes"] = _compress_array(normalized)
+        segment["mfe_count"] = int(normalized.size)
+        packed[side] = segment
+    return packed
+
+
+def _unpack_stats_from_cache(payload: Dict[str, object]) -> Dict[str, object]:
+    restored = dict(payload)
+    for side in ("long", "short"):
+        segment = dict(restored.get(side) or {})
+        blob = segment.pop("mfe_bytes", b"")
+        segment["mfe"] = _decompress_array(blob)
+        restored[side] = segment
+    return restored
 
 
 def _tf_minutes(token: str) -> int:
@@ -119,6 +165,8 @@ async def _compute_stats(symbol: str, style: str) -> Optional[Dict[str, object]]
     long_mfe, short_mfe = _compute_mfe(frame, horizon_bars)
     if long_mfe.size < min_samples or short_mfe.size < min_samples:
         return None
+    long_mfe = long_mfe.astype(np.float32, copy=False)
+    short_mfe = short_mfe.astype(np.float32, copy=False)
 
     atr_series = atr(frame["high"], frame["low"], frame["close"], 14)
     atr_mean = float(atr_series.dropna().tail(100).mean()) if not atr_series.empty else None
@@ -149,12 +197,13 @@ async def get_style_stats(symbol: str, style: str) -> Optional[Dict[str, object]
         entry = _CACHE.get(key)
         now = time.monotonic()
         if entry and now - entry[0] < _CACHE_TTL:
-            return entry[1]
+            cached_payload = entry[1]
+            return _unpack_stats_from_cache(cached_payload)
 
     stats = await _compute_stats(symbol, style)
     async with _LOCK:
         if stats:
-            _CACHE[key] = (time.monotonic(), stats)
+            _CACHE[key] = (time.monotonic(), _pack_stats_for_cache(stats))
         else:
             _CACHE.pop(key, None)
     return stats
@@ -166,4 +215,3 @@ def estimate_probability(mfe_values: np.ndarray, distance: float) -> Optional[fl
         return None
     hits = np.count_nonzero(mfe_values >= distance)
     return hits / float(mfe_values.size)
-

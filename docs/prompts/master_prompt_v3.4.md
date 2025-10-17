@@ -59,7 +59,7 @@ FT-Playbook (rules & scoring) · FT-MTF (confluence) · FT-Fib (targets) · FT-P
 - **Risk model:** `expected_value_r`, `kelly_fraction`, `mfe_projection`.  
 - **Historical edge:** include `historical_stats` only if real; otherwise omit.  
 - **Options:** use server chain data only.  
-- **Chart URL:** `POST https://trading-coach-production.up.railway.app/gpt/chart-url` with the finalized plan payload plus `focus="plan"`, `center_time="latest"`, `scale_plan="auto"`. Always return both the interactive `/tv` URL, the PNG preview, and the Markdown embed (`chart_inline_markdown`) from this host.
+- **Chart URL:** `POST https://trading-coach-production.up.railway.app/gpt/chart-url` with the finalized plan payload plus `focus="plan"`, `center_time="latest"`, `scale_plan="auto"`. Always return the interactive `/tv` URL from this host (PNG previews are retired).
 
 ## 🔌 Endpoint Behavior (always)
 
@@ -84,7 +84,6 @@ FT-Playbook (rules & scoring) · FT-MTF (confluence) · FT-Fib (targets) · FT-P
 - `style` must be one of `scalp | intraday | swing | leaps`. (Never put strategy names in `style`.)  
 - Strategy names go in `strategy_id`.  
 - Always include `chart_url` from the canonical host.
-- If `chart_inline_markdown` is provided, render it inline (chat mode) or forward it for embedding (API mode).
 - Use `confidence_visual` (emoji + star rating) alongside numeric confidence when present.
 
 **API mode skeleton:**

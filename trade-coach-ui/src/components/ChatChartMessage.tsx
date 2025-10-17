@@ -1,8 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from "react";
-import Image from "next/image";
-import { API_BASE_URL, PUBLIC_BASE_URL, withAuthHeaders } from "@/lib/env";
+import { API_BASE_URL, withAuthHeaders } from "@/lib/env";
 
 type PlanDirection = "long" | "short";
 
@@ -27,12 +26,11 @@ type ChatChartMessageProps = {
 
 type ChartLinksResponse = {
   interactive: string;
-  png?: string | null;
 };
 
 type LoadState =
   | { status: "idle" | "loading" }
-  | { status: "ready"; liveUrl: string; pngUrl: string }
+  | { status: "ready"; liveUrl: string }
   | { status: "error"; message: string };
 
 const NUMBER_FORMAT = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -66,13 +64,6 @@ function computeRiskReward(entry: number | null, stop: number | null, target: nu
     return null;
   }
   return reward / risk;
-}
-
-function buildPngUrl(params: URLSearchParams): string {
-  const base = PUBLIC_BASE_URL || API_BASE_URL;
-  const trimmed = base.replace(/\/$/, "");
-  const query = params.toString();
-  return query ? `${trimmed}/charts/png?${query}` : `${trimmed}/charts/png`;
 }
 
 export default function ChatChartMessage({ symbol, interval, plan, focus, centerTime, theme = "dark", scalePlan = "auto" }: ChatChartMessageProps) {
@@ -118,43 +109,10 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
       }
     });
 
-    const pngParams = new URLSearchParams();
-    pngParams.set("symbol", upperSymbol);
-    pngParams.set("interval", interval);
-    if (Number.isFinite(entry)) {
-      pngParams.set("entry", NUMBER_FORMAT.format(Number(entry)));
-    }
-    if (Number.isFinite(stop)) {
-      pngParams.set("stop", NUMBER_FORMAT.format(Number(stop)));
-    }
-    if (tpCsv) {
-      pngParams.set("tp", tpCsv);
-    }
-    if (emaCsv) {
-      pngParams.set("ema", emaCsv);
-    }
-    if (levelsToken) {
-      pngParams.set("levels", levelsToken);
-    }
-    if (focus) {
-      pngParams.set("focus", focus);
-    }
-    if (centerToken) {
-      pngParams.set("center_time", centerToken);
-    }
-    if (scalePlan) {
-      pngParams.set("scale_plan", scalePlan);
-    }
-    pngParams.set("theme", theme);
-
-    const signature = JSON.stringify({
-      body,
-      png: Array.from(pngParams.entries()),
-    });
+    const signature = JSON.stringify({ body });
 
     return {
       body,
-      pngParams,
       signature,
       upperSymbol,
       emaSpans,
@@ -190,8 +148,7 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
         if (!liveUrl) {
           throw new Error("chart-url response missing interactive link");
         }
-        const pngUrl = data.png && data.png.length > 0 ? data.png : buildPngUrl(normalized.pngParams);
-        setState({ status: "ready", liveUrl, pngUrl });
+        setState({ status: "ready", liveUrl });
       } catch (error) {
         if (aborted) return;
         const message = error instanceof Error ? error.message : "Unknown chart error";
@@ -205,7 +162,7 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
       aborted = true;
       controller.abort();
     };
-  }, [normalized.signature, normalized.body, normalized.pngParams, retryCounter]);
+  }, [normalized.body, normalized.signature, retryCounter]);
 
   const retry = () => setRetryCounter((value) => value + 1);
 
@@ -224,16 +181,15 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
             href={state.liveUrl}
             target="_blank"
             rel="noreferrer"
-            className="block overflow-hidden rounded-lg border border-slate-700/80 bg-slate-950/40 transition hover:border-sky-500/70 hover:shadow-lg hover:shadow-sky-900/40"
+            className="flex items-center justify-between rounded-lg border border-slate-700/80 bg-slate-950/40 px-4 py-3 transition hover:border-sky-500/70 hover:shadow-lg hover:shadow-sky-900/40"
           >
-            <Image
-              src={state.pngUrl}
-              alt={`${normalized.upperSymbol} ${interval} trading plan`}
-              className="h-auto w-full"
-              width={1280}
-              height={720}
-              unoptimized
-            />
+            <div className="flex flex-col">
+              <span className="text-sm font-semibold text-slate-100">Open interactive chart</span>
+              <span className="text-xs text-slate-400">Launch /tv with live overlays and plan levels</span>
+            </div>
+            <span className="text-lg text-sky-400" aria-hidden="true">
+              ↗
+            </span>
           </a>
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
             <span className="font-semibold text-slate-100">
@@ -255,9 +211,7 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
                   </span>
                 ))}
           </div>
-          <p className="text-xs text-slate-400">
-            Click to open the live chart with focus on the trade plan. Updates stream in via `/tv`.
-          </p>
+          <p className="text-xs text-slate-400">PNG previews are no longer generated. Click the card above to open the live chart with plan overlays.</p>
         </>
       )}
       {state.status === "loading" && <div className="text-xs text-slate-400">Loading chart preview…</div>}

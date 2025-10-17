@@ -161,7 +161,7 @@ async def test_scan_top100_paging(monkeypatch):
     monkeypatch.setattr("src.agent_server._indicator_bundle", fake_indicator_bundle)
     monkeypatch.setattr("src.agent_server._indicator_metrics", fake_indicator_metrics)
     monkeypatch.setattr("src.agent_server.compute_metrics_fast", fake_compute_metrics_fast)
-    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style: _context_stub())
+    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style, session: _context_stub())
 
     request_payload = ScanRequest(universe="FT-TopLiquidity", style="intraday", limit=100)
     request = _make_request()
@@ -213,7 +213,7 @@ async def test_scan_never_5xx_on_stale(monkeypatch):
     monkeypatch.setattr("src.agent_server._indicator_bundle", fake_indicator_bundle)
     monkeypatch.setattr("src.agent_server._indicator_metrics", fake_indicator_metrics)
     monkeypatch.setattr("src.agent_server.compute_metrics_fast", fake_compute_metrics_fast)
-    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style: _context_stub())
+    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style, session: _context_stub())
 
     request_payload = ScanRequest(universe="FT-TopLiquidity", style="intraday", limit=20)
     request = _make_request()
@@ -266,7 +266,7 @@ async def test_scan_relaxes_min_rvol_when_frozen(monkeypatch):
     monkeypatch.setattr("src.agent_server._indicator_bundle", fake_indicator_bundle)
     monkeypatch.setattr("src.agent_server._indicator_metrics", fake_indicator_metrics)
     monkeypatch.setattr("src.agent_server.compute_metrics_fast", fake_compute_metrics_fast)
-    monkeypatch.setattr("src.agent_server._evaluate_scan_context", frozen_context)
+    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style, session: frozen_context(policy, style))
 
     request_payload = ScanRequest(
         universe=symbols,
@@ -318,7 +318,7 @@ async def test_scan_fallback_limits_and_confidence_sort(monkeypatch):
     monkeypatch.setattr("src.agent_server.expand_universe", fake_expand_universe)
     monkeypatch.setattr("src.agent_server._collect_market_data", fake_collect_market_data)
     monkeypatch.setattr("src.agent_server.scan_market", fake_scan_market)
-    monkeypatch.setattr("src.agent_server._evaluate_scan_context", frozen_context)
+    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style, session: frozen_context(policy, style))
 
     request_payload = ScanRequest(
         universe="FT-TopLiquidity",
@@ -340,7 +340,7 @@ async def test_universe_not_symbol(monkeypatch):
     monkeypatch.setattr("src.agent_server.expand_universe", lambda universe, style, limit: ["AAPL"])  # noqa: ARG001
     monkeypatch.setattr("src.agent_server._collect_market_data", lambda symbols, timeframe, as_of=None: ({sym: _make_history() for sym in symbols}, {sym: "polygon" for sym in symbols}))  # noqa: ARG001
     monkeypatch.setattr("src.agent_server.scan_market", lambda symbols, market_data: [])  # noqa: ARG001
-    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style: _context_stub())
+    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style, session: _context_stub())
 
     request = _make_request()
     user = AuthedUser(user_id="tester")
@@ -380,7 +380,7 @@ async def test_chart_query_guard(monkeypatch):
     monkeypatch.setattr("src.agent_server._indicator_bundle", fake_indicator_bundle)
     monkeypatch.setattr("src.agent_server._indicator_metrics", fake_indicator_metrics)
     monkeypatch.setattr("src.agent_server.compute_metrics_fast", fake_compute_metrics_fast)
-    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style: _context_stub())
+    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style, session: _context_stub())
 
     universe = ScanUniverse(tickers=["AAPL"], style="intraday", limit=10)
     request = _make_request()
@@ -422,7 +422,7 @@ async def test_sector_cap_and_min_quality(monkeypatch):
     monkeypatch.setattr("src.agent_server._indicator_bundle", fake_indicator_bundle)
     monkeypatch.setattr("src.agent_server._indicator_metrics", fake_indicator_metrics)
     monkeypatch.setattr("src.agent_server.compute_metrics_fast", fake_compute_metrics_fast)
-    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style: _context_stub())
+    monkeypatch.setattr("src.agent_server._evaluate_scan_context", lambda policy, style, session: _context_stub())
 
     request_payload = ScanRequest(universe="FT-TopLiquidity", style="intraday", limit=100)
     request = _make_request()

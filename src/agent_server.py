@@ -20,7 +20,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, cast
+from collections import Counter
 import copy
 
 import httpx
@@ -78,6 +79,8 @@ from .app.engine import (
 )
 from .app.engine.execution_profiles import ExecutionContext as PlanExecutionContext, refine_plan as refine_execution_plan
 from .app.engine.options_select import score_contract, best_contract_example
+from .app.middleware import SessionMiddleware
+from .app.routers.session import router as session_router
 from .app.services import session_now, parse_session_as_of
 from .app.providers.universe import load_universe
 from .context_overlays import compute_context_overlays
@@ -143,6 +146,23 @@ ALLOWED_CHART_KEYS = {
     "session_phase",
     "session_banner",
 }
+
+_DEFAULT_SESSION_FALLBACK: Dict[str, str] = {
+    "status": "closed",
+    "as_of": "",
+    "next_open": "",
+    "tz": "America/New_York",
+    "banner": "Session unavailable",
+}
+
+_METRIC_COUNTER: Counter[str] = Counter()
+
+
+def _record_metric(name: str, **labels: str) -> int:
+    key_parts = [name] + [f"{key}={labels[key]}" for key in sorted(labels)]
+    key = "|".join(key_parts)
+    _METRIC_COUNTER[key] += 1
+    return _METRIC_COUNTER[key]
 
 _STYLE_DELTA_PREF: Dict[str, float] = {
     "scalp": 0.55,
@@ -252,12 +272,24 @@ def _cache_summary(entries: Iterable[Tuple[float, Any]]) -> Dict[str, Any]:
     }
 
 
-def _market_snapshot_payload() -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
+def _session_payload_from_request(request: Request) -> Dict[str, Any]:
+    candidate = getattr(request.state, "session", None)
+    if isinstance(candidate, dict):
+        return dict(candidate)
+    try:
+        return session_now().to_dict()
+    except Exception:  # pragma: no cover - defensive
+        return dict(_DEFAULT_SESSION_FALLBACK)
+
+
+def _market_snapshot_payload(session_payload: Mapping[str, Any] | None = None) -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
     snapshot = _MARKET_CLOCK.snapshot()
-    session_snapshot = session_now()
-    session_payload = session_snapshot.to_dict()
-    as_of_dt = parse_session_as_of(session_payload) or _MARKET_CLOCK.last_rth_close()
-    frozen = session_payload.get("status") != "open"
+    if session_payload is None:
+        session_payload = session_now().to_dict()
+    else:
+        session_payload = dict(session_payload)
+    as_of_dt = parse_session_as_of(session_payload) or _MARKET_CLOCK.last_rth_close(at=snapshot.now_et)
+    frozen = str(session_payload.get("status")).lower() != "open"
     market_payload = {
         "status": snapshot.status,
         "session": snapshot.session,
@@ -411,8 +443,8 @@ def _normalize_chart_interval(value: str) -> str:
     return token.upper()
 
 
-def _evaluate_scan_context(asof_policy: str, style: str) -> tuple[ScanContext, str | None, Dict[str, Any]]:
-    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload()
+def _evaluate_scan_context(asof_policy: str, style: str, session_payload: Mapping[str, Any]) -> tuple[ScanContext, str | None, Dict[str, Any]]:
+    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(session_payload)
     policy = asof_policy.lower()
     label: Literal["live", "frozen"]
     banner: str | None = None
@@ -739,7 +771,6 @@ class ChartParams(BaseModel):
 
 class ChartLinks(BaseModel):
     interactive: str
-    png: str | None = None
 
 
 async def _fetch_option_chain_with_aliases(symbol: str, as_of_hint: Optional[datetime]) -> pd.DataFrame:
@@ -764,6 +795,7 @@ app = FastAPI(
     version="0.2.0",
 )
 
+app.add_middleware(SessionMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -946,8 +978,6 @@ class PlanResponse(BaseModel):
     earnings: Dict[str, Any] | None = None
     charts_params: Dict[str, Any] | None = None
     chart_url: str | None = None
-    chart_png: str | None = None
-    chart_inline_markdown: str | None = None
     chart_timeframe: str | None = None
     chart_guidance: str | None = None
     strategy_id: str | None = None
@@ -2459,15 +2489,6 @@ def _chart_hint(strategy_id: Optional[str], style: Optional[str]) -> Tuple[str, 
     return ("5m", "Use 5 minute closes to validate the trigger and manage stops.")
 
 
-def _swap_chart_path(url: str, source: str, target: str) -> str:
-    try:
-        parsed = urlsplit(url)
-        path = parsed.path.replace(source, target, 1)
-        return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
-    except Exception:
-        return url
-
-
 def _resolved_base_url(request: Request) -> str:
     # Respect reverse-proxy headers to avoid mixed-content (http iframe on https page)
     headers = request.headers
@@ -3508,7 +3529,8 @@ async def gpt_scan_endpoint(
     user: AuthedUser = Depends(require_api_key),
 ) -> ScanPage:
     started = time.perf_counter()
-    context, context_banner, dq = _evaluate_scan_context(request_payload.asof_policy, request_payload.style)
+    session_payload = _session_payload_from_request(request)
+    context, context_banner, dq = _evaluate_scan_context(request_payload.asof_policy, request_payload.style, session_payload)
     try:
         universe_limit = max(request_payload.limit, 100)
         tickers = await expand_universe(request_payload.universe, style=request_payload.style, limit=universe_limit)
@@ -3808,6 +3830,11 @@ async def gpt_scan_endpoint(
 
     planning_context = "frozen" if str(dq.get("mode")).lower() == "degraded" else context.label
     latency_ms = int((time.perf_counter() - started) * 1000)
+    metric_count = _record_metric(
+        "gpt_scan",
+        session=str(session_payload.get("status") or "unknown"),
+        context=planning_context,
+    )
     logger.info(
         "scan completed",
         extra={
@@ -3818,6 +3845,9 @@ async def gpt_scan_endpoint(
             "banner_present": bool(banner),
             "page_size": len(page_candidates),
             "latency_ms": latency_ms,
+            "session_status": session_payload.get("status"),
+            "session_as_of": session_payload.get("as_of"),
+            "metric_count": metric_count,
         },
     )
     return ScanPage(
@@ -3875,7 +3905,8 @@ async def _legacy_scan(
     if len(resolved_tickers) > limit:
         resolved_tickers = resolved_tickers[:limit]
 
-    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload()
+    session_payload = _session_payload_from_request(request)
+    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(session_payload)
 
     style_filter = _normalize_style(universe.style)
     data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}.get(style_filter, "5")
@@ -4339,8 +4370,6 @@ async def _legacy_scan(
         if chart_links:
             chart_query["interval"] = chart_interval_hint
             charts_payload["interactive"] = chart_links.interactive
-            if chart_links.png:
-                charts_payload["png"] = chart_links.png
         elif chart_query and required_chart_keys.issubset(chart_query.keys()):
             fallback_chart_url = _build_tv_chart_url(request, chart_query)
             charts_payload["interactive"] = fallback_chart_url
@@ -4348,11 +4377,6 @@ async def _legacy_scan(
                 "chart link fallback used",
                 extra={"symbol": signal.symbol, "strategy_id": signal.strategy_id, "url": fallback_chart_url},
             )
-            if "png" not in charts_payload:
-                charts_payload["png"] = _swap_chart_path(fallback_chart_url, "/tv", "/charts/png")
-
-        if "interactive" in charts_payload and "png" not in charts_payload:
-            charts_payload["png"] = _swap_chart_path(charts_payload["interactive"], "/tv", "/charts/png")
 
         index_decision = None
         index_execution_proxy: Optional[Dict[str, object]] = None
@@ -4537,7 +4561,8 @@ async def _generate_fallback_plan(
     user: AuthedUser,
 ) -> PlanResponse | None:
     style_token = _fallback_style_token(style)
-    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload()
+    session_payload = _session_payload_from_request(request)
+    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(session_payload)
     is_plan_live = bool(is_open)
     timeframe_map = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}
     timeframe = timeframe_map.get(style_token, "5")
@@ -4738,7 +4763,6 @@ async def _generate_fallback_plan(
     except HTTPException:
         chart_links = None
     chart_url = chart_links.interactive if chart_links else _build_tv_chart_url(request, chart_params)
-    chart_png = chart_links.png if chart_links else None
     chart_url_with_ids = _append_query_params(
         chart_url,
         {
@@ -4746,16 +4770,6 @@ async def _generate_fallback_plan(
             "plan_version": "1",
         },
     )
-    inline_markdown = None
-    if chart_png:
-        chart_png = _append_query_params(
-            chart_png,
-            {
-                "plan_id": plan_id,
-                "plan_version": "1",
-            },
-        )
-        inline_markdown = f"[![{symbol.upper()} plan]({chart_png})]({chart_url_with_ids})"
     plan_block = {
         "symbol": symbol.upper(),
         "style": style_token,
@@ -4779,10 +4793,6 @@ async def _generate_fallback_plan(
     plan_block["idea_url"] = chart_url_with_ids
     plan_block["chart_timeframe"] = chart_timeframe_hint
     plan_block["chart_guidance"] = hint_guidance
-    if chart_png:
-        plan_block["chart_png"] = chart_png
-    if inline_markdown:
-        plan_block["chart_inline_markdown"] = inline_markdown
     if confidence_visual:
         plan_block["confidence_visual"] = confidence_visual
     plan_warnings: List[str] = []
@@ -4820,10 +4830,6 @@ async def _generate_fallback_plan(
     charts_payload["live"] = is_plan_live
     charts_payload["timeframe"] = chart_timeframe_hint
     charts_payload["guidance"] = hint_guidance
-    if chart_png:
-        charts_payload["png"] = chart_png
-    if inline_markdown:
-        charts_payload["inline_markdown"] = inline_markdown
     data_payload = dict(data_meta)
     bars_url = f"{_resolved_base_url(request)}/gpt/context/{symbol.upper()}?interval={interval_token}&lookback=300"
     if is_plan_live:
@@ -4887,8 +4893,6 @@ async def _generate_fallback_plan(
         market=market_meta,
         data=data_payload,
         session_state=market_meta.get("session_state"),
-        chart_png=chart_png,
-        chart_inline_markdown=inline_markdown,
         chart_timeframe=chart_timeframe_hint,
         chart_guidance=hint_guidance,
         confidence_visual=confidence_visual,
@@ -4913,6 +4917,7 @@ async def gpt_plan(
     if not _PLAN_SYMBOL_PATTERN.fullmatch(symbol):
         raise HTTPException(status_code=400, detail="Invalid symbol; use /gpt/scan for universe requests.")
     forced_plan_id = (request_payload.plan_id or "").strip()
+    session_payload = _session_payload_from_request(request)
     logger.info(
         "gpt_plan received",
         extra={
@@ -5006,7 +5011,7 @@ async def gpt_plan(
     market_meta = market_meta_context if isinstance(market_meta_context, dict) else None
     data_meta = data_meta_context if isinstance(data_meta_context, dict) else None
     if market_meta is None or data_meta is None:
-        fallback_market, fallback_data, _, _ = _market_snapshot_payload()
+        fallback_market, fallback_data, _, _ = _market_snapshot_payload(session_payload)
         if market_meta is None:
             market_meta = fallback_market
         if data_meta is None:
@@ -5028,7 +5033,6 @@ async def gpt_plan(
     charts = charts_container.get("params") if isinstance(charts_container, dict) else None
     chart_params_payload: Dict[str, Any] = charts if isinstance(charts, dict) else {}
     chart_url_value: Optional[str] = charts_container.get("interactive") if isinstance(charts_container, dict) else None
-    chart_png_value: Optional[str] = charts_container.get("png") if isinstance(charts_container, dict) else None
 
     # Ensure plan levels are embedded for /tv rendering even if upstream omitted them.
     entry_level = plan.get("entry")
@@ -5110,7 +5114,6 @@ async def gpt_plan(
             chart_model = ChartParams(**chart_params_payload)
             chart_links = await gpt_chart_url(chart_model, request)
             chart_url_value = chart_links.interactive
-            chart_png_value = chart_links.png
             try:
                 chart_params_payload["interval"] = normalize_interval(chart_params_payload.get("interval") or chart_model.interval)
             except Exception:
@@ -5150,18 +5153,6 @@ async def gpt_plan(
                 live_param_stamp = datetime.now(timezone.utc).isoformat()
             chart_url_value = _append_query_params(chart_url_value, {"live": "1", "last_update": live_param_stamp})
         charts_payload["interactive"] = chart_url_value
-        if chart_png_value:
-            chart_png_value = _append_query_params(
-                chart_png_value,
-                {
-                    "plan_id": plan_id,
-                    "plan_version": str(version),
-                },
-            )
-            charts_payload["png"] = chart_png_value
-        else:
-            chart_png_value = _swap_chart_path(chart_url_value, "/tv", "/charts/png")
-            charts_payload["png"] = chart_png_value
     elif chart_params_payload and {"direction", "entry", "stop", "tp"}.issubset(chart_params_payload.keys()):
         fallback_chart_url = _build_tv_chart_url(request, chart_params_payload)
         fallback_chart_url = _append_query_params(
@@ -5185,9 +5176,6 @@ async def gpt_plan(
             "plan chart fallback used",
             extra={"symbol": symbol, "plan_id": plan_id, "url": fallback_chart_url},
         )
-        if not chart_png_value:
-            chart_png_value = _swap_chart_path(chart_url_value, "/tv", "/charts/png")
-            charts_payload["png"] = chart_png_value
 
     if not chart_url_value:
         minimal_params = {
@@ -5211,9 +5199,6 @@ async def gpt_plan(
         chart_url_value = _build_tv_chart_url(request, minimal_params)
         charts_payload.setdefault("params", minimal_params)
         charts_payload["interactive"] = chart_url_value
-        if not chart_png_value:
-            chart_png_value = _swap_chart_path(chart_url_value, "/tv", "/charts/png")
-            charts_payload["png"] = chart_png_value
 
     trade_detail_url = chart_url_value
     plan["trade_detail"] = trade_detail_url
@@ -5519,26 +5504,12 @@ async def gpt_plan(
     charts_field = charts_payload or None
     charts_params_output = chart_params_payload or None
     chart_url_output = chart_url_value or None
-    chart_inline_markdown_value = None
-    if chart_png_value and chart_url_output:
-        chart_inline_markdown_value = f"[![{symbol.upper()} plan]({chart_png_value})]({chart_url_output})"
-        if charts_field is not None:
-            charts_field.setdefault("inline_markdown", chart_inline_markdown_value)
-    if chart_png_value and plan:
-        plan["chart_png"] = chart_png_value
-    if chart_inline_markdown_value and plan:
-        plan["chart_inline_markdown"] = chart_inline_markdown_value
-    if structured_plan_payload:
-        if chart_inline_markdown_value:
-            structured_plan_payload["chart_inline_markdown"] = chart_inline_markdown_value
-        if chart_png_value:
-            structured_plan_payload["chart_png"] = chart_png_value
-        if confidence_visual_value:
-            structured_plan_payload["confidence_visual"] = confidence_visual_value
+    if structured_plan_payload and confidence_visual_value:
+        structured_plan_payload["confidence_visual"] = confidence_visual_value
     market_meta = market_meta_context if isinstance(market_meta_context, dict) else None
     data_meta = data_meta_context if isinstance(data_meta_context, dict) else None
     if market_meta is None or data_meta is None:
-        fallback_market, fallback_data, _, _ = _market_snapshot_payload()
+        fallback_market, fallback_data, _, _ = _market_snapshot_payload(session_payload)
         if market_meta is None:
             market_meta = fallback_market
         if data_meta is None:
@@ -5578,6 +5549,11 @@ async def gpt_plan(
         if isinstance(bars_url, str):
             data_meta["bars"] = _append_query_params(bars_url, {"live": "1"})
 
+    metric_count = _record_metric(
+        "gpt_plan",
+        session=str(session_payload.get("status") or "unknown"),
+        context=planning_context_value,
+    )
     logger.info(
         "plan response ready",
         extra={
@@ -5587,6 +5563,9 @@ async def gpt_plan(
             "planning_context": planning_context_value,
             "trade_detail": trade_detail_url,
             "idea_url": trade_detail_url,
+            "session_status": session_payload.get("status"),
+            "session_as_of": session_payload.get("as_of"),
+            "metric_count": metric_count,
         },
     )
 
@@ -5616,8 +5595,6 @@ async def gpt_plan(
         earnings=earnings_block,
         charts_params=charts_params_output,
         chart_url=chart_url_output,
-        chart_png=chart_png_value,
-        chart_inline_markdown=chart_inline_markdown_value,
         chart_timeframe=chart_timeframe_hint,
         chart_guidance=hint_guidance,
         strategy_id=first.get("strategy_id"),
@@ -5679,23 +5656,10 @@ async def assistant_exec(
         plan_block["chart_guidance"] = plan_response.chart_guidance
     if plan_response.confidence_visual and "confidence_visual" not in plan_block:
         plan_block["confidence_visual"] = plan_response.confidence_visual
-    if plan_response.chart_inline_markdown and "chart_inline_markdown" not in plan_block:
-        plan_block["chart_inline_markdown"] = plan_response.chart_inline_markdown
-    if plan_response.chart_png and "chart_png" not in plan_block:
-        plan_block["chart_png"] = plan_response.chart_png
-
     chart_block = {
         "interactive": plan_response.chart_url,
         "params": plan_response.charts_params,
     }
-    if plan_response.chart_png:
-        chart_block["png"] = plan_response.chart_png
-    if plan_response.chart_inline_markdown:
-        chart_block["inline_markdown"] = plan_response.chart_inline_markdown
-    if plan_response.chart_png:
-        chart_block["png"] = plan_response.chart_png
-    if plan_response.chart_inline_markdown:
-        chart_block["inline_markdown"] = plan_response.chart_inline_markdown
 
     options_block = plan_response.options or {}
     if not options_block or not options_block.get("best"):
@@ -5750,12 +5714,13 @@ async def assistant_exec(
 )
 async def symbol_diagnostics(
     symbol: str,
+    request: Request,
     interval: str = Query("5"),
     lookback: int = Query(300, ge=100, le=1000),
 ) -> SymbolDiagnosticsResponse:
     normalized_interval = normalize_interval(interval)
     context = await _build_interval_context(symbol.upper(), normalized_interval, lookback)
-    session_payload = session_now().to_dict()
+    session_payload = _session_payload_from_request(request)
     return SymbolDiagnosticsResponse(
         symbol=symbol.upper(),
         interval=normalized_interval,
@@ -6685,10 +6650,23 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     encoded = urlencode(query, doseq=False, safe=",", quote_via=quote)
     url = f"{base}?{encoded}" if encoded else base
 
-    png_origin = public_base or _resolved_base_url(request)
-    png_base = f"{png_origin.rstrip('/')}/charts/png"
-    png_url = f"{png_base}?{encoded}" if encoded else png_base
-    return ChartLinks(interactive=url, png=png_url)
+    session_snapshot = _session_payload_from_request(request)
+    metric_count = _record_metric(
+        "gpt_chart_url",
+        session=str(session_snapshot.get("status") or "unknown"),
+    )
+    logger.info(
+        "chart_url built",
+        extra={
+            "endpoint": "gpt_chart_url",
+            "symbol": data["symbol"],
+            "interval": data["interval"],
+            "session_status": session_snapshot.get("status"),
+            "session_as_of": session_snapshot.get("as_of"),
+            "metric_count": metric_count,
+        },
+    )
+    return ChartLinks(interactive=url)
 
 
 @gpt.get("/context/{symbol}", summary="Return recent market context for a ticker")
@@ -6817,6 +6795,7 @@ async def gpt_widget(kind: str, symbol: str | None = None, user: AuthedUser = De
 
 
 # Register GPT endpoints with the application
+app.include_router(session_router)
 app.include_router(tv_api)
 app.include_router(gpt)
 app.include_router(charts_router)
@@ -6843,7 +6822,6 @@ async def root() -> Dict[str, Any]:
             "context": "/gpt/context/{symbol}",
             "widgets": "/gpt/widgets/{kind}",
             "charts_html": "/charts/html",
-            "charts_png": "/charts/png",
             "health": "/healthz",
         },
     }

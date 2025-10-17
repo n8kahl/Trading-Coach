@@ -19,7 +19,7 @@ A lightweight FastAPI service that prepares market data, trading plans, volatili
 | `POST /gpt/chart-url` | Normalise chart parameters and return a `/tv` URL containing plan lines, overlays, and metadata. | Supports plan rescaling, supply/demand zones, liquidity pools, FVG bands, and anchored VWAPs. |
 | `GET /tv` | Serves the TradingView Advanced UI when bundled; otherwise falls back to Lightweight Charts with EMA labels, white VWAP, plan bands, and overlay lines. | `scale_plan=auto` rescales historic plans to current price regimes. |
 
-Support routes: `/tv-api/*` (Lightweight Charts datafeed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html|png` (static renderer).
+Support routes: `/tv-api/*` (Lightweight Charts datafeed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html` (static renderer).
 
 Authentication is optional. Set `BACKEND_API_KEY` to require Bearer tokens; include `X-User-Id` to scope data per user.
 
@@ -82,7 +82,7 @@ FINNHUB_API_KEY=your_finnhub_key         # Required for enrich_service.py
 ENRICH_SERVICE_URL=http://localhost:8081 # Override if deploying enrichment elsewhere
 DB_URL=postgresql://user:pass@host:5432/dbname  # Optional; enables persistent idea snapshots
 SELF_API_BASE_URL=https://trading-coach-production.up.railway.app  # Used for auto-replan callbacks
-PUBLIC_BASE_URL=https://trading-coach-production.up.railway.app    # Absolute base used for link unfurls (PNG + /tv)
+PUBLIC_BASE_URL=https://trading-coach-production.up.railway.app    # Absolute base used for link unfurls (/tv)
 
 # Tradier (sandbox defaults shown)
 TRADIER_SANDBOX_TOKEN=XXXXXXXXXXXX

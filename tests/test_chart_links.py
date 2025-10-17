@@ -5,7 +5,7 @@ from src.agent_server import ChartParams, gpt_chart_url
 
 
 @pytest.mark.asyncio
-async def test_gpt_chart_url_returns_png_and_focus_params():
+async def test_gpt_chart_url_returns_interactive_focus_params():
     scope = {
         "type": "http",
         "method": "POST",
@@ -33,9 +33,7 @@ async def test_gpt_chart_url_returns_png_and_focus_params():
     assert links.interactive.startswith("https://test.local/charts/html?")
     assert "focus=plan" in links.interactive
     assert "center_time=latest" in links.interactive
-    assert links.png is not None
-    assert links.png.startswith("https://test.local/charts/png?")
-    assert "focus=plan" in links.png
+    assert not hasattr(links, "png")
 
 
 @pytest.mark.asyncio
