@@ -7215,10 +7215,10 @@ async def _rebuild_plan_layers(plan_id: str, snapshot: Dict[str, Any], request: 
     backfill_user = AuthedUser(user_id="layers_backfill")
     try:
         response = await gpt_plan(plan_request, request, backfill_user)
-    except HTTPException:
+    except HTTPException as exc:
         logger.warning(
             "chart_layers_rebuild_http_error",
-            extra={"plan_id": plan_id, "symbol": symbol},
+            extra={"plan_id": plan_id, "symbol": symbol, "status": exc.status_code, "detail": exc.detail},
         )
         return None
     logger.info(
