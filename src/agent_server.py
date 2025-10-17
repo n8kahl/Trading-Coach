@@ -7216,7 +7216,7 @@ async def _rebuild_plan_layers(plan_id: str, snapshot: Dict[str, Any], request: 
     return response.plan_layers
 
 
-def _fallback_plan_layers(plan_block: Mapping[str, Any], plan_id: str) -> Dict[str, Any]:
+def _fallback_plan_layers(plan_block: Mapping[str, Any], plan_id: str, *, reason: str = "missing") -> Dict[str, Any]:
     session_state = plan_block.get("session_state") or {}
     as_of = str(session_state.get("as_of") or "")
     symbol = (plan_block.get("symbol") or "").strip().upper()
@@ -7228,11 +7228,14 @@ def _fallback_plan_layers(plan_block: Mapping[str, Any], plan_id: str) -> Dict[s
     )
     precision = get_precision(symbol) if symbol else 2
     planning_context = plan_block.get("planning_context") or plan_block.get("planningContext") or "unknown"
+    notes = ["Plan layers unavailable; showing chart without annotations"]
+    if reason == "stale":
+        notes = ["Plan layers out of date; displaying chart without annotations"]
     meta: Dict[str, Any] = {
         "confidence_factors": [],
         "confluence": [],
-        "status": "missing",
-        "notes": ["Plan layers unavailable; showing chart without annotations"],
+        "status": reason,
+        "notes": notes,
     }
     return {
         "plan_id": plan_id,
@@ -7270,14 +7273,15 @@ async def chart_layers_endpoint(
     while True:
         if not layers or not isinstance(layers, dict):
             if refreshed and not refresh:
-                raise HTTPException(status_code=404, detail="Plan layers unavailable")
+                layers = _fallback_plan_layers(plan_block, plan_id, reason="missing")
+                break
             rebuilt = await _rebuild_plan_layers(plan_id, snapshot, request)
             if rebuilt is None:
                 logger.warning(
                     "plan_layers_missing_backfill_failed",
                     extra={"plan_id": plan_id},
                 )
-                layers = _fallback_plan_layers(plan_block, plan_id)
+                layers = _fallback_plan_layers(plan_block, plan_id, reason="missing")
                 break
             refreshed = True
             snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
@@ -7305,7 +7309,8 @@ async def chart_layers_endpoint(
                     "layers_as_of": layers_as_of,
                 },
             )
-            raise HTTPException(status_code=409, detail="Plan layers stale for requested plan")
+            layers = _fallback_plan_layers(plan_block, plan_id, reason="stale")
+            break
         break
 
     if not layers or not isinstance(layers, dict):

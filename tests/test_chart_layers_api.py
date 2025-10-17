@@ -74,10 +74,10 @@ async def test_chart_layers_endpoint_detects_asof_mismatch(monkeypatch):
     )
 
     request = Request({"type": "http", "method": "GET", "path": "/api/v1/gpt/chart-layers", "headers": []})
-    with pytest.raises(Exception) as excinfo:
-        await chart_layers_endpoint(plan_id=plan_id, request=request)
+    payload = await chart_layers_endpoint(plan_id=plan_id, request=request)
 
-    assert getattr(excinfo.value, "status_code", None) == 409
+    assert payload["plan_id"] == plan_id
+    assert payload["meta"]["status"] == "stale"
     get_settings.cache_clear()
 
 
