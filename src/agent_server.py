@@ -7231,36 +7231,35 @@ async def chart_layers_endpoint(
         raise HTTPException(status_code=404, detail="Plan layers unavailable")
     snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
     plan_block = snapshot.get("plan") or {}
-    layers = plan_block.get("plan_layers") or snapshot.get("plan_layers")
+    layers: Dict[str, Any] | None = plan_block.get("plan_layers") or snapshot.get("plan_layers")
 
-    if refresh and not isinstance(layers, dict):
-        rebuilt = await _rebuild_plan_layers(plan_id, snapshot, request)
-        if rebuilt:
+    refreshed = False
+
+    while True:
+        if not layers or not isinstance(layers, dict):
+            if refreshed and not refresh:
+                raise HTTPException(status_code=404, detail="Plan layers unavailable")
+            rebuilt = await _rebuild_plan_layers(plan_id, snapshot, request)
+            if rebuilt is None:
+                raise HTTPException(status_code=404, detail="Plan layers unavailable")
+            refreshed = True
             snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
             plan_block = snapshot.get("plan") or {}
             layers = plan_block.get("plan_layers") or snapshot.get("plan_layers")
+            continue
 
-    if not layers or not isinstance(layers, dict):
-        raise HTTPException(status_code=404, detail="Plan layers unavailable")
+        plan_session = plan_block.get("session_state") or {}
+        plan_as_of = str(plan_session.get("as_of") or "").strip()
+        layers_as_of = str(layers.get("as_of") or "").strip()
 
-    plan_session = plan_block.get("session_state") or {}
-    plan_as_of = str(plan_session.get("as_of") or "").strip()
-    layers_as_of = str(layers.get("as_of") or "").strip()
-
-    if plan_as_of and layers_as_of and plan_as_of != layers_as_of:
-        if refresh:
+        if plan_as_of and layers_as_of and plan_as_of != layers_as_of:
             rebuilt = await _rebuild_plan_layers(plan_id, snapshot, request)
             if rebuilt:
+                refreshed = True
                 snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
                 plan_block = snapshot.get("plan") or {}
                 layers = plan_block.get("plan_layers") or snapshot.get("plan_layers")
-                if not layers or not isinstance(layers, dict):
-                    raise HTTPException(status_code=409, detail="Plan layers stale for requested plan")
-                plan_session = plan_block.get("session_state") or {}
-                plan_as_of = str(plan_session.get("as_of") or "").strip()
-                layers_as_of = str(layers.get("as_of") or "").strip()
-
-        if plan_as_of and layers_as_of and plan_as_of != layers_as_of:
+                continue
             logger.warning(
                 "plan_layers_asof_mismatch",
                 extra={
@@ -7270,6 +7269,10 @@ async def chart_layers_endpoint(
                 },
             )
             raise HTTPException(status_code=409, detail="Plan layers stale for requested plan")
+        break
+
+    if not layers or not isinstance(layers, dict):
+        raise HTTPException(status_code=404, detail="Plan layers unavailable")
 
     payload = copy.deepcopy(layers)
     payload.setdefault("plan_id", plan_id)

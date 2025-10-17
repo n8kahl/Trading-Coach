@@ -50,6 +50,10 @@ async def test_chart_layers_endpoint_returns_layers(monkeypatch):
 async def test_chart_layers_endpoint_detects_asof_mismatch(monkeypatch):
     monkeypatch.setenv("FF_LAYERS_ENDPOINT", "1")
     get_settings.cache_clear()
+    async def fake_rebuild(plan_id, snapshot, request):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr("src.agent_server._rebuild_plan_layers", fake_rebuild)
 
     plan_id = "TEST-PLAN-STALE"
     await _store_idea_snapshot(
