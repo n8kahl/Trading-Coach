@@ -105,6 +105,21 @@
   let planLayers = null;
   let planLayersMeta = {};
   let planZones = [];
+  const MAX_PRIMARY_LEVELS = 6;
+  let levelGroups = { primary: [], supplemental: [] };
+  let showAllLevels = false;
+  let allKeyLevels = [];
+  let pendingAutoReplan = null;
+  let autoReplanInFlight = false;
+  let keyLevels = [];
+  const AUTO_REARM_STORAGE_KEY = 'tc_auto_rearm';
+  let autoRearmEnabled = (() => {
+    try {
+      return window.localStorage.getItem(AUTO_REARM_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  })();
   if (currentPlanId) {
     try {
       const layersResponse = await fetch(`${baseUrl}/api/v1/gpt/chart-layers?plan_id=${encodeURIComponent(currentPlanId)}`, {
@@ -157,29 +172,54 @@
   const clonePlan = () => JSON.parse(JSON.stringify(basePlan));
   let currentPlan = clonePlan();
 
-  let keyLevels = parseNamedLevels(params.get('levels'));
-  if ((!keyLevels || !keyLevels.length) && planLayers && Array.isArray(planLayers.levels)) {
-    keyLevels = planLayers.levels
-      .map((item) => {
-        if (!item || !Number.isFinite(item.price)) return null;
-        return { price: Number(item.price), label: item.label || null };
-      })
-      .filter(Boolean);
-  }
-  if (planZones.length) {
-    planZones.forEach((zone, index) => {
-      if (!zone || (!Number.isFinite(zone.high) && !Number.isFinite(zone.low))) {
-        return;
-      }
-      const baseLabel = zone.label || zone.kind || `Zone ${index + 1}`;
-      if (Number.isFinite(zone.high)) {
-        keyLevels.push({ price: Number(zone.high), label: `${baseLabel} High` });
-      }
-      if (Number.isFinite(zone.low)) {
-        keyLevels.push({ price: Number(zone.low), label: `${baseLabel} Low` });
-      }
-    });
-  }
+  const collectInitialLevels = () => {
+    const collected = [];
+    const fromParams = parseNamedLevels(params.get('levels'));
+    if (Array.isArray(fromParams) && fromParams.length) {
+      fromParams.forEach((item) => {
+        if (!item || !Number.isFinite(item.price)) return;
+        collected.push({ price: Number(item.price), label: item.label || null });
+      });
+    }
+    if (planLayers && Array.isArray(planLayers.levels)) {
+      planLayers.levels.forEach((item) => {
+        if (!item || !Number.isFinite(item.price)) return;
+        collected.push({ price: Number(item.price), label: item.label || null });
+      });
+    }
+    if (planZones.length) {
+      planZones.forEach((zone, index) => {
+        if (!zone || (!Number.isFinite(zone.high) && !Number.isFinite(zone.low))) {
+          return;
+        }
+        const baseLabel = zone.label || zone.kind || `Zone ${index + 1}`;
+        if (Number.isFinite(zone.high)) {
+          collected.push({ price: Number(zone.high), label: `${baseLabel} High` });
+        }
+        if (Number.isFinite(zone.low)) {
+          collected.push({ price: Number(zone.low), label: `${baseLabel} Low` });
+        }
+      });
+    }
+    const keyLevelSource = mergedPlanMeta.key_levels;
+    if (Array.isArray(keyLevelSource)) {
+      keyLevelSource.forEach((item) => {
+        if (!item || !Number.isFinite(item.price)) return;
+        const label = typeof item.label === 'string' && item.label.trim() ? item.label.trim() : null;
+        collected.push({ price: Number(item.price), label });
+      });
+    } else if (keyLevelSource && typeof keyLevelSource === 'object') {
+      Object.entries(keyLevelSource).forEach(([name, value]) => {
+        const numeric = toNumber(value);
+        if (!Number.isFinite(numeric)) return;
+        const label = name
+          .replace(/_/g, ' ')
+          .replace(/\b([a-z])/g, (match) => match.toUpperCase());
+        collected.push({ price: numeric, label });
+      });
+    }
+    return dedupeLevels(collected);
+  };
 
   const paramConfidence = parseNumber(params.get('confidence'));
   const mergedPlanMeta = {
@@ -203,39 +243,26 @@
     key_levels: planMeta.key_levels || null,
   };
 
-  if ((!keyLevels || !keyLevels.length) && mergedPlanMeta.key_levels) {
-    keyLevels = Object.entries(mergedPlanMeta.key_levels)
-      .map(([name, value]) => {
-        const numeric = toNumber(value);
-        if (!Number.isFinite(numeric)) return null;
-        const label = name
-          .replace(/_/g, ' ')
-          .replace(/\b([a-z])/g, (match) => match.toUpperCase());
-        return { price: numeric, label };
-      })
-      .filter(Boolean);
-  }
-  const dedupedLevels = [];
-  const levelSet = new Set();
-  (keyLevels || []).forEach((item) => {
-    if (!item || !Number.isFinite(item.price)) return;
-    const token = `${item.label || ''}:${item.price.toFixed(4)}`;
-    if (levelSet.has(token)) return;
-    levelSet.add(token);
-    dedupedLevels.push(item);
-  });
-  keyLevels = dedupedLevels;
+  allKeyLevels = collectInitialLevels();
+  showAllLevels = false;
+  setLevelGroupsFromMeta(planLayersMeta, allKeyLevels, { silent: true });
 
   const dataSourceRaw = (params.get('data_source') || '').trim();
   const dataModeToken = (params.get('data_mode') || '').trim().toLowerCase();
   const dataAgeMsParam = Number(params.get('data_age_ms') || '');
   const lastUpdateRaw = (params.get('last_update') || '').trim();
   const STALE_FEED_THRESHOLD_MS = 120000;
-  const LIVE_STALE_THRESHOLD_MS = 15000;
+  const STREAM_GOOD_THRESHOLD_MS = 15000;
+  const STREAM_WARN_THRESHOLD_MS = 60000;
+  let dataLastUpdateDate = parseIsoDate(lastUpdateRaw);
   let dataAgeMs = Number.isFinite(dataAgeMsParam) ? dataAgeMsParam : null;
+  let lastHeartbeatMs = dataLastUpdateDate ? dataLastUpdateDate.getTime() : null;
+  let followLive = true;
+  let suppressFollowDetection = false;
   const isFeedDegraded = () =>
     dataModeToken === 'degraded' || (Number.isFinite(dataAgeMs) && dataAgeMs > STALE_FEED_THRESHOLD_MS);
   let lastDegradedState = isFeedDegraded();
+  let streamingStatusState = dataLastUpdateDate ? (dataAgeMs !== null && dataAgeMs > STREAM_WARN_THRESHOLD_MS ? 'stale' : dataAgeMs > STREAM_GOOD_THRESHOLD_MS ? 'warn' : 'good') : 'idle';
 
   const focusToken = (params.get('focus') || '').toLowerCase();
   const centerTimeParamRaw = params.get('center_time');
@@ -257,11 +284,15 @@
   const headerMarketEl = document.getElementById('header_market');
   const headerLastUpdateEl = document.getElementById('header_lastupdate');
   const headerDataSourceEl = document.getElementById('header_datasource');
+  const streamingStatusEl = document.getElementById('streaming_status');
+  const followLiveToggleEl = document.getElementById('follow_live_toggle');
+  const levelsToggleEl = document.getElementById('levels_toggle');
   const planStatusNoteEl = document.getElementById('plan_status_note');
   const timeframeSwitcherEl = document.getElementById('timeframe_switcher');
   const planPanelEl = document.getElementById('plan_panel');
   const planPanelBodyEl = document.getElementById('plan_panel_body');
   const debugEl = document.getElementById('debug_banner');
+  const toastContainerEl = document.getElementById('toast_container');
 
   const headerSymbolMetaEl = (() => {
     if (!headerSymbolEl) return null;
@@ -275,7 +306,8 @@
   })();
 
   const planLogEntries = [];
-  const PLAN_LOG_LIMIT = 60;
+  const PLAN_LOG_LIMIT = 50;
+  const PLAN_LOG_VISIBLE_LIMIT = 5;
   let planLogListEl = null;
   let planLogEmptyEl = null;
 
@@ -358,6 +390,90 @@
     return Number.isNaN(date.getTime()) ? null : date;
   };
 
+  function dedupeLevels(levels) {
+    if (!Array.isArray(levels)) return [];
+    const seen = new Set();
+    const result = [];
+    levels.forEach((item) => {
+      if (!item || !Number.isFinite(item.price)) return;
+      const label = typeof item.label === 'string' && item.label.trim() ? item.label.trim() : null;
+      const token = `${label || ''}:${Number(item.price).toFixed(4)}`;
+      if (seen.has(token)) return;
+      seen.add(token);
+      result.push({ price: Number(item.price), label });
+    });
+    return result;
+  }
+
+  function sanitizeLevelList(levels) {
+    if (!Array.isArray(levels)) return [];
+    return dedupeLevels(
+      levels
+        .map((item) => {
+          if (!item) return null;
+          if (Number.isFinite(item.price)) {
+            return { price: Number(item.price), label: item.label || null };
+          }
+          if (Number.isFinite(item.level)) {
+            return { price: Number(item.level), label: item.label || null };
+          }
+          return null;
+        })
+        .filter(Boolean),
+    );
+  }
+
+  function setLevelGroups(primary, supplemental, { silent = false } = {}) {
+    levelGroups = {
+      primary: dedupeLevels(primary),
+      supplemental: dedupeLevels(supplemental),
+    };
+    updateLevelVisibility({ silent });
+  }
+
+  function setLevelGroupsFromMeta(meta, fallbackLevels, { silent = false } = {}) {
+    const fallback = dedupeLevels(Array.isArray(fallbackLevels) ? fallbackLevels : []);
+    const metaGroups = (meta && meta.level_groups) || {};
+    let primary = sanitizeLevelList(metaGroups.primary);
+    let supplemental = sanitizeLevelList(metaGroups.supplemental);
+    if (!primary.length && fallback.length) {
+      primary = fallback.slice(0, MAX_PRIMARY_LEVELS);
+    }
+    if (!supplemental.length && fallback.length) {
+      const start = primary.length;
+      supplemental = fallback.slice(start, fallback.length);
+    }
+    setLevelGroups(primary, supplemental, { silent });
+  }
+
+  function updateLevelVisibility({ silent = false } = {}) {
+    const combined = showAllLevels
+      ? [...levelGroups.primary, ...levelGroups.supplemental]
+      : [...levelGroups.primary];
+    keyLevels = dedupeLevels(combined);
+    updateLevelsToggleUi();
+    if (!silent) {
+      refreshLevelLines();
+    }
+  }
+
+  function updateLevelsToggleUi() {
+    if (!levelsToggleEl) return;
+    if (!levelGroups.supplemental.length) {
+      levelsToggleEl.disabled = true;
+      levelsToggleEl.classList.remove('levels-toggle--active');
+      levelsToggleEl.setAttribute('aria-pressed', 'false');
+      levelsToggleEl.textContent = 'Show more levels';
+      levelsToggleEl.title = 'Additional levels unavailable';
+      return;
+    }
+    levelsToggleEl.disabled = false;
+    levelsToggleEl.classList.toggle('levels-toggle--active', showAllLevels);
+    levelsToggleEl.setAttribute('aria-pressed', showAllLevels ? 'true' : 'false');
+    levelsToggleEl.textContent = showAllLevels ? 'Hide extra levels' : 'Show more levels';
+    levelsToggleEl.title = showAllLevels ? 'Hide supplemental chart levels' : 'Display supplemental chart levels';
+  }
+
   const etDateFormatter = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     month: 'short',
@@ -388,9 +504,6 @@
     const days = Math.round(hours / 24);
     return `${days}d`;
   };
-
-  let dataLastUpdateDate = parseIsoDate(lastUpdateRaw);
-
   const friendlySourceLabel = (token) => {
     const normalized = (token || '').trim().toLowerCase();
     if (!normalized) return '';
@@ -484,6 +597,14 @@
     const raw = String(message).trim();
     if (!raw) return;
     const ts = Number.isFinite(timestampSeconds) ? Number(timestampSeconds) : Math.floor(Date.now() / 1000);
+    if (planLogEntries.length && planLogEntries[0].message === raw && planLogEntries[0].severity === severity) {
+      // Avoid spamming identical consecutive lines.
+      return;
+    }
+    const duplicateIndex = planLogEntries.findIndex((entry) => entry.message === raw);
+    if (duplicateIndex !== -1) {
+      planLogEntries.splice(duplicateIndex, 1);
+    }
     planLogEntries.unshift({ message: raw, ts, severity });
     if (planLogEntries.length > PLAN_LOG_LIMIT) {
       planLogEntries.length = PLAN_LOG_LIMIT;
@@ -491,37 +612,178 @@
     renderPlanLog();
   };
 
+  const showToast = (message, { tone = 'success', duration = 3200 } = {}) => {
+    if (!toastContainerEl || !message) return;
+    const toast = document.createElement('div');
+    toast.className = `toast ${tone === 'warn' ? 'toast--warn' : 'toast--success'}`;
+    toast.textContent = message;
+    toastContainerEl.appendChild(toast);
+    window.setTimeout(() => {
+      toast.classList.add('toast--hide');
+      window.setTimeout(() => {
+        if (toast.parentElement === toastContainerEl) {
+          toastContainerEl.removeChild(toast);
+        }
+      }, 320);
+    }, Math.max(1200, duration));
+  };
+
+  const updateFollowLiveToggle = () => {
+    if (!followLiveToggleEl) return;
+    followLiveToggleEl.classList.toggle('follow-toggle--active', followLive);
+    followLiveToggleEl.setAttribute('aria-pressed', followLive ? 'true' : 'false');
+    followLiveToggleEl.title = followLive ? 'Auto-scroll to latest bar' : 'Auto-scroll paused — click to resume';
+  };
+
+  const setFollowLiveState = (value, { scroll = true } = {}) => {
+    const next = Boolean(value);
+    if (followLive === next) return;
+    followLive = next;
+    updateFollowLiveToggle();
+    if (followLive && scroll) {
+      ensureScrollToRealTime();
+    }
+  };
+
+  const pauseFollowLive = () => {
+    if (!followLive) return;
+    followLive = false;
+    updateFollowLiveToggle();
+  };
+
+  const updateAutoRearmToggle = () => {
+    const btn = document.getElementById('auto_rearm_toggle');
+    if (!btn) return;
+    if (autoRearmEnabled) {
+      btn.classList.add('plan-replay__button--active');
+      btn.setAttribute('aria-pressed', 'true');
+      btn.textContent = 'Auto Rearm: On';
+      btn.title = 'Automatically reload the next plan when it becomes available';
+    } else {
+      btn.classList.remove('plan-replay__button--active');
+      btn.setAttribute('aria-pressed', 'false');
+      btn.textContent = 'Auto Rearm: Off';
+      btn.title = 'Leave auto reload off — you will see a prompt when a new plan is ready';
+    }
+  };
+
+  const setAutoRearmEnabled = (value) => {
+    autoRearmEnabled = Boolean(value);
+    try {
+      window.localStorage.setItem(AUTO_REARM_STORAGE_KEY, autoRearmEnabled ? '1' : '0');
+    } catch {
+      // ignore storage errors
+    }
+    updateAutoRearmToggle();
+    if (autoRearmEnabled && pendingAutoReplan && !autoReplanInFlight) {
+      adoptPendingReplan({ viaAuto: true });
+    }
+  };
+
+  const renderAutoReplanBanner = () => {
+    const section = document.getElementById('auto_replan_section');
+    const messageEl = document.getElementById('auto_replan_message');
+    const applyBtn = document.getElementById('auto_replan_apply');
+    if (!section || !messageEl || !applyBtn) return;
+    if (!pendingAutoReplan) {
+      section.hidden = true;
+      applyBtn.disabled = true;
+      return;
+    }
+    section.hidden = false;
+    const note = pendingAutoReplan.note ? ` — ${escapeHtml(String(pendingAutoReplan.note))}` : '';
+    messageEl.innerHTML = `Next plan ${escapeHtml(String(pendingAutoReplan.planId))}${note}`;
+    applyBtn.disabled = autoReplanInFlight;
+  };
+
+  const adoptPendingReplan = async ({ viaAuto = false } = {}) => {
+    if (!pendingAutoReplan || autoReplanInFlight) return;
+    autoReplanInFlight = true;
+    renderAutoReplanBanner();
+    try {
+      if (!viaAuto) {
+        pauseFollowLive();
+      }
+      const payload = await fetchPlanIdea(pendingAutoReplan.planId);
+      await applyPlanSnapshot(payload, {
+        logMessage: viaAuto ? 'Auto replan applied.' : 'Next plan loaded.',
+        fallbackPlanId: pendingAutoReplan.planId,
+        fallbackPlanVersion: pendingAutoReplan.planVersion,
+      });
+      pendingAutoReplan = null;
+      renderAutoReplanBanner();
+      showToast(viaAuto ? 'Auto replan applied.' : 'Plan reloaded.');
+    } catch (error) {
+      console.error('Auto replan adoption failed', error);
+      showToast('Failed to load next plan', { tone: 'warn' });
+    } finally {
+      autoReplanInFlight = false;
+      renderAutoReplanBanner();
+    }
+  };
+
+  const streamingStateForAge = (ageMs) => {
+    if (ageMs === null || ageMs === undefined) {
+      return dataLastUpdateDate ? 'warn' : 'idle';
+    }
+    if (ageMs <= STREAM_GOOD_THRESHOLD_MS) return 'good';
+    if (ageMs <= STREAM_WARN_THRESHOLD_MS) return 'warn';
+    return 'stale';
+  };
+
+  const applyStreamingStatus = () => {
+    if (!streamingStatusEl) return;
+    const age = dataLastUpdateDate ? (Number.isFinite(dataAgeMs) ? dataAgeMs : Date.now() - dataLastUpdateDate.getTime()) : null;
+    const nextState = dataLastUpdateDate ? streamingStateForAge(age) : 'idle';
+    streamingStatusState = nextState;
+    streamingStatusEl.classList.remove('streaming-pill--idle', 'streaming-pill--good', 'streaming-pill--warn', 'streaming-pill--stale');
+    streamingStatusEl.classList.add(`streaming-pill--${nextState}`);
+    let title = 'Awaiting first heartbeat';
+    if (dataLastUpdateDate) {
+      const rel = Number.isFinite(age) ? formatRelativeDuration(age) : '';
+      const statusLabel =
+        nextState === 'good'
+          ? 'Heartbeat fresh'
+          : nextState === 'warn'
+            ? 'Heartbeat delayed'
+            : nextState === 'stale'
+              ? 'Heartbeat stale'
+              : 'Awaiting stream';
+      const parts = [statusLabel];
+      if (rel) parts.push(`${rel} ago`);
+      if (dataSourceRaw) parts.push(`Source ${friendlySourceLabel(dataSourceRaw)}`);
+      title = parts.join(' · ');
+    }
+    streamingStatusEl.title = title;
+    streamingStatusEl.setAttribute('aria-label', title);
+  };
+
   const setDataLastUpdate = (timestampSeconds) => {
     if (!Number.isFinite(timestampSeconds)) return;
     dataLastUpdateDate = new Date(timestampSeconds * 1000);
+    lastHeartbeatMs = dataLastUpdateDate.getTime();
     dataAgeMs = 0;
     const degraded = isFeedDegraded();
     if (degraded !== lastDegradedState) {
       lastDegradedState = degraded;
       applyMarketStatus(currentMarketPhase || 'closed');
     }
+    streamingStatusState = 'good';
     updateDataMetadata();
   };
 
   const updateDataMetadata = () => {
     if (headerLastUpdateEl) {
-      const parts = [];
-      const nowEt = etClockFormatter.format(new Date());
-      parts.push(`Live ${nowEt} ET`);
-      if (dataLastUpdateDate) {
+      if (!dataLastUpdateDate) {
+        headerLastUpdateEl.textContent = 'Awaiting first heartbeat';
+        headerLastUpdateEl.classList.remove('plan-header__meta--alert');
+      } else {
         const age = Number.isFinite(dataAgeMs) ? dataAgeMs : Date.now() - dataLastUpdateDate.getTime();
         const rel = Number.isFinite(age) ? formatRelativeDuration(age) : '';
         const formatted = etDateFormatter.format(dataLastUpdateDate);
-        parts.push(`Last update ${formatted} ET${rel ? ` (${rel} ago)` : ''}`);
-        if (Number.isFinite(age) && age > LIVE_STALE_THRESHOLD_MS) {
-          parts.push('⚠️ Streaming paused');
-        }
-      } else {
-        parts.push('Awaiting first tick');
+        headerLastUpdateEl.textContent = `Last update ${formatted} ET${rel ? ` (${rel} ago)` : ''}`;
+        headerLastUpdateEl.classList.toggle('plan-header__meta--alert', streamingStatusState === 'stale');
       }
-      headerLastUpdateEl.textContent = parts.join(' · ');
-      const stale = dataLastUpdateDate && Date.now() - dataLastUpdateDate.getTime() > LIVE_STALE_THRESHOLD_MS;
-      headerLastUpdateEl.classList.toggle('plan-header__meta--alert', Boolean(stale));
     }
     if (headerDataSourceEl) {
       const sourceLabel = friendlySourceLabel(dataSourceRaw);
@@ -532,6 +794,7 @@
       headerDataSourceEl.textContent = parts.join(' · ');
       headerDataSourceEl.classList.toggle('plan-header__meta--alert', degraded);
     }
+    applyStreamingStatus();
   };
 
   const isAlertSeverity = (token) => {
@@ -541,6 +804,21 @@
   };
 
   updateDataMetadata();
+  updateFollowLiveToggle();
+
+  if (followLiveToggleEl) {
+    followLiveToggleEl.addEventListener('click', () => {
+      setFollowLiveState(!followLive, { scroll: !followLive });
+    });
+  }
+
+  if (levelsToggleEl) {
+    levelsToggleEl.addEventListener('click', () => {
+      if (!levelGroups.supplemental.length) return;
+      showAllLevels = !showAllLevels;
+      updateLevelVisibility();
+    });
+  }
 
   window.setInterval(() => {
     if (!dataLastUpdateDate) return;
@@ -643,8 +921,20 @@
   sessionOverlayEl = document.createElement('div');
   sessionOverlayEl.className = 'session-overlay';
   container.appendChild(sessionOverlayEl);
-  chart.timeScale().subscribeVisibleTimeRangeChange(() => {
+  chart.timeScale().subscribeVisibleTimeRangeChange((visibleRange) => {
     renderSessionBands();
+    if (suppressFollowDetection || !followLive) {
+      return;
+    }
+    if (!visibleRange || !latestCandleData.length) return;
+    const lastBar = latestCandleData[latestCandleData.length - 1];
+    if (!lastBar || !Number.isFinite(lastBar.time)) return;
+    const rangeTo = Number(visibleRange.to);
+    if (!Number.isFinite(rangeTo)) return;
+    const toleranceSeconds = Math.max(lastSecondsPerBar, 60);
+    if (rangeTo < lastBar.time - toleranceSeconds * 0.5) {
+      pauseFollowLive();
+    }
   });
 
   const candleSeries = chart.addCandlestickSeries({
@@ -1118,6 +1408,19 @@
       renderPlanPanel(lastKnownPrice);
       updatePlanPanelLastPrice(lastKnownPrice);
     }
+    if (changes.next_plan_id) {
+      pendingAutoReplan = {
+        planId: String(changes.next_plan_id).trim(),
+        planVersion: changes.next_plan_version ? String(changes.next_plan_version).trim() : null,
+        note: changes.note || null,
+      };
+      renderAutoReplanBanner();
+      if (autoRearmEnabled) {
+        adoptPendingReplan({ viaAuto: true });
+      } else {
+        showToast('Next plan ready — reload when you are set.');
+      }
+    }
     if (Number.isFinite(eventTs)) {
       setDataLastUpdate(eventTs);
     }
@@ -1212,6 +1515,14 @@
   };
 
   const priceLineMap = new Map();
+  const buildLevelLineId = (label, price) => {
+    const safeLabel = (label || '').trim().replace(/\s+/g, '_');
+    return `level:${safeLabel}:${Number(price).toFixed(4)}`;
+  };
+  const formatLevelLabel = (level, idx) => {
+    const label = typeof level.label === 'string' && level.label.trim() ? level.label.trim() : null;
+    return label || `Level ${idx + 1}`;
+  };
   const setPriceLine = (id, options) => {
     if (!Number.isFinite(options.price)) return;
     const existing = priceLineMap.get(id);
@@ -1226,6 +1537,32 @@
   const prunePriceLines = (activeIds) => {
     for (const [id, line] of priceLineMap.entries()) {
       if (!activeIds.has(id)) {
+        candleSeries.removePriceLine(line);
+        priceLineMap.delete(id);
+      }
+    }
+  };
+
+  const refreshLevelLines = () => {
+    if (!candleSeries) return;
+    const desiredIds = new Set();
+    [...keyLevels]
+      .filter((level) => Number.isFinite(level.price))
+      .sort((a, b) => b.price - a.price)
+      .forEach((level, idx) => {
+        const label = formatLevelLabel(level, idx);
+        const id = buildLevelLineId(label, level.price);
+        desiredIds.add(id);
+        setPriceLine(id, {
+          price: level.price,
+          color: '#94a3b8',
+          title: label,
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dotted,
+        });
+      });
+    for (const [id, line] of priceLineMap.entries()) {
+      if (id.startsWith('level:') && !desiredIds.has(id)) {
         candleSeries.removePriceLine(line);
         priceLineMap.delete(id);
       }
@@ -1568,6 +1905,7 @@
     })();
     const rrCopy = rrValue !== null && rrValue > 0 ? rrValue.toFixed(2) : rrFallback !== null ? rrFallback.toFixed(2) : '—';
     const runnerNote = mergedPlanMeta.runner && mergedPlanMeta.runner.note ? mergedPlanMeta.runner.note : null;
+    const quotesNotice = planLayersMeta.quotes_notice || mergedPlanMeta.quotes_notice || null;
 
     const lastPriceCopy = Number.isFinite(lastPrice) ? formatPrice(lastPrice) : '—';
     const replayMinutesValue = clampReplayMinutes(replayConfig.minutes);
@@ -1611,11 +1949,11 @@
           ${checklistHtml}
         </ul>
       </div>
-      ${
-        confluenceItems.length
-          ? `<div class="plan-panel__section">
-              <h3>Confluence</h3>
-              <ul class="plan-panel__confluence">
+      <div class="plan-panel__section">
+        <h3>Confluence</h3>
+        ${
+          confluenceItems.length
+            ? `<ul class="plan-panel__confluence">
                 ${confluenceItems
                   .map(
                     (item) =>
@@ -1629,10 +1967,22 @@
                       }"></span>${escapeHtml(item.label)}</li>`,
                   )
                   .join('')}
-              </ul>
-            </div>`
+              </ul>`
+            : '<p style="font-size:12px;color:rgba(148,163,184,0.7);margin:6px 0 0;">No confluence signals yet.</p>'
+        }
+      </div>
+      ${
+        quotesNotice
+          ? `<div class="plan-panel__section"><div class="plan-panel__notice plan-panel__notice--warn">${escapeHtml(quotesNotice)}</div></div>`
           : ''
       }
+      <div class="plan-panel__section auto-replan" id="auto_replan_section" hidden>
+        <h3>Next Plan Ready</h3>
+        <p id="auto_replan_message"></p>
+        <div class="auto-replan__cta">
+          <button type="button" class="plan-replay__button" id="auto_replan_apply">Reload Plan</button>
+        </div>
+      </div>
       <div class="plan-panel__section">
         <h3>Plan Log <span id="plan_log_indicator" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-left:6px;opacity:.6;"></span></h3>
         <ul class="plan-log" id="plan_log"></ul>
@@ -1687,6 +2037,11 @@
     planLogListEl = document.getElementById('plan_log');
     planLogEmptyEl = document.getElementById('plan_log_empty');
     renderPlanLog();
+    const autoReplanApplyBtn = document.getElementById('auto_replan_apply');
+    if (autoReplanApplyBtn) {
+      autoReplanApplyBtn.addEventListener('click', () => adoptPendingReplan({ viaAuto: false }));
+    }
+    renderAutoReplanBanner();
     if (!loggedInitialPlan) {
       const degraded = isFeedDegraded();
       const initialMessage = degraded
@@ -1707,12 +2062,17 @@
   };
 
   const ensureScrollToRealTime = () => {
-    if (isReplaying) return;
+    if (isReplaying || !followLive) return;
     try {
+      suppressFollowDetection = true;
       chart.timeScale().scrollToRealTime();
     } catch (error) {
-      // ignore
+      suppressFollowDetection = false;
+      return;
     }
+    window.requestAnimationFrame(() => {
+      suppressFollowDetection = false;
+    });
   };
 
   const updateRealtimeBar = (price, payload) => {
@@ -1790,6 +2150,8 @@
   // --- Scenario Plans (inline) ---
   const applyPlanResponse = (response, { logMessage } = {}) => {
     if (!response) return;
+    pendingAutoReplan = null;
+    renderAutoReplanBanner();
     const planBlock = response.plan || {};
     const structured = response.structured_plan || planBlock.structured_plan || null;
     const chartsParams = response.charts_params || (response.charts && response.charts.params) || {};
@@ -1876,35 +2238,11 @@
     planLayers = layersCandidate;
     planLayersMeta = (layersCandidate && layersCandidate.meta) || {};
     planZones = Array.isArray(layersCandidate?.zones) ? layersCandidate.zones : [];
-
-    const rebuildKeyLevels = () => {
-      if (Array.isArray(layersCandidate?.levels) && layersCandidate.levels.length) {
-        return layersCandidate.levels
-          .map((item) => {
-            if (!item || !Number.isFinite(item.price)) return null;
-            return { price: Number(item.price), label: item.label || null };
-          })
-          .filter(Boolean);
-      }
-      const sourceLevels = planBlock.key_levels || response.key_levels || mergedPlanMeta.key_levels || {};
-      if (sourceLevels && typeof sourceLevels === 'object') {
-        return Object.entries(sourceLevels)
-          .map(([label, value]) => {
-            const numeric = toNumber(value);
-            if (!Number.isFinite(numeric)) return null;
-            return {
-              price: numeric,
-              label: label
-                .replace(/_/g, ' ')
-                .replace(/\b([a-z])/g, (match) => match.toUpperCase()),
-            };
-          })
-          .filter(Boolean);
-      }
-      return keyLevels;
-    };
-    keyLevels = rebuildKeyLevels();
-    mergedPlanMeta.key_levels = keyLevels;
+    mergedPlanMeta.quotes_notice = planLayersMeta.quotes_notice || null;
+    allKeyLevels = collectInitialLevels();
+    mergedPlanMeta.key_levels = planBlock.key_levels || response.key_levels || mergedPlanMeta.key_levels;
+    showAllLevels = false;
+    setLevelGroupsFromMeta(planLayersMeta, allKeyLevels);
 
     setOrDeleteParam('style', styleToken);
     setOrDeleteParam('direction', directionToken);
@@ -1933,6 +2271,10 @@
 
     renderPlanPanel(lastKnownPrice);
     applyPlanStatus('intact', notesCandidate || latestPlanNote, planBlock.next_step || 'hold_plan', rrValue);
+
+    const nextPlanId = planBlock.plan_id || response.plan_id || currentPlanId;
+    const nextPlanVersion = planBlock.version || response.version || currentPlanVersion;
+    return { planId: nextPlanId, planVersion: nextPlanVersion };
   };
 
   const scenarioConfig = { style: 'intraday', baseStyle: 'intraday', busy: false };
@@ -1940,6 +2282,24 @@
   scenarioConfig.style = scenarioConfig.baseStyle;
   let scenarioOverlayData = null; // { entry, stop, tps[], label, plan_id, plan_version, levels, zones }
   const scenarioLineIds = new Set();
+
+  const fetchPlanIdea = async (planId) => {
+    const resp = await fetch(`${baseUrl}/idea/${encodeURIComponent(planId)}`, { cache: 'no-store' });
+    if (!resp.ok) {
+      throw new Error(`Snapshot unavailable (${resp.status})`);
+    }
+    return resp.json();
+  };
+
+  const applyPlanSnapshot = async (payload, { logMessage, fallbackPlanId, fallbackPlanVersion } = {}) => {
+    const result = applyPlanResponse(payload, { logMessage }) || {};
+    const appliedPlanId = result.planId || fallbackPlanId || currentPlanId;
+    const appliedPlanVersion = result.planVersion || fallbackPlanVersion || currentPlanVersion;
+    setCurrentPlanId(appliedPlanId, appliedPlanVersion);
+    await loadTickerInsights(appliedPlanId);
+    await fetchBars();
+    return { planId: appliedPlanId, planVersion: appliedPlanVersion };
+  };
 
   const setScenarioStatus = (message, isError = false) => {
     const el = document.getElementById('scenario_status');
@@ -2121,20 +2481,25 @@
 
   const adoptScenario = async (adoptBtn, clearBtn, setActiveFn) => {
     if (!scenarioOverlayData || !scenarioOverlayData.plan_id) return;
+    pauseFollowLive();
     setScenarioStatus('Adopting scenario…');
     try {
-      let payload = scenarioOverlayData.snapshot;
-      if (!payload) {
-        const resp = await fetch(`${baseUrl}/idea/${encodeURIComponent(scenarioOverlayData.plan_id)}`, { cache: 'no-store' });
-        if (!resp.ok) {
-          throw new Error(`Snapshot unavailable (${resp.status})`);
+      let payload;
+      try {
+        payload = await fetchPlanIdea(scenarioOverlayData.plan_id);
+      } catch (ideaError) {
+        if (scenarioOverlayData.snapshot) {
+          payload = scenarioOverlayData.snapshot;
+        } else {
+          throw ideaError;
         }
-        payload = await resp.json();
       }
-      applyPlanResponse(payload, { logMessage: scenarioOverlayData.label ? `${scenarioOverlayData.label} adopted.` : 'Scenario adopted.' });
-      const nextPlanId = payload.plan_id || scenarioOverlayData.plan_id;
-      const nextPlanVersion = payload.version || scenarioOverlayData.plan_version;
-      setCurrentPlanId(nextPlanId, nextPlanVersion);
+      const logMessage = scenarioOverlayData.label ? `${scenarioOverlayData.label} adopted.` : 'Scenario adopted.';
+      const applied = await applyPlanSnapshot(payload, {
+        logMessage,
+        fallbackPlanId: scenarioOverlayData.plan_id,
+        fallbackPlanVersion: scenarioOverlayData.plan_version,
+      });
       scenarioConfig.baseStyle = (mergedPlanMeta.style || '').toLowerCase();
       scenarioConfig.style = scenarioConfig.baseStyle;
       scenarioOverlayData = null;
@@ -2143,12 +2508,12 @@
       if (clearBtn) clearBtn.disabled = true;
       if (typeof setActiveFn === 'function') setActiveFn(scenarioConfig.baseStyle);
       chart.priceScale('right').applyOptions({ autoScale: true });
-      await loadTickerInsights(nextPlanId);
-      await fetchBars();
+      showToast('Scenario adopted — live updates active.');
       setScenarioStatus('Scenario adopted — live updates active.');
     } catch (error) {
       console.error('Scenario adoption failed', error);
       setScenarioStatus(error instanceof Error ? `Adoption failed: ${error.message}` : 'Adoption failed.', true);
+      showToast('Scenario adoption failed', { tone: 'warn' });
     }
   };
 
@@ -2219,6 +2584,12 @@
     }
     container.appendChild(adoptBtn);
     container.appendChild(clearBtn);
+    const autoRearmBtn = document.createElement('button');
+    autoRearmBtn.id = 'auto_rearm_toggle';
+    autoRearmBtn.type = 'button';
+    autoRearmBtn.className = 'plan-replay__button';
+    autoRearmBtn.setAttribute('aria-pressed', autoRearmEnabled ? 'true' : 'false');
+    container.appendChild(autoRearmBtn);
     adoptBtn.addEventListener('click', () => {
       adoptScenario(adoptBtn, clearBtn, setActive);
     });
@@ -2229,6 +2600,9 @@
       adoptBtn.disabled = true;
       clearBtn.disabled = true;
       chart.priceScale('right').applyOptions({ autoScale: true });
+    });
+    autoRearmBtn.addEventListener('click', () => {
+      setAutoRearmEnabled(!autoRearmEnabled);
     });
     const styleToHighlight = overlayActive ? scenarioConfig.style : scenarioConfig.baseStyle;
     setActive(styleToHighlight);
@@ -2241,6 +2615,7 @@
       clearBtn.disabled = true;
       setScenarioStatus('Select a style to generate a scenario overlay.');
     }
+    updateAutoRearmToggle();
   };
 
   const loadTickerInsights = async (planId = currentPlanId) => {
@@ -2903,9 +3278,9 @@
         .filter((level) => Number.isFinite(level.price))
         .sort((a, b) => b.price - a.price)
         .forEach((level, idx) => {
-          const label = level.label ? level.label : `Level ${idx + 1}`;
-          const key = `level:${label}:${level.price.toFixed(4)}`;
-          registerLine(key, {
+          const label = formatLevelLabel(level, idx);
+          const id = buildLevelLineId(label, level.price);
+          registerLine(id, {
             price: level.price,
             color: '#94a3b8',
             title: label,

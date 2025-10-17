@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .precision import get_price_precision
 
@@ -54,6 +54,38 @@ def _build_zone_items(zones: Iterable[Dict[str, Any]] | None, kind: str, *, prec
     return payload
 
 
+def _level_priority(level: Dict[str, Any]) -> int:
+    label = str(level.get("label") or "").lower()
+    if not label:
+        return 10
+    if any(token in label for token in ("opening", "open range", "orh", "orl")):
+        return 95
+    if "vwap" in label:
+        return 90
+    if any(token in label for token in ("session high", "session low", "day high", "day low", "intraday high", "intraday low")):
+        return 85
+    if any(token in label for token in ("vah", "val", "poc")):
+        return 80
+    if "volume" in label:
+        return 70
+    if any(token in label for token in ("supply", "demand")):
+        return 60
+    if any(token in label for token in ("weekly", "monthly")):
+        return 55
+    return 20
+
+
+def _split_level_groups(levels: List[Dict[str, Any]], *, max_primary: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if not levels:
+        return [], []
+    scored = [(idx, level, _level_priority(level)) for idx, level in enumerate(levels)]
+    scored.sort(key=lambda item: (item[2], -item[0]), reverse=True)
+    primary_indices = sorted(idx for idx, _, _ in scored[:max_primary])
+    primary = [dict(levels[idx]) for idx in primary_indices]
+    supplemental = [dict(level) for idx, level in enumerate(levels) if idx not in primary_indices]
+    return primary, supplemental
+
+
 def build_plan_layers(
     *,
     symbol: str,
@@ -81,6 +113,14 @@ def build_plan_layers(
 
     levels = _build_level_items(key_levels, precision=precision)
     layers["levels"] = levels
+
+    primary_levels, supplemental_levels = _split_level_groups(levels, max_primary=6)
+    layers["meta"] = {
+        "level_groups": {
+            "primary": primary_levels,
+            "supplemental": supplemental_levels,
+        }
+    }
 
     zones: List[Dict[str, Any]] = []
     if isinstance(overlays, dict):

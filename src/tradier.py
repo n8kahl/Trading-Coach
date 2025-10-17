@@ -27,7 +27,8 @@ class TradierConfig:
 
 _CACHE_TTL_SECONDS = 15.0
 _CHAIN_CACHE: Dict[Tuple[str, str | None], Tuple[float, pd.DataFrame]] = {}
-_QUOTE_CACHE: Dict[Tuple[str, ...], Tuple[float, Dict[str, Dict[str, Any]]]] = {}
+_QUOTE_CACHE: Dict[Tuple[str, ...], Tuple[float, Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]]] = {}
+_SANDBOX_NOTICE_LOGGED = False
 
 
 def _get_tradier_config() -> TradierConfig:
@@ -37,6 +38,10 @@ def _get_tradier_config() -> TradierConfig:
         raise TradierNotConfiguredError("Tradier API token is not configured.")
     base_url = settings.tradier_base_url.rstrip("/")
     return TradierConfig(token=token, base_url=base_url)
+
+
+def _is_sandbox_endpoint(config: TradierConfig) -> bool:
+    return "sandbox" in config.base_url.lower()
 
 
 async def _fetch_json(client: httpx.AsyncClient, url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -164,7 +169,7 @@ async def select_tradier_contract(symbol: str, prefer_delta: float | None = 0.5)
     }
 
 
-def _chunk_symbols(symbols: Iterable[str], size: int = 40) -> List[List[str]]:
+def _chunk_symbols(symbols: Iterable[str], size: int = 25) -> List[List[str]]:
     chunk: List[str] = []
     chunks: List[List[str]] = []
     for sym in symbols:
@@ -211,21 +216,32 @@ async def fetch_option_chain_cached(symbol: str, expiration: str | None = None) 
     return frame
 
 
-async def fetch_option_quotes(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+async def fetch_option_quotes(symbols: List[str]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
     cleaned = sorted({sym for sym in symbols if sym})
     if not cleaned:
-        return {}
+        return {}, {"mode": "empty"}
     key = tuple(cleaned)
     now = time.monotonic()
     cached = _QUOTE_CACHE.get(key)
     if cached and now - cached[0] < _CACHE_TTL_SECONDS:
-        return {k: dict(v) for k, v in cached[1].items()}
+        cached_quotes, cached_meta = cached[1]
+        return {k: dict(v) for k, v in cached_quotes.items()}, dict(cached_meta)
 
     config = _get_tradier_config()
     headers = {
         "Authorization": f"Bearer {config.token}",
         "Accept": "application/json",
     }
+    meta: Dict[str, Any] = {"mode": "production"}
+    if _is_sandbox_endpoint(config):
+        global _SANDBOX_NOTICE_LOGGED
+        if not _SANDBOX_NOTICE_LOGGED:
+            logger.info("Skipping Tradier quote lookup in sandbox mode.")
+            _SANDBOX_NOTICE_LOGGED = True
+        meta = {"mode": "sandbox", "notice": "sandbox_quotes_disabled"}
+        _QUOTE_CACHE[key] = (now, ({}, meta))
+        return {}, meta
+
     results: Dict[str, Dict[str, Any]] = {}
     async with httpx.AsyncClient(base_url=config.base_url, headers=headers, timeout=10.0) as client:
         for chunk in _chunk_symbols(cleaned):
@@ -249,5 +265,6 @@ async def fetch_option_quotes(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
                 if symbol:
                     results[symbol] = normalized
 
-    _QUOTE_CACHE[key] = (now, {k: dict(v) for k, v in results.items()})
-    return results
+    quoted_copy = {k: dict(v) for k, v in results.items()}
+    _QUOTE_CACHE[key] = (now, (quoted_copy, dict(meta)))
+    return quoted_copy, meta

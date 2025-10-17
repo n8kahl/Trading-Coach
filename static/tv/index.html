@@ -87,6 +87,92 @@
         display: none;
       }
 
+      .plan-header__controls {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .streaming-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 12px;
+        border-radius: 999px;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        border: 1px solid transparent;
+        background: rgba(148, 163, 184, 0.12);
+        color: rgba(226, 232, 240, 0.78);
+        transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+      }
+
+      .streaming-pill__dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+        background: currentColor;
+      }
+
+      .streaming-pill--good {
+        background: rgba(34, 197, 94, 0.18);
+        border-color: rgba(34, 197, 94, 0.4);
+        color: rgba(134, 239, 172, 0.95);
+      }
+
+      .streaming-pill--warn {
+        background: rgba(250, 204, 21, 0.18);
+        border-color: rgba(250, 204, 21, 0.4);
+        color: rgba(253, 230, 138, 0.95);
+      }
+
+      .streaming-pill--stale {
+        background: rgba(248, 113, 113, 0.16);
+        border-color: rgba(248, 113, 113, 0.4);
+        color: rgba(254, 202, 202, 0.95);
+      }
+
+      .streaming-pill--idle {
+        background: rgba(148, 163, 184, 0.12);
+        border-color: rgba(148, 163, 184, 0.3);
+        color: rgba(226, 232, 240, 0.7);
+      }
+
+      .follow-toggle,
+      .levels-toggle {
+        background: rgba(96, 165, 250, 0.12);
+        border: 1px solid rgba(96, 165, 250, 0.35);
+        color: rgba(219, 234, 254, 0.88);
+        padding: 6px 14px;
+        border-radius: 999px;
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+      }
+
+      .follow-toggle:hover,
+      .levels-toggle:hover {
+        background: rgba(96, 165, 250, 0.2);
+        border-color: rgba(96, 165, 250, 0.45);
+      }
+
+      .follow-toggle.follow-toggle--active {
+        background: rgba(34, 197, 94, 0.2);
+        border-color: rgba(34, 197, 94, 0.45);
+        color: rgba(187, 247, 208, 0.95);
+      }
+
+      .levels-toggle.levels-toggle--active {
+        background: rgba(129, 140, 248, 0.2);
+        border-color: rgba(129, 140, 248, 0.45);
+        color: rgba(199, 210, 254, 0.95);
+      }
+
       .status-pill {
         display: inline-flex;
         align-items: center;
@@ -304,6 +390,23 @@
         gap: 6px;
       }
 
+      .plan-panel__notice {
+        margin: 8px 0 0;
+        padding: 10px 14px;
+        border-radius: 12px;
+        font-size: 12px;
+        letter-spacing: 0.03em;
+        background: rgba(148, 163, 184, 0.12);
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        color: rgba(226, 232, 240, 0.88);
+      }
+
+      .plan-panel__notice--warn {
+        background: rgba(250, 204, 21, 0.16);
+        border-color: rgba(250, 204, 21, 0.4);
+        color: rgba(253, 230, 138, 0.95);
+      }
+
       .plan-log {
         list-style: none;
         margin: 0;
@@ -311,6 +414,8 @@
         display: flex;
         flex-direction: column;
         gap: 10px;
+        max-height: 190px;
+        overflow-y: auto;
       }
 
       .plan-log li {
@@ -422,6 +527,61 @@
         color: rgba(148, 163, 184, 0.78);
       }
 
+      .auto-replan {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .auto-replan__cta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .toast-container {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        z-index: 1000;
+        pointer-events: none;
+      }
+
+      .toast {
+        background: rgba(14, 165, 233, 0.18);
+        border: 1px solid rgba(59, 130, 246, 0.4);
+        color: rgba(191, 219, 254, 0.95);
+        padding: 10px 14px;
+        border-radius: 10px;
+        font-size: 13px;
+        letter-spacing: 0.02em;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45);
+        backdrop-filter: blur(12px);
+        transition: opacity 0.3s ease, transform 0.3s ease;
+        pointer-events: auto;
+      }
+
+      .toast--success {
+        background: rgba(34, 197, 94, 0.22);
+        border-color: rgba(34, 197, 94, 0.4);
+        color: rgba(220, 252, 231, 0.95);
+      }
+
+      .toast--warn {
+        background: rgba(250, 204, 21, 0.22);
+        border-color: rgba(250, 204, 21, 0.4);
+        color: rgba(254, 240, 138, 0.95);
+      }
+
+      .toast--hide {
+        opacity: 0;
+        transform: translateY(-10px);
+      }
+
       .chart-wrapper {
         position: relative;
         border-radius: 20px;
@@ -507,6 +667,9 @@
           align-items: flex-start;
           text-align: left;
         }
+        .plan-header__controls {
+          justify-content: flex-start;
+        }
         .timeframe-switcher {
           padding-inline: 16px;
         }
@@ -550,6 +713,24 @@
           <span id="header_planstatus" class="status-pill"></span>
           <span id="header_market" class="status-pill"></span>
         </div>
+        <div class="plan-header__controls">
+          <span
+            id="streaming_status"
+            class="streaming-pill streaming-pill--idle"
+            role="status"
+            aria-live="polite"
+            title="Awaiting first heartbeat"
+          >
+            <span class="streaming-pill__dot"></span>
+            Streaming Data
+          </span>
+          <button type="button" id="follow_live_toggle" class="follow-toggle follow-toggle--active" aria-pressed="true">
+            Follow Live
+          </button>
+          <button type="button" id="levels_toggle" class="levels-toggle" aria-pressed="false">
+            Show more levels
+          </button>
+        </div>
         <div class="plan-header__duration">
           <strong id="header_duration"></strong>
           <span id="header_lastprice"></span>
@@ -570,6 +751,7 @@
       </div>
     </div>
     <div id="debug_banner" class="debug-banner"></div>
+    <div id="toast_container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
     <script src="tradingview-init.js?v=20251116"></script>
   </body>
 </html>

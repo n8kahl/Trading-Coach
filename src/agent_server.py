@@ -90,7 +90,7 @@ from .db import (
     fetch_idea_snapshot as db_fetch_idea_snapshot,
     store_idea_snapshot as db_store_idea_snapshot,
 )
-from .data_sources import fetch_polygon_ohlcv
+from .data_sources import fetch_polygon_ohlcv, fetch_yahoo_ohlcv
 from .symbol_streamer import SymbolStreamCoordinator
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
@@ -1914,11 +1914,13 @@ def _is_stale_frame(frame: pd.DataFrame, timeframe: str) -> bool:
     now = pd.Timestamp.utcnow()
     age = now - last_ts
     tf = (timeframe or "5").lower()
-    if tf.isdigit():
-        return age > pd.Timedelta(hours=36)
+    if tf.endswith("m") or tf.isdigit():
+        return age > pd.Timedelta(minutes=15)
+    if tf.endswith("h"):
+        return age > pd.Timedelta(minutes=30)
     if tf in {"d", "1d", "day"}:
-        return age > pd.Timedelta(days=10)
-    return age > pd.Timedelta(days=10)
+        return age > pd.Timedelta(days=3)
+    return age > pd.Timedelta(days=7)
 
 
 async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None:
@@ -1942,6 +1944,22 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
 
     if fresh_polygon is not None:
         return fresh_polygon
+
+    # Attempt Yahoo fallback before returning stale Polygon data
+    for candidate in candidates:
+        try:
+            yahoo = await fetch_yahoo_ohlcv(candidate, timeframe)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Yahoo fetch failed for %s: %s", candidate, exc)
+            continue
+        if yahoo is None or yahoo.empty:
+            continue
+        if _is_stale_frame(yahoo, timeframe):
+            continue
+        yahoo_copy = yahoo.copy()
+        yahoo_copy.attrs["source"] = "yahoo"
+        logger.info("using yahoo fallback for %s", symbol)
+        return yahoo_copy
 
     if stale_polygon is not None:
         logger.warning("Polygon data is stale for %s; returning last known data.", symbol)
@@ -3000,6 +3018,10 @@ async def _auto_replan(symbol: str, style: Optional[str], origin_plan_id: str, e
             response.raise_for_status()
         data = response.json()
         new_plan_id = str(data.get("plan_id")) if isinstance(data, dict) else None
+        new_plan_version = data.get("version") if isinstance(data, dict) else None
+        new_plan_style = None
+        if isinstance(data, dict):
+            new_plan_style = data.get("style") or (data.get("plan") or {}).get("style")
         logger.info(
             "auto replan triggered",
             extra={"symbol": symbol, "style": style, "origin_plan_id": origin_plan_id, "exit_reason": exit_reason, "new_plan_id": new_plan_id},
@@ -3007,18 +3029,23 @@ async def _auto_replan(symbol: str, style: Optional[str], origin_plan_id: str, e
         if new_plan_id:
             note = f"Plan replanned ({style}) to {new_plan_id}." if exit_reason is None else f"Plan replanned after {exit_reason}; new plan {new_plan_id}."
             timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            changes: Dict[str, Any] = {
+                "status": "auto_replanned",
+                "note": note,
+                "next_plan_id": new_plan_id,
+                "timestamp": timestamp,
+            }
+            if new_plan_version is not None:
+                changes["next_plan_version"] = new_plan_version
+            if new_plan_style:
+                changes["next_plan_style"] = new_plan_style
             await _publish_stream_event(
                 symbol,
                 {
                     "t": "plan_delta",
                     "plan_id": origin_plan_id,
                     "version": 1,
-                    "changes": {
-                        "status": "auto_replanned",
-                        "note": note,
-                        "next_plan_id": new_plan_id,
-                        "timestamp": timestamp,
-                    },
+                    "changes": changes,
                     "reason": "auto_replan",
                 },
             )
@@ -5591,21 +5618,26 @@ async def gpt_plan(
             break
     if plan_layers is not None:
         meta = plan_layers.setdefault("meta", {})
-        if confidence_factors:
-            meta["confidence_factors"] = list(confidence_factors)
+        if not isinstance(meta.get("level_groups"), dict):
+            meta["level_groups"] = {"primary": [], "supplemental": []}
+        confidence_values = list(confidence_factors or meta.get("confidence_factors") or [])
+        meta["confidence_factors"] = confidence_values
         structured_confluence = None
         if structured_plan_payload and structured_plan_payload.get("confluence"):
             structured_confluence = list(structured_plan_payload.get("confluence") or [])
         elif snapped_names:
             structured_confluence = list(snapped_names)
-        if structured_confluence:
-            meta["confluence"] = structured_confluence
+        meta["confluence"] = list(structured_confluence or meta.get("confluence") or [])
         if feature_block:
             meta["features"] = {
                 key: value
                 for key, value in feature_block.items()
                 if isinstance(value, (bool, int, float, str))
             }
+        else:
+            meta.setdefault("features", {})
+        if isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
+            meta["quotes_notice"] = options_payload["quotes_notice"]
     calc_notes_output = calc_notes or None
     if calc_notes_output is not None and not calc_notes_output:
         calc_notes_output = None
@@ -6530,7 +6562,7 @@ async def gpt_contracts(
 
     # collect quotes for symbols present in the chain
     option_symbols = [str(sym) for sym in chain["symbol"].dropna().tolist()]
-    quotes = await fetch_option_quotes(option_symbols)
+    quotes, quotes_meta = await fetch_option_quotes(option_symbols)
 
     style = _normalize_contract_style(request_payload.style)
     filters = _prepare_contract_filters(request_payload, style)
@@ -6587,7 +6619,7 @@ async def gpt_contracts(
         except Exception:
             continue
 
-    return {
+    response_payload = {
         "symbol": symbol,
         "side": side,
         "style": style,
@@ -6598,6 +6630,14 @@ async def gpt_contracts(
         "alternatives": alternatives,
         "table": table_rows,
     }
+    if quotes_meta.get("notice"):
+        notice = quotes_meta.get("notice")
+        if notice == "sandbox_quotes_disabled":
+            response_payload["quotes_notice"] = "Sandbox quotes unavailable"
+        else:
+            response_payload["quotes_notice"] = str(notice)
+    response_payload["quotes_mode"] = quotes_meta.get("mode") or "unknown"
+    return response_payload
 
 
 @gpt.post("/chart-url", summary="Build a canonical chart URL from params", response_model=ChartLinks)

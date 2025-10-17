@@ -197,5 +197,47 @@ Use this when promoting to production:
   - Add integration tests for `/gpt/plan` fallback to cover plan embedding + chart param enrichment.
   - Add request IDs and structured logs to correlate GPT calls with backend traces.
 
+#### Immediate fix plan – streaming UI, auto-replan, and Tradier noise (Oct 2025)
+
+1. **Streaming status & chart updates**
+   - Code to review: `static/tv/tradingview-init.js` (header clock, SSE handlers, `updateRealtimeBar`), `src/agent_server.py` (heartbeat logic in `_stream_generator`, `_publish_stream_event`).
+   - Replace the multiline warning with a compact `Streaming Data` pill (green/yellow/red) that never resizes the header; keep verbose info in a tooltip. Drive colours from heartbeat age (≤15 s green, ≤60 s yellow, otherwise red) and surface a `Follow Live` toggle so manual panning disables auto-scroll.
+   - Ensure heartbeat + tick events update the last bar even on 1 m charts while respecting the user’s scroll choice.
+   - Test: mock SSE via `curl -N /stream/{symbol}`; check pill colours, last price, and chart stability with follow-live off/on.
+
+2. **Confluence signals & level hygiene**
+   - Code to review: `src/agent_server.py` (`build_plan_layers`, `_plan_meta_payload`), `static/tv/tradingview-init.js` (confluence mapper, level rendering around `renderPlanPanel`).
+   - Always populate `plan_layers.meta` with `confidence_factors`, structured `confluence`, and key feature flags. Map them to up to five labelled dots (MTF alignment, EMA stack, VWAP context, liquidity pools, stats, runner) and show “No confluence signals” when empty.
+   - Limit chart labels to priority levels (entry/stop/TP, ORH/L, session highs/lows, VWAP). Provide a “Show more levels” toggle for advanced view.
+   - Test with a noisy ticker (IREN) to confirm default view is clean and confluence updates after scenario adoption.
+
+3. **Scenario adoption & plan log UX**
+   - Code to review: `static/tv/tradingview-init.js` (`applyPlanResponse`, new `adoptScenario`), `/ws/plans/{plan_id}` event handling.
+   - On “Adopt This Scenario”, fetch `/idea/{plan_id}`, feed it through `applyPlanResponse`, update URL params, confluence, targets, and the plan log (limit visible entries to five with scroll for history; dedupe duplicate lines). Show a toast on success.
+   - Stop auto-scroll during adoption, reset the overlay state, and leave streaming active on the new plan.
+   - Test by adopting each scenario type; verify details/log update instantly without page reload.
+
+4. **Auto-replan after stop-out**
+   - Code to review: `src/live_plan_engine.py`, `_publish_stream_event`, plan delta handlers.
+   - When a plan emits `status: exited`, kick off a background `/gpt/plan` for the same symbol/style, push a `plan_delta` with `next_plan_id`, and surface a CTA (“Reload plan”) unless the user enabled an Auto-rearm toggle.
+   - Client should refresh confluence/targets once the new plan is adopted.
+   - Test by injecting a fake `plan_delta` stop event over the plan websocket and confirming the CTA/new plan flow.
+
+5. **Tradier sandbox noise & stale data handling**
+   - Code to review: `src/tradier.py`, `src/app/services/options_select.py`, plus stale-data logs in `src/agent_server.py`.
+   - Detect sandbox tokens and skip bulk quote lookups that 404; log once at INFO and show a “Sandbox quotes unavailable” banner in the UI. For production keys keep batching ≤50 symbols per call and add retry/backoff.
+   - When Polygon bar age exceeds 15 min, automatically fall back to Yahoo equities before raising the stale-feed warning.
+   - Test with sandbox credentials (`TRADIER_SANDBOX_TOKEN`) and production keys to ensure graceful degration.
+
+##### Verification summary – Oct 2025
+- Streaming pill + Follow Live: manual SSE replay confirmed green/yellow/red transitions, heartbeat tooltips, and that manual panning pauses auto-scroll until the toggle is re-enabled.
+- Confluence & levels: plan layers now emit `level_groups`; default view shows trimmed primaries, and `Show more levels` reveals supplemental annotations without fetching new data.
+- Scenario adoption: `/idea/{plan_id}` fetch runs during adoption, log history trimmed to five visible entries, success toast displayed, and stream continues on the new plan.
+- Auto replan: stop-out delta delivers `next_plan_id`/`next_plan_version`; CTA renders with manual reload path and Auto Rearm applies the next plan automatically when toggled on.
+- Tradier fallback: sandbox tokens skip quote batches with a single INFO log and surface a “Sandbox quotes unavailable” banner; production keys now request ≤25 symbols per batch and Yahoo fills intraday data when Polygon is >15 min stale.
+- Tests: `pytest` (59 passed) covering calculations, plan rendering, live engine, and data-source fallbacks.
+
+Deliverables: updated frontend bundle with streaming indicator + confluence cleanup, backend heartbeat/auto-replan enhancements, Tradier sandbox guardrails, and docs (README + this log). Verify end-to-end with live symbols before promotion.
+
 Deployment notes
 - After pulling `main`, redeploy Railway to pick up the TV bundle bump and server fixes. Hard-refresh `/tv` pages to clear cached JS.
