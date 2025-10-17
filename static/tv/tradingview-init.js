@@ -1366,38 +1366,70 @@
     })();
 
     const buildConfluence = () => {
-      const items = [];
-      const seenSources = new Set();
-      targetsMeta.forEach((meta) => {
-        if (!meta) return;
-        const source = (meta.source || meta.snap_tag || '').toString();
-        if (!source || seenSources.has(source)) return;
-        seenSources.add(source);
-        const prob = toNumber(meta.prob_touch);
-        const rr = toNumber(meta.rr);
-        let score = null;
-        if (prob !== null) score = prob;
-        else if (rr !== null) score = Math.min(Math.max(rr / 3, 0), 1);
-        let color = 'green';
-        if (score !== null) {
-          if (score >= 0.6) color = 'green';
-          else if (score >= 0.4) color = 'yellow';
+      const CATEGORY_RULES = [
+        { id: 'mtf', label: 'MTF Alignment', color: 'green', match: (tokens) => /mtf|multi-timeframe|htf/.test(tokens) },
+        { id: 'ema', label: 'EMA Stack', color: 'green', match: (tokens) => /ema|ma_align|crossover/.test(tokens) },
+        { id: 'vwap', label: 'VWAP Structure', color: 'green', match: (tokens) => /vwap|avwap|anchored/.test(tokens) },
+        { id: 'volume', label: 'Volume Profile', color: 'yellow', match: (tokens) => /volume|poc|vah|val/.test(tokens) },
+        { id: 'liquidity', label: 'Liquidity Pools', color: 'yellow', match: (tokens) => /liquidity|stoprun|liquidity_pool/.test(tokens) },
+        { id: 'fvg', label: 'Fair Value Gap', color: 'yellow', match: (tokens) => /fvg|imbalance/.test(tokens) },
+        { id: 'gamma', label: 'Gamma Magnet', color: 'yellow', match: (tokens) => /gamma|dealer|oi_wall/.test(tokens) },
+        { id: 'stats', label: 'Historical Stats', color: 'green', match: (tokens) => /stats|prob/.test(tokens) },
+        { id: 'trend', label: 'Trend Structure', color: 'green', match: (tokens) => /trend|structure/.test(tokens) },
+      ];
+      const colorPriority = { red: 0, yellow: 1, green: 2 };
+      const confluenceMap = new Map();
+
+      const scoreColor = (meta, baseColor) => {
+        let color = baseColor || 'green';
+        const prob = toNumber(meta?.prob_touch);
+        const rr = toNumber(meta?.rr);
+        if (prob !== null) {
+          if (prob >= 0.6) color = 'green';
+          else if (prob >= 0.4) color = 'yellow';
+          else color = 'red';
+        } else if (rr !== null) {
+          if (rr >= 2.0) color = 'green';
+          else if (rr >= 1.2) color = 'yellow';
           else color = 'red';
         }
-        const label = source
-          .replace(/_/g, ' ')
-          .replace(/\b([a-z])/g, (match) => match.toUpperCase());
-        items.push({ label, color });
+        if (meta?.optional) {
+          color = color === 'green' ? 'yellow' : color;
+        }
+        return color;
+      };
+
+      (targetsMeta || []).forEach((meta) => {
+        if (!meta) return;
+        const tokens = `${meta.source || ''} ${meta.snap_tag || ''}`.toLowerCase();
+        if (!tokens.trim()) return;
+        const rule = CATEGORY_RULES.find((candidate) => candidate.match(tokens));
+        if (!rule) return;
+        const color = scoreColor(meta, rule.color);
+        const current = confluenceMap.get(rule.id);
+        if (!current || colorPriority[color] > colorPriority[current.color]) {
+          confluenceMap.set(rule.id, { label: rule.label, color });
+        }
       });
-      if (mergedPlanMeta.bias) {
-        items.push({
-          label: `Trend ${mergedPlanMeta.bias.toString().toUpperCase()}`,
-          color: 'green',
-        });
+
+      const items = Array.from(confluenceMap.values());
+
+      if (!items.length) {
+        if (mergedPlanMeta.bias) {
+          items.push({ label: `Trend ${mergedPlanMeta.bias.toString().toUpperCase()}`, color: 'green' });
+        }
+        if (strategyLabel) {
+          const friendly = strategyLabel
+            .toString()
+            .replace(/_/g, ' ')
+            .replace(/\b([a-z])/g, (match) => match.toUpperCase());
+          items.push({ label: `Strategy ${friendly}`, color: 'green' });
+        }
+        if (mergedPlanMeta.runner) {
+          items.push({ label: 'Runner Active', color: 'green' });
+        }
       }
-      if (mergedPlanMeta.runner) {
-        items.push({ label: 'Runner active', color: 'green' });
-      }
+
       return items.slice(0, 5);
     };
 
@@ -1822,7 +1854,7 @@
     adoptBtn.id = 'scenario_adopt';
     adoptBtn.type = 'button';
     adoptBtn.className = 'plan-replay__button';
-    adoptBtn.textContent = 'Adopt as Live';
+    adoptBtn.textContent = 'Adopt This Scenario';
     adoptBtn.disabled = true;
     const clearBtn = document.createElement('button');
     clearBtn.id = 'scenario_clear';
@@ -1883,6 +1915,7 @@
     container.appendChild(clearBtn);
     adoptBtn.addEventListener('click', () => {
       if (!scenarioOverlayData || !scenarioOverlayData.plan_id) return;
+      setScenarioStatus('Adopting scenario…');
       const q = new URLSearchParams(window.location.search);
       q.set('plan_id', scenarioOverlayData.plan_id);
       if (scenarioOverlayData.plan_version) q.set('plan_version', scenarioOverlayData.plan_version);
