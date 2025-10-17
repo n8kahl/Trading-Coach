@@ -7207,12 +7207,28 @@ async def _rebuild_plan_layers(plan_id: str, snapshot: Dict[str, Any], request: 
     if not symbol:
         return None
 
+    logger.info(
+        "chart_layers_rebuild_start",
+        extra={"plan_id": plan_id, "symbol": symbol, "style": style},
+    )
     plan_request = PlanRequest(symbol=symbol, style=style, plan_id=plan_id)
     backfill_user = AuthedUser(user_id="layers_backfill")
     try:
         response = await gpt_plan(plan_request, request, backfill_user)
     except HTTPException:
+        logger.warning(
+            "chart_layers_rebuild_http_error",
+            extra={"plan_id": plan_id, "symbol": symbol},
+        )
         return None
+    logger.info(
+        "chart_layers_rebuild_success",
+        extra={
+            "plan_id": plan_id,
+            "symbol": symbol,
+            "has_layers": bool(response.plan_layers),
+        },
+    )
     return response.plan_layers
 
 
@@ -7237,6 +7253,15 @@ def _fallback_plan_layers(plan_block: Mapping[str, Any], plan_id: str, *, reason
         "status": reason,
         "notes": notes,
     }
+    logger.info(
+        "chart_layers_fallback",
+        extra={
+            "plan_id": plan_id,
+            "symbol": symbol or None,
+            "interval": interval,
+            "reason": reason,
+        },
+    )
     return {
         "plan_id": plan_id,
         "symbol": symbol or None,
@@ -7264,6 +7289,10 @@ async def chart_layers_endpoint(
     settings = get_settings()
     if not getattr(settings, "ff_layers_endpoint", False):
         raise HTTPException(status_code=404, detail="Plan layers unavailable")
+    logger.info(
+        "chart_layers_request",
+        extra={"plan_id": plan_id, "refresh": refresh},
+    )
     snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
     plan_block = snapshot.get("plan") or {}
     layers: Dict[str, Any] | None = plan_block.get("plan_layers") or snapshot.get("plan_layers")
@@ -7283,6 +7312,10 @@ async def chart_layers_endpoint(
                 )
                 layers = _fallback_plan_layers(plan_block, plan_id, reason="missing")
                 break
+            logger.info(
+                "plan_layers_missing_rebuilt",
+                extra={"plan_id": plan_id, "attempt": refreshed + 1},
+            )
             refreshed = True
             snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
             plan_block = snapshot.get("plan") or {}
@@ -7300,6 +7333,14 @@ async def chart_layers_endpoint(
                 snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
                 plan_block = snapshot.get("plan") or {}
                 layers = plan_block.get("plan_layers") or snapshot.get("plan_layers")
+                logger.info(
+                    "plan_layers_stale_rebuilt",
+                    extra={
+                        "plan_id": plan_id,
+                        "plan_as_of": plan_as_of,
+                        "layers_as_of": layers_as_of,
+                    },
+                )
                 continue
             logger.warning(
                 "plan_layers_asof_mismatch",
