@@ -211,6 +211,7 @@ See `docs/gpt_integration.md` for full schemas and sample payloads.
 | `/gpt/contracts` returns empty `best` | Liquidity filters removed everything. The service widens Δ by ±0.05 and DTE by ±2 once each; if it still returns empty there genuinely isn’t a liquid contract under the constraints. |
 | Chart missing plan bands | Ensure you pass `entry`, `stop`, and `tp` (comma separated) when calling `/gpt/chart-url`. The GPT should forward the plan payload (including `plan_id`) from `/gpt/scan`. |
 | Plan URLs stop working after restart | Configure `DB_URL`/`DATABASE_URL` with your Railway Postgres connection so plan/idea snapshots persist across deploys; otherwise the in-memory cache resets. |
+| `/tv` renders a blank chart | Confirm you are using the canonical link emitted by `/gpt/plan` (includes `plan_id` + `plan_version`) and review the viewer data flow in `docs/tv_data_flow.md`. Hard-refresh to pull the latest `tradingview-init.js`. |
 
 Deployment is currently handled by Railway (`nixpacks.toml` + `Procfile`). Logs will show cache hits (`cached=true`) and option snapshot warnings.
 
