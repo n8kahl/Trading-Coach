@@ -242,6 +242,8 @@
     expected_move: toNumber(planMeta.expected_move),
     horizon_minutes: toNumber(planMeta.horizon_minutes),
     key_levels: planMeta.key_levels || null,
+    confluence: Array.isArray(planMeta.confluence_tags) ? planMeta.confluence_tags : [],
+    confidence_factors: Array.isArray(planMeta.confidence_factors) ? planMeta.confidence_factors : [],
   };
 
   allKeyLevels = collectInitialLevels();
@@ -260,6 +262,7 @@
   let lastHeartbeatMs = dataLastUpdateDate ? dataLastUpdateDate.getTime() : null;
   let followLive = true;
   let suppressFollowDetection = false;
+  let forceAutoFocus = true;
   const isFeedDegraded = () =>
     dataModeToken === 'degraded' || (Number.isFinite(dataAgeMs) && dataAgeMs > STALE_FEED_THRESHOLD_MS);
   let lastDegradedState = isFeedDegraded();
@@ -2232,6 +2235,16 @@ levelsToggleEl = document.getElementById('levels_toggle');
       horizon_minutes: toNumber(response.horizon_minutes ?? mergedPlanMeta.horizon_minutes),
       warnings: Array.isArray(response.warnings) && response.warnings.length ? response.warnings : planBlock.warnings || [],
       strategy: strategyId,
+      confluence: Array.isArray(planBlock.confluence_tags)
+        ? planBlock.confluence_tags
+        : Array.isArray(response.confluence_tags)
+          ? response.confluence_tags
+          : mergedPlanMeta.confluence,
+      confidence_factors: Array.isArray(planBlock.confidence_factors)
+        ? planBlock.confidence_factors
+        : Array.isArray(response.confidence_factors)
+          ? response.confidence_factors
+          : mergedPlanMeta.confidence_factors,
     });
 
     const layersCandidate = planBlock.plan_layers || response.plan_layers || null;
@@ -2297,6 +2310,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
     const appliedPlanVersion = result.planVersion || fallbackPlanVersion || currentPlanVersion;
     setCurrentPlanId(appliedPlanId, appliedPlanVersion);
     await loadTickerInsights(appliedPlanId);
+    forceAutoFocus = true;
     await fetchBars();
     return { planId: appliedPlanId, planVersion: appliedPlanVersion };
   };
@@ -2480,24 +2494,31 @@ levelsToggleEl = document.getElementById('levels_toggle');
   };
 
   const adoptScenario = async (adoptBtn, clearBtn, setActiveFn) => {
-    if (!scenarioOverlayData || !scenarioOverlayData.plan_id) return;
+    if (!scenarioOverlayData) return;
     pauseFollowLive();
     setScenarioStatus('Adopting scenario…');
     try {
       let payload;
-      try {
-        payload = await fetchPlanIdea(scenarioOverlayData.plan_id);
-      } catch (ideaError) {
-        if (scenarioOverlayData.snapshot) {
-          payload = scenarioOverlayData.snapshot;
-        } else {
-          throw ideaError;
+      const overlayPlanId = scenarioOverlayData.plan_id ? String(scenarioOverlayData.plan_id).trim() : null;
+      if (overlayPlanId) {
+        try {
+          payload = await fetchPlanIdea(overlayPlanId);
+        } catch (ideaError) {
+          if (scenarioOverlayData.snapshot) {
+            payload = scenarioOverlayData.snapshot;
+          } else {
+            throw ideaError;
+          }
         }
+      } else if (scenarioOverlayData.snapshot) {
+        payload = scenarioOverlayData.snapshot;
+      } else {
+        throw new Error('Scenario snapshot unavailable');
       }
       const logMessage = scenarioOverlayData.label ? `${scenarioOverlayData.label} adopted.` : 'Scenario adopted.';
       const applied = await applyPlanSnapshot(payload, {
         logMessage,
-        fallbackPlanId: scenarioOverlayData.plan_id,
+        fallbackPlanId: overlayPlanId,
         fallbackPlanVersion: scenarioOverlayData.plan_version,
       });
       scenarioConfig.baseStyle = (mergedPlanMeta.style || '').toLowerCase();
@@ -3061,9 +3082,12 @@ levelsToggleEl = document.getElementById('levels_toggle');
   const fetchBars = async () => {
     if (isReplaying) return;
     const token = ++fetchToken;
-    hasAppliedFocusRange = false;
-    hasAppliedTimeCenter = false;
-    hasAppliedTimeWindow = false;
+    const resetFocusFlags = forceAutoFocus || followLive;
+    if (resetFocusFlags) {
+      hasAppliedFocusRange = false;
+      hasAppliedTimeCenter = false;
+      hasAppliedTimeWindow = false;
+    }
     try {
       const now = Math.floor(Date.now() / 1000);
       const minSpan = resolutionToSeconds(currentResolution) * 200;
@@ -3303,15 +3327,18 @@ levelsToggleEl = document.getElementById('levels_toggle');
 
       candleSeries.setMarkers([]);
 
+      const allowAutoFocus = forceAutoFocus || followLive;
       if (focusToken === 'plan') {
-        applyPlanPriceFocus(planForFrame, { force: true });
-        applyPlanTimeWindow({ force: true });
-        if (centerTimeToken) {
-          applyTimeCentering({ force: true });
-        } else {
-          chart.timeScale().scrollToPosition(0, true);
+        if (allowAutoFocus) {
+          applyPlanPriceFocus(planForFrame, { force: true });
+          applyPlanTimeWindow({ force: true });
+          if (centerTimeToken) {
+            applyTimeCentering({ force: true });
+          } else {
+            chart.timeScale().scrollToPosition(0, true);
+          }
         }
-      } else {
+      } else if (allowAutoFocus) {
         chart.priceScale('right').applyOptions({ autoScale: true });
         chart.timeScale().fitContent();
         if (centerTimeToken) {
@@ -3325,6 +3352,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
       debugEl.style.display = 'block';
       debugEl.textContent = `Error loading data: ${err.message}`;
     }
+    forceAutoFocus = false;
   };
 
   renderHeader();
