@@ -18,7 +18,7 @@ from src.agent_server import (
 )
 from src.scan_features import Metrics, Penalties
 from src.schemas import ScanFilters, ScanPage
-from src.scanner import Plan, Signal
+from src.scanner import Plan, Signal, _build_context, _prepare_symbol_frame
 
 
 def _make_history() -> pd.DataFrame:
@@ -115,6 +115,28 @@ def _make_signal(symbol: str, idx: int, sector: str) -> Signal:
     signal.plan = plan
     signal.features = {"direction_bias": "long", "sector": sector}
     return signal
+
+
+def test_build_context_uses_rth_phase_for_close_bar():
+    index = pd.date_range(
+        start="2025-10-16 09:30",
+        end="2025-10-16 16:00",
+        freq="5min",
+        tz="America/New_York",
+    ).tz_convert("UTC")
+    frame = pd.DataFrame(
+        {
+            "open": [100 + i * 0.1 for i in range(len(index))],
+            "high": [100.2 + i * 0.1 for i in range(len(index))],
+            "low": [99.8 + i * 0.1 for i in range(len(index))],
+            "close": [100.1 + i * 0.1 for i in range(len(index))],
+            "volume": [1_000_000 + i * 1000 for i in range(len(index))],
+        },
+        index=index,
+    )
+    prepared = _prepare_symbol_frame(frame)
+    ctx = _build_context(prepared)
+    assert ctx["session_phase"] in {"power_hour", "afternoon"}, "should reflect RTH context even at close"
 
 
 @pytest.mark.asyncio

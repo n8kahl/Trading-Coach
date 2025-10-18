@@ -70,6 +70,150 @@ async def test_gpt_plan_includes_trade_detail(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_gpt_plan_respects_strategy_id(monkeypatch):
+    async def fake_scan(universe, request, user):  # noqa: ARG001
+        return [
+            {
+                "symbol": "AAPL",
+                "style": "intraday",
+                "strategy_id": "orb_retest",
+                "plan": {
+                    "plan_id": "AAPL-ORB-TEST",
+                    "version": 3,
+                    "entry": 150.0,
+                    "stop": 148.8,
+                    "targets": [151.2, 152.6],
+                    "direction": "long",
+                    "confidence": 0.68,
+                    "strategy": "orb_retest",
+                },
+                "charts": {
+                    "params": {
+                        "symbol": "AAPL",
+                        "interval": "5m",
+                        "direction": "long",
+                        "entry": "150.0",
+                        "stop": "148.8",
+                        "tp": "151.2,152.6",
+                    }
+                },
+                "market_snapshot": {
+                    "indicators": {"atr14": 1.1},
+                    "volatility": {"expected_move_horizon": 2.3},
+                    "trend": {"direction_hint": "long"},
+                },
+                "key_levels": {"session_high": 152.0, "session_low": 147.5},
+                "features": {"plan_confidence_factors": ["VWAP confirmation"]},
+                "events": {"label": "earnings watch"},
+                "earnings": {"next_earnings_at": "2025-11-01"},
+            }
+        ]
+
+    async def fake_chart_url(params, request):  # noqa: ARG001
+        return agent_server.ChartLinks(interactive="https://example.com/chart")
+
+    monkeypatch.setattr(agent_server, "gpt_scan", fake_scan)
+    monkeypatch.setattr(agent_server, "gpt_chart_url", fake_chart_url)
+    monkeypatch.setattr(
+        agent_server,
+        "get_session",
+        lambda request=None: {"status": "open", "as_of": "2025-10-16T15:55:00-04:00", "tz": "America/New_York"},
+    )
+
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": b""}
+    request = Request(scope)
+    user = agent_server.AuthedUser(user_id="test-user")
+
+    response = await agent_server.gpt_plan(
+        agent_server.PlanRequest(symbol="AAPL", style="intraday"),
+        request,
+        user,
+    )
+
+    assert response.setup == "orb_retest"
+    assert response.plan["strategy"] == "orb_retest"
+    assert response.events == {"label": "earnings watch"}
+    assert response.earnings == {"next_earnings_at": "2025-11-01"}
+
+
+@pytest.mark.asyncio
+async def test_gpt_plan_macro_events_fallback(monkeypatch):
+    async def fake_scan(universe, request, user):  # noqa: ARG001
+        return [
+            {
+                "symbol": "SPY",
+                "style": "intraday",
+                "strategy_id": "vwap_avwap",
+                "plan": {
+                    "plan_id": "SPY-VWAP-TEST",
+                    "entry": 430.0,
+                    "stop": 428.5,
+                    "targets": [431.2, 432.4],
+                    "direction": "long",
+                    "confidence": 0.62,
+                    "strategy": "vwap_avwap",
+                },
+                "charts": {
+                    "params": {
+                        "symbol": "SPY",
+                        "interval": "5m",
+                        "direction": "long",
+                        "entry": "430.0",
+                        "stop": "428.5",
+                        "tp": "431.2,432.4",
+                    }
+                },
+                "market_snapshot": {
+                    "indicators": {"atr14": 1.5},
+                    "volatility": {"expected_move_horizon": 2.8},
+                    "trend": {"direction_hint": "long"},
+                },
+                "key_levels": {"session_high": 432.0, "session_low": 427.5},
+                "features": {"plan_confidence_factors": ["EMA alignment"]},
+            }
+        ]
+
+    async def fake_chart_url(params, request):  # noqa: ARG001
+        return agent_server.ChartLinks(interactive="https://example.com/chart")
+
+    async def fake_enrichment(symbol):  # noqa: ARG001
+        return {}
+
+    def fake_event_window(as_of):  # noqa: ARG001
+        return {
+            "upcoming": [{"name": "FOMC decision", "minutes": 45}],
+            "active": [],
+            "min_minutes_to_event": 45,
+        }
+
+    monkeypatch.setattr(agent_server, "gpt_scan", fake_scan)
+    monkeypatch.setattr(agent_server, "gpt_chart_url", fake_chart_url)
+    monkeypatch.setattr(agent_server, "_fetch_context_enrichment", fake_enrichment)
+    monkeypatch.setattr(agent_server, "get_event_window", fake_event_window)
+    monkeypatch.setattr(
+        agent_server,
+        "get_session",
+        lambda request=None: {"status": "closed", "as_of": "2025-10-16T16:00:00-04:00", "tz": "America/New_York"},
+    )
+
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": b""}
+    request = Request(scope)
+    user = agent_server.AuthedUser(user_id="test-user")
+
+    response = await agent_server.gpt_plan(
+        agent_server.PlanRequest(symbol="SPY", style="intraday"),
+        request,
+        user,
+    )
+
+    assert response.setup == "vwap_avwap"
+    assert response.events is not None
+    assert response.events.get("label") == "macro_window"
+    assert response.events.get("next_fomc_minutes") == 45
+    assert response.earnings is None
+
+
+@pytest.mark.asyncio
 async def test_simulate_generator_serializes_timestamp(monkeypatch):
     index = pd.date_range("2024-01-01", periods=1, freq="min", tz="UTC")
     frame = pd.DataFrame(

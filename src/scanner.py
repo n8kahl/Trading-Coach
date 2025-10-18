@@ -1215,6 +1215,37 @@ def _session_phase(ts: pd.Timestamp) -> str:
     return "other"
 
 
+def _phase_timestamp(index: pd.DatetimeIndex) -> pd.Timestamp:
+    """Select a representative timestamp for session phase classification.
+
+    When the latest bar prints after the RTH close (e.g., 16:00 ET), detectors that
+    rely on specific session windows (midday, power hour, etc.) should still evaluate
+    using the final regular-session bar. This helper walks backwards until it finds
+    an intraday timestamp inside the cash session.
+    """
+
+    if not isinstance(index, pd.DatetimeIndex) or index.empty:
+        return pd.Timestamp.utcnow().tz_localize("UTC")
+
+    latest = index[-1]
+    latest_utc = latest.tz_localize("UTC") if latest.tzinfo is None else latest.tz_convert("UTC")
+    latest_et = latest_utc.tz_convert(TZ_ET)
+    minutes = latest_et.hour * 60 + latest_et.minute
+    if minutes < RTH_END_MINUTE:
+        return latest_utc
+
+    # Walk backwards to find the last bar inside regular trading hours.
+    for candidate in reversed(index[:-1]):
+        candidate_utc = candidate.tz_localize("UTC") if candidate.tzinfo is None else candidate.tz_convert("UTC")
+        candidate_et = candidate_utc.tz_convert(TZ_ET)
+        candidate_minutes = candidate_et.hour * 60 + candidate_et.minute
+        if candidate_minutes < RTH_END_MINUTE:
+            return candidate_utc
+
+    # Fallback: nudge the latest timestamp slightly earlier.
+    return latest_utc - pd.Timedelta(minutes=1)
+
+
 def _prepare_symbol_frame(frame: pd.DataFrame) -> pd.DataFrame:
     frame = _ensure_datetime_index(frame).sort_index().copy()
     if frame.empty:
@@ -1475,6 +1506,8 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
     except Exception:
         anchored_vwaps_intraday = {}
 
+    phase_ts = _phase_timestamp(frame.index)
+
     return {
         "frame": frame,
         "session": session_df,
@@ -1490,7 +1523,7 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
         "volume_median": volume_median,
         "minutes_vector": minutes_vector,
         "timestamp": frame.index[-1],
-        "session_phase": _session_phase(frame.index[-1]),
+        "session_phase": _session_phase(phase_ts),
         "htf_levels": _collect_htf_levels(session_df, prev_session_df, latest),
         "expected_move_horizon": expected_move_horizon,
         "key": key_levels,

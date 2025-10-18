@@ -83,6 +83,7 @@ from .app.engine.options_select import score_contract, best_contract_example
 from .app.middleware import SessionMiddleware, get_session
 from .app.routers.session import router as session_router
 from .app.services import parse_session_as_of, make_chart_url, build_plan_layers, get_precision
+from .app.providers.macro import get_event_window
 from .app.providers.universe import load_universe
 from .context_overlays import compute_context_overlays
 from .db import (
@@ -236,6 +237,31 @@ _FROZEN_DEFAULT_UNIVERSE: List[str] = [
     "TLT",
 ]
 
+ETF_EVENT_SYMBOLS: set[str] = {
+    "SPY",
+    "QQQ",
+    "IWM",
+    "DIA",
+    "TLT",
+    "SMH",
+    "XLF",
+    "XLE",
+    "XLK",
+    "XLV",
+    "XLY",
+    "XLI",
+    "XLB",
+    "XLU",
+    "XLRE",
+    "HYG",
+    "GDX",
+    "USO",
+    "GLD",
+    "SLV",
+    "SPX",
+    "NDX",
+}
+
 _STRATEGY_CHART_HINTS: Dict[str, Tuple[str, str]] = {
     "orb_retest": ("1m", "Wait for a 1 minute break and retest of the opening range boundary before committing."),
     "power_hour_trend": ("5m", "Manage the trade on 5 minute closes while price holds trend alignment into the close."),
@@ -305,6 +331,51 @@ def _data_symbol_candidates(symbol: str) -> List[str]:
         if alias and alias not in candidates:
             candidates.append(alias)
     return candidates
+
+
+def _macro_event_block(symbol: str, session_state: Mapping[str, Any] | None) -> Dict[str, Any] | None:
+    if symbol.upper() not in ETF_EVENT_SYMBOLS:
+        return None
+    as_of = None
+    if session_state and isinstance(session_state, Mapping):
+        as_of = session_state.get("as_of")
+    try:
+        window = get_event_window(as_of)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("macro event window fetch failed", exc_info=True)
+        return None
+    if not window:
+        return None
+    upcoming = window.get("upcoming") or []
+    active = window.get("active") or []
+    if not upcoming and not active:
+        return None
+
+    def _find_minutes(tokens: Tuple[str, ...]) -> Optional[int]:
+        for collection in (active, upcoming):
+            for item in collection:
+                name = str(item.get("name") or "").lower()
+                if any(token in name for token in tokens):
+                    minutes = item.get("minutes")
+                    try:
+                        return int(minutes)
+                    except (TypeError, ValueError):
+                        continue
+        return None
+
+    block: Dict[str, Any] = {
+        "label": "macro_window",
+        "source": "macro_window",
+        "within_event_window": bool(active),
+        "active": active,
+        "upcoming": upcoming,
+    }
+    block["next_fomc_minutes"] = _find_minutes(("fomc", "fed"))
+    block["next_cpi_minutes"] = _find_minutes(("cpi", "inflation"))
+    block["next_nfp_minutes"] = _find_minutes(("payroll", "jobs"))
+    if window.get("min_minutes_to_event") is not None:
+        block["min_minutes_to_event"] = window.get("min_minutes_to_event")
+    return block
 
 
 @dataclass(slots=True)
@@ -3919,6 +3990,19 @@ async def gpt_scan_endpoint(
     try:
         market_subset = {symbol: market_data[symbol] for symbol in subset if symbol in market_data}
         signals = await scan_market(subset, market_subset, as_of=context.as_of)
+        strategy_counts = Counter(signal.strategy_id for signal in signals)
+        symbol_set = {signal.symbol for signal in signals}
+        logger.info(
+            "scan_market_signals",
+            extra={
+                "symbols_evaluated": len(subset),
+                "signals": len(signals),
+                "unique_symbols": len(symbol_set),
+                "top_strategies": dict(strategy_counts.most_common(5)),
+                "planning_context": context.label,
+                "data_mode": dq.get("mode"),
+            },
+        )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("scan_market failed: %s", exc, exc_info=True)
         dq["ok"] = False
@@ -5776,6 +5860,8 @@ async def gpt_plan(
     sentiment_block = first.get("sentiment")
     events_block = first.get("events")
     earnings_block = first.get("earnings")
+    events_source = "payload" if events_block else None
+    earnings_source = "payload" if earnings_block else None
     if not events_block or not earnings_block:
         try:
             enrichment = await _fetch_context_enrichment(symbol)
@@ -5783,9 +5869,20 @@ async def gpt_plan(
             logger.debug("enrichment fetch failed for %s: %s", symbol, exc)
             enrichment = None
         if not events_block:
-            events_block = (enrichment or {}).get("events")
+            enriched_events = (enrichment or {}).get("events")
+            if enriched_events:
+                events_block = enriched_events
+                events_source = events_source or "enrichment"
         if not earnings_block:
-            earnings_block = (enrichment or {}).get("earnings")
+            enriched_earnings = (enrichment or {}).get("earnings")
+            if enriched_earnings:
+                earnings_block = enriched_earnings
+                earnings_source = earnings_source or "enrichment"
+    if not events_block:
+        macro_events = _macro_event_block(symbol, session_state_payload)
+        if macro_events:
+            events_block = macro_events
+            events_source = events_source or "macro_window"
     confidence_factors: List[str] | None = None
     feature_block = first.get("features") or {}
     for key in ("plan_confidence_factors", "plan_confidence_reasons", "confidence_reasons"):
@@ -5890,6 +5987,17 @@ async def gpt_plan(
         bars_url = data_meta.get("bars")
         if isinstance(bars_url, str):
             data_meta["bars"] = _append_query_params(bars_url, {"live": "1"})
+
+    logger.info(
+        "plan_enrichment_status",
+        extra={
+            "symbol": symbol,
+            "events_present": bool(events_block),
+            "earnings_present": bool(earnings_block),
+            "events_source": events_source or "none",
+            "earnings_source": earnings_source or "none",
+        },
+    )
 
     metric_count = _record_metric(
         "gpt_plan",
