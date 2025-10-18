@@ -384,11 +384,11 @@ levelsToggleEl = document.getElementById('levels_toggle');
           .replace(/"/g, '&quot;')
       : value;
 
-  const parseIsoDate = (value) => {
+  function parseIsoDate(value) {
     if (!value) return null;
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? null : date;
-  };
+  }
 
   function dedupeLevels(levels) {
     if (!Array.isArray(levels)) return [];
