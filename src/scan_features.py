@@ -5,12 +5,18 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime, time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
 from .ranking import Style
 from .scanner import Plan, Signal
+
+_ACTIONABILITY_THRESHOLDS = {
+    "pct": 1.5,
+    "atr": 0.75,
+    "bars": 4.0,
+}
 
 
 @dataclass(slots=True)
@@ -45,6 +51,10 @@ class Metrics:
     context_score: float
     penalties: Penalties
     confidence: float
+    actionability: float
+    entry_distance_pct: float
+    entry_distance_atr: float
+    bars_to_trigger: float
 
 
 @dataclass(slots=True)
@@ -80,6 +90,45 @@ def compute_metrics_fast(symbol: str, style: Style, context: MetricsContext) -> 
     macro_fit = _macro_alignment(features, context.as_of)
     context_score = _context_score(context, features)
     penalties = _penalties(features, context.data_meta)
+    last_close = float("nan")
+    try:
+        if "close" in context.history.columns and not context.history["close"].empty:
+            last_close = float(context.history["close"].iloc[-1])
+    except Exception:
+        last_close = float("nan")
+    entry_value = None
+    stop_value = None
+    if plan and plan.entry is not None:
+        try:
+            entry_value = float(plan.entry)
+        except (TypeError, ValueError):
+            entry_value = None
+    if plan and plan.stop is not None:
+        try:
+            stop_value = float(plan.stop)
+        except (TypeError, ValueError):
+            stop_value = None
+    atr_hint = context.indicator_bundle.get("atr") if isinstance(context.indicator_bundle, dict) else None
+    try:
+        atr_value = float(atr_hint) if atr_hint is not None else float("nan")
+    except (TypeError, ValueError):
+        atr_value = float("nan")
+    distance_points = float("nan")
+    if entry_value is not None and math.isfinite(last_close):
+        distance_points = abs(entry_value - last_close)
+    entry_distance_pct = _safe_ratio(distance_points, last_close) * 100.0
+    entry_distance_atr = _safe_ratio(distance_points, atr_value)
+    avg_range = float("nan")
+    try:
+        if {"high", "low"}.issubset(context.history.columns):
+            ranges = (context.history["high"] - context.history["low"]).tail(12).dropna()
+            if not ranges.empty:
+                avg_range = float(ranges.mean())
+    except Exception:
+        avg_range = float("nan")
+    bars_to_trigger = _safe_ratio(distance_points, avg_range)
+    actionability = _actionability_score(entry_distance_pct, entry_distance_atr, bars_to_trigger)
+
     return Metrics(
         symbol=symbol,
         sector=sector,
@@ -102,6 +151,10 @@ def compute_metrics_fast(symbol: str, style: Style, context: MetricsContext) -> 
         context_score=context_score,
         penalties=penalties,
         confidence=confidence,
+        actionability=_clamp(actionability),
+        entry_distance_pct=entry_distance_pct if math.isfinite(entry_distance_pct) else float("nan"),
+        entry_distance_atr=entry_distance_atr if math.isfinite(entry_distance_atr) else float("nan"),
+        bars_to_trigger=bars_to_trigger if math.isfinite(bars_to_trigger) else float("nan"),
     )
 
 
@@ -247,6 +300,41 @@ def _penalties(features: Dict[str, Any], data_meta: Dict[str, Any]) -> Penalties
         pen_chop=_clamp(pen_chop, 0.0, 0.12),
         pen_cluster=_clamp(pen_cluster, 0.0, 0.08),
     )
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    try:
+        if numerator is None or denominator is None:
+            return float("nan")
+        num = float(numerator)
+        den = float(denominator)
+        if not math.isfinite(num) or not math.isfinite(den) or den == 0:
+            return float("nan")
+        return num / den
+    except Exception:
+        return float("nan")
+
+
+def _score_component(value: float, threshold: float) -> float:
+    if threshold <= 0:
+        return 0.0
+    if not math.isfinite(value):
+        return 0.0
+    ratio = max(value / threshold, 0.0)
+    return _clamp(1.0 - ratio)
+
+
+def _actionability_score(distance_pct: float, distance_atr: float, bars_to_trigger: float) -> float:
+    components: List[tuple[float, float]] = [
+        (_score_component(distance_pct, _ACTIONABILITY_THRESHOLDS["pct"]), 0.5),
+        (_score_component(distance_atr, _ACTIONABILITY_THRESHOLDS["atr"]), 0.3),
+        (_score_component(bars_to_trigger, _ACTIONABILITY_THRESHOLDS["bars"]), 0.2),
+    ]
+    weighted_sum = sum(value * weight for value, weight in components)
+    total_weight = sum(weight for _, weight in components)
+    if total_weight <= 0:
+        return 0.0
+    return _clamp(weighted_sum / total_weight)
 
 
 def _map_range(value: float, low: float, high: float) -> float:

@@ -99,6 +99,7 @@ from .ranking import (
     Features as RankingFeatures,
     Scored as RankedCandidate,
     Style as RankingStyle,
+    ACTIONABILITY_GATE,
     diversify as diversify_ranked,
     rank as rank_candidates,
 )
@@ -668,6 +669,37 @@ async def _build_scan_stub_candidate(
         )
         metrics = compute_metrics_fast(metrics_context.symbol, style_token, metrics_context)
         confidence = metrics.confidence
+        entry_distance_pct_val = _safe_number(metrics.entry_distance_pct)
+        entry_distance_atr_val = _safe_number(metrics.entry_distance_atr)
+        bars_to_trigger_val = _safe_number(metrics.bars_to_trigger)
+        actionability_score = _clamp01(metrics.actionability)
+        should_gate = (
+            actionability_score < ACTIONABILITY_GATE
+            and (
+                (entry_distance_pct_val is not None and entry_distance_pct_val > 2.0)
+                or (entry_distance_atr_val is not None and entry_distance_atr_val > 1.2)
+            )
+        )
+        if should_gate:
+            logger.debug(
+                "scan_candidate_gated_distance",
+                extra={
+                    "symbol": signal.symbol,
+                    "strategy": signal.strategy_id,
+                    "entry_distance_pct": entry_distance_pct_val,
+                    "entry_distance_atr": entry_distance_atr_val,
+                    "actionability": actionability_score,
+                },
+            )
+            return None
+        actionable_soon = False
+        if entry_distance_pct_val is not None and entry_distance_pct_val <= 1.0:
+            actionable_soon = True
+        if entry_distance_atr_val is not None and entry_distance_atr_val <= 0.7:
+            actionable_soon = True
+        if bars_to_trigger_val is not None and bars_to_trigger_val <= 3:
+            actionable_soon = True
+
         candidate = ScanCandidate(
             symbol=signal.symbol.upper(),
             score=float(signal.score),
@@ -679,8 +711,24 @@ async def _build_scan_stub_candidate(
             rr_t1=rr_t1,
             confidence=confidence,
             chart_url=chart_url,
+            entry_distance_pct=entry_distance_pct_val,
+            entry_distance_atr=entry_distance_atr_val,
+            bars_to_trigger=bars_to_trigger_val,
+            actionable_soon=actionable_soon,
         )
         features = _metrics_to_features(metrics, style_token)
+        logger.debug(
+            "scan_candidate_metrics",
+            extra={
+                "symbol": signal.symbol,
+                "strategy": signal.strategy_id,
+                "score_raw": float(signal.score),
+                "actionability": actionability_score,
+                "entry_distance_pct": entry_distance_pct_val,
+                "entry_distance_atr": entry_distance_atr_val,
+                "bars_to_trigger": bars_to_trigger_val,
+            },
+        )
         return ScanPrep(candidate=candidate, metrics=metrics, features=features)
 
 
@@ -1030,9 +1078,12 @@ class PlanResponse(BaseModel):
     target_meta: List[Dict[str, Any]] | None = None
     rr_to_t1: float | None = None
     confidence: float | None = None
-    confluence_tags: List[str] = []
     confidence_factors: List[str] | None = None
     confluence_tags: List[str] | None = None
+    confluence: List[str] | None = None
+    key_levels_used: Dict[str, Any] | None = None
+    risk_block: Dict[str, Any] | None = None
+    execution_rules: Dict[str, Any] | None = None
     notes: str | None = None
     relevant_levels: Dict[str, Any] | None = None
     expected_move_basis: str | None = None
@@ -1230,6 +1281,7 @@ def _metrics_to_features(metrics: Metrics, style: RankingStyle) -> RankingFeatur
         vol_regime=_clamp01(metrics.vol_regime),
         momentum_htf=_clamp01(metrics.mom_htf),
         context=_clamp01(metrics.context_score),
+        actionability=_clamp01(metrics.actionability),
         weekly_structure=_clamp01(metrics.struct_w1),
         daily_confluence=_clamp01(metrics.conf_d1),
         option_efficiency=_clamp01(metrics.opt_eff),
@@ -1283,6 +1335,10 @@ def _fallback_scan_candidates(
             rr_t1=None,
             plan_id=None,
             chart_url=None,
+            entry_distance_pct=None,
+            entry_distance_atr=None,
+            bars_to_trigger=None,
+            actionable_soon=None,
         )
         ranked.append((score, candidate))
     ranked.sort(
@@ -2265,6 +2321,432 @@ def _unique_tags(values: Iterable[Any]) -> List[str]:
     return ordered
 
 
+def _classify_level(label: str) -> str:
+    token = (label or "").strip().lower()
+    if not token:
+        return "structural"
+    session_keywords = (
+        "opening_range",
+        "session_",
+        "orh",
+        "orl",
+        "vwap",
+        "avwap",
+        "intraday",
+        "gap",
+        "lod",
+        "hod",
+    )
+    structural_keywords = (
+        "prev_",
+        "vah",
+        "val",
+        "poc",
+        "weekly",
+        "monthly",
+        "year",
+        "supply",
+        "demand",
+        "swing",
+    )
+    if any(token.startswith(prefix) for prefix in session_keywords) or token in {"orh", "orl", "vwap"}:
+        return "session"
+    if any(keyword in token for keyword in structural_keywords):
+        return "structural"
+    return "structural"
+
+
+def _ensure_plan_layers_cover_used_levels(
+    plan_layers: Dict[str, Any],
+    key_levels_used: Dict[str, List[Dict[str, Any]]],
+    *,
+    precision: int,
+) -> None:
+    if not isinstance(plan_layers, dict):
+        return
+    levels: List[Dict[str, Any]] = plan_layers.setdefault("levels", [])
+    def _normalized_price(value: Any) -> float | None:
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            return None
+        return round(price, precision)
+
+    existing_keys: set[tuple[str | None, float | None]] = set()
+    for item in levels:
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label")
+        price_val = _normalized_price(item.get("price"))
+        existing_keys.add((label, price_val))
+
+    for bucket in key_levels_used.values():
+        for entry in bucket:
+            label = entry.get("label")
+            price_val = _normalized_price(entry.get("price"))
+            if price_val is None:
+                continue
+            key = (label, price_val)
+            if key in existing_keys:
+                continue
+            levels.append({"price": price_val, "label": label, "kind": "level"})
+            existing_keys.add(key)
+
+    meta = plan_layers.setdefault("meta", {})
+    level_groups = meta.setdefault("level_groups", {"primary": [], "supplemental": []})
+    primary = level_groups.setdefault("primary", [])
+    supplemental = level_groups.setdefault("supplemental", [])
+
+    def _contains(container: List[Dict[str, Any]], candidate: Dict[str, Any]) -> bool:
+        for item in container:
+            if not isinstance(item, dict):
+                continue
+            if item.get("label") == candidate.get("label") and item.get("price") == candidate.get("price"):
+                return True
+        return False
+
+    for bucket in key_levels_used.values():
+        for entry in bucket:
+            price_val = _normalized_price(entry.get("price"))
+            if price_val is None:
+                continue
+            candidate = {"price": price_val, "label": entry.get("label"), "kind": "level"}
+            if _contains(primary, candidate) or _contains(supplemental, candidate):
+                continue
+            supplemental.append(candidate)
+
+
+def _higher_timeframe(interval: str | None) -> str | None:
+    token = (interval or "5m").lower()
+    mapping = {
+        "1m": "5m",
+        "3m": "15m",
+        "5m": "15m",
+        "10m": "30m",
+        "15m": "1h",
+        "30m": "1h",
+        "45m": "1h",
+        "60m": "4h",
+        "1h": "4h",
+        "2h": "4h",
+        "4h": "1d",
+        "1d": "1w",
+        "d": "1w",
+    }
+    return mapping.get(token, "1d")
+
+
+def _compute_rsi_from_bars(bars: Sequence[Mapping[str, Any]], period: int = 14) -> float | None:
+    closes: List[float] = []
+    for bar in bars or []:
+        close = bar.get("close")
+        if isinstance(close, (int, float)):
+            closes.append(float(close))
+    if len(closes) <= period:
+        return None
+    series = pd.Series(closes[-(period + 1) :])
+    delta = series.diff().dropna()
+    if delta.empty:
+        return None
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.ewm(alpha=1 / period, adjust=False).mean().iloc[-1]
+    avg_loss = losses.ewm(alpha=1 / period, adjust=False).mean().iloc[-1]
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return max(0.0, min(100.0, float(rsi)))
+
+
+def _volume_profile_tags(entry: Any, overlays: Mapping[str, Any] | None, atr_value: Any, interval: str) -> List[str]:
+    if overlays is None:
+        return []
+    vp = overlays.get("volume_profile") if isinstance(overlays, Mapping) else None
+    if not isinstance(vp, Mapping):
+        return []
+    try:
+        entry_val = float(entry) if entry is not None else None
+    except (TypeError, ValueError):
+        entry_val = None
+    if entry_val is None:
+        return []
+    try:
+        atr_val = float(atr_value) if atr_value is not None else None
+    except (TypeError, ValueError):
+        atr_val = None
+    threshold = atr_val * 0.5 if atr_val and atr_val > 0 else max(abs(entry_val) * 0.0015, 0.1)
+    tags: List[str] = []
+    for label_key, vp_key in [("VAH", "vah"), ("VAL", "val"), ("POC", "poc")]:
+        level_val = vp.get(vp_key)
+        if not isinstance(level_val, (int, float)):
+            continue
+        distance = abs(float(level_val) - entry_val)
+        if distance <= threshold:
+            tags.append(f"Near {label_key} ({interval})")
+    return tags
+
+
+def _confluence_tags_for_snapshot(
+    snapshot: Mapping[str, Any],
+    interval: str,
+    *,
+    direction: str | None,
+    entry: Any,
+    overlays: Mapping[str, Any] | None,
+    context: Mapping[str, Any] | None,
+) -> List[str]:
+    tags: List[str] = []
+    interval_label = interval
+    direction_token = (direction or "long").lower()
+    indicators = snapshot.get("indicators") or {}
+    price_block = snapshot.get("price") or {}
+    try:
+        price_val = float(price_block.get("close"))
+    except (TypeError, ValueError):
+        price_val = None
+    trend = (snapshot.get("trend") or {}).get("ema_stack")
+    if direction_token == "long" and trend == "bullish":
+        tags.append(f"EMA alignment ({interval_label})")
+    elif direction_token == "short" and trend == "bearish":
+        tags.append(f"EMA alignment ({interval_label})")
+    vwap_val = indicators.get("vwap")
+    if isinstance(vwap_val, (int, float)) and isinstance(price_val, float):
+        if direction_token == "long" and price_val >= float(vwap_val):
+            tags.append(f"Above VWAP ({interval_label})")
+        elif direction_token == "short" and price_val <= float(vwap_val):
+            tags.append(f"Below VWAP ({interval_label})")
+    if (snapshot.get("volatility") or {}).get("in_squeeze"):
+        tags.append(f"Squeeze compression ({interval_label})")
+    adx_val = indicators.get("adx14")
+    if isinstance(adx_val, (int, float)) and float(adx_val) >= 25:
+        tags.append(f"ADX trending ({interval_label})")
+    rsi_val = None
+    if context and isinstance(context.get("bars"), list):
+        rsi_val = _compute_rsi_from_bars(context["bars"])
+    if rsi_val is not None:
+        if direction_token == "long" and rsi_val >= 55:
+            tags.append(f"RSI bullish ({interval_label})")
+        elif direction_token == "short" and rsi_val <= 45:
+            tags.append(f"RSI bearish ({interval_label})")
+    tags.extend(_volume_profile_tags(entry, overlays, indicators.get("atr14"), interval_label))
+    return tags
+
+
+async def _compute_multi_timeframe_confluence(
+    symbol: str,
+    base_interval: str,
+    *,
+    snapshot: Mapping[str, Any],
+    direction: str | None,
+    entry: Any,
+    overlays: Mapping[str, Any] | None,
+) -> List[str]:
+    base_interval_norm = base_interval or "5m"
+    tags: List[str] = []
+    tags.extend(
+        _confluence_tags_for_snapshot(
+            snapshot,
+            base_interval_norm,
+            direction=direction,
+            entry=entry,
+            overlays=overlays,
+            context=None,
+        )
+    )
+    higher = _higher_timeframe(base_interval_norm)
+    if higher:
+        try:
+            context = await _build_interval_context(symbol, higher, 300)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                "mtf_confluence_fetch_failed",
+                extra={"symbol": symbol, "interval": higher, "detail": str(exc)},
+            )
+        else:
+            tags.extend(
+                _confluence_tags_for_snapshot(
+                    context.get("snapshot") or {},
+                    higher,
+                    direction=direction,
+                    entry=entry,
+                    overlays=None,
+                    context=context,
+                )
+            )
+    return _unique_tags(tags)
+
+
+def _extract_runner_multiple(runner: Mapping[str, Any] | None) -> float | None:
+    if not isinstance(runner, Mapping):
+        return None
+    for key in ("atr_multiple", "multiple", "trail_multiple"):
+        value = runner.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                continue
+    trail = runner.get("trail")
+    if isinstance(trail, str):
+        match = re.search(r"x\s*(\d*\.?\d+)", trail.lower())
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def _build_risk_block(
+    *,
+    entry: Any,
+    stop: Any,
+    targets: Sequence[Any] | None,
+    atr: Any,
+    stop_multiple: Any,
+    expected_move: Any,
+    runner: Mapping[str, Any] | None,
+) -> Dict[str, Any] | None:
+    try:
+        entry_val = float(entry)
+        stop_val = float(stop)
+    except (TypeError, ValueError):
+        return None
+    risk_points = abs(entry_val - stop_val)
+    if risk_points <= 0:
+        return None
+    risk_percent = None
+    if entry_val != 0:
+        risk_percent = abs(risk_points / abs(entry_val)) * 100.0
+    rr_map: Dict[str, float] = {}
+    clean_targets: List[float] = []
+    for idx, target in enumerate(targets or [], start=1):
+        try:
+            target_val = float(target)
+        except (TypeError, ValueError):
+            continue
+        clean_targets.append(target_val)
+        reward = abs(target_val - entry_val)
+        if risk_points > 0:
+            rr_map[f"tp{idx}"] = round(reward / risk_points, 2)
+    atr_val = None
+    try:
+        atr_val = float(atr) if atr is not None else None
+    except (TypeError, ValueError):
+        atr_val = None
+    stop_multiple_val = None
+    try:
+        stop_multiple_val = float(stop_multiple) if stop_multiple is not None else None
+    except (TypeError, ValueError):
+        stop_multiple_val = None
+    if stop_multiple_val is None and atr_val and atr_val > 0:
+        stop_multiple_val = risk_points / atr_val
+    expected_move_val = None
+    try:
+        expected_move_val = float(expected_move) if expected_move is not None else None
+    except (TypeError, ValueError):
+        expected_move_val = None
+    expected_move_map: Dict[str, float] = {}
+    if expected_move_val and expected_move_val > 0:
+        for idx, target_val in enumerate(clean_targets, start=1):
+            reward = abs(target_val - entry_val)
+            expected_move_map[f"tp{idx}"] = round(reward / expected_move_val, 2)
+    runner_multiple = _extract_runner_multiple(runner)
+    block: Dict[str, Any] = {
+        "risk_points": round(risk_points, 4),
+        "reward_to_target": rr_map or None,
+    }
+    if risk_percent is not None:
+        block["risk_percent"] = round(risk_percent, 2)
+    if atr_val is not None:
+        block["atr_value"] = round(atr_val, 4)
+    if stop_multiple_val is not None:
+        block["atr_stop_multiple"] = round(stop_multiple_val, 2)
+    if expected_move_val is not None:
+        block["expected_move"] = round(expected_move_val, 4)
+    if expected_move_map:
+        block["expected_move_fraction"] = expected_move_map
+    if runner_multiple is not None:
+        block["runner_trail_multiple"] = round(runner_multiple, 2)
+    return {key: value for key, value in block.items() if value is not None}
+
+
+def _find_level_by_role(key_levels_used: Dict[str, List[Dict[str, Any]]] | None, role: str) -> Dict[str, Any] | None:
+    if not key_levels_used:
+        return None
+    for bucket in key_levels_used.values():
+        for level in bucket:
+            if str(level.get("role")) == role:
+                return level
+    return None
+
+
+def _format_level_label(level: Dict[str, Any] | None, fallback_price: Any, precision: int) -> str:
+    try:
+        price_val = float(fallback_price) if fallback_price is not None else None
+    except (TypeError, ValueError):
+        price_val = None
+    if level:
+        label = level.get("label")
+        try:
+            level_price = float(level.get("price"))
+        except (TypeError, ValueError):
+            level_price = price_val
+        if label and level_price is not None:
+            return f"{label} @ {level_price:.{precision}f}"
+        if level_price is not None:
+            return f"{level_price:.{precision}f}"
+    if price_val is not None:
+        return f"{price_val:.{precision}f}"
+    return "defined level"
+
+
+def _build_execution_rules(
+    *,
+    entry: Any,
+    stop: Any,
+    targets: Sequence[Any] | None,
+    direction: str | None,
+    precision: int,
+    key_levels_used: Dict[str, List[Dict[str, Any]]] | None,
+    runner: Mapping[str, Any] | None,
+) -> Dict[str, str] | None:
+    if entry is None or stop is None:
+        return None
+    direction_token = (direction or "long").lower()
+    entry_level = _find_level_by_role(key_levels_used, "entry")
+    stop_level = _find_level_by_role(key_levels_used, "stop")
+    tp1_level = _find_level_by_role(key_levels_used, "tp1")
+    trigger_level = _format_level_label(entry_level, entry, precision)
+    stop_label = _format_level_label(stop_level, stop, precision)
+    tp1_display = None
+    if targets:
+        tp1_value = targets[0]
+        tp1_display = _format_level_label(tp1_level, tp1_value, precision)
+    runner_multiple = _extract_runner_multiple(runner)
+    if direction_token == "short":
+        trigger = f"Trigger on sustained breakdown below {trigger_level}."
+        invalidation = f"Invalidate on closes above {stop_label}."
+        scale = f"Cover partial size at {tp1_display}" if tp1_display else "Scale risk once 1R is achieved."
+        reload = f"Reload on failed reclaim of {trigger_level} after bounce."
+    else:
+        trigger = f"Trigger on acceptance above {trigger_level}."
+        invalidation = f"Invalidate on closes below {stop_label}."
+        scale = f"Trim partial size at {tp1_display}" if tp1_display else "Scale risk once 1R is achieved."
+        reload = f"Reload on defended retest of {trigger_level}."
+    if runner_multiple is not None:
+        scale = f"{scale} Trail runner with ATR x{runner_multiple:.2f}."
+    return {
+        "trigger": trigger,
+        "invalidation": invalidation,
+        "scale": scale,
+        "reload": reload,
+    }
+
+
 def _tp_reason_entries(meta_list: Sequence[Mapping[str, Any]] | None) -> List[Dict[str, Any]]:
     if not meta_list:
         return []
@@ -2372,7 +2854,7 @@ def _extract_options_contracts(options_payload: Mapping[str, Any] | None) -> Lis
         trimmed = {key: val for key, val in contract.items() if val is not None}
         if trimmed:
             contracts.append(trimmed)
-    return contracts
+    return contracts[:3]
 
 
 def _build_market_snapshot(history: pd.DataFrame, key_levels: Dict[str, float]) -> Dict[str, Any]:
@@ -4850,9 +5332,9 @@ async def _generate_fallback_plan(
     include_plan_layers = bool(
         getattr(settings, "ff_chart_canonical_v1", False) or getattr(settings, "ff_layers_endpoint", False)
     )
-    include_options_contracts = bool(getattr(settings, "ff_options_always", False))
+    include_options_contracts = True
     options_contracts: List[Dict[str, Any]] | None = None
-    options_note: str | None = "Options selection unavailable in fallback mode" if include_options_contracts else None
+    options_note: str | None = None
     session_payload = _session_payload_from_request(request)
     market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(session_payload)
     is_plan_live = bool(is_open)
@@ -4909,6 +5391,7 @@ async def _generate_fallback_plan(
     if not isinstance(atr_value, (int, float)) or not math.isfinite(atr_value) or atr_value <= 0:
         atr_value = max(close_price * 0.006, 0.25)
     key_levels = context.get("key") or {}
+    snapshot = _build_market_snapshot(prepared, key_levels)
     ema_trend_up = ema9 > ema20 > ema50
     ema_trend_down = ema9 < ema20 < ema50
     if ema_trend_up or (close_price >= ema20 >= ema50):
@@ -5011,11 +5494,81 @@ async def _generate_fallback_plan(
     notes = (
         f"{direction_label} bias with EMA stack supportive; manage risk using {runner_trail} and watch VWAP for continuation."
     )
+    options_payload: Dict[str, Any] | None = None
+    style_public = (public_style(style_token) or style_token or "intraday").lower()
+    side_hint = _infer_contract_side(None, direction)
+    if include_options_contracts and side_hint:
+        plan_anchor = {
+            "underlying_entry": entry,
+            "stop": stop,
+            "targets": targets[:2],
+            "horizon_minutes": 60 if style_public in {"swing", "leaps"} else 30,
+        }
+        contract_request = ContractsRequest(
+            symbol=symbol,
+            side=side_hint,
+            style=style_public,
+            selection_mode="analyze",
+            plan_anchor=plan_anchor,
+        )
+        try:
+            options_payload = await gpt_contracts(contract_request, user)
+        except HTTPException as exc:
+            logger.info("fallback contract lookup skipped for %s: %s", symbol, exc)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("fallback contract lookup error for %s: %s", symbol, exc)
+    if include_options_contracts:
+        extracted_contracts = _extract_options_contracts(options_payload)
+        if extracted_contracts:
+            options_contracts = extracted_contracts
+        else:
+            options_contracts = []
+            if isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
+                options_note = str(options_payload["quotes_notice"])
+            elif not side_hint:
+                options_note = "Options side unavailable for this plan"
+            else:
+                options_note = "No tradeable contracts met filters"
+    else:
+        options_payload = None
     hint_interval_raw, hint_guidance = _chart_hint("baseline_auto", style_token)
     try:
         chart_timeframe_hint = normalize_interval(hint_interval_raw)
     except ValueError:
         chart_timeframe_hint = "5m"
+    mtf_confluence_tags = []
+    try:
+        mtf_confluence_tags = await _compute_multi_timeframe_confluence(
+            symbol=symbol,
+            base_interval=chart_timeframe_hint or "5m",
+            snapshot=snapshot,
+            direction=direction,
+            entry=entry,
+            overlays=None,
+        )
+    except Exception:  # pragma: no cover - defensive
+        mtf_confluence_tags = []
+    stop_multiple_val = None
+    if atr_value and atr_value > 0:
+        stop_multiple_val = abs(entry - stop) / atr_value
+    risk_block = _build_risk_block(
+        entry=entry,
+        stop=stop,
+        targets=targets,
+        atr=atr_value,
+        stop_multiple=stop_multiple_val,
+        expected_move=expected_move_abs,
+        runner=runner,
+    )
+    execution_rules = _build_execution_rules(
+        entry=entry,
+        stop=stop,
+        targets=targets,
+        direction=direction,
+        precision=get_precision(symbol),
+        key_levels_used=None,
+        runner=runner,
+    )
     plan_ts = context.get("timestamp")
     if isinstance(plan_ts, pd.Timestamp):
         plan_ts_utc = plan_ts.tz_convert("UTC") if plan_ts.tzinfo else plan_ts.tz_localize("UTC")
@@ -5093,8 +5646,16 @@ async def _generate_fallback_plan(
         plan_block["confluence_tags"] = confluence_tags
     if tp_reasons:
         plan_block["tp_reasons"] = tp_reasons
+    if include_options_contracts and options_contracts is not None:
+        plan_block["options_contracts"] = options_contracts
     if include_options_contracts and options_note:
         plan_block["options_note"] = options_note
+    if mtf_confluence_tags:
+        plan_block["mtf_confluence"] = mtf_confluence_tags
+    if risk_block:
+        plan_block["risk_block"] = risk_block
+    if execution_rules:
+        plan_block["execution_rules"] = execution_rules
     plan_warnings: List[str] = []
     target_profile = build_target_profile(
         entry=entry,
@@ -5129,8 +5690,16 @@ async def _generate_fallback_plan(
         structured_plan["tp_reasons"] = tp_reasons
     if confluence_tags:
         structured_plan["confluence_tags"] = confluence_tags
+    if include_options_contracts and options_contracts is not None:
+        structured_plan["options_contracts"] = options_contracts
     if include_options_contracts and options_note:
         structured_plan["options_note"] = options_note
+    if mtf_confluence_tags:
+        structured_plan["mtf_confluence"] = mtf_confluence_tags
+    if risk_block:
+        structured_plan["risk_block"] = risk_block
+    if execution_rules:
+        structured_plan["execution_rules"] = execution_rules
     chart_params_payload = {key: str(value) for key, value in chart_params.items()}
     charts_payload: Dict[str, Any] = {"params": chart_params_payload, "interactive": chart_url_with_ids}
     charts_payload["live"] = is_plan_live
@@ -5193,6 +5762,7 @@ async def _generate_fallback_plan(
         confidence=confidence,
         confidence_factors=confidence_factors or None,
         confluence_tags=confluence_tags or None,
+        confluence=mtf_confluence_tags or None,
         notes=notes,
         relevant_levels={k: float(v) for k, v in key_levels.items() if isinstance(v, (int, float))},
         expected_move_basis=expected_move_basis,
@@ -5209,13 +5779,14 @@ async def _generate_fallback_plan(
         target_profile=target_profile.to_dict(),
         charts=charts_payload,
         key_levels={k: float(v) for k, v in key_levels.items() if isinstance(v, (int, float))},
+        key_levels_used=None,
         market_snapshot=market_meta,
         features={
             "ema_trend_up": ema_trend_up,
             "ema_trend_down": ema_trend_down,
             "vwap": vwap_value,
         },
-        options=None,
+        options=options_payload if isinstance(options_payload, dict) else None,
         options_contracts=options_contracts if include_options_contracts else None,
         options_note=options_note if include_options_contracts else None,
         calc_notes={
@@ -5230,6 +5801,8 @@ async def _generate_fallback_plan(
         data_quality=data_quality,
         debug={"source": "auto_fallback_plan"},
         runner=runner,
+        risk_block=risk_block,
+        execution_rules=execution_rules,
         market=market_meta,
         data=data_payload,
         session_state=market_meta.get("session_state"),
@@ -5273,6 +5846,8 @@ async def _generate_fallback_plan(
                 "vwap": float(vwap_value) if isinstance(vwap_value, (int, float)) else None,
             },
         )
+        if mtf_confluence_tags:
+            meta["mtf_confluence"] = mtf_confluence_tags
         response.plan_layers = layers
     return response
 
@@ -5299,7 +5874,7 @@ async def gpt_plan(
     include_plan_layers = bool(
         getattr(settings, "ff_chart_canonical_v1", False) or getattr(settings, "ff_layers_endpoint", False)
     )
-    include_options_contracts = bool(getattr(settings, "ff_options_always", False))
+    include_options_contracts = True
     logger.info(
         "gpt_plan received",
         extra={
@@ -5587,6 +6162,7 @@ async def gpt_plan(
     plan["idea_url"] = trade_detail_url
 
     atr_val = _safe_number(indicators.get("atr14"))
+    precision_for_levels = get_precision(symbol)
     calc_notes: Dict[str, Any] = {}
     if atr_val is not None:
         calc_notes["atr14"] = atr_val
@@ -5600,16 +6176,58 @@ async def gpt_plan(
         calc_notes["stop_multiple"] = round(float(stop_multiple), 3)
     if rr_inputs:
         calc_notes["rr_inputs"] = rr_inputs
+    calc_notes_output = calc_notes or None
+    if calc_notes_output is not None and not calc_notes_output:
+        calc_notes_output = None
+    targets_for_rules = list(targets_list)
+    risk_block = _build_risk_block(
+        entry=entry_val,
+        stop=stop_val,
+        targets=targets_for_rules,
+        atr=calc_notes.get("atr14") if calc_notes else None,
+        stop_multiple=calc_notes.get("stop_multiple") if calc_notes else None,
+        expected_move=plan.get("expected_move") or (snapshot.get("volatility") or {}).get("expected_move_horizon"),
+        runner=plan.get("runner") if plan else None,
+    )
+    execution_rules = _build_execution_rules(
+        entry=entry_val,
+        stop=stop_val,
+        targets=targets_for_rules,
+        direction=plan.get("direction") or direction_hint,
+        precision=precision_for_levels,
+        key_levels_used=None,  # populated later once matches resolved
+        runner=plan.get("runner") if plan else None,
+    )
+    mtf_confluence_tags: List[str] = []
+    try:
+        mtf_confluence_tags = await _compute_multi_timeframe_confluence(
+            symbol=symbol,
+            base_interval=chart_timeframe_hint or "5m",
+            snapshot=snapshot,
+            direction=plan.get("direction") or direction_hint,
+            entry=entry_val,
+            overlays=first.get("context_overlays"),
+        )
+    except Exception:  # pragma: no cover - defensive
+        mtf_confluence_tags = []
     # Infer snapped_targets by comparing target prices to named levels (key_levels + overlays)
     snapped_names: List[str] = []
+    key_level_matches: List[Dict[str, Any]] = []
     try:
         targets_for_snap = list(targets_list)
         atr_for_window = float(indicators.get("atr14") or 0.0)
-        window = max(atr_for_window * 0.30, 0.0)
+        baseline_price = entry_val if entry_val is not None else (targets_for_snap[0] if targets_for_snap else None)
+        fallback_window = 0.1
+        if baseline_price is not None:
+            try:
+                fallback_window = max(abs(float(baseline_price)) * 0.002, 0.1)
+            except (TypeError, ValueError):
+                fallback_window = 0.1
+        window = atr_for_window * 0.30 if atr_for_window and atr_for_window > 0 else fallback_window
+        window = max(window, fallback_window)
         levels_dict = first.get("key_levels") or {}
         overlays = first.get("context_overlays") or {}
-        named: List[Tuple[str, float]] = []
-        # Key levels (map some to canonical short labels)
+        level_candidates: List[Dict[str, Any]] = []
         alias = {
             "opening_range_high": "ORH",
             "opening_range_low": "ORL",
@@ -5623,19 +6241,34 @@ async def gpt_plan(
         for k, v in (levels_dict or {}).items():
             if isinstance(v, (int, float)):
                 try:
-                    named.append((alias.get(k, k), float(v)))
+                    price_val = float(v)
                 except Exception:
                     continue
-        # Volume profile (VAH/VAL/POC/VWAP)
+                label = alias.get(k, k)
+                level_candidates.append(
+                    {
+                        "label": label,
+                        "price": price_val,
+                        "category": _classify_level(label),
+                        "source": "key_levels",
+                    }
+                )
         vp = overlays.get("volume_profile") or {}
         for lab, key in [("VAH", "vah"), ("VAL", "val"), ("POC", "poc"), ("VWAP", "vwap")]:
             val = vp.get(key)
             if isinstance(val, (int, float)):
                 try:
-                    named.append((lab, float(val)))
+                    price_val = float(val)
                 except Exception:
-                    pass
-        # Anchored VWAPs
+                    continue
+                level_candidates.append(
+                    {
+                        "label": lab,
+                        "price": price_val,
+                        "category": _classify_level(lab),
+                        "source": "volume_profile",
+                    }
+                )
         av = overlays.get("avwap") or {}
         av_map = {
             "from_open": "AVWAP(open)",
@@ -5647,24 +6280,68 @@ async def gpt_plan(
             val = av.get(k)
             if isinstance(val, (int, float)):
                 try:
-                    named.append((lab, float(val)))
+                    price_val = float(val)
                 except Exception:
-                    pass
+                    continue
+                level_candidates.append(
+                    {
+                        "label": lab,
+                        "price": price_val,
+                        "category": _classify_level(lab),
+                        "source": "anchored_vwap",
+                    }
+                )
+
+        def _nearest_level(price: float) -> Dict[str, Any] | None:
+            best_candidate: Dict[str, Any] | None = None
+            best_distance: float | None = None
+            for candidate in level_candidates:
+                distance = abs(candidate["price"] - price)
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    best_candidate = candidate
+            if best_candidate is None or best_distance is None:
+                return None
+            if not math.isfinite(best_distance) or best_distance > window:
+                return None
+            return {
+                "label": best_candidate["label"],
+                "price": best_candidate["price"],
+                "category": best_candidate.get("category", "structural"),
+                "source": best_candidate.get("source"),
+                "distance": best_distance,
+            }
+
         for tp in targets_for_snap[:2]:
             try:
                 tp_f = float(tp)
             except Exception:
                 continue
-            nearest = None
-            best_name = None
-            for name, val in named:
-                if nearest is None or abs(val - tp_f) < abs(nearest - tp_f):
-                    nearest = val
-                    best_name = name
-            if nearest is not None and abs(nearest - tp_f) <= window and best_name:
-                snapped_names.append(best_name)
+            match = _nearest_level(tp_f)
+            if match:
+                snapped_names.append(match["label"])
+
+        def _record_match(role: str, raw_price: float | None) -> None:
+            if raw_price is None:
+                return
+            try:
+                price_val = float(raw_price)
+            except (TypeError, ValueError):
+                return
+            match = _nearest_level(price_val)
+            if not match:
+                return
+            entry = dict(match)
+            entry["role"] = role
+            key_level_matches.append(entry)
+
+        _record_match("entry", entry_val)
+        _record_match("stop", stop_val)
+        for idx, target_value in enumerate(targets_for_snap, start=1):
+            _record_match(f"tp{idx}", target_value)
     except Exception:
         snapped_names = []
+        key_level_matches = []
 
     htf = {
         "bias": ((snapshot.get("trend") or {}).get("ema_stack") or "unknown"),
@@ -5778,8 +6455,11 @@ async def gpt_plan(
     options_contracts: List[Dict[str, Any]] | None = None
     options_note: str | None = None
     if include_options_contracts:
-        options_contracts = _extract_options_contracts(options_payload) or None
-        if not options_contracts:
+        extracted_contracts = _extract_options_contracts(options_payload)
+        if extracted_contracts:
+            options_contracts = extracted_contracts
+        else:
+            options_contracts = []
             if isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
                 options_note = str(options_payload["quotes_notice"])
             elif not side_hint:
@@ -5796,6 +6476,50 @@ async def gpt_plan(
                 decimals_value = int(round(math.log10(scale)))
         except Exception:
             decimals_value = 2
+
+    precision_for_levels = decimals_value if isinstance(decimals_value, int) else 2
+    key_levels_used: Dict[str, List[Dict[str, Any]]] | None = None
+    if key_level_matches:
+        formatted: Dict[str, List[Dict[str, Any]]] = {"session": [], "structural": []}
+        seen_pairs: set[tuple[str | None, str | None]] = set()
+        distance_precision = max(precision_for_levels + 2, 4)
+        for match in key_level_matches:
+            role = match.get("role")
+            label = match.get("label")
+            pair = (role, label)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            try:
+                price_val = float(match.get("price"))
+            except (TypeError, ValueError):
+                continue
+            try:
+                distance_val = float(match.get("distance"))
+            except (TypeError, ValueError):
+                distance_val = 0.0
+            bucket = "session" if str(match.get("category" or "")).lower() == "session" else "structural"
+            entry_payload: Dict[str, Any] = {
+                "role": role,
+                "label": label,
+                "price": round(price_val, precision_for_levels),
+                "distance": round(abs(distance_val), distance_precision),
+            }
+            source = match.get("source")
+            if source:
+                entry_payload["source"] = source
+            formatted[bucket].append(entry_payload)
+        key_levels_used = {bucket: items for bucket, items in formatted.items() if items}
+
+    execution_rules = _build_execution_rules(
+        entry=entry_val,
+        stop=stop_val,
+        targets=targets_for_rules,
+        direction=plan.get("direction") or direction_hint,
+        precision=precision_for_levels,
+        key_levels_used=key_levels_used,
+        runner=plan.get("runner") if plan else None,
+    )
 
     plan_core = _extract_plan_core(first, plan_id, version, decimals_value)
     if plan_core.get("setup") in {"watch_plan", "offline"}:
@@ -5821,6 +6545,18 @@ async def gpt_plan(
         plan_core["target_profile"] = target_profile_dict
     if session_state_payload:
         plan_core.setdefault("session_state", session_state_payload)
+    if key_levels_used:
+        plan_core["key_levels_used"] = key_levels_used
+        plan.setdefault("key_levels_used", key_levels_used)
+    if risk_block:
+        plan_core["risk_block"] = risk_block
+        plan.setdefault("risk_block", risk_block)
+    if execution_rules:
+        plan_core["execution_rules"] = execution_rules
+        plan.setdefault("execution_rules", execution_rules)
+    if mtf_confluence_tags:
+        plan_core["mtf_confluence"] = mtf_confluence_tags
+        plan.setdefault("mtf_confluence", mtf_confluence_tags)
     plan_layers: Dict[str, Any] | None = None
     if include_plan_layers:
         overlays_payload = first.get("context_overlays")
@@ -5836,6 +6572,8 @@ async def gpt_plan(
             key_levels=first.get("key_levels"),
             overlays=overlays_payload,
         )
+        if key_levels_used:
+            _ensure_plan_layers_cover_used_levels(plan_layers, key_levels_used, precision=precision_for_levels)
         plan_layers["plan_id"] = plan_id
         plan_core["plan_layers"] = plan_layers
     summary_snapshot = _build_snapshot_summary(first)
@@ -5956,6 +6694,8 @@ async def gpt_plan(
             meta.setdefault("features", {})
         if isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
             meta["quotes_notice"] = options_payload["quotes_notice"]
+        if mtf_confluence_tags:
+            meta["mtf_confluence"] = mtf_confluence_tags
     if structured_plan_payload is not None:
         if confluence_tags:
             structured_plan_payload["confluence"] = confluence_tags
@@ -5963,10 +6703,18 @@ async def gpt_plan(
         if tp_reasons:
             structured_plan_payload["tp_reasons"] = tp_reasons
         if include_options_contracts:
-            if options_contracts:
+            if options_contracts is not None:
                 structured_plan_payload["options_contracts"] = options_contracts
-            elif options_note:
+            if options_note:
                 structured_plan_payload["options_note"] = options_note
+        if key_levels_used:
+            structured_plan_payload["key_levels_used"] = key_levels_used
+        if risk_block:
+            structured_plan_payload["risk_block"] = risk_block
+        if execution_rules:
+            structured_plan_payload["execution_rules"] = execution_rules
+        if mtf_confluence_tags:
+            structured_plan_payload["mtf_confluence"] = mtf_confluence_tags
     if confluence_tags:
         plan_core["confluence_tags"] = confluence_tags
         plan.setdefault("confluence_tags", confluence_tags)
@@ -5974,7 +6722,7 @@ async def gpt_plan(
         plan_core["tp_reasons"] = tp_reasons
         plan.setdefault("tp_reasons", tp_reasons)
     if include_options_contracts:
-        if options_contracts:
+        if options_contracts is not None:
             plan_core["options_contracts"] = options_contracts
             plan.setdefault("options_contracts", options_contracts)
         if options_note:
@@ -6085,6 +6833,7 @@ async def gpt_plan(
         confidence=confidence_output,
         confidence_factors=confidence_factors,
         confluence_tags=confluence_tags or None,
+        confluence=mtf_confluence_tags or None,
         notes=notes_output,
         relevant_levels=relevant_levels or None,
         expected_move_basis=expected_move_basis,
@@ -6103,6 +6852,7 @@ async def gpt_plan(
         target_profile=target_profile_dict,
         charts=charts_field,
         key_levels=first.get("key_levels"),
+        key_levels_used=key_levels_used or None,
         market_snapshot=first.get("market_snapshot"),
         features=first.get("features"),
         options=first.get("options"),
@@ -6118,6 +6868,8 @@ async def gpt_plan(
         update_reason=update_reason,
         market=market_meta,
         data=data_meta,
+        risk_block=risk_block,
+        execution_rules=execution_rules,
         session_state=session_state_payload,
         confidence_visual=confidence_visual_value,
         plan_layers=plan_layers,
@@ -6209,6 +6961,14 @@ async def assistant_exec(
         meta_block["options_contracts"] = plan_response.options_contracts
     if plan_response.options_note:
         meta_block["options_note"] = plan_response.options_note
+    if plan_response.confluence:
+        meta_block["mtf_confluence"] = plan_response.confluence
+    if plan_response.key_levels_used:
+        meta_block["key_levels_used"] = plan_response.key_levels_used
+    if plan_response.risk_block:
+        meta_block["risk_block"] = plan_response.risk_block
+    if plan_response.execution_rules:
+        meta_block["execution_rules"] = plan_response.execution_rules
 
     return AssistantExecResponse(
         plan=plan_block,

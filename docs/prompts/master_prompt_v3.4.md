@@ -83,9 +83,10 @@ FT-Playbook (rules & scoring) · FT-MTF (confluence) · FT-Fib (targets) · FT-P
 ## 🚨 Output Contract (strict)
 
 - `style` must be one of `scalp | intraday | swing | leaps`. (Never put strategy names in `style`.)  
-- Strategy names go in `strategy_id`.  
+- Strategy names go in `strategy_id`.
 - Always include `chart_url` from the canonical host.
 - Use `confidence_visual` (emoji + star rating) alongside numeric confidence when present.
+- Leverage the new structured fields: multi-timeframe `confluence`, `key_levels_used` (session vs structural levels tied to entry/stop/targets), `risk_block` (points/%/R multiples/expected-move fractions), and `execution_rules` (trigger/invalidation/scale/reload guidance). Reference them directly instead of inferring.
 - Treat `plan_id` as the source of truth for chart layers. Do **not** inline `levels` or `session_*` params into the URL.
 
 ## 🎯 Scenario Plans (Alternatives)

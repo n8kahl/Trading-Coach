@@ -231,6 +231,10 @@ components:
         rr_t1: { type: number, format: double, nullable: true }
         confidence: { type: number, format: double, nullable: true }
         chart_url: { type: string, format: uri, nullable: true }
+        entry_distance_pct: { type: number, format: double, nullable: true }
+        entry_distance_atr: { type: number, format: double, nullable: true }
+        bars_to_trigger: { type: number, format: double, nullable: true }
+        actionable_soon: { type: boolean, nullable: true }
 
     ScanPage:
       type: object
@@ -293,6 +297,49 @@ components:
             interval: { type: string }
             precision: { type: integer }
 
+    LevelUsage:
+      type: object
+      properties:
+        role: { type: string }
+        label: { type: string, nullable: true }
+        price: { type: number, format: double }
+        distance: { type: number, format: double, nullable: true }
+        source: { type: string, nullable: true }
+
+    KeyLevelsUsed:
+      type: object
+      properties:
+        session:
+          type: array
+          items: { $ref: '#/components/schemas/LevelUsage' }
+        structural:
+          type: array
+          items: { $ref: '#/components/schemas/LevelUsage' }
+
+    RiskBlock:
+      type: object
+      properties:
+        risk_points: { type: number, format: double, nullable: true }
+        risk_percent: { type: number, format: double, nullable: true }
+        reward_to_target:
+          type: object
+          additionalProperties: { type: number, format: double }
+        atr_stop_multiple: { type: number, format: double, nullable: true }
+        atr_value: { type: number, format: double, nullable: true }
+        expected_move: { type: number, format: double, nullable: true }
+        expected_move_fraction:
+          type: object
+          additionalProperties: { type: number, format: double }
+        runner_trail_multiple: { type: number, format: double, nullable: true }
+
+    ExecutionRules:
+      type: object
+      properties:
+        trigger: { type: string, nullable: true }
+        invalidation: { type: string, nullable: true }
+        scale: { type: string, nullable: true }
+        reload: { type: string, nullable: true }
+
     TargetMeta:
       type: object
       properties:
@@ -354,6 +401,9 @@ components:
         key_levels:
           type: object
           additionalProperties: { type: number, format: double }
+        key_levels_used:
+          $ref: '#/components/schemas/KeyLevelsUsed'
+          nullable: true
         market_snapshot: { type: object, nullable: true }
         features: { type: object, nullable: true }
         options: { type: object, nullable: true }
@@ -392,6 +442,12 @@ components:
           items: { $ref: '#/components/schemas/Contract' }
         options_note: { type: string, nullable: true }
         plan_layers: { $ref: '#/components/schemas/PlanLayers' }
+        risk_block:
+          $ref: '#/components/schemas/RiskBlock'
+          nullable: true
+        execution_rules:
+          $ref: '#/components/schemas/ExecutionRules'
+          nullable: true
 
     StructuredPlan:
       type: object
@@ -433,6 +489,19 @@ components:
         meta:
           type: array
           items: { type: object }
+        key_levels_used:
+          $ref: '#/components/schemas/KeyLevelsUsed'
+          nullable: true
+        mtf_confluence:
+          type: array
+          items: { type: string }
+          nullable: true
+        risk_block:
+          $ref: '#/components/schemas/RiskBlock'
+          nullable: true
+        execution_rules:
+          $ref: '#/components/schemas/ExecutionRules'
+          nullable: true
 
     TargetProfile:
       type: object

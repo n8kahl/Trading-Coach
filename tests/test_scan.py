@@ -94,6 +94,10 @@ def _metrics_for(
         context_score=0.6,
         penalties=penalties,
         confidence=confidence,
+        actionability=0.6,
+        entry_distance_pct=0.8,
+        entry_distance_atr=0.8,
+        bars_to_trigger=2.5,
     )
 
 

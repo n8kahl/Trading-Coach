@@ -33,6 +33,8 @@ See `docs/production_readiness.md` for scope, validation checks, and verificatio
 
 Support routes: `/tv-api/*` (Lightweight Charts datafeed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html` (static renderer), `/api/v1/gpt/chart-layers` (plan overlays).
 
+Scan responses expose additional actionability metrics (`entry_distance_pct`, `entry_distance_atr`, `bars_to_trigger`, `actionable_soon`) so clients can prioritise nearer-term setups.
+
 Authentication is optional. Set `BACKEND_API_KEY` to require Bearer tokens; include `X-User-Id` to scope data per user.
 
 ---
@@ -58,7 +60,7 @@ Authentication is optional. Set `BACKEND_API_KEY` to require Bearer tokens; incl
 - Scenarios: zero or more frozen snapshots per style (Scalp/Intraday/Swing; Reversal gated until server strategy exists).
 - Adopt: promote a scenario to Live in the UI; optionally regenerate via `/gpt/plan` first.
 - Charts: canonical `/tv` URLs only; no `session_*` or inline levels in links. Overlays fetched by `plan_id` via `GET /api/v1/gpt/chart-layers`.
-  Plans also surface `confluence_tags`, `tp_reasons`, and (when `FF_OPTIONS_ALWAYS=1`) top-ranked `options_contracts` so the GPT can explain targets and contract selection without fabricating details.
+  Plans also surface `confluence_tags`, multi-timeframe `confluence`, `key_levels_used`, `risk_block`, `execution_rules`, and (when `FF_OPTIONS_ALWAYS=1`) top-ranked `options_contracts` so the GPT can explain levels, risk, and contract selection without fabricating details.
   Access in `trade-coach-ui` under `/replay/:symbol`.
 
 ---

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Literal, Sequence
 
 Style = Literal["scalp", "intraday", "swing", "leaps"]
+
+logger = logging.getLogger(__name__)
+
+ACTIONABILITY_GATE = 0.25
 
 WEIGHTS: Dict[Style, Dict[str, float]] = {
     "scalp": {
@@ -138,6 +143,7 @@ class Features:
     vol_regime: float
     momentum_htf: float
     context: float
+    actionability: float
     weekly_structure: float
     daily_confluence: float
     option_efficiency: float
@@ -156,7 +162,8 @@ class Features:
             + self.confluence
             + self.liquidity
             + self.context
-        ) / 4.0
+            + self.actionability
+        ) / 5.0
         return _clamp(baseline)
 
 
@@ -178,7 +185,32 @@ def rank(features: Sequence[Features], style: Style) -> List[Scored]:
     for bundle in features:
         if bundle.quality() < quality_min:
             continue
-        score = _weighted_score(bundle, weights)
+        if style in {"scalp", "intraday"}:
+            if _clamp(bundle.actionability) < ACTIONABILITY_GATE:
+                logger.debug(
+                    "rank_actionability_gated",
+                    extra={
+                        "symbol": bundle.symbol,
+                        "style": style,
+                        "actionability": float(_clamp(bundle.actionability)),
+                    },
+                )
+                continue
+            trend_score, rr_score, base_score = _trend_actionability_score(bundle, weights)
+            score = base_score
+            logger.debug(
+                "rank_candidate_score",
+                extra={
+                    "symbol": bundle.symbol,
+                    "style": style,
+                    "score": round(score, 4),
+                    "trend_component": round(trend_score, 4),
+                    "rr_component": round(rr_score, 4),
+                    "actionability": round(_clamp(bundle.actionability), 4),
+                },
+            )
+        else:
+            score = _weighted_score(bundle, weights)
         if score <= 0:
             continue
         scored.append(
@@ -219,6 +251,30 @@ def diversify(scored: Iterable[Scored], limit: int = 100) -> List[Scored]:
     return selection
 
 
+def _trend_actionability_score(features: Features, weights: Dict[str, float]) -> tuple[float, float, float]:
+    trend_components = (
+        features.momentum,
+        features.confluence,
+        features.momentum_htf,
+        features.htf_structure,
+        features.confluence_htf,
+    )
+    trend_score = _mean(trend_components)
+    rr_components = (features.rr1, features.rr2, features.rr_multi)
+    rr_score = _mean(rr_components)
+    actionability_component = _clamp(features.actionability)
+    base = (
+        0.4 * _clamp(trend_score)
+        + 0.3 * actionability_component
+        + 0.3 * _clamp(rr_score)
+    )
+    penalty = 0.0
+    for key in ("pen_event", "pen_dq", "pen_spread", "pen_chop", "pen_cluster"):
+        penalty += weights.get(key, 0.0) * _clamp(getattr(features, key, 0.0))
+    final_score = max(base - penalty, 0.0)
+    return _clamp(trend_score), _clamp(rr_score), final_score
+
+
 def _weighted_score(features: Features, weights: Dict[str, float]) -> float:
     positive_keys = (
         "entry_quality",
@@ -233,6 +289,7 @@ def _weighted_score(features: Features, weights: Dict[str, float]) -> float:
         "vol_regime",
         "momentum_htf",
         "context",
+        "actionability",
         "weekly_structure",
         "daily_confluence",
         "option_efficiency",
@@ -272,8 +329,15 @@ def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
+def _mean(values: Sequence[float]) -> float:
+    finite = [value for value in values if math.isfinite(value)]
+    if not finite:
+        return 0.0
+    return sum(finite) / len(finite)
+
+
 def _round_for_sort(value: float) -> float:
     return round(value, 6)
 
 
-__all__ = ["SECTOR_CAP", "Features", "Scored", "Style", "diversify", "rank", "WEIGHTS", "MIN_QUALITY"]
+__all__ = ["SECTOR_CAP", "Features", "Scored", "Style", "diversify", "rank", "WEIGHTS", "MIN_QUALITY", "ACTIONABILITY_GATE"]

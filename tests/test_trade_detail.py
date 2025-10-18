@@ -378,6 +378,10 @@ async def test_gpt_plan_populates_completeness_fields(monkeypatch):
     response = await agent_server.gpt_plan(agent_server.PlanRequest(symbol="AAPL", style="intraday"), request, user)
 
     assert response.confluence_tags, "should emit confluence tags"
+    assert response.confluence, "should emit multi-timeframe confluence"
+    assert response.key_levels_used, "should report key levels used"
+    assert response.risk_block and response.risk_block["risk_points"] > 0
+    assert response.execution_rules and response.execution_rules["trigger"]
     assert any("TP1" in item["label"] for item in response.tp_reasons), "tp reasons should describe targets"
     assert response.options_contracts and response.options_contracts[0]["symbol"].startswith("AAPL"), "contracts list should surface best picks"
     assert response.options_note is None

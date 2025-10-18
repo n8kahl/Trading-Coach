@@ -42,6 +42,10 @@ class ScanCandidate(BaseModel):
     rr_t1: float | None = None
     confidence: float | None = None
     chart_url: AnyUrl | None = None
+    entry_distance_pct: float | None = None
+    entry_distance_atr: float | None = None
+    bars_to_trigger: float | None = None
+    actionable_soon: bool | None = None
 
 
 class ScanPage(BaseModel):
