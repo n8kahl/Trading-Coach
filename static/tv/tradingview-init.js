@@ -109,6 +109,7 @@
   let levelGroups = { primary: [], supplemental: [] };
   let showAllLevels = false;
   let allKeyLevels = [];
+  let levelsToggleEl = null;
   let pendingAutoReplan = null;
   let autoReplanInFlight = false;
   let keyLevels = [];
@@ -272,9 +273,6 @@
   let hasAppliedFocusRange = false;
   let hasAppliedTimeCenter = false;
   let hasAppliedTimeWindow = false;
-
-let levelsToggleEl;
-
 const headerSymbolEl = document.getElementById('header_symbol');
   const headerStrategyEl = document.getElementById('header_strategy');
   const headerBiasEl = document.getElementById('header_bias');
