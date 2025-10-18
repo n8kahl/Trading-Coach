@@ -158,7 +158,7 @@ Happy shipping!
   - Embedded session metadata into chart links: `market_status`, `session_status`, `session_phase`, `session_banner`, plus `live=1` and `last_update` when applicable.
   - TV viewer now derives the symbol from `symbol`, `plan_meta`, or `plan_id`, writes it back into the URL, and connects the correct stream; no more fallback to AAPL when query is missing.
   - TV viewer treats session flags and data freshness properly: shows “Market Open” when session is live and only displays a degraded banner when `data_age_ms > 120s`.
-  - Bumped static bundle version (`tradingview-init.js?v=20251116`) to force fresh assets in production.
+- Bumped static bundle version (`tradingview-init.js?v=20251118`) to force fresh assets in production.
 
 ### 7. Release checklist
 
