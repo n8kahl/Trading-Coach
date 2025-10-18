@@ -20,7 +20,7 @@ focuses on data prep; the agent performs the higher-level reasoning.
 - Master prompt (**approved v3.9-lite+**): [`docs/prompts/master_prompt_v3.9-lite-plus.md`](prompts/master_prompt_v3.9-lite-plus.md)
 - API schema (**OpenAPI 2.2.1**): see [`docs/openapi_v2.2.1.yaml`](openapi_v2.2.1.yaml) or `https://trading-coach-production.up.railway.app/openapi.json`
 - Deployment status: **Production ready & approved** (2025-10-17 refresh)
-- Persistent storage: set `DB_URL` (Postgres) so `/gpt/plan` snapshots and idea permalinks survive restarts.
+- Persistent storage: set `DB_URL` (or `DATABASE_URL`) so `/gpt/plan` snapshots and idea permalinks survive restarts.
 
 ---
 

@@ -19,7 +19,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="allow")
 
     polygon_api_key: str | None = Field(None, env="POLYGON_API_KEY")
-    db_url: str | None = Field(None, env="DB_URL")
+    db_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DB_URL", "DATABASE_URL"),
+    )
     backend_api_key: str | None = Field(None, env="BACKEND_API_KEY")
     tradier_token: str | None = Field(
         default=None,

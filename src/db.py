@@ -51,6 +51,12 @@ async def _create_pool() -> asyncpg.Pool | None:
     if not db_url:
         logger.info("DB_URL not configured; idea snapshots will remain in-memory")
         return None
+    db_url = db_url.strip()
+    if not db_url:
+        logger.info("DB_URL configured but empty after trimming; skipping database setup")
+        return None
+    if db_url.startswith("postgres://"):
+        db_url = "postgresql://" + db_url[len("postgres://") :]
     try:
         pool = await asyncpg.create_pool(dsn=db_url, min_size=1, max_size=5, statement_cache_size=0)
         logger.info("database connection pool initialised")

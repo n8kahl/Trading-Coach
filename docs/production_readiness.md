@@ -23,11 +23,10 @@ Validation checklist (executed against production)
 - Fallback behavior verified: Polygon snapshot 400s degrade gracefully to Tradier.
 
 Operational notes
-- Caching is in-memory; restarts clear caches. Configure `DB_URL` to persist plan snapshots.
+- Caching is in-memory; restarts clear caches. Configure `DB_URL`/`DATABASE_URL` to persist plan snapshots.
 - Polygon options entitlement is optional; warnings expected without it.
 - For GPT Actions, point to the production host and use the served OpenAPI.
 
 Change tracking
 - Detailed change log and roadmap live in `docs/progress.md`.
 - Integration details and payload contracts live in `docs/gpt_integration.md`.
-
