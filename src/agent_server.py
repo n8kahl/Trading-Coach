@@ -4003,6 +4003,15 @@ async def gpt_scan_endpoint(
                 "data_mode": dq.get("mode"),
             },
         )
+        if not signals:
+            logger.warning(
+                "scan_market_empty",
+                extra={
+                    "symbols_considered": len(subset),
+                    "planning_context": context.label,
+                    "filters": request_payload.filters.model_dump() if request_payload.filters else None,
+                },
+            )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("scan_market failed: %s", exc, exc_info=True)
         dq["ok"] = False
@@ -5127,12 +5136,44 @@ async def _generate_fallback_plan(
     charts_payload["live"] = is_plan_live
     charts_payload["timeframe"] = chart_timeframe_hint
     charts_payload["guidance"] = hint_guidance
+    enrichment = None
+    events_block: Dict[str, Any] | None = None
+    earnings_block: Dict[str, Any] | None = None
+    sentiment_block: Dict[str, Any] | None = None
+    try:
+        enrichment = await _fetch_context_enrichment(symbol)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("fallback enrichment fetch failed for %s: %s", symbol, exc)
+        enrichment = None
+    if enrichment:
+        events_block = enrichment.get("events")
+        earnings_block = enrichment.get("earnings")
+        sentiment_block = enrichment.get("sentiment")
+    session_state_payload = market_meta.get("session_state") if isinstance(market_meta, dict) else None
+    if not events_block:
+        macro_window = _macro_event_block(symbol, session_state_payload)
+        if macro_window:
+            events_block = macro_window
+    if symbol.upper() in ETF_EVENT_SYMBOLS:
+        earnings_block = None
+    if isinstance(data_meta, dict):
+        data_meta = dict(data_meta)
+        data_meta["earnings_present"] = bool(earnings_block)
+        data_meta["events_present"] = bool(events_block)
     data_payload = dict(data_meta)
     bars_url = f"{_resolved_base_url(request)}/gpt/context/{symbol.upper()}?interval={interval_token}&lookback=300"
     if is_plan_live:
         bars_url += "&live=1"
     data_payload["bars"] = bars_url
     data_payload["session_state"] = market_meta.get("session_state")
+    data_payload["earnings_present"] = bool(earnings_block)
+    data_payload["events_present"] = bool(events_block)
+    data_quality = {
+        "series_present": True,
+        "iv_present": bool(expected_move_abs) and math.isfinite(expected_move_abs),
+        "events_present": bool(events_block),
+        "earnings_present": bool(earnings_block),
+    }
     response = PlanResponse(
         plan_id=plan_id,
         version=1,
@@ -5155,6 +5196,9 @@ async def _generate_fallback_plan(
         notes=notes,
         relevant_levels={k: float(v) for k, v in key_levels.items() if isinstance(v, (int, float))},
         expected_move_basis=expected_move_basis,
+        sentiment=sentiment_block,
+        events=events_block,
+        earnings=earnings_block,
         charts_params=chart_params_payload,
         chart_url=chart_url_with_ids,
         strategy_id="baseline_auto",
@@ -5183,11 +5227,7 @@ async def _generate_fallback_plan(
             "snapped_targets": [],
         },
         decimals=2,
-        data_quality={
-            "series_present": True,
-            "iv_present": False,
-            "earnings_present": bool(market_meta.get("session_state")),
-        },
+        data_quality=data_quality,
         debug={"source": "auto_fallback_plan"},
         runner=runner,
         market=market_meta,
@@ -5633,7 +5673,8 @@ async def gpt_plan(
     data_quality = {
         "series_present": True,
         "iv_present": True,
-        "earnings_present": True,
+        "events_present": False,
+        "earnings_present": False,
     }
     raw_warnings = first.get("warnings") or plan.get("warnings") or []
     if isinstance(raw_warnings, list):
@@ -5883,6 +5924,8 @@ async def gpt_plan(
         if macro_events:
             events_block = macro_events
             events_source = events_source or "macro_window"
+    data_quality["events_present"] = bool(events_block)
+    data_quality["earnings_present"] = bool(earnings_block)
     confidence_factors: List[str] | None = None
     feature_block = first.get("features") or {}
     for key in ("plan_confidence_factors", "plan_confidence_reasons", "confidence_reasons"):
@@ -5987,6 +6030,10 @@ async def gpt_plan(
         bars_url = data_meta.get("bars")
         if isinstance(bars_url, str):
             data_meta["bars"] = _append_query_params(bars_url, {"live": "1"})
+
+    if isinstance(data_meta, dict):
+        data_meta.setdefault("events_present", bool(events_block))
+        data_meta.setdefault("earnings_present", bool(earnings_block))
 
     logger.info(
         "plan_enrichment_status",

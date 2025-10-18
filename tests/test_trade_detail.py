@@ -134,6 +134,11 @@ async def test_gpt_plan_respects_strategy_id(monkeypatch):
     assert response.plan["strategy"] == "orb_retest"
     assert response.events == {"label": "earnings watch"}
     assert response.earnings == {"next_earnings_at": "2025-11-01"}
+    assert response.data_quality["events_present"] is True
+    assert response.data_quality["earnings_present"] is True
+    data_meta = response.data or {}
+    assert data_meta.get("events_present") is True
+    assert data_meta.get("earnings_present") is True
 
 
 @pytest.mark.asyncio
@@ -211,6 +216,11 @@ async def test_gpt_plan_macro_events_fallback(monkeypatch):
     assert response.events.get("label") == "macro_window"
     assert response.events.get("next_fomc_minutes") == 45
     assert response.earnings is None
+    assert response.data_quality["events_present"] is True
+    assert response.data_quality["earnings_present"] is False
+    data_meta = response.data or {}
+    assert data_meta.get("events_present") is True
+    assert data_meta.get("earnings_present") is False
 
 
 @pytest.mark.asyncio
