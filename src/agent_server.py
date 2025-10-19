@@ -4609,30 +4609,12 @@ async def gpt_scan_endpoint(
         explicit_value=request_payload.simulate_open,
         explicit_field_set="simulate_open" in fields_set,
     )
+    planning_mode = bool(getattr(request_payload, "planning_mode", False))
     session_payload = _session_payload_from_request(request)
-    session_token = _session_tracking_id(session_payload)
-    user_id = getattr(user, "user_id", "anonymous")
-    style_norm_req = (request_payload.style or "").strip().lower()
-    style_lookup_key = style_norm_req or _SCAN_STYLE_ANY
-
-    def _finalize_plan_response(plan_payload: PlanResponse) -> PlanResponse:
-        response.headers["X-No-Fabrication"] = "1"
-        return plan_payload
-
-    if session_token:
-        allowed_symbols = _SCAN_SYMBOL_REGISTRY.get((user_id, session_token, style_lookup_key))
-        if allowed_symbols is None and style_lookup_key != _SCAN_STYLE_ANY:
-            allowed_symbols = _SCAN_SYMBOL_REGISTRY.get((user_id, session_token, _SCAN_STYLE_ANY))
-        if allowed_symbols is not None and symbol not in allowed_symbols:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "PLAN_NOT_IN_LAST_SCAN",
-                    "message": f"{symbol} not present in most recent scan",
-                },
-            )
     settings = get_settings()
     allow_fallback_trades = not bool(getattr(settings, "ft_no_fallback_trades", True))
+    if planning_mode:
+        allow_fallback_trades = True
     no_setups_banner = "NO_ELIGIBLE_SETUPS"
     session_ticker = _session_tracking_id(session_payload)
     if session_ticker:
@@ -4661,6 +4643,25 @@ async def gpt_scan_endpoint(
                 request.state.scan_phase_update(page.phase)
             except Exception:
                 pass
+        if planning_mode:
+            meta_map = dict(page.meta or {})
+            meta_map["planning_mode"] = True
+            page.meta = meta_map
+            dq_map = dict(page.data_quality or {})
+            dq_map["planning_mode"] = True
+            if planning_banner:
+                notes_field = dq_map.setdefault("notes", [])
+                if isinstance(notes_field, list) and planning_banner not in notes_field:
+                    notes_field.append(planning_banner)
+            page.data_quality = dq_map
+            if planning_banner and not page.banner:
+                page.banner = planning_banner
+            if isinstance(page.session, dict):
+                session_map = dict(page.session)
+                session_map.setdefault("planning_mode", True)
+                if planning_banner:
+                    session_map.setdefault("banner", planning_banner)
+                page.session = session_map
         return page
 
     try:
@@ -4677,6 +4678,17 @@ async def gpt_scan_endpoint(
             session_payload,
         )
 
+    planning_banner: str | None = None
+    if planning_mode:
+        banner_token = session_payload.get("banner") if isinstance(session_payload, Mapping) else None
+        if banner_token:
+            planning_banner = f"Planning mode — {banner_token}"
+        else:
+            try:
+                planning_banner = f"Planning mode — market closed as of {context.as_of_iso}"
+            except Exception:
+                planning_banner = "Planning mode — market closed"
+
     def _fallback_or_empty(
         *,
         symbols: Sequence[str],
@@ -4687,6 +4699,11 @@ async def gpt_scan_endpoint(
         label: str | None = None,
         empty_banner: str | None = None,
     ) -> ScanPage:
+        banner_override = banner
+        empty_override = empty_banner
+        if planning_mode and planning_banner:
+            banner_override = planning_banner if not banner_override else banner_override
+            empty_override = planning_banner
         if allow_fallback_trades:
             fallback_page = _fallback_scan_page(
                 request_payload,
@@ -4694,7 +4711,7 @@ async def gpt_scan_endpoint(
                 symbols=symbols,
                 market_data=market_data,
                 dq=dq,
-                banner=banner,
+                banner=banner_override,
                 limit=limit,
                 mode=mode,
                 label=label,
@@ -4702,14 +4719,14 @@ async def gpt_scan_endpoint(
             )
             if fallback_page is not None:
                 return fallback_page
-        if not allow_fallback_trades and empty_banner:
-            if banner and banner != empty_banner:
+        if not allow_fallback_trades and empty_override:
+            if banner and banner != empty_override:
                 notes_field = dq.setdefault("notes", [])
                 if isinstance(notes_field, list):
                     notes_field.append(banner)
-            resolved_banner = empty_banner
+            resolved_banner = empty_override
         else:
-            resolved_banner = banner or empty_banner
+            resolved_banner = banner_override or empty_override
         return _empty_scan_page(
             request_payload,
             context,

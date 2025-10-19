@@ -25,6 +25,7 @@ class ScanRequest(BaseModel):
     filters: ScanFilters | None = None
     cursor: str | None = None
     simulate_open: bool = False
+    planning_mode: bool = False
 
     @field_validator("universe")
     @staticmethod
