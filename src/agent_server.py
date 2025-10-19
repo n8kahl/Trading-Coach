@@ -6112,6 +6112,7 @@ async def gpt_plan(
     plan["chart_timeframe"] = chart_timeframe_hint
     plan["chart_guidance"] = hint_guidance
     is_plan_live = str(first.get("planning_context") or "").strip().lower() == "live"
+    simulated_banner_text: str | None = None
     if simulate_open:
         first["planning_context"] = "live"
         is_plan_live = True
@@ -6119,15 +6120,6 @@ async def gpt_plan(
             container = first.get(key)
             if isinstance(container, dict):
                 container.setdefault("simulated_open", True)
-        if simulated_banner_text:
-            existing_banners = plan.get("banners")
-            if isinstance(existing_banners, list):
-                banners_list = existing_banners
-            else:
-                banners_list = []
-                plan["banners"] = banners_list
-            if simulated_banner_text not in banners_list:
-                banners_list.append(simulated_banner_text)
     logger.info(
         "plan identity normalized",
         extra={
@@ -6153,7 +6145,6 @@ async def gpt_plan(
             data_meta.setdefault("as_of_ts", fallback_data["as_of_ts"])
             data_meta.setdefault("frozen", fallback_data["frozen"])
             data_meta.setdefault("ok", fallback_data.get("ok", True))
-    simulated_banner_text: str | None = None
     if simulate_open:
         banner_dt: datetime | None = None
         if isinstance(data_meta, dict):
@@ -6168,6 +6159,15 @@ async def gpt_plan(
         if banner_dt is None:
             banner_dt = datetime.now(timezone.utc)
         simulated_banner_text = _format_simulated_banner(banner_dt)
+        if simulated_banner_text:
+            existing_banners = plan.get("banners")
+            if isinstance(existing_banners, list):
+                banners_list = existing_banners
+            else:
+                banners_list = []
+                plan["banners"] = banners_list
+            if simulated_banner_text not in banners_list:
+                banners_list.append(simulated_banner_text)
     session_state_payload: Dict[str, Any] | None = None
     if isinstance(market_meta, dict):
         session_state_payload = market_meta.get("session_state")
