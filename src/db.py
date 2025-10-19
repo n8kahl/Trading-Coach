@@ -41,6 +41,61 @@ CREATE INDEX IF NOT EXISTS idx_idea_snapshots_latest
     ON idea_snapshots (plan_id, version DESC);
 """
 
+_PLANNING_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS evening_scan_universe_snapshots (
+    id              SERIAL PRIMARY KEY,
+    as_of_utc       TIMESTAMPTZ NOT NULL,
+    universe_name   TEXT        NOT NULL,
+    universe_source TEXT        NOT NULL,
+    tickers         JSONB       NOT NULL,
+    metadata        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS evening_scan_runs (
+    id              SERIAL PRIMARY KEY,
+    as_of_utc       TIMESTAMPTZ NOT NULL,
+    universe_name   TEXT        NOT NULL,
+    universe_source TEXT        NOT NULL,
+    tickers         JSONB       NOT NULL,
+    indices_context JSONB       NOT NULL,
+    data_windows    JSONB       NOT NULL,
+    notes           TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS evening_candidates (
+    id                         SERIAL PRIMARY KEY,
+    scan_id                    INTEGER     NOT NULL REFERENCES evening_scan_runs (id) ON DELETE CASCADE,
+    symbol                     TEXT        NOT NULL,
+    metrics                    JSONB       NOT NULL,
+    levels                     JSONB       NOT NULL,
+    readiness_score            DOUBLE PRECISION NOT NULL,
+    components                 JSONB       NOT NULL,
+    contract_template          JSONB,
+    requires_live_confirmation BOOLEAN     NOT NULL DEFAULT TRUE,
+    missing_live_inputs        TEXT[]      NOT NULL DEFAULT ARRAY[]::TEXT[],
+    created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS plan_finalizations (
+    id                 SERIAL PRIMARY KEY,
+    candidate_id       INTEGER     NOT NULL REFERENCES evening_candidates (id) ON DELETE CASCADE,
+    finalized_at       TIMESTAMPTZ,
+    live_inputs        JSONB,
+    selected_contracts JSONB,
+    status             TEXT        NOT NULL,
+    reject_reason      TEXT,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_evening_candidates_scan_symbol
+    ON evening_candidates (scan_id, symbol);
+
+CREATE INDEX IF NOT EXISTS idx_plan_finalizations_candidate
+    ON plan_finalizations (candidate_id);
+"""
+
 
 async def _create_pool() -> asyncpg.Pool | None:
     if asyncpg is None:
@@ -96,6 +151,23 @@ async def ensure_schema() -> bool:
         return True
     except Exception as exc:  # pragma: no cover - depends on external DB state
         logger.error("failed to ensure database schema", exc_info=exc)
+        return False
+
+
+async def ensure_planning_schema() -> bool:
+    """Create persistence tables required for planning-mode scans."""
+
+    pool = await get_pool()
+    if pool is None or asyncpg is None:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(_PLANNING_TABLE_DDL)
+        logger.info("database schema ensured for planning mode tables")
+        return True
+    except Exception as exc:  # pragma: no cover
+        logger.error("failed to ensure planning schema", exc_info=exc)
         return False
 
 

@@ -12,6 +12,7 @@
 - Hardened chart request models (`extra="forbid"`) and applied host checks to both canonical and fallback chart URLs.  
 - Sanitised all ChartParams call-sites (scan + fallback plan) so extra fields are stripped before validation.  
 - Unified event-window gating + options blocking between primary and fallback `/gpt/plan` paths (prevents NameError + ensures consistent warnings).  
+- Implemented planning-mode services (`PolygonAggregatesClient`, `UniverseProvider`, `PlanningScanEngine`, `PlanningPersistence`, `PlanningScanRunner`) plus `/gpt/finalize`; readiness scoring, universe snapshots, and candidate persistence now ship end-to-end.  
 - In the fallback plan pipeline:
   - Added SL/TP invariant checks (stop-entry-target ordering per direction).  
   - Applied EM cap using `FT_EM_FACTOR`; plans now flag `em_used` when ceilings/floors activate.  

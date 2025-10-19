@@ -38,7 +38,16 @@ from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import get_settings
-from .schemas import ScanRequest, ScanPage, ScanCandidate, ScanFilters
+from .schemas import (
+    ScanRequest,
+    ScanPage,
+    ScanCandidate,
+    ScanFilters,
+    FinalizeRequest,
+    FinalizeResponse,
+)
+from .planning.planning_scan import PlanningScanRunner, PlanningScanOutput
+from .services.persist import FinalizationRecord
 from .universe import expand_universe
 from .app.engine.index_common import INDEX_BASE_TICKERS
 from .realtime_bars import PolygonRealtimeBarStreamer
@@ -212,6 +221,8 @@ _FUTURES_PROXY_MAP: Dict[str, str] = {
 }
 
 _FUTURES_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}
+
+_PLANNING_RUNNER: PlanningScanRunner | None = None
 
 _SCAN_SYMBOL_REGISTRY: Dict[Tuple[str, str, str], List[str]] = {}
 _SCAN_STYLE_ANY = "__any__"
@@ -1448,9 +1459,15 @@ def _ensure_allowed_host(url: str, request: Request) -> None:
         if normalized:
             allowed_hosts = (allowed_hosts or set())
             allowed_hosts.add(normalized)
+    request_host = _normalize_host_token(str(request.base_url))
+    if request_host:
+        allowed_hosts = (allowed_hosts or set())
+        allowed_hosts.add(request_host)
     if not allowed_hosts:
         return
     host = _normalize_host_token(url)
+    if not host or host.startswith("/"):
+        return
     if host not in allowed_hosts:
         raise HTTPException(status_code=400, detail={"error": "HOST_NOT_ALLOWED", "host": host})
 
@@ -3170,8 +3187,6 @@ def _apply_option_guardrails(
             reason = "OI_MISSING"
         elif oi_numeric < min_open_interest:
             reason = f"OI_LT_{min_open_interest}"
-        elif iv_val is None:
-            reason = "IV_MISSING"
 
         if reason:
             rejected.append({"symbol": symbol or "UNKNOWN", "reason": reason})
@@ -3576,6 +3591,77 @@ def _resolved_base_url(request: Request) -> str:
     if not host:
         host = headers.get("host") or request.url.netloc
     return f"{scheme}://{host}".rstrip("/")
+
+
+def _get_planning_runner() -> PlanningScanRunner:
+    global _PLANNING_RUNNER
+    if _PLANNING_RUNNER is None:
+        _PLANNING_RUNNER = PlanningScanRunner()
+    return _PLANNING_RUNNER
+
+
+def _planning_scan_to_page(result: PlanningScanOutput, request_payload: ScanRequest) -> ScanPage:
+    candidates: List[ScanCandidate] = []
+    for idx, candidate in enumerate(result.candidates, start=1):
+        planning_snapshot = {
+            "planning_mode": True,
+            "readiness_score": candidate.readiness_score,
+            "components": candidate.components,
+            "levels": candidate.levels,
+            "contract_template": candidate.contract_template.as_dict(),
+            "requires_live_confirmation": candidate.requires_live_confirmation,
+            "missing_live_inputs": list(candidate.missing_live_inputs),
+        }
+        reasons = [
+            f"Readiness {candidate.readiness_score:.2f}",
+            "Probability {:.0%}".format(candidate.components.get("probability", 0.0)),
+        ]
+        sc = ScanCandidate(
+            symbol=candidate.symbol,
+            rank=idx,
+            score=candidate.readiness_score,
+            reasons=reasons,
+            entry=candidate.levels.get("entry"),
+            stop=candidate.levels.get("invalidation"),
+            tps=list(candidate.levels.get("targets") or []),
+            source_paths={},
+            planning_snapshot=planning_snapshot,
+        )
+        candidates.append(sc)
+
+    meta = {
+        "planning_mode": True,
+        "run_id": result.run_id,
+        "indices_context": result.indices_context,
+        "universe": {
+            "name": result.universe.name,
+            "source": result.universe.source,
+            "count": len(result.universe.symbols),
+        },
+    }
+    data_quality = {
+        "planning_mode": True,
+        "series_present": bool(candidates),
+        "indices_present": bool(result.indices_context),
+    }
+    session_meta = {
+        "planning_mode": True,
+        "universe": result.universe.name,
+        "symbols": result.universe.symbols,
+    }
+    banner = "Planning mode — market closed" if not candidates else "Planning mode — dynamic universe"
+    return ScanPage(
+        as_of=result.as_of_utc.isoformat(),
+        planning_context="frozen",
+        banner=banner,
+        meta=meta,
+        candidates=candidates,
+        data_quality=data_quality,
+        session=session_meta,
+        phase="scan",
+        count_candidates=len(candidates),
+        next_cursor=None,
+    )
 
 
 def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
@@ -4599,9 +4685,18 @@ async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict
 async def gpt_scan_endpoint(
     request_payload: ScanRequest,
     request: Request,
-    response: Response,
-    user: AuthedUser = Depends(require_api_key),
+    response: Response = None,
+    user: AuthedUser | Any = Depends(require_api_key),
 ) -> ScanPage:
+    if response is None or isinstance(response, AuthedUser):
+        provisional_user = response if isinstance(response, AuthedUser) else None
+        response = Response()
+        if provisional_user is not None:
+            user = provisional_user
+    if not isinstance(user, AuthedUser):
+        user_id = getattr(user, "user_id", "anonymous")
+        user = AuthedUser(user_id=user_id)
+
     started = time.perf_counter()
     fields_set = getattr(request_payload, "model_fields_set", set())
     simulate_open = _resolve_simulate_open(
@@ -4621,6 +4716,21 @@ async def gpt_scan_endpoint(
     user_id = getattr(user, "user_id", "anonymous")
     style_norm = (request_payload.style or "").strip().lower()
     style_registry_token = style_norm or _SCAN_STYLE_ANY
+
+    if planning_mode:
+        runner = _get_planning_runner()
+        if isinstance(request_payload.universe, list):
+            universe_token = ",".join(request_payload.universe)
+        else:
+            universe_token = request_payload.universe
+        planning_result = await runner.run(
+            universe=universe_token,
+            style=request_payload.style,
+            limit=request_payload.limit,
+        )
+        planning_page = _planning_scan_to_page(planning_result, request_payload)
+        response.headers["X-No-Fabrication"] = "1"
+        return planning_page
 
     def _record_symbols(symbols: List[str]) -> None:
         if not session_ticker:
@@ -6476,9 +6586,17 @@ async def _generate_fallback_plan(
 async def gpt_plan(
     request_payload: PlanRequest,
     request: Request,
-    response: Response,
-    user: AuthedUser = Depends(require_api_key),
+    response: Response = None,
+    user: AuthedUser | Any = Depends(require_api_key),
 ) -> PlanResponse:
+    if response is None or isinstance(response, AuthedUser):
+        provisional_user = response if isinstance(response, AuthedUser) else None
+        response = Response()
+        if provisional_user is not None:
+            user = provisional_user
+    if not isinstance(user, AuthedUser):
+        user_id = getattr(user, "user_id", "anonymous")
+        user = AuthedUser(user_id=user_id)
     """Compatibility endpoint that returns the top plan for a single symbol.
 
     Internally reuses /gpt/scan to keep plan logic centralized.
@@ -7732,6 +7850,33 @@ async def gpt_plan(
     return _finalize_plan_response(plan_response)
 
 
+@gpt.post("/gpt/finalize", summary="Finalize planning-mode contract templates", response_model=FinalizeResponse)
+async def gpt_finalize(
+    request_payload: FinalizeRequest,
+    request: Request,
+    user: AuthedUser = Depends(require_api_key),
+) -> FinalizeResponse:
+    runner = _get_planning_runner()
+    persistence = runner.persistence
+    await persistence.ensure_schema()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    finalized_at = now_iso if request_payload.status == "finalized" else None
+    record = FinalizationRecord(
+        candidate_id=request_payload.candidate_id,
+        status=request_payload.status,
+        finalized_at=finalized_at,
+        live_inputs=request_payload.live_inputs or {},
+        selected_contracts={"contracts": request_payload.selected_contracts or []},
+        reject_reason=request_payload.reject_reason,
+    )
+    updated_id = await persistence.upsert_finalization(record)
+    return FinalizeResponse(
+        candidate_id=request_payload.candidate_id,
+        status=request_payload.status,
+        updated=bool(updated_id),
+    )
+
+
 @gpt.post(
     "/api/v1/assistant/exec",
     summary="Structured execution payload for assistant clients",
@@ -7747,7 +7892,7 @@ async def assistant_exec(
         style=request_payload.style,
         plan_id=request_payload.plan_id,
     )
-    plan_response = await gpt_plan(plan_request, request, Response(), user)
+    plan_response = await gpt_plan(plan_request, request, user)
 
     plan_block = plan_response.structured_plan or {}
     if not plan_block:

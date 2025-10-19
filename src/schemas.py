@@ -56,6 +56,7 @@ class ScanCandidate(BaseModel):
     bars_to_trigger: float | None = None
     actionable_soon: bool | None = None
     source_paths: Dict[str, str] = Field(default_factory=dict)
+    planning_snapshot: Dict[str, Any] | None = None
 
 
 class ScanPage(BaseModel):
@@ -71,3 +72,22 @@ class ScanPage(BaseModel):
     phase: Literal["scan"] | None = None
     count_candidates: int | None = None
     next_cursor: str | None = None
+
+
+class FinalizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: int
+    symbol: str
+    status: Literal["finalized", "rejected", "deferred"]
+    live_inputs: Dict[str, Any] = Field(default_factory=dict)
+    selected_contracts: List[Dict[str, Any]] | None = None
+    reject_reason: str | None = None
+
+
+class FinalizeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: int
+    status: Literal["finalized", "rejected", "deferred"]
+    updated: bool

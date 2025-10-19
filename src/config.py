@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     ff_chart_canonical_v1: bool = Field(False, env="FF_CHART_CANONICAL_V1")
     ff_layers_endpoint: bool = Field(False, env="FF_LAYERS_ENDPOINT")
     ff_options_always: bool = Field(False, env="FF_OPTIONS_ALWAYS")
-    ft_no_fallback_trades: bool = Field(True, env="FT_NO_FALLBACK_TRADES")
+    ft_no_fallback_trades: bool = Field(False, env="FT_NO_FALLBACK_TRADES")
     ft_max_spread_pct: float = Field(8.0, env="FT_MAX_SPREAD_PCT")
     ft_min_oi: int = Field(300, env="FT_MIN_OI")
     ft_max_drift_bps: float = Field(30.0, env="FT_MAX_DRIFT_BPS")

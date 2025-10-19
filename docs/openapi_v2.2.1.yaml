@@ -51,6 +51,25 @@ paths:
         '400': { description: Invalid input or empty universe }
         '502': { description: Upstream market data unavailable }
 
+  /gpt/finalize:
+    post:
+      summary: Finalize a planning-mode candidate once live quotes are verified
+      operationId: postGptFinalize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinalizeRequest'
+      responses:
+        '200':
+          description: Finalization acknowledgement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinalizeResponse'
+        '400': { description: Invalid finalization payload }
+
   /gpt/chart-url:
     post:
       summary: Build canonical /tv link for a plan
@@ -209,6 +228,43 @@ components:
           type: array
           description: Target prices in display order
           items: { type: number, format: double }
+
+    FinalizeRequest:
+      type: object
+      required: [candidate_id, status]
+      properties:
+        candidate_id:
+          type: integer
+          description: Identifier returned by planning-mode persistence
+        symbol:
+          type: string
+          nullable: true
+          description: Optional symbol for reference/logging
+        status:
+          type: string
+          enum: [finalized, rejected, deferred]
+        live_inputs:
+          type: object
+          additionalProperties: {}
+          description: Snapshot of live market inputs used during finalization (IV, spread, OI, etc.)
+          default: {}
+        selected_contracts:
+          type: array
+          items: { type: object }
+          nullable: true
+          description: Contracts approved during finalization (if any)
+        reject_reason:
+          type: string
+          nullable: true
+          description: Optional explanation when status = rejected
+
+    FinalizeResponse:
+      type: object
+      required: [candidate_id, status, updated]
+      properties:
+        candidate_id: { type: integer }
+        status: { type: string, enum: [finalized, rejected, deferred] }
+        updated: { type: boolean }
           example: [253.0, 254.2, 255.6]
         ema:
           type: array
@@ -230,6 +286,7 @@ components:
       required: [symbol, score, reasons]
       properties:
         symbol: { type: string }
+        rank: { type: integer, nullable: true }
         score: { type: number, format: double }
         reasons:
           type: array
@@ -247,6 +304,32 @@ components:
         entry_distance_atr: { type: number, format: double, nullable: true }
         bars_to_trigger: { type: number, format: double, nullable: true }
         actionable_soon: { type: boolean, nullable: true }
+        planning_snapshot:
+          type: object
+          nullable: true
+          description: Present when the scan runs in planning mode; describes the readiness scoring used by the planning engine.
+          properties:
+            planning_mode: { type: boolean }
+            readiness_score: { type: number, format: double }
+            components:
+              type: object
+              properties:
+                probability: { type: number, format: double }
+                actionability: { type: number, format: double }
+                risk_reward: { type: number, format: double }
+            levels:
+              type: object
+              properties:
+                entry: { type: number, format: double }
+                invalidation: { type: number, format: double }
+                targets:
+                  type: array
+                  items: { type: number, format: double }
+            contract_template: { type: object }
+            requires_live_confirmation: { type: boolean }
+            missing_live_inputs:
+              type: array
+              items: { type: string }
 
     ScanPage:
       type: object
