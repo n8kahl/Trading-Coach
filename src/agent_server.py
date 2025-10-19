@@ -6468,7 +6468,7 @@ async def _generate_fallback_plan(
     if em_cap_used:
         meta_payload["em_used"] = True
     plan_response.meta = meta_payload or None
-    return _finalize_plan_response(plan_response)
+    return plan_response
 
 
 @gpt.post("/plan", summary="Return a single trade plan for a symbol", response_model=PlanResponse)
@@ -6502,6 +6502,10 @@ async def gpt_plan(
     user_id = getattr(user, "user_id", "anonymous")
     style_norm_req = (request_payload.style or "").strip().lower()
     style_lookup_key = style_norm_req or _SCAN_STYLE_ANY
+
+    def _finalize_plan_response(plan_payload: PlanResponse) -> PlanResponse:
+        response.headers["X-No-Fabrication"] = "1"
+        return plan_payload
     if session_token:
         allowed_symbols = _SCAN_SYMBOL_REGISTRY.get((user_id, session_token, style_lookup_key))
         if allowed_symbols is None and style_lookup_key != _SCAN_STYLE_ANY:
