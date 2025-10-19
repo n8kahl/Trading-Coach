@@ -16,6 +16,7 @@ _UNIVERSE_CACHE: dict[tuple[str, str | None, int], tuple[float, List[str]]] = {}
 _UNIVERSE_LOCK = asyncio.Lock()
 
 _TOKEN_PATTERN = re.compile(r"FT-(TOPLIQUIDITY|PLAYBOOK|WATCHLIST)", re.IGNORECASE)
+_TOP_K_PATTERN = re.compile(r"TOP(\d{1,3})$", re.IGNORECASE)
 _SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9\.:]{0,9}$")
 
 _DEFAULT_PLAYBOOK = ["AAPL", "MSFT", "NVDA", "GOOG", "META", "TSLA", "AMZN"]
@@ -91,6 +92,16 @@ async def expand_universe(universe: str | List[str], *, style: str, limit: int) 
             seed = int(datetime.utcnow().timestamp() // 86400)
             symbols.sort(key=lambda sym: (hash((sym, seed)) & 0xFFFFFFFF))
         return symbols
+
+    top_match = _TOP_K_PATTERN.fullmatch(token)
+    if top_match:
+        try:
+            requested = int(top_match.group(1))
+        except (TypeError, ValueError):
+            requested = limit
+        effective_limit = max(1, min(requested, limit))
+        symbols = await load_universe(style=style, sector=None, limit=effective_limit)
+        return _normalize_symbols(symbols)[:effective_limit]
 
     if _SYMBOL_PATTERN.fullmatch(token):
         return _normalize_symbols([token])[:limit]

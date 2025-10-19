@@ -4613,8 +4613,6 @@ async def gpt_scan_endpoint(
     session_payload = _session_payload_from_request(request)
     settings = get_settings()
     allow_fallback_trades = not bool(getattr(settings, "ft_no_fallback_trades", True))
-    if planning_mode:
-        allow_fallback_trades = True
     no_setups_banner = "NO_ELIGIBLE_SETUPS"
     session_ticker = _session_tracking_id(session_payload)
     if session_ticker:
