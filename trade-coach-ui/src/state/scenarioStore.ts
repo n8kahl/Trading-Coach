@@ -100,7 +100,7 @@ export function useScenarioStore(symbol: string) {
     const data = await res.json();
     const plan = data?.plan ?? data ?? {};
     const planId: string = plan.plan_id || data.plan_id;
-    const chartUrl: string | null = plan.chart_url || plan.trade_detail || plan.idea_url || data?.charts?.interactive || null;
+    const chartUrl: string | null = plan.chart_url || plan.trade_detail || data?.charts?.interactive || null;
     const entry: number | null = plan.entry ?? plan.structured_plan?.entry?.level ?? null;
     const stop: number | null = plan.stop ?? plan.structured_plan?.stop ?? null;
     const tps: number[] = Array.isArray(plan.targets) ? plan.targets : plan.structured_plan?.targets || [];

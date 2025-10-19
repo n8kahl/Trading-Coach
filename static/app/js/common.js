@@ -39,7 +39,12 @@ export function copy(text) {
 }
 
 export function buildIdeaUrl(planId, version = 1) {
-  return `/app/idea.html?plan_id=${encodeURIComponent(planId)}&v=${version}`;
+  const params = new URLSearchParams();
+  if (planId) params.set('plan_id', planId);
+  const safeVersion = Number.isFinite(Number(version)) ? String(version) : '1';
+  params.set('plan_version', safeVersion);
+  const query = params.toString();
+  return query ? `/tv?${query}` : '/tv';
 }
 
 export function roundToDecimals(value, decimals) {

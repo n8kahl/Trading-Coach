@@ -87,7 +87,6 @@ async def test_assistant_exec_builds_options_example(monkeypatch):
             plan_id="T123",
             version=1,
             trade_detail="https://example.com/plan",
-            idea_url="https://example.com/plan",
             symbol="AAPL",
             style="intraday",
             plan={"plan_id": "T123"},

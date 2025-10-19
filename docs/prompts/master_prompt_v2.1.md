@@ -917,9 +917,6 @@ components:
         trade_detail:
           type: string
           format: uri
-        idea_url:
-          type: string
-          format: uri
         warnings:
           type: array
           items:
@@ -1474,9 +1471,6 @@ components:
         trade_detail:
           type: string
           format: uri
-        idea_url:
-          type: string
-          format: uri
       required:
         - plan_id
         - version
@@ -1492,7 +1486,6 @@ components:
         - decimals
         - charts_params
         - trade_detail
-        - idea_url
 
     IdeaSnapshot:
       type: object
