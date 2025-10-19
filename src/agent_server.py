@@ -92,7 +92,7 @@ from .db import (
     store_idea_snapshot as db_store_idea_snapshot,
 )
 from .data_sources import fetch_polygon_ohlcv, fetch_yahoo_ohlcv
-from .symbol_streamer import SymbolStreamCoordinator
+from .symbol_streamer import SymbolStreamCoordinator, fetch_live_quote
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
 from .ranking import (
@@ -8314,6 +8314,29 @@ async def gpt_context(
     response.update(enhancements)
     response["context_overlays"] = enhancements
     if polygon_bundle:
+        # Cross-source consistency: compare chain underlying vs live quote (0.2% threshold; 5s SLA)
+        try:
+            u = (polygon_bundle.get("underlying") or {}) if isinstance(polygon_bundle, dict) else {}
+            usym = (u.get("symbol") or symbol).upper() if isinstance(u, dict) else symbol
+            uprice = float(u.get("price")) if isinstance(u.get("price"), (int, float, str)) else None
+            quote = await fetch_live_quote(usym)
+            mismatch_pct = None
+            if (uprice is not None) and (quote and isinstance(quote.price, (int, float))):
+                mismatch_pct = abs(float(quote.price) - float(uprice)) / max(float(uprice), 1e-9)
+            polygon_bundle.setdefault("consistency", {})
+            polygon_bundle["consistency"].update(
+                {
+                    "quote_age_s": getattr(quote, "age_seconds", None),
+                    "underlying_vs_quote_pct": round(mismatch_pct, 6) if mismatch_pct is not None else None,
+                    "policy": {"threshold_pct": 0.002},
+                }
+            )
+            if (mismatch_pct is not None and mismatch_pct > 0.002) or (
+                getattr(quote, "age_seconds", 0) and getattr(quote, "age_seconds", 0) > 5
+            ):
+                polygon_bundle["hold_refresh"] = True
+        except Exception:
+            logger.debug("consistency check failed", exc_info=True)
         response["options"] = polygon_bundle
     level_tokens = _extract_levels_for_chart(key_levels)
 

@@ -13,6 +13,9 @@ from .data_sources import fetch_polygon_ohlcv
 
 logger = logging.getLogger(__name__)
 
+# Data freshness SLAs (seconds)
+QUOTES_MAX_AGE_S: float = 5.0
+
 
 @dataclass
 class QuoteResult:
@@ -20,6 +23,17 @@ class QuoteResult:
     timestamp: Optional[str]
     source: str
     error: Optional[str] = None
+    age_seconds: Optional[float] = None
+
+
+def _age_seconds_from_iso(ts: Optional[str]) -> Optional[float]:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return max((datetime.now(timezone.utc) - dt).total_seconds(), 0.0)
+    except Exception:  # pragma: no cover - defensive
+        return None
 
 
 async def _fetch_polygon_last_trade(symbol: str, api_key: str) -> QuoteResult:
@@ -81,12 +95,20 @@ async def fetch_live_quote(symbol: str) -> QuoteResult:
     if settings.polygon_api_key:
         quote = await _fetch_polygon_last_trade(symbol, settings.polygon_api_key)
         if quote.price is not None:
-            return quote
+            quote.age_seconds = _age_seconds_from_iso(quote.timestamp)
+            if quote.age_seconds is not None and quote.age_seconds > QUOTES_MAX_AGE_S:
+                errors.append("stale_quote")
+            else:
+                return quote
         errors.append(quote.error or "polygon_error")
     if settings.finnhub_api_key:
         quote = await _fetch_finnhub_quote(symbol, settings.finnhub_api_key)
         if quote.price is not None:
-            return quote
+            quote.age_seconds = _age_seconds_from_iso(quote.timestamp)
+            if quote.age_seconds is not None and quote.age_seconds > QUOTES_MAX_AGE_S:
+                errors.append("stale_quote")
+            else:
+                return quote
         errors.append(quote.error or "finnhub_error")
     try:
         polygon_frame = await fetch_polygon_ohlcv(symbol.upper(), "1")
@@ -101,7 +123,8 @@ async def fetch_live_quote(symbol: str) -> QuoteResult:
             ts = ts.astimezone(timezone.utc).isoformat()
         else:
             ts = datetime.utcnow().isoformat()
-        return QuoteResult(price=price, timestamp=ts, source="polygon_bars", error=None)
+        age = _age_seconds_from_iso(ts)
+        return QuoteResult(price=price, timestamp=ts, source="polygon_bars", error=None, age_seconds=age)
     if not settings.polygon_api_key and not settings.finnhub_api_key:
         errors.append("missing_credentials")
     return QuoteResult(price=None, timestamp=None, source="none", error=";".join(errors) or "no_data")
