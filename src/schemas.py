@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Dict, List, Literal
 
-from pydantic import AnyUrl, BaseModel, Field, field_validator
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 
 
 class ScanFilters(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     min_rvol: float | None = Field(default=None, ge=0.0)
     exclude: list[str] | None = None
     min_liquidity_rank: int | None = Field(default=None, ge=1)
 
 
 class ScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     universe: str | list[str]
     style: Literal["scalp", "intraday", "swing", "leaps"]
     limit: int = Field(default=20, ge=1, le=100)
@@ -33,7 +37,10 @@ class ScanRequest(BaseModel):
 
 
 class ScanCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
+    rank: int
     score: float
     reasons: list[str] = Field(default_factory=list)
     plan_id: str | None = None
@@ -47,13 +54,19 @@ class ScanCandidate(BaseModel):
     entry_distance_atr: float | None = None
     bars_to_trigger: float | None = None
     actionable_soon: bool | None = None
+    source_paths: Dict[str, str] = Field(default_factory=dict)
 
 
 class ScanPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     as_of: str
     planning_context: Literal["live", "frozen"]
     banner: str | None = None
     meta: dict[str, Any]
     candidates: list[ScanCandidate]
     data_quality: dict[str, Any]
+    session: dict[str, Any] | None = None
+    phase: Literal["scan"] | None = None
+    count_candidates: int | None = None
     next_cursor: str | None = None

@@ -21,20 +21,21 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Set, Tuple, cast
 from collections import Counter
 import copy
 
 import httpx
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
 from urllib.parse import urlencode, quote, urlsplit, urlunsplit, parse_qsl
 from fastapi.responses import StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import get_settings
 from .schemas import ScanRequest, ScanPage, ScanCandidate, ScanFilters
@@ -211,6 +212,9 @@ _FUTURES_PROXY_MAP: Dict[str, str] = {
 }
 
 _FUTURES_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}
+
+_SCAN_SYMBOL_REGISTRY: Dict[Tuple[str, str, str], List[str]] = {}
+_SCAN_STYLE_ANY = "__any__"
 
 _MARKET_CLOCK = MarketClock()
 
@@ -418,6 +422,105 @@ class ScanContext:
     @property
     def as_of_iso(self) -> str:
         return self.as_of.isoformat()
+
+
+def _session_tracking_id(session_payload: Mapping[str, Any]) -> str | None:
+    status = session_payload.get("status")
+    as_of = session_payload.get("as_of")
+    style = session_payload.get("style")
+    components = [
+        str(status or "").strip().lower(),
+        str(as_of or "").strip(),
+        str(style or "").strip().lower(),
+    ]
+    token = "|".join(components).strip("|")
+    return token or None
+
+
+def _validate_level_invariants(
+    direction: str | None,
+    entry: Any,
+    stop: Any,
+    targets: Sequence[Any],
+) -> tuple[bool, str | None]:
+    dir_token = (direction or "").strip().lower()
+    if dir_token not in {"long", "short"}:
+        return False, "invalid_direction"
+    try:
+        entry_f = float(entry)
+        stop_f = float(stop)
+        target_values = [float(tp) for tp in targets]
+    except (TypeError, ValueError):
+        return False, "non_numeric_levels"
+    if not target_values:
+        return False, "missing_targets"
+    if not math.isfinite(entry_f) or not math.isfinite(stop_f) or not all(math.isfinite(tp) for tp in target_values):
+        return False, "non_finite_levels"
+    if dir_token == "long":
+        if not stop_f < entry_f:
+            return False, "stop_not_below_entry"
+        prev = entry_f
+        for idx, tp in enumerate(target_values, start=1):
+            if tp <= prev:
+                return False, f"tp{idx}_not_above_previous"
+            prev = tp
+    else:
+        if not stop_f > entry_f:
+            return False, "stop_not_above_entry"
+        prev = entry_f
+        for idx, tp in enumerate(target_values, start=1):
+            if tp >= prev:
+                return False, f"tp{idx}_not_below_previous"
+            prev = tp
+    return True, None
+
+
+def _apply_em_cap(
+    direction: str | None,
+    entry: Any,
+    targets: Sequence[Any],
+    expected_move: Any,
+    factor: float,
+) -> tuple[List[float], bool]:
+    dir_token = (direction or "").strip().lower()
+    try:
+        entry_f = float(entry)
+    except (TypeError, ValueError):
+        return [float(tp) for tp in targets if tp is not None], False
+    try:
+        em_val = float(expected_move)
+    except (TypeError, ValueError):
+        em_val = float("nan")
+    if dir_token not in {"long", "short"} or not math.isfinite(em_val) or em_val <= 0 or factor <= 0:
+        return [float(tp) for tp in targets if tp is not None], False
+    cap_distance = em_val * factor
+    cap_level = entry_f + cap_distance if dir_token == "long" else entry_f - cap_distance
+    adjusted: List[float] = []
+    em_used = False
+    for tp in targets:
+        try:
+            tp_f = float(tp)
+        except (TypeError, ValueError):
+            continue
+        original = tp_f
+        if dir_token == "long" and tp_f > cap_level:
+            tp_f = cap_level
+        elif dir_token == "short" and tp_f < cap_level:
+            tp_f = cap_level
+        if adjusted:
+            if dir_token == "long" and tp_f <= adjusted[-1]:
+                tp_f = min(cap_level, adjusted[-1] + 0.01)
+            elif dir_token == "short" and tp_f >= adjusted[-1]:
+                tp_f = max(cap_level, adjusted[-1] - 0.01)
+        if dir_token == "long":
+            tp_f = min(tp_f, cap_level)
+        else:
+            tp_f = max(tp_f, cap_level)
+        tp_f = round(tp_f, 4)
+        if not math.isclose(tp_f, round(original, 4)):
+            em_used = True
+        adjusted.append(tp_f)
+    return adjusted, em_used
 
 
 @dataclass(slots=True)
@@ -753,6 +856,7 @@ async def _build_scan_stub_candidate(
 
         candidate = ScanCandidate(
             symbol=signal.symbol.upper(),
+            rank=0,
             score=float(signal.score),
             reasons=_candidate_reasons(signal),
             plan_id=plan_id,
@@ -766,6 +870,7 @@ async def _build_scan_stub_candidate(
             entry_distance_atr=entry_distance_atr_val,
             bars_to_trigger=bars_to_trigger_val,
             actionable_soon=actionable_soon,
+            source_paths={},
         )
         features = _metrics_to_features(metrics, style_token)
         logger.debug(
@@ -879,6 +984,7 @@ def _empty_scan_page(
     *,
     banner: str | None,
     dq: Dict[str, Any],
+    session: Dict[str, Any],
 ) -> ScanPage:
     meta = {
         "style": request.style,
@@ -894,6 +1000,9 @@ def _empty_scan_page(
         meta=meta,
         candidates=[],
         data_quality=dq,
+        session=session,
+        phase="scan",
+        count_candidates=0,
         next_cursor=None,
     )
 
@@ -925,13 +1034,38 @@ async def _expand_universe_tokens(symbols: List[str], *, style: str | None, limi
 
 
 class ChartParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
     interval: str
-
-    model_config = ConfigDict(extra="allow")
+    direction: Literal["long", "short"] | None = None
+    entry: float | str | None = None
+    stop: float | str | None = None
+    tp: str | None = None
+    title: str | None = None
+    plan_id: str | None = None
+    plan_version: str | None = None
+    strategy: str | None = None
+    range: str | None = None
+    focus: str | None = None
+    center_time: str | None = None
+    scale_plan: str | None = None
+    notes: str | None = None
+    live: str | None = None
+    last_update: str | None = None
+    data_source: str | None = None
+    data_mode: str | None = None
+    data_age_ms: str | int | None = None
+    runner: str | None = None
+    tp_meta: str | None = None
+    view: str | None = None
+    levels: str | None = None
+    ema: str | None = None
 
 
 class ChartLinks(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     interactive: str
 
 
@@ -951,12 +1085,24 @@ async def _fetch_option_chain_with_aliases(symbol: str, as_of_hint: Optional[dat
     return pd.DataFrame()
 
 
+class AllowedHostsMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, allowed: Sequence[str]):
+        super().__init__(app)
+        self.allowed_hosts = _allowed_host_set(allowed or [])
+
+    async def dispatch(self, request: Request, call_next):
+        request.state.allowed_hosts = self.allowed_hosts
+        response = await call_next(request)
+        return response
+
+
 app = FastAPI(
     title="Trading Coach GPT Backend",
     description="Backend utilities for a custom GPT that offers trading guidance.",
     version="0.2.0",
 )
 
+app.add_middleware(AllowedHostsMiddleware, allowed=get_settings().ft_allowed_hosts)
 app.add_middleware(SessionMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -1091,6 +1237,8 @@ class ScanUniverse(BaseModel):
 
 
 class ContractsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
     side: str | None = None
     style: str | None = None
@@ -1104,22 +1252,33 @@ class ContractsRequest(BaseModel):
     risk_amount: float | None = None
     expiry: str | None = None
     bias: str | None = None
-
-    model_config = ConfigDict(extra="allow")
+    selection_mode: str | None = None
+    plan_anchor: Dict[str, Any] | None = None
 
 
 class PlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
     style: str | None = None
     plan_id: str | None = None
     simulate_open: bool = False
 
 
+class RejectedContract(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    reason: str
+
+
 class PlanResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     plan_id: str | None = None
     version: int | None = None
     trade_detail: str | None = None
-    warnings: List[str] | None = None
+    warnings: List[str] = Field(default_factory=list)
     planning_context: str | None = None
     symbol: str
     style: str | None = None
@@ -1132,8 +1291,8 @@ class PlanResponse(BaseModel):
     rr_to_t1: float | None = None
     confidence: float | None = None
     confidence_factors: List[str] | None = None
-    confluence_tags: List[str] | None = None
-    confluence: List[str] | None = None
+    confluence_tags: List[str] = Field(default_factory=list)
+    confluence: List[str] = Field(default_factory=list)
     key_levels_used: Dict[str, Any] | None = None
     risk_block: Dict[str, Any] | None = None
     execution_rules: Dict[str, Any] | None = None
@@ -1158,7 +1317,7 @@ class PlanResponse(BaseModel):
     market_snapshot: Dict[str, Any] | None = None
     features: Dict[str, Any] | None = None
     options: Dict[str, Any] | None = None
-    options_contracts: List[Dict[str, Any]] | None = None
+    options_contracts: List[Dict[str, Any]] = Field(default_factory=list)
     options_note: str | None = None
     calc_notes: Dict[str, Any] | None = None
     htf: Dict[str, Any] | None = None
@@ -1172,18 +1331,27 @@ class PlanResponse(BaseModel):
     data: Dict[str, Any] | None = None
     session_state: Dict[str, Any] | None = None
     confidence_visual: str | None = None
-    plan_layers: Dict[str, Any] | None = None
-    tp_reasons: List[Dict[str, Any]] | None = None
+    plan_layers: Dict[str, Any] = Field(default_factory=dict)
+    tp_reasons: List[Dict[str, Any]] = Field(default_factory=list)
     meta: Dict[str, Any] | None = None
+    source_paths: Dict[str, str] = Field(default_factory=dict)
+    accuracy_levels: List[str] = Field(default_factory=list)
+    rejected_contracts: List[RejectedContract] = Field(default_factory=list)
+    layers_fetched: bool | None = None
+    phase: str | None = None
 
 
 class AssistantExecRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
     style: str | None = None
     plan_id: str | None = None
 
 
 class AssistantExecResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     plan: Dict[str, Any]
     chart: Dict[str, Any]
     options: Dict[str, Any] | None = None
@@ -1192,6 +1360,8 @@ class AssistantExecResponse(BaseModel):
 
 
 class SymbolDiagnosticsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
     interval: str
     key_levels: Dict[str, Any]
@@ -1201,6 +1371,8 @@ class SymbolDiagnosticsResponse(BaseModel):
 
 
 class IdeaStoreRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     plan: Dict[str, Any]
     summary: Dict[str, Any] | None = None
     volatility_regime: Dict[str, Any] | None = None
@@ -1214,16 +1386,22 @@ class IdeaStoreRequest(BaseModel):
 
 
 class IdeaStoreResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     plan_id: str
     trade_detail: str
 
 
 class StreamPushRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
     event: Dict[str, Any]
 
 
 class MultiContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
     intervals: List[str] = Field(
         ..., validation_alias=AliasChoices("intervals", "frames")
@@ -1233,12 +1411,50 @@ class MultiContextRequest(BaseModel):
 
 
 class MultiContextResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
     snapshots: List[Dict[str, Any]]
     volatility_regime: Dict[str, Any]
     sentiment: Dict[str, Any] | None = None
     events: Dict[str, Any] | None = None
     earnings: Dict[str, Any] | None = None
+
+
+def _normalize_host_token(value: str | None) -> str:
+    if not value:
+        return ""
+    parsed = urlsplit(value)
+    token = parsed.netloc or parsed.path or ""
+    return token.lower()
+
+
+def _allowed_host_set(tokens: Iterable[str]) -> Set[str]:
+    hosts: Set[str] = set()
+    for token in tokens:
+        normalized = _normalize_host_token(token)
+        if normalized:
+            hosts.add(normalized)
+    return hosts
+
+
+def _ensure_allowed_host(url: str, request: Request) -> None:
+    allowed_hosts: Set[str] | None = getattr(request.state, "allowed_hosts", None)
+    settings = get_settings()
+    if not allowed_hosts:
+        allowed_hosts = _allowed_host_set(getattr(settings, "ft_allowed_hosts", []))
+    for candidate in (getattr(settings, "public_base_url", None), getattr(settings, "chart_base_url", None)):
+        normalized = _normalize_host_token(candidate)
+        if normalized:
+            allowed_hosts = (allowed_hosts or set())
+            allowed_hosts.add(normalized)
+    if not allowed_hosts:
+        return
+    host = _normalize_host_token(url)
+    if host not in allowed_hosts:
+        raise HTTPException(status_code=400, detail={"error": "HOST_NOT_ALLOWED", "host": host})
+
+
     summary: Dict[str, Any] | None = None
     decimals: int | None = None
     data_quality: Dict[str, Any] | None = None
@@ -1379,6 +1595,7 @@ def _fallback_scan_candidates(
             ]
         candidate = ScanCandidate(
             symbol=symbol.upper(),
+            rank=0,
             score=float(round(score, 4)),
             reasons=reasons,
             confidence=float(round(confidence, 4)),
@@ -1392,6 +1609,7 @@ def _fallback_scan_candidates(
             entry_distance_atr=None,
             bars_to_trigger=None,
             actionable_soon=None,
+            source_paths={},
         )
         ranked.append((score, candidate))
     ranked.sort(
@@ -1402,7 +1620,10 @@ def _fallback_scan_candidates(
         )
     )
     fallback_limit = max(1, min(limit, len(ranked)))
-    return [item[1] for item in ranked[:fallback_limit]]
+    ordered: List[ScanCandidate] = []
+    for position, (_, candidate) in enumerate(ranked[:fallback_limit], start=1):
+        ordered.append(candidate.model_copy(update={"rank": position}))
+    return ordered
 
 
 def _fallback_scan_page(
@@ -1416,6 +1637,7 @@ def _fallback_scan_page(
     limit: int,
     mode: str | None = None,
     label: str | None = None,
+    session: Dict[str, Any],
 ) -> ScanPage | None:
     # Primary frozen list for requested horizon
     is_live = context.label == "live" and context.is_open
@@ -1449,6 +1671,9 @@ def _fallback_scan_page(
         meta=meta,
         candidates=candidates,
         data_quality=dq,
+        session=session,
+        phase="scan",
+        count_candidates=len(candidates),
         next_cursor=None,
     )
 
@@ -1966,7 +2191,7 @@ async def _regenerate_snapshot_from_slug(plan_id: str, version: Optional[int], r
 
     # Call gpt_plan directly with a synthetic user context
     user = AuthedUser(user_id="slug-regenerator")
-    response = await gpt_plan(plan_request, request, user)
+    response = await gpt_plan(plan_request, request, Response(), user)
 
     # Fetch the snapshot that gpt_plan just stored
     base_snapshot = None
@@ -2882,6 +3107,7 @@ def _extract_options_contracts(options_payload: Mapping[str, Any] | None) -> Lis
             "volume": item.get("volume"),
             "liquidity_score": _safe_number(item.get("liquidity_score") or item.get("tradeability")),
             "spread_pct": _safe_number(item.get("spread_pct")),
+            "iv": _safe_number(item.get("implied_volatility") or item.get("iv")),
         }
         pnl_block = item.get("pnl") if isinstance(item.get("pnl"), Mapping) else None
         if pnl_block:
@@ -2908,6 +3134,51 @@ def _extract_options_contracts(options_payload: Mapping[str, Any] | None) -> Lis
         if trimmed:
             contracts.append(trimmed)
     return contracts[:3]
+
+
+def _apply_option_guardrails(
+    contracts: Sequence[Dict[str, Any]],
+    *,
+    max_spread_pct: float,
+    min_open_interest: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    filtered: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, str]] = []
+    for contract in contracts:
+        if not isinstance(contract, dict):
+            continue
+        symbol = str(contract.get("symbol") or contract.get("label") or "")
+        spread = _safe_number(contract.get("spread_pct"))
+        bid = _safe_number(contract.get("bid"))
+        ask = _safe_number(contract.get("ask"))
+        if spread is None and bid is not None and ask is not None and (bid + ask) > 0:
+            mid = max((bid + ask) / 2.0, 1e-6)
+            spread = abs(ask - bid) / mid * 100.0
+            contract["spread_pct"] = round(spread, 2)
+        oi_val = contract.get("open_interest")
+        oi_numeric: float | None
+        try:
+            oi_numeric = float(oi_val) if oi_val is not None else None
+        except (TypeError, ValueError):
+            oi_numeric = None
+        iv_val = _safe_number(contract.get("iv"))
+
+        reason: str | None = None
+        if spread is not None and float(spread) > max_spread_pct:
+            reason = f"SPREAD_GT_{max_spread_pct:g}"
+        elif oi_numeric is None:
+            reason = "OI_MISSING"
+        elif oi_numeric < min_open_interest:
+            reason = f"OI_LT_{min_open_interest}"
+        elif iv_val is None:
+            reason = "IV_MISSING"
+
+        if reason:
+            rejected.append({"symbol": symbol or "UNKNOWN", "reason": reason})
+            continue
+        filtered.append(contract)
+
+    return filtered[:3], rejected
 
 
 def _build_market_snapshot(history: pd.DataFrame, key_levels: Dict[str, float]) -> Dict[str, Any]:
@@ -3321,11 +3592,15 @@ def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
         else:
             query[key] = str(value)
     if not query:
-        return base
+        url = base
+        _ensure_allowed_host(url, request)
+        return url
     # Ensure symbol is present; if absent, use a safe default to avoid host fallback
     if "symbol" not in query or not query["symbol"]:
         query["symbol"] = "SPY"
-    return f"{base}?{urlencode(query, safe=',|:;+-_() ')}"
+    url = f"{base}?{urlencode(query, safe=',|:;+-_() ')}"
+    _ensure_allowed_host(url, request)
+    return url
 
 
 TV_SUPPORTED_RESOLUTIONS = ["1", "3", "5", "10", "15", "30", "60", "120", "240", "1D", "1W"]
@@ -4324,6 +4599,7 @@ async def gpt_futures_snapshot(_: AuthedUser = Depends(require_api_key)) -> Dict
 async def gpt_scan_endpoint(
     request_payload: ScanRequest,
     request: Request,
+    response: Response,
     user: AuthedUser = Depends(require_api_key),
 ) -> ScanPage:
     started = time.perf_counter()
@@ -4334,6 +4610,59 @@ async def gpt_scan_endpoint(
         explicit_field_set="simulate_open" in fields_set,
     )
     session_payload = _session_payload_from_request(request)
+    session_token = _session_tracking_id(session_payload)
+    user_id = getattr(user, "user_id", "anonymous")
+    style_norm_req = (request_payload.style or "").strip().lower()
+    style_lookup_key = style_norm_req or _SCAN_STYLE_ANY
+
+    def _finalize_plan_response(plan_payload: PlanResponse) -> PlanResponse:
+        response.headers["X-No-Fabrication"] = "1"
+        return plan_payload
+
+    if session_token:
+        allowed_symbols = _SCAN_SYMBOL_REGISTRY.get((user_id, session_token, style_lookup_key))
+        if allowed_symbols is None and style_lookup_key != _SCAN_STYLE_ANY:
+            allowed_symbols = _SCAN_SYMBOL_REGISTRY.get((user_id, session_token, _SCAN_STYLE_ANY))
+        if allowed_symbols is not None and symbol not in allowed_symbols:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PLAN_NOT_IN_LAST_SCAN",
+                    "message": f"{symbol} not present in most recent scan",
+                },
+            )
+    settings = get_settings()
+    allow_fallback_trades = not bool(getattr(settings, "ft_no_fallback_trades", True))
+    no_setups_banner = "NO_ELIGIBLE_SETUPS"
+    session_ticker = _session_tracking_id(session_payload)
+    if session_ticker:
+        request.state.last_scan_session = session_ticker
+        request.state.last_scan_cursor_symbols = None
+    user_id = getattr(user, "user_id", "anonymous")
+    style_norm = (request_payload.style or "").strip().lower()
+    style_registry_token = style_norm or _SCAN_STYLE_ANY
+
+    def _record_symbols(symbols: List[str]) -> None:
+        if not session_ticker:
+            return
+        normalized = [sym.upper() for sym in symbols if sym]
+        primary_key = (user_id, session_ticker, style_registry_token)
+        _SCAN_SYMBOL_REGISTRY[primary_key] = normalized
+        _SCAN_SYMBOL_REGISTRY[(user_id, session_ticker, _SCAN_STYLE_ANY)] = normalized
+
+    def _finalize(page: ScanPage) -> ScanPage:
+        response.headers["X-No-Fabrication"] = "1"
+        symbols = [candidate.symbol.upper() for candidate in page.candidates]
+        if session_ticker:
+            request.state.last_scan_cursor_symbols = symbols
+            _record_symbols(symbols)
+        if page.phase == "scan" and hasattr(request.state, "scan_phase_update"):
+            try:
+                request.state.scan_phase_update(page.phase)
+            except Exception:
+                pass
+        return page
+
     try:
         context, context_banner, dq = _evaluate_scan_context(
             request_payload.asof_policy,
@@ -4347,28 +4676,61 @@ async def gpt_scan_endpoint(
             request_payload.style,
             session_payload,
         )
+
+    def _fallback_or_empty(
+        *,
+        symbols: Sequence[str],
+        market_data: Dict[str, pd.DataFrame],
+        banner: str | None,
+        limit: int,
+        mode: str | None = None,
+        label: str | None = None,
+        empty_banner: str | None = None,
+    ) -> ScanPage:
+        if allow_fallback_trades:
+            fallback_page = _fallback_scan_page(
+                request_payload,
+                context,
+                symbols=symbols,
+                market_data=market_data,
+                dq=dq,
+                banner=banner,
+                limit=limit,
+                mode=mode,
+                label=label,
+                session=session_payload,
+            )
+            if fallback_page is not None:
+                return fallback_page
+        if not allow_fallback_trades and empty_banner:
+            if banner and banner != empty_banner:
+                notes_field = dq.setdefault("notes", [])
+                if isinstance(notes_field, list):
+                    notes_field.append(banner)
+            resolved_banner = empty_banner
+        else:
+            resolved_banner = banner or empty_banner
+        return _empty_scan_page(
+            request_payload,
+            context,
+            banner=resolved_banner,
+            dq=dq,
+            session=session_payload,
+        )
     try:
         universe_limit = max(request_payload.limit, 100)
         tickers = await expand_universe(request_payload.universe, style=request_payload.style, limit=universe_limit)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Universe expansion failed: %s", exc)
         # Present frozen leaders from default universe rather than empty
-        fallback_page = _fallback_scan_page(
-            request_payload,
-            context,
-            symbols=_FROZEN_DEFAULT_UNIVERSE,
-            market_data={},
-            dq=dq,
-            banner=None if context.is_open else (context_banner or "Universe unavailable — showing frozen leaders."),
-            limit=request_payload.limit,
-        )
-        if fallback_page is not None:
-            return fallback_page
-        return _empty_scan_page(
-            request_payload,
-            context,
-            banner=context_banner or "Universe expansion failed.",
-            dq=dq,
+        return _finalize(
+            _fallback_or_empty(
+                symbols=_FROZEN_DEFAULT_UNIVERSE,
+                market_data={},
+                banner=None if context.is_open else (context_banner or "Universe unavailable — showing frozen leaders."),
+                limit=request_payload.limit,
+                empty_banner=no_setups_banner,
+            )
         )
 
     if request_payload.filters and request_payload.filters.exclude:
@@ -4376,22 +4738,14 @@ async def gpt_scan_endpoint(
         tickers = [symbol for symbol in tickers if symbol not in exclude]
 
     if not tickers:
-        fallback_page = _fallback_scan_page(
-            request_payload,
-            context,
-            symbols=_FROZEN_DEFAULT_UNIVERSE,
-            market_data={},
-            dq=dq,
-            banner=None if context.is_open else (context_banner or "Empty universe — showing frozen leaders."),
-            limit=request_payload.limit,
-        )
-        if fallback_page is not None:
-            return fallback_page
-        return _empty_scan_page(
-            request_payload,
-            context,
-            banner=context_banner or "Empty universe after filters.",
-            dq=dq,
+        return _finalize(
+            _fallback_or_empty(
+                symbols=_FROZEN_DEFAULT_UNIVERSE,
+                market_data={},
+                banner=None if context.is_open else (context_banner or "Empty universe — showing frozen leaders."),
+                limit=request_payload.limit,
+                empty_banner=no_setups_banner,
+            )
         )
 
     data_as_of = None if context.label == "live" and context.is_open else context.as_of
@@ -4426,22 +4780,14 @@ async def gpt_scan_endpoint(
             banner_override = "Live feed unavailable — using frozen context."
         except HTTPException:
             # Absolute outage: still present leaders list instead of empty
-            fallback_page = _fallback_scan_page(
-                request_payload,
-                context,
-                symbols=tickers,
-                market_data={},
-                dq=dq,
-                banner=None if context.is_open else "Market data unavailable — showing frozen leaders.",
-                limit=request_payload.limit,
-            )
-            if fallback_page is not None:
-                return fallback_page
-            return _empty_scan_page(
-                request_payload,
-                context,
-                banner="Market data unavailable — using frozen context.",
-                dq=dq,
+            return _finalize(
+                _fallback_or_empty(
+                    symbols=tickers,
+                    market_data={},
+                    banner=None if context.is_open else "Market data unavailable — showing frozen leaders.",
+                    limit=request_payload.limit,
+                    empty_banner=no_setups_banner,
+                )
             )
 
     dq = dict(dq)
@@ -4502,43 +4848,27 @@ async def gpt_scan_endpoint(
         else:
             logger.warning("Live scan: all symbols stale (>%d ms); continuing with best-effort data", tolerance_ms)
     if not available_symbols:
-        fallback_page = _fallback_scan_page(
-            request_payload,
-            context,
-            symbols=tickers,
-            market_data=market_data,
-            dq=dq,
-            banner=None if context.is_open else (banner or "Market closed — showing frozen leaders."),
-            limit=page_limit,
-        )
-        if fallback_page is not None:
-            return fallback_page
-        return _empty_scan_page(
-            request_payload,
-            context,
-            banner=banner or "No market data available for requested universe.",
-            dq=dq,
+        return _finalize(
+            _fallback_or_empty(
+                symbols=tickers,
+                market_data=market_data,
+                banner=None if context.is_open else (banner or "Market closed — showing frozen leaders."),
+                limit=page_limit,
+                empty_banner=no_setups_banner,
+            )
         )
 
     effective_filters = _effective_scan_filters(request_payload.filters, context=context)
     filtered_symbols = _apply_scan_filters(available_symbols, market_data, effective_filters)
     if not filtered_symbols:
-        fallback_page = _fallback_scan_page(
-            request_payload,
-            context,
-            symbols=available_symbols,
-            market_data=market_data,
-            dq=dq,
-            banner=None if context.is_open else (banner or "Filters removed all symbols — showing frozen leaders."),
-            limit=page_limit,
-        )
-        if fallback_page is not None:
-            return fallback_page
-        return _empty_scan_page(
-            request_payload,
-            context,
-            banner=banner or "No tickers passed scan filters.",
-            dq=dq,
+        return _finalize(
+            _fallback_or_empty(
+                symbols=available_symbols,
+                market_data=market_data,
+                banner=None if context.is_open else (banner or "Filters removed all symbols — showing frozen leaders."),
+                limit=page_limit,
+                empty_banner=no_setups_banner,
+            )
         )
     subset = filtered_symbols[: rank_limit * 2]
     try:
@@ -4584,11 +4914,14 @@ async def gpt_scan_endpoint(
         dq["ok"] = False
         dq.setdefault("mode", "degraded")
         dq["error"] = "scan_failed"
-        return _empty_scan_page(
-            request_payload,
-            context,
-            banner=banner or "Scan unavailable — using frozen context.",
-            dq=dq,
+        return _finalize(
+            _empty_scan_page(
+                request_payload,
+                context,
+                banner=banner or "Scan unavailable — using frozen context.",
+                dq=dq,
+                session=session_payload,
+            )
         )
 
     stub_context = ScanContext(
@@ -4609,22 +4942,14 @@ async def gpt_scan_endpoint(
     )
 
     if not preps:
-        fallback_page = _fallback_scan_page(
-            request_payload,
-            context,
-            symbols=available_symbols,
-            market_data=market_subset,
-            dq=dq,
-            banner=None if context.is_open else (banner or "Scanner returned no signals — showing frozen leaders."),
-            limit=page_limit,
-        )
-        if fallback_page is not None:
-            return fallback_page
-        return _empty_scan_page(
-            request_payload,
-            context,
-            banner=banner or "No qualified setups found.",
-            dq=dq,
+        return _finalize(
+            _fallback_or_empty(
+                symbols=available_symbols,
+                market_data=market_subset,
+                banner=None if context.is_open else (banner or "Scanner returned no signals — showing frozen leaders."),
+                limit=page_limit,
+                empty_banner=no_setups_banner,
+            )
         )
 
     style_literal = _ranking_style(request_payload.style)
@@ -4654,25 +4979,30 @@ async def gpt_scan_endpoint(
         ordered_candidates = [item.candidate for item in fallback[:rank_limit]]
 
     if not ordered_candidates:
-        fallback_page = _fallback_scan_page(
-            request_payload,
-            context,
-            symbols=available_symbols,
-            market_data=market_subset,
-            dq=dq,
-            banner=None if context.is_open else (banner or "Ranking produced no results — showing frozen leaders."),
-            limit=page_limit,
+        return _finalize(
+            _fallback_or_empty(
+                symbols=available_symbols,
+                market_data=market_subset,
+                banner=None if context.is_open else (banner or "Ranking produced no results — showing frozen leaders."),
+                limit=page_limit,
+                empty_banner=no_setups_banner,
+            )
         )
-        if fallback_page is not None:
-            return fallback_page
 
-    start_index = decode_cursor(request_payload.cursor)
-    page_size = min(50, page_limit)
-    cutoff = min(page_limit, len(ordered_candidates))
-    start = min(start_index, cutoff)
-    end = min(start + page_size, cutoff)
-    next_cursor = encode_cursor(end) if end < cutoff else None
-    page_candidates = ordered_candidates[start:end]
+    if ordered_candidates:
+        start_index = decode_cursor(request_payload.cursor)
+        page_size = min(50, page_limit)
+        cutoff = min(page_limit, len(ordered_candidates))
+        start = min(start_index, cutoff)
+        end = min(start + page_size, cutoff)
+        next_cursor = encode_cursor(end) if end < cutoff else None
+        ranked_candidates: List[ScanCandidate] = []
+        for idx, candidate in enumerate(ordered_candidates, start=1):
+            ranked_candidates.append(candidate.model_copy(update={"rank": idx}))
+        page_candidates = ranked_candidates[start:end]
+    else:
+        page_candidates = []
+        next_cursor = None
 
     meta = {
         "style": request_payload.style,
@@ -4706,14 +5036,19 @@ async def gpt_scan_endpoint(
             "sim_open": context.simulate_open,
         },
     )
-    return ScanPage(
-        as_of=context.as_of_iso,
-        planning_context=planning_context,
-        banner=banner,
-        meta=meta,
-        candidates=page_candidates,
-        data_quality=dq,
-        next_cursor=next_cursor,
+    return _finalize(
+        ScanPage(
+            as_of=context.as_of_iso,
+            planning_context=planning_context,
+            banner=banner,
+            meta=meta,
+            candidates=page_candidates,
+            data_quality=dq,
+            session=session_payload,
+            phase="scan",
+            count_candidates=len(page_candidates),
+            next_cursor=next_cursor,
+        )
     )
 
 
@@ -5449,8 +5784,10 @@ async def _generate_fallback_plan(
         getattr(settings, "ff_chart_canonical_v1", False) or getattr(settings, "ff_layers_endpoint", False)
     )
     include_options_contracts = True
+    rejected_contracts: List[Dict[str, str]] = []
     options_contracts: List[Dict[str, Any]] | None = None
     options_note: str | None = None
+    em_cap_used = False
     session_payload = _session_payload_from_request(request)
     market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(
         session_payload,
@@ -5513,6 +5850,7 @@ async def _generate_fallback_plan(
     snapshot = _build_market_snapshot(prepared, key_levels)
     ema_trend_up = ema9 > ema20 > ema50
     ema_trend_down = ema9 < ema20 < ema50
+    expected_move_abs = context.get("expected_move_horizon")
     if ema_trend_up or (close_price >= ema20 >= ema50):
         direction = "long"
     elif ema_trend_down or (close_price <= ema20 <= ema50):
@@ -5573,6 +5911,20 @@ async def _generate_fallback_plan(
         else:
             targets = [round(entry - (entry - target) * scale, 2) for target in targets]
         rr_to_t1 = _risk_reward(entry, stop, targets[0], direction)
+    em_factor = float(getattr(settings, "ft_em_factor", 1.1))
+    capped_targets, cap_used = _apply_em_cap(direction, entry, targets, expected_move_abs, em_factor)
+    if capped_targets and len(capped_targets) == len(targets):
+        targets = [round(val, 2) for val in capped_targets]
+        em_cap_used = cap_used
+        rr_to_t1 = _risk_reward(entry, stop, targets[0], direction)
+    else:
+        targets = [round(float(val), 2) for val in targets]
+    valid_levels, invariant_reason = _validate_level_invariants(direction, entry, stop, targets)
+    if not valid_levels:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVARIANT_BROKEN", "message": invariant_reason or "invalid_levels"},
+        )
     rr_to_t1 = float(rr_to_t1) if rr_to_t1 is not None else None
     trend_component = 0.8 if (direction == "long" and ema_trend_up) or (direction == "short" and ema_trend_down) else 0.6
     liquidity_component = 0.65 if isinstance(context.get("volume_median"), (int, float)) and context["volume_median"] > 0 else 0.5
@@ -5587,7 +5939,6 @@ async def _generate_fallback_plan(
         if direction == "short" and close_price <= vwap_value:
             confidence_factors.append("Below VWAP")
     confluence_tags = _unique_tags(confidence_factors)
-    expected_move_abs = context.get("expected_move_horizon")
     expected_move_basis = None
     if isinstance(expected_move_abs, (int, float)) and math.isfinite(expected_move_abs) and expected_move_abs > 0:
         expected_move_pct = (expected_move_abs / close_price) * 100 if close_price else 0.0
@@ -5614,6 +5965,7 @@ async def _generate_fallback_plan(
         f"{direction_label} bias with EMA stack supportive; manage risk using {runner_trail} and watch VWAP for continuation."
     )
     options_payload: Dict[str, Any] | None = None
+    rejected_contracts: List[Dict[str, str]] = []
     style_public = (public_style(style_token) or style_token or "intraday").lower()
     side_hint = _infer_contract_side(None, direction)
     if include_options_contracts and side_hint:
@@ -5638,16 +5990,35 @@ async def _generate_fallback_plan(
             logger.warning("fallback contract lookup error for %s: %s", symbol, exc)
     if include_options_contracts:
         extracted_contracts = _extract_options_contracts(options_payload)
-        if extracted_contracts:
-            options_contracts = extracted_contracts
+        filtered_contracts, guardrail_rejections = _apply_option_guardrails(
+            extracted_contracts,
+            max_spread_pct=float(getattr(settings, "ft_max_spread_pct", 8.0)),
+            min_open_interest=int(getattr(settings, "ft_min_oi", 300)),
+        )
+        if guardrail_rejections:
+            rejected_contracts.extend(guardrail_rejections)
+        if filtered_contracts:
+            options_contracts = filtered_contracts
         else:
             options_contracts = []
-            if isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
+            if guardrail_rejections and not options_note:
+                options_note = "Contracts filtered by liquidity guardrails"
+            elif isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
                 options_note = str(options_payload["quotes_notice"])
             elif not side_hint:
                 options_note = "Options side unavailable for this plan"
             else:
                 options_note = "No tradeable contracts met filters"
+    if include_options_contracts and event_window_blocked:
+        options_contracts = []
+        options_note = "Blocked by event window"
+        if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
+            rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
+    if include_options_contracts and event_window_blocked:
+        options_contracts = []
+        options_note = "Blocked by event window"
+        if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
+            rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
     else:
         options_payload = None
     hint_interval_raw, hint_guidance = _chart_hint("baseline_auto", style_token)
@@ -5758,6 +6129,11 @@ async def _generate_fallback_plan(
     plan_block["trade_detail"] = chart_url_with_ids
     plan_block["chart_timeframe"] = chart_timeframe_hint
     plan_block["chart_guidance"] = hint_guidance
+    plan_block["within_event_window"] = within_event_window
+    if minutes_to_event is not None:
+        plan_block["minutes_to_event"] = minutes_to_event
+    if em_cap_used:
+        plan_block["em_used"] = True
     if simulated_banner_text:
         banners_list = plan_block.get("banners") if isinstance(plan_block.get("banners"), list) else None
         if banners_list is None:
@@ -5775,13 +6151,15 @@ async def _generate_fallback_plan(
         plan_block["options_contracts"] = options_contracts
     if include_options_contracts and options_note:
         plan_block["options_note"] = options_note
+    if rejected_contracts:
+        plan_block["rejected_contracts"] = rejected_contracts
     if mtf_confluence_tags:
         plan_block["mtf_confluence"] = mtf_confluence_tags
     if risk_block:
         plan_block["risk_block"] = risk_block
     if execution_rules:
         plan_block["execution_rules"] = execution_rules
-    plan_warnings: List[str] = []
+    plan_warnings: List[str] = list(event_warnings)
     target_profile = build_target_profile(
         entry=entry,
         stop=stop,
@@ -5805,12 +6183,17 @@ async def _generate_fallback_plan(
         rationale=notes,
         options_block=None,
         chart_url=chart_url_with_ids,
-        session=market_meta.get("session_state"),
+        session=session_state_payload,
         confluence=confluence_tags or None,
     )
     if confidence_visual:
         structured_plan["confidence_visual"] = confidence_visual
     structured_plan["trade_detail"] = chart_url_with_ids
+    structured_plan["within_event_window"] = within_event_window
+    if minutes_to_event is not None:
+        structured_plan["minutes_to_event"] = minutes_to_event
+    if em_cap_used:
+        structured_plan["em_used"] = True
     if tp_reasons:
         structured_plan["tp_reasons"] = tp_reasons
     if confluence_tags:
@@ -5819,6 +6202,9 @@ async def _generate_fallback_plan(
         structured_plan["options_contracts"] = options_contracts
     if include_options_contracts and options_note:
         structured_plan["options_note"] = options_note
+    if rejected_contracts:
+        structured_plan["rejected_contracts"] = rejected_contracts
+    structured_plan["target_profile"] = target_profile_dict
     if mtf_confluence_tags:
         structured_plan["mtf_confluence"] = mtf_confluence_tags
     if risk_block:
@@ -5832,6 +6218,10 @@ async def _generate_fallback_plan(
             structured_plan["banners"] = banners_list
         if simulated_banner_text not in banners_list:
             banners_list.append(simulated_banner_text)
+    target_profile_dict = target_profile.to_dict()
+    if em_cap_used:
+        target_profile_dict["em_used"] = True
+    warnings_payload = list(dict.fromkeys(plan_warnings)) if plan_warnings else []
     chart_params_payload = {key: str(value) for key, value in chart_params.items()}
     charts_payload: Dict[str, Any] = {"params": chart_params_payload, "interactive": chart_url_with_ids}
     charts_payload["live"] = is_plan_live
@@ -5852,11 +6242,35 @@ async def _generate_fallback_plan(
         events_block = enrichment.get("events")
         earnings_block = enrichment.get("earnings")
         sentiment_block = enrichment.get("sentiment")
-    session_state_payload = market_meta.get("session_state") if isinstance(market_meta, dict) else None
+    session_state_payload_raw = market_meta.get("session_state") if isinstance(market_meta, dict) else None
+    if session_state_payload_raw is None and isinstance(data_meta, dict):
+        session_state_payload_raw = data_meta.get("session_state")
+    session_state_payload = dict(session_state_payload_raw) if isinstance(session_state_payload_raw, Mapping) else {}
     if not events_block:
         macro_window = _macro_event_block(symbol, session_state_payload)
         if macro_window:
             events_block = macro_window
+    within_event_window = bool((events_block or {}).get("within_event_window"))
+    minutes_to_event_token = (events_block or {}).get("min_minutes_to_event")
+    minutes_to_event: Optional[int] = None
+    if minutes_to_event_token is not None:
+        try:
+            minutes_to_event = int(float(minutes_to_event_token))
+        except (TypeError, ValueError):
+            minutes_to_event = None
+    session_state_payload["within_event_window"] = within_event_window
+    if minutes_to_event is not None:
+        session_state_payload["minutes_to_event"] = minutes_to_event
+    blocked_styles = {
+        token.strip().lower()
+        for token in getattr(settings, "ft_event_blocked_styles", [])
+        if token and token.strip()
+    }
+    style_lower = (style_token or "").strip().lower()
+    event_window_blocked = within_event_window and (style_lower in blocked_styles)
+    event_warnings: List[str] = []
+    if event_window_blocked:
+        event_warnings.append("EVENT_WINDOW_BLOCKED")
     if symbol.upper() in ETF_EVENT_SYMBOLS:
         earnings_block = None
     if isinstance(data_meta, dict):
@@ -5868,20 +6282,34 @@ async def _generate_fallback_plan(
     if is_plan_live:
         bars_url += "&live=1"
     data_payload["bars"] = bars_url
-    data_payload["session_state"] = market_meta.get("session_state")
+    data_payload["session_state"] = session_state_payload
     data_payload["earnings_present"] = bool(earnings_block)
     data_payload["events_present"] = bool(events_block)
+    data_payload["within_event_window"] = within_event_window
+    if minutes_to_event is not None:
+        data_payload["minutes_to_event"] = minutes_to_event
     data_quality = {
         "series_present": True,
         "iv_present": bool(expected_move_abs) and math.isfinite(expected_move_abs),
         "events_present": bool(events_block),
         "earnings_present": bool(earnings_block),
     }
-    response = PlanResponse(
+    data_quality["within_event_window"] = within_event_window
+    if minutes_to_event is not None:
+        data_quality["minutes_to_event"] = minutes_to_event
+    if event_window_blocked:
+        data_quality["event_window_blocked"] = True
+    confluence_payload = list(confluence_tags) if confluence_tags else []
+    mtf_confluence_payload = list(mtf_confluence_tags) if mtf_confluence_tags else []
+    tp_reasons_payload = list(tp_reasons) if tp_reasons else []
+    options_contracts_payload: List[Dict[str, Any]] = (
+        list(options_contracts) if include_options_contracts and options_contracts else []
+    )
+    plan_response = PlanResponse(
         plan_id=plan_id,
         version=1,
         trade_detail=chart_url_with_ids,
-        warnings=plan_warnings or None,
+        warnings=warnings_payload,
         planning_context="live" if is_plan_live else "frozen",
         symbol=symbol.upper(),
         style=style_token,
@@ -5894,8 +6322,8 @@ async def _generate_fallback_plan(
         rr_to_t1=rr_to_t1,
         confidence=confidence,
         confidence_factors=confidence_factors or None,
-        confluence_tags=confluence_tags or None,
-        confluence=mtf_confluence_tags or None,
+        confluence_tags=confluence_payload,
+        confluence=mtf_confluence_payload,
         notes=notes,
         relevant_levels={k: float(v) for k, v in key_levels.items() if isinstance(v, (int, float))},
         expected_move_basis=expected_move_basis,
@@ -5909,7 +6337,7 @@ async def _generate_fallback_plan(
         score=confidence,
         plan=plan_block,
         structured_plan=structured_plan,
-        target_profile=target_profile.to_dict(),
+        target_profile=target_profile_dict,
         charts=charts_payload,
         key_levels={k: float(v) for k, v in key_levels.items() if isinstance(v, (int, float))},
         key_levels_used=None,
@@ -5920,7 +6348,7 @@ async def _generate_fallback_plan(
             "vwap": vwap_value,
         },
         options=options_payload if isinstance(options_payload, dict) else None,
-        options_contracts=options_contracts if include_options_contracts else None,
+        options_contracts=options_contracts_payload,
         options_note=options_note if include_options_contracts else None,
         calc_notes={
             "atr14": round(float(atr_value), 4),
@@ -5938,17 +6366,18 @@ async def _generate_fallback_plan(
         execution_rules=execution_rules,
         market=market_meta,
         data=data_payload,
-        session_state=market_meta.get("session_state"),
+        session_state=session_state_payload,
         chart_timeframe=chart_timeframe_hint,
         chart_guidance=hint_guidance,
         confidence_visual=confidence_visual,
-        tp_reasons=tp_reasons or None,
+        tp_reasons=tp_reasons_payload,
+        rejected_contracts=rejected_contracts,
     )
     if simulate_open:
         response_meta = {"simulated_open": True}
         if simulated_banner_text:
             response_meta["banner"] = simulated_banner_text
-        response.meta = response_meta
+        plan_response.meta = response_meta
     if include_plan_layers:
         layers = build_plan_layers(
             symbol=symbol.upper(),
@@ -5986,8 +6415,17 @@ async def _generate_fallback_plan(
         )
         if mtf_confluence_tags:
             meta["mtf_confluence"] = mtf_confluence_tags
-        response.plan_layers = layers
-    return response
+        plan_response.plan_layers = layers
+    plan_response.phase = "hydrate"
+    plan_response.layers_fetched = bool(plan_response.plan_layers)
+    meta_payload = dict(plan_response.meta or {})
+    meta_payload["within_event_window"] = within_event_window
+    if minutes_to_event is not None:
+        meta_payload["minutes_to_event"] = minutes_to_event
+    if em_cap_used:
+        meta_payload["em_used"] = True
+    plan_response.meta = meta_payload or None
+    return _finalize_plan_response(plan_response)
 
 
 @gpt.post("/plan", summary="Return a single trade plan for a symbol", response_model=PlanResponse)
@@ -5995,6 +6433,7 @@ async def _generate_fallback_plan(
 async def gpt_plan(
     request_payload: PlanRequest,
     request: Request,
+    response: Response,
     user: AuthedUser = Depends(require_api_key),
 ) -> PlanResponse:
     """Compatibility endpoint that returns the top plan for a single symbol.
@@ -6008,6 +6447,7 @@ async def gpt_plan(
         raise HTTPException(status_code=400, detail="Invalid symbol; use /gpt/scan for universe requests.")
     forced_plan_id = (request_payload.plan_id or "").strip()
     settings = get_settings()
+    allow_plan_fallback = not bool(getattr(settings, "ft_no_fallback_trades", True))
     fields_set = getattr(request_payload, "model_fields_set", set())
     simulate_open = _resolve_simulate_open(
         request,
@@ -6034,19 +6474,20 @@ async def gpt_plan(
     except TypeError:
         results = await gpt_scan(universe, request, user)
     if not results:
-        fallback_plan = await _generate_fallback_plan(
-            symbol,
-            request_payload.style,
-            request,
-            user,
-            simulate_open=simulate_open,
-        )
-        if fallback_plan is not None:
-            logger.info(
-                "gpt_plan fallback_generated",
-                extra={"symbol": symbol, "style": request_payload.style, "mode": "no_signals"},
+        if allow_plan_fallback:
+            fallback_plan = await _generate_fallback_plan(
+                symbol,
+                request_payload.style,
+                request,
+                user,
+                simulate_open=simulate_open,
             )
-            return fallback_plan
+            if fallback_plan is not None:
+                logger.info(
+                    "gpt_plan fallback_generated",
+                    extra={"symbol": symbol, "style": request_payload.style, "mode": "no_signals"},
+                )
+                return _finalize_plan_response(fallback_plan)
         raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
     logger.info(
@@ -6063,22 +6504,46 @@ async def gpt_plan(
     snapshot = first.get("market_snapshot") or {}
     indicators = (snapshot.get("indicators") or {})
     volatility = (snapshot.get("volatility") or {})
+    expected_move_abs: float | None = None
+    if isinstance(plan.get("expected_move"), (int, float, str)):
+        try:
+            candidate = float(plan.get("expected_move"))
+            if math.isfinite(candidate) and candidate > 0:
+                expected_move_abs = candidate
+        except (TypeError, ValueError):
+            expected_move_abs = None
+    if expected_move_abs is None and isinstance(volatility.get("expected_move_horizon"), (int, float, str)):
+        try:
+            candidate = float(volatility.get("expected_move_horizon"))
+            if math.isfinite(candidate) and candidate > 0:
+                expected_move_abs = candidate
+        except (TypeError, ValueError):
+            expected_move_abs = None
+    if expected_move_abs is None and isinstance(data_meta, dict):
+        try:
+            candidate = float(data_meta.get("expected_move_horizon"))
+            if math.isfinite(candidate) and candidate > 0:
+                expected_move_abs = candidate
+        except (TypeError, ValueError, TypeError):
+            expected_move_abs = None
+    em_cap_used = False
     # Build calc_notes + htf from available payload
     raw_plan = first.get("plan") or {}
     if not raw_plan:
-        fallback_plan = await _generate_fallback_plan(
-            symbol,
-            request_payload.style,
-            request,
-            user,
-            simulate_open=simulate_open,
-        )
-        if fallback_plan is not None:
-            logger.info(
-                "gpt_plan fallback_generated",
-                extra={"symbol": symbol, "style": request_payload.style, "mode": "empty_plan"},
+        if allow_plan_fallback:
+            fallback_plan = await _generate_fallback_plan(
+                symbol,
+                request_payload.style,
+                request,
+                user,
+                simulate_open=simulate_open,
             )
-            return fallback_plan
+            if fallback_plan is not None:
+                logger.info(
+                    "gpt_plan fallback_generated",
+                    extra={"symbol": symbol, "style": request_payload.style, "mode": "empty_plan"},
+                )
+                return _finalize_plan_response(fallback_plan)
         raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
     plan: Dict[str, Any] = dict(raw_plan)
     raw_plan_id = str(plan.get("plan_id") or "").strip()
@@ -6229,6 +6694,24 @@ async def gpt_plan(
             if token and str(token).strip()
         ]
     targets_list = [float(tp) for tp in target_tokens if tp is not None]
+    direction_for_levels = plan.get("direction") or direction_hint
+    if entry_val is not None and stop_val is not None and targets_list:
+        em_factor = float(getattr(settings, "ft_em_factor", 1.1))
+        capped_targets, cap_used = _apply_em_cap(direction_for_levels, entry_val, targets_list, expected_move_abs, em_factor)
+        if capped_targets and len(capped_targets) == len(targets_list):
+            targets_list = [round(val, 2) for val in capped_targets]
+            em_cap_used = cap_used
+        else:
+            targets_list = [round(float(val), 2) for val in targets_list]
+        valid_levels, invariant_reason = _validate_level_invariants(direction_for_levels, entry_val, stop_val, targets_list)
+        if not valid_levels:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "INVARIANT_BROKEN", "message": invariant_reason or "invalid_levels"},
+            )
+    else:
+        targets_list = [round(float(val), 2) for val in targets_list]
+
     tp1_value = targets_list[0] if targets_list else None
 
     rr_inputs = None
@@ -6555,6 +7038,10 @@ async def gpt_plan(
     else:
         plan_warnings = []
     plan_warnings = [w for w in plan_warnings if "watch plan" not in str(w).lower()]
+    if event_warnings:
+        plan_warnings.extend(event_warnings)
+    plan_warnings = [str(w) for w in plan_warnings if w]
+    plan_warnings = list(dict.fromkeys(plan_warnings))
 
     entry_for_engine = entry_val
     if entry_for_engine is None:
@@ -6592,6 +7079,8 @@ async def gpt_plan(
                 bias=plan.get("direction") or direction_hint,
             )
             target_profile_dict = target_profile.to_dict()
+            if em_cap_used:
+                target_profile_dict["em_used"] = True
             structured_plan_payload = build_structured_plan(
                 plan_id=plan_id,
                 symbol=symbol,
@@ -6661,11 +7150,20 @@ async def gpt_plan(
     options_note: str | None = None
     if include_options_contracts:
         extracted_contracts = _extract_options_contracts(options_payload)
-        if extracted_contracts:
-            options_contracts = extracted_contracts
+        filtered_contracts, guardrail_rejections = _apply_option_guardrails(
+            extracted_contracts,
+            max_spread_pct=float(getattr(settings, "ft_max_spread_pct", 8.0)),
+            min_open_interest=int(getattr(settings, "ft_min_oi", 300)),
+        )
+        if guardrail_rejections:
+            rejected_contracts.extend(guardrail_rejections)
+        if filtered_contracts:
+            options_contracts = filtered_contracts
         else:
             options_contracts = []
-            if isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
+            if guardrail_rejections and not options_note:
+                options_note = "Contracts filtered by liquidity guardrails"
+            elif isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
                 options_note = str(options_payload["quotes_notice"])
             elif not side_hint:
                 options_note = "Options side unavailable for this plan"
@@ -6839,8 +7337,16 @@ async def gpt_plan(
     bias_output = plan.get("direction") or ((snapshot.get("trend") or {}).get("direction_hint"))
     relevant_levels = first.get("key_levels") or {}
     expected_move_basis = None
-    if isinstance(volatility.get("expected_move_horizon"), (int, float)):
-        expected_move_basis = "expected_move_horizon"
+    if isinstance(expected_move_abs, (int, float)) and math.isfinite(expected_move_abs) and expected_move_abs > 0:
+        price_ref = entry_val if isinstance(entry_val, (int, float)) else (snapshot.get("price", {}).get("close") if isinstance(snapshot.get("price", {}), Mapping) else None)
+        try:
+            pct = (expected_move_abs / float(price_ref)) * 100 if price_ref else None
+        except (TypeError, ValueError):
+            pct = None
+        if pct is not None:
+            expected_move_basis = f"EM ≈ {expected_move_abs:.2f} ({pct:.1f}%)"
+        else:
+            expected_move_basis = f"EM ≈ {expected_move_abs:.2f}"
     sentiment_block = first.get("sentiment")
     events_block = first.get("events")
     earnings_block = first.get("earnings")
@@ -6907,11 +7413,13 @@ async def gpt_plan(
             structured_plan_payload["confluence_tags"] = confluence_tags
         if tp_reasons:
             structured_plan_payload["tp_reasons"] = tp_reasons
-        if include_options_contracts:
-            if options_contracts is not None:
-                structured_plan_payload["options_contracts"] = options_contracts
-            if options_note:
-                structured_plan_payload["options_note"] = options_note
+    if include_options_contracts:
+        if options_contracts is not None:
+            structured_plan_payload["options_contracts"] = options_contracts
+        if options_note:
+            structured_plan_payload["options_note"] = options_note
+    if rejected_contracts:
+        structured_plan_payload["rejected_contracts"] = rejected_contracts
         if key_levels_used:
             structured_plan_payload["key_levels_used"] = key_levels_used
         if risk_block:
@@ -6933,6 +7441,9 @@ async def gpt_plan(
         if options_note:
             plan_core["options_note"] = options_note
             plan.setdefault("options_note", options_note)
+    if rejected_contracts:
+        plan_core["rejected_contracts"] = rejected_contracts
+        plan.setdefault("rejected_contracts", rejected_contracts)
     calc_notes_output = calc_notes or None
     if calc_notes_output is not None and not calc_notes_output:
         calc_notes_output = None
@@ -7025,11 +7536,18 @@ async def gpt_plan(
         if simulated_banner_text:
             response_meta["banner"] = simulated_banner_text
 
-    response = PlanResponse(
+    warnings_payload = list(dict.fromkeys(plan_warnings)) if plan_warnings else []
+    confluence_payload = list(confluence_tags) if confluence_tags else []
+    mtf_confluence_payload = list(mtf_confluence_tags) if mtf_confluence_tags else []
+    tp_reasons_payload = list(tp_reasons) if tp_reasons else []
+    options_contracts_payload: List[Dict[str, Any]] = (
+        list(options_contracts) if include_options_contracts and options_contracts else []
+    )
+    plan_response = PlanResponse(
         plan_id=plan_id,
         version=version,
         trade_detail=trade_detail_url,
-        warnings=plan_warnings or None,
+        warnings=warnings_payload,
         planning_context=planning_context_value,
         symbol=first.get("symbol"),
         style=first.get("style"),
@@ -7042,8 +7560,8 @@ async def gpt_plan(
         rr_to_t1=rr_output,
         confidence=confidence_output,
         confidence_factors=confidence_factors,
-        confluence_tags=confluence_tags or None,
-        confluence=mtf_confluence_tags or None,
+        confluence_tags=confluence_payload,
+        confluence=mtf_confluence_payload,
         notes=notes_output,
         relevant_levels=relevant_levels or None,
         expected_move_basis=expected_move_basis,
@@ -7066,7 +7584,7 @@ async def gpt_plan(
         market_snapshot=first.get("market_snapshot"),
         features=first.get("features"),
         options=first.get("options"),
-        options_contracts=options_contracts if include_options_contracts else None,
+        options_contracts=options_contracts_payload,
         options_note=options_note if include_options_contracts else None,
         calc_notes=calc_notes_output,
         htf=htf,
@@ -7082,11 +7600,21 @@ async def gpt_plan(
         execution_rules=execution_rules,
         session_state=session_state_payload,
         confidence_visual=confidence_visual_value,
-        plan_layers=plan_layers,
-        tp_reasons=tp_reasons or None,
+        plan_layers=plan_layers or {},
+        tp_reasons=tp_reasons_payload,
         meta=response_meta,
+        rejected_contracts=rejected_contracts,
     )
-    return response
+    plan_response.phase = "hydrate"
+    plan_response.layers_fetched = bool(plan_response.plan_layers)
+    meta_payload = dict(plan_response.meta or {})
+    meta_payload["within_event_window"] = within_event_window
+    if minutes_to_event is not None:
+        meta_payload["minutes_to_event"] = minutes_to_event
+    if em_cap_used:
+        meta_payload["em_used"] = True
+    plan_response.meta = meta_payload or None
+    return _finalize_plan_response(plan_response)
 
 
 @gpt.post(
@@ -7104,7 +7632,7 @@ async def assistant_exec(
         style=request_payload.style,
         plan_id=request_payload.plan_id,
     )
-    plan_response = await gpt_plan(plan_request, request, user)
+    plan_response = await gpt_plan(plan_request, request, Response(), user)
 
     plan_block = plan_response.structured_plan or {}
     if not plan_block:
@@ -7290,7 +7818,7 @@ async def refresh_plan_snapshot(
         raise HTTPException(status_code=400, detail="Plan snapshot missing symbol")
     style = plan_block.get("style")
     plan_request = PlanRequest(symbol=symbol, style=style, plan_id=plan_id)
-    response = await gpt_plan(plan_request, request, user)
+    response = await gpt_plan(plan_request, request, Response(), user)
     return response
 
 
@@ -7995,10 +8523,10 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     """
 
     # Collect raw data, preserving extras
-    data: Dict[str, Any] = dict(payload.model_extra or {})
-    raw_symbol = str(payload.symbol or "").strip()
-    raw_interval = str(payload.interval or "").strip()
-    direction = (str(data.get("direction") or "").strip().lower())
+    data: Dict[str, Any] = payload.model_dump(mode="python", exclude_none=True)
+    raw_symbol = str(data.get("symbol") or "").strip()
+    raw_interval = str(data.get("interval") or "").strip()
+    direction = str(data.get("direction") or "").strip().lower()
     entry = data.get("entry")
     stop = data.get("stop")
     tp_csv = data.get("tp")
@@ -8159,6 +8687,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
             base_url=tv_base,
             precision_map=None,
         )
+        _ensure_allowed_host(canonical_url, request)
         logger.info(
             "chart_url built",
             extra={
@@ -8203,9 +8732,10 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
             "session_status": session_snapshot.get("status"),
             "session_as_of": session_snapshot.get("as_of"),
             "metric_count": metric_count,
-            "canonical": False,
-        },
-    )
+        "canonical": False,
+    },
+)
+    _ensure_allowed_host(url, request)
     return ChartLinks(interactive=url)
 
 
@@ -8362,7 +8892,7 @@ async def _rebuild_plan_layers(plan_id: str, snapshot: Dict[str, Any], request: 
     plan_request = PlanRequest(symbol=symbol, style=style, plan_id=plan_id)
     backfill_user = AuthedUser(user_id="layers_backfill")
     try:
-        response = await gpt_plan(plan_request, request, backfill_user)
+        response = await gpt_plan(plan_request, request, Response(), backfill_user)
     except HTTPException as exc:
         logger.warning(
             "chart_layers_rebuild_http_error",

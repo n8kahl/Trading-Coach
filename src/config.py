@@ -9,7 +9,7 @@ hosting provider's secrets manager rather than storing them in version control.
 """
 
 from functools import lru_cache
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -51,6 +51,23 @@ class Settings(BaseSettings):
     ff_chart_canonical_v1: bool = Field(False, env="FF_CHART_CANONICAL_V1")
     ff_layers_endpoint: bool = Field(False, env="FF_LAYERS_ENDPOINT")
     ff_options_always: bool = Field(False, env="FF_OPTIONS_ALWAYS")
+    ft_no_fallback_trades: bool = Field(True, env="FT_NO_FALLBACK_TRADES")
+    ft_max_spread_pct: float = Field(8.0, env="FT_MAX_SPREAD_PCT")
+    ft_min_oi: int = Field(300, env="FT_MIN_OI")
+    ft_max_drift_bps: float = Field(30.0, env="FT_MAX_DRIFT_BPS")
+    ft_em_factor: float = Field(1.3, env="FT_EM_FACTOR")
+    ft_allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["https://trading-coach-production.up.railway.app"],
+        env="FT_ALLOWED_HOSTS",
+    )
+    ft_event_blocked_styles: list[str] = Field(default_factory=list, env="FT_EVENT_BLOCKED_STYLES")
+
+    @field_validator("ft_allowed_hosts", "ft_event_blocked_styles", mode="before")
+    @classmethod
+    def _split_comma_separated(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            return [token.strip() for token in value.split(",") if token.strip()]
+        return value
 
 @lru_cache()
 def get_settings() -> Settings:
