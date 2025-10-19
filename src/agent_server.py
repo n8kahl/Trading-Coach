@@ -7523,13 +7523,14 @@ async def gpt_plan(
             structured_plan_payload["confluence_tags"] = confluence_tags
         if tp_reasons:
             structured_plan_payload["tp_reasons"] = tp_reasons
-    if include_options_contracts:
-        if options_contracts is not None:
-            structured_plan_payload["options_contracts"] = options_contracts
-        if options_note:
-            structured_plan_payload["options_note"] = options_note
-    if rejected_contracts:
-        structured_plan_payload["rejected_contracts"] = rejected_contracts
+    if structured_plan_payload is not None:
+        if include_options_contracts:
+            if options_contracts is not None:
+                structured_plan_payload["options_contracts"] = options_contracts
+            if options_note:
+                structured_plan_payload["options_note"] = options_note
+        if rejected_contracts:
+            structured_plan_payload["rejected_contracts"] = rejected_contracts
         if key_levels_used:
             structured_plan_payload["key_levels_used"] = key_levels_used
         if risk_block:
