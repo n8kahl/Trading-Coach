@@ -60,9 +60,7 @@ async def test_gpt_plan_includes_trade_detail(monkeypatch):
     response = await agent_server.gpt_plan(agent_server.PlanRequest(symbol="TSLA", style="swing"), request, user)
 
     assert response.trade_detail, "trade_detail should be populated"
-    assert response.idea_url == response.trade_detail, "legacy idea_url alias should mirror trade_detail"
     assert response.plan["trade_detail"] == response.trade_detail, "embedded plan must carry trade_detail"
-    assert response.plan["idea_url"] == response.trade_detail, "embedded plan must keep idea_url alias"
     parsed = urlparse(response.trade_detail)
     params = parse_qs(parsed.query)
     assert params.get("plan_id") == ["TSLA-SWING-20251010"]

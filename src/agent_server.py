@@ -1119,7 +1119,6 @@ class PlanResponse(BaseModel):
     plan_id: str | None = None
     version: int | None = None
     trade_detail: str | None = None
-    idea_url: str | None = None
     warnings: List[str] | None = None
     planning_context: str | None = None
     symbol: str
@@ -1217,7 +1216,6 @@ class IdeaStoreRequest(BaseModel):
 class IdeaStoreResponse(BaseModel):
     plan_id: str
     trade_detail: str
-    idea_url: str
 
 
 class StreamPushRequest(BaseModel):
@@ -1990,10 +1988,8 @@ async def _regenerate_snapshot_from_slug(plan_id: str, version: Optional[int], r
     plan_block["version"] = response.version
     redirect_url = _build_trade_detail_url(request, plan_id, response.version)
     plan_block["trade_detail"] = redirect_url
-    plan_block["idea_url"] = redirect_url
     cloned["plan"] = plan_block
     cloned["trade_detail"] = redirect_url
-    cloned["idea_url"] = redirect_url
 
     await _store_idea_snapshot(plan_id, cloned)
     return cloned
@@ -5760,7 +5756,6 @@ async def _generate_fallback_plan(
         "debug": {},
     }
     plan_block["trade_detail"] = chart_url_with_ids
-    plan_block["idea_url"] = chart_url_with_ids
     plan_block["chart_timeframe"] = chart_timeframe_hint
     plan_block["chart_guidance"] = hint_guidance
     if simulated_banner_text:
@@ -5886,7 +5881,6 @@ async def _generate_fallback_plan(
         plan_id=plan_id,
         version=1,
         trade_detail=chart_url_with_ids,
-        idea_url=chart_url_with_ids,
         warnings=plan_warnings or None,
         planning_context="live" if is_plan_live else "frozen",
         symbol=symbol.upper(),
@@ -6360,7 +6354,6 @@ async def gpt_plan(
 
     trade_detail_url = chart_url_value
     plan["trade_detail"] = trade_detail_url
-    plan["idea_url"] = trade_detail_url
 
     atr_val = _safe_number(indicators.get("atr14"))
     precision_for_levels = get_precision(symbol)
@@ -6742,7 +6735,6 @@ async def gpt_plan(
         plan_core.setdefault("setup", first.get("strategy_id"))
         plan.setdefault("setup", plan_core.get("setup"))
     plan_core["trade_detail"] = trade_detail_url
-    plan_core["idea_url"] = trade_detail_url
     plan_core["chart_timeframe"] = chart_timeframe_hint
     plan_core["chart_guidance"] = hint_guidance
     if updated_from_version:
@@ -7020,7 +7012,6 @@ async def gpt_plan(
             "version": version,
             "planning_context": planning_context_value,
             "trade_detail": trade_detail_url,
-            "idea_url": trade_detail_url,
             "session_status": session_payload.get("status"),
             "session_as_of": session_payload.get("as_of"),
             "metric_count": metric_count,
@@ -7034,11 +7025,10 @@ async def gpt_plan(
         if simulated_banner_text:
             response_meta["banner"] = simulated_banner_text
 
-    return PlanResponse(
+    response = PlanResponse(
         plan_id=plan_id,
         version=version,
         trade_detail=trade_detail_url,
-        idea_url=trade_detail_url,
         warnings=plan_warnings or None,
         planning_context=planning_context_value,
         symbol=first.get("symbol"),
@@ -7096,6 +7086,7 @@ async def gpt_plan(
         tp_reasons=tp_reasons or None,
         meta=response_meta,
     )
+    return response
 
 
 @gpt.post(
@@ -7172,7 +7163,6 @@ async def assistant_exec(
         "symbol": plan_response.symbol,
         "style": plan_response.style,
         "trade_detail": plan_response.trade_detail,
-        "idea_url": plan_response.idea_url,
     }
     if plan_response.confluence_tags:
         meta_block["confluence_tags"] = plan_response.confluence_tags
@@ -7234,13 +7224,12 @@ async def internal_idea_store(payload: IdeaStoreRequest, request: Request) -> Id
     trade_detail_url = _build_trade_detail_url(request, plan_id, int(version))
     snapshot = payload.model_dump()
     plan_payload = snapshot.get("plan") or {}
-    legacy_detail = plan_payload.pop("idea_url", None)
-    if "trade_detail" not in plan_payload:
-        plan_payload["trade_detail"] = legacy_detail or trade_detail_url
+    plan_payload.pop("idea_url", None)
+    plan_payload.setdefault("trade_detail", trade_detail_url)
     snapshot["plan"] = plan_payload
     snapshot.setdefault("chart_url", None)
     await _store_idea_snapshot(plan_id, snapshot)
-    return IdeaStoreResponse(plan_id=plan_id, trade_detail=trade_detail_url, idea_url=trade_detail_url)
+    return IdeaStoreResponse(plan_id=plan_id, trade_detail=trade_detail_url)
 
 
 async def _ensure_snapshot(plan_id: str, version: Optional[int], request: Request) -> Dict[str, Any]:

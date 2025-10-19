@@ -368,12 +368,11 @@ components:
 
     PlanResponse:
       type: object
-      required: [plan_id, version, trade_detail, idea_url, symbol]
+      required: [plan_id, version, trade_detail, symbol]
       properties:
         plan_id: { type: string }
         version: { type: integer, minimum: 1 }
         trade_detail: { type: string, format: uri }
-        idea_url: { type: string, format: uri }
         warnings:
           type: array
           items: { type: string }

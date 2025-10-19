@@ -114,18 +114,26 @@ async function openIdea(item) {
       method: 'POST',
       body: JSON.stringify(body),
     });
-    const detailUrl = plan.trade_detail || plan.idea_url;
-    if (detailUrl) {
-      window.open(detailUrl, '_blank');
-    } else if (plan.plan_id) {
-      const url = buildIdeaUrl(plan.plan_id, plan.version || 1);
-      window.open(url, '_blank');
-    } else {
-      throw new Error('Plan did not include a trade detail link');
+    const chartUrl =
+      plan.chart_url ||
+      plan.trade_detail ||
+      plan?.charts?.interactive ||
+      plan?.plan?.chart_url ||
+      plan?.plan?.trade_detail;
+    if (chartUrl) {
+      window.open(chartUrl, '_blank');
+      return;
     }
+    const planId = plan.plan_id || plan?.plan?.plan_id;
+    if (planId) {
+      const fallbackUrl = buildIdeaUrl(planId, plan.version || plan?.plan?.version || 1);
+      window.open(fallbackUrl, '_blank');
+      return;
+    }
+    throw new Error('Plan did not include a chart URL');
   } catch (err) {
     console.error(err);
-    showToast(`Failed to open idea: ${err.message}`);
+    showToast(`Failed to open chart: ${err.message}`);
   }
 }
 

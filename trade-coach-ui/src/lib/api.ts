@@ -55,8 +55,7 @@ export async function fetchPlanForSymbol(symbol: string, style?: string): Promis
       session_state: plan.session_state ?? null,
       structured_plan: structured,
     },
-    chart_url: plan.trade_detail ?? plan.idea_url ?? data?.charts?.interactive ?? null,
-    idea_url: plan.trade_detail ?? plan.idea_url ?? null,
+    chart_url: plan.chart_url ?? plan.trade_detail ?? data?.charts?.interactive ?? null,
   } as PlanSnapshot;
   return snapshot;
 }

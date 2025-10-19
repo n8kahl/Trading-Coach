@@ -41,7 +41,6 @@ export type PlanSnapshot = {
   data_quality?: Record<string, unknown>;
   options?: Record<string, unknown>;
   chart_url?: string | null;
-  idea_url?: string | null;
 };
 
 export type PlanDeltaEvent = {

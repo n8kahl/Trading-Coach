@@ -19,7 +19,7 @@ State model (client only)
 - Max 3 scenarios per symbol; stored in `localStorage` (`tc:scenarios:<SYMBOL>`). Live UI pointer in `tc:live:<SYMBOL>`.
 
 APIs
-- Generate: `POST /gpt/plan { symbol, style }` → use `plan.plan_id` and `plan.trade_detail|idea_url|charts.interactive` for canonical chart links.
+- Generate: `POST /gpt/plan { symbol, style }` → use `plan.plan_id` and `plan.trade_detail|chart_url|charts.interactive` for canonical chart links.
 - Overlays: `/api/v1/gpt/chart-layers?plan_id=...` (resolved by `/tv`).
 - No server persistence for scenarios in v1.
 

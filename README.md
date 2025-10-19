@@ -184,12 +184,13 @@ The root `package.json` exposes helper scripts:
 
 ```
 npm run dev        # trade-coach-ui dev server
-npm run dev:legacy # legacy idea-page dev server
-npm run build      # build both frontends
+npm run build      # build the live plan console bundle
 npm run start      # start the live plan console (Next.js) on $PORT
 ```
 
 `trade-coach-ui` renders live plan data by calling `/idea/{plan_id}` for the initial snapshot, `/ws/plans/{plan_id}` for coaching deltas, and `/stream/{symbol}` for price ticks. As you extend the TradeFollower, the UI will automatically surface trail-stop adjustments and auto-replan events.
+
+`/tv` is the canonical interactive viewer for plans and scans. Legacy Idea Page bundles have been removed; continue using the `/gpt/chart-url` surface to build shareable `/tv` links.
 
 ---
 
