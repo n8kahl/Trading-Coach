@@ -296,7 +296,11 @@ def _session_payload_from_request(request: Request) -> Dict[str, Any]:
     return dict(get_session(request))
 
 
-def _market_snapshot_payload(session_payload: Mapping[str, Any] | None = None) -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
+def _market_snapshot_payload(
+    session_payload: Mapping[str, Any] | None = None,
+    *,
+    simulate_open: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, Any], datetime, bool]:
     snapshot = _MARKET_CLOCK.snapshot()
     if session_payload is None:
         session_payload = get_session()
@@ -304,6 +308,8 @@ def _market_snapshot_payload(session_payload: Mapping[str, Any] | None = None) -
         session_payload = dict(session_payload)
     as_of_dt = parse_session_as_of(session_payload) or _MARKET_CLOCK.last_rth_close(at=snapshot.now_et)
     frozen = str(session_payload.get("status")).lower() != "open"
+    simulated = bool(simulate_open)
+    effective_is_open = (not frozen) or simulated
     market_payload = {
         "status": snapshot.status,
         "session": snapshot.session,
@@ -311,14 +317,34 @@ def _market_snapshot_payload(session_payload: Mapping[str, Any] | None = None) -
         "now_et": snapshot.now_et.isoformat(),
         "next_open_et": snapshot.next_open_et.isoformat() if snapshot.next_open_et else None,
         "next_close_et": snapshot.next_close_et.isoformat() if snapshot.next_close_et else None,
+        "simulated_open": simulated,
     }
     data_payload = {
         "as_of_ts": int(as_of_dt.timestamp() * 1000),
         "frozen": frozen,
         "ok": True,
         "session_state": session_payload,
+        "simulated_open": simulated,
     }
-    return market_payload, data_payload, as_of_dt, not frozen
+    return market_payload, data_payload, as_of_dt, effective_is_open
+
+
+def _format_simulated_banner(as_of: datetime) -> str:
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=timezone.utc)
+    local = as_of.astimezone(ZoneInfo("America/New_York"))
+    return f"Simulated live — analysis as of {local.strftime('%Y-%m-%d %H:%M ET')}"
+
+
+def _resolve_simulate_open(request: Request, *, explicit_value: bool, explicit_field_set: bool) -> bool:
+    header_value = request.headers.get("X-Simulate-Open")
+    header_flag = False
+    if header_value is not None:
+        token = header_value.strip().lower()
+        header_flag = token in {"1", "true", "yes", "on"}
+    if explicit_field_set:
+        return bool(explicit_value)
+    return header_flag
 
 
 def _data_symbol_candidates(symbol: str) -> List[str]:
@@ -387,6 +413,7 @@ class ScanContext:
     data_timeframe: str
     market_meta: Dict[str, Any]
     data_meta: Dict[str, Any]
+    simulate_open: bool = False
 
     @property
     def as_of_iso(self) -> str:
@@ -502,34 +529,57 @@ def _normalize_chart_interval(value: str) -> str:
     return token.upper()
 
 
-def _evaluate_scan_context(asof_policy: str, style: str, session_payload: Mapping[str, Any]) -> tuple[ScanContext, str | None, Dict[str, Any]]:
-    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(session_payload)
+def _evaluate_scan_context(
+    asof_policy: str,
+    style: str,
+    session_payload: Mapping[str, Any],
+    *,
+    simulate_open: bool = False,
+) -> tuple[ScanContext, str | None, Dict[str, Any]]:
+    market_meta, data_meta, as_of_dt, effective_is_open = _market_snapshot_payload(
+        session_payload,
+        simulate_open=simulate_open,
+    )
     policy = asof_policy.lower()
     label: Literal["live", "frozen"]
-    banner: str | None = None
+    banner_parts: List[str] = []
+    session_status = str(session_payload.get("status") or "").lower()
+    session_is_open = session_status == "open"
 
     if policy == "live":
-        label = "live" if is_open else "frozen"
-        if not is_open:
-            banner = "Market closed — using last known good data."
+        label = "live" if effective_is_open else "frozen"
+        if not session_is_open:
+            banner_parts.append("Market closed — using last known good data.")
     elif policy == "frozen":
         label = "frozen"
-        banner = "Frozen planning context requested."
+        banner_parts.append("Frozen planning context requested.")
     else:  # live_or_lkg
-        label = "live" if is_open else "frozen"
-        if not is_open:
-            banner = "Live feed unavailable — using frozen data."
+        label = "live" if effective_is_open else "frozen"
+        if not session_is_open:
+            banner_parts.append("Live feed unavailable — using frozen data.")
+
+    if simulate_open and not session_is_open:
+        banner_parts.append(_format_simulated_banner(as_of_dt))
+
+    banner: str | None
+    if banner_parts:
+        unique_parts = list(dict.fromkeys(part for part in banner_parts if part))
+        banner = " • ".join(unique_parts)
+    else:
+        banner = None
 
     data_timeframe = _scan_timeframe_for_style(style)
     context = ScanContext(
         as_of=as_of_dt,
         label=label,
-        is_open=is_open,
+        is_open=effective_is_open,
+        simulate_open=bool(simulate_open),
         data_timeframe=data_timeframe,
         market_meta=market_meta,
         data_meta=dict(data_meta),
     )
     dq = dict(data_meta)
+    dq["simulated_open"] = bool(simulate_open)
     return context, banner, dq
 
 
@@ -660,6 +710,7 @@ async def _build_scan_stub_candidate(
             style=style_token,
             as_of=context.as_of,
             is_open=context.is_open,
+            simulate_open=context.simulate_open,
             history=history,
             signal=signal,
             plan=plan,
@@ -834,6 +885,8 @@ def _empty_scan_page(
         "limit": request.limit,
         "universe_size": 0,
     }
+    if context.simulate_open:
+        meta["simulated_open"] = True
     return ScanPage(
         as_of=context.as_of_iso,
         planning_context=context.label,
@@ -1059,6 +1112,7 @@ class PlanRequest(BaseModel):
     symbol: str
     style: str | None = None
     plan_id: str | None = None
+    simulate_open: bool = False
 
 
 class PlanResponse(BaseModel):
@@ -1121,6 +1175,7 @@ class PlanResponse(BaseModel):
     confidence_visual: str | None = None
     plan_layers: Dict[str, Any] | None = None
     tp_reasons: List[Dict[str, Any]] | None = None
+    meta: Dict[str, Any] | None = None
 
 
 class AssistantExecRequest(BaseModel):
@@ -1386,6 +1441,8 @@ def _fallback_scan_page(
         "label": label or ("Live liquidity leaders" if is_live else "Frozen leaders (as of RTH close)"),
         "alt_candidates": {alt_key: alt_compact},
     }
+    if context.simulate_open:
+        meta["simulated_open"] = True
     banner_value = banner if banner is not None else (None if is_live else "Market closed — frozen data")
     return ScanPage(
         as_of=context.as_of_iso,
@@ -4274,8 +4331,26 @@ async def gpt_scan_endpoint(
     user: AuthedUser = Depends(require_api_key),
 ) -> ScanPage:
     started = time.perf_counter()
+    fields_set = getattr(request_payload, "model_fields_set", set())
+    simulate_open = _resolve_simulate_open(
+        request,
+        explicit_value=request_payload.simulate_open,
+        explicit_field_set="simulate_open" in fields_set,
+    )
     session_payload = _session_payload_from_request(request)
-    context, context_banner, dq = _evaluate_scan_context(request_payload.asof_policy, request_payload.style, session_payload)
+    try:
+        context, context_banner, dq = _evaluate_scan_context(
+            request_payload.asof_policy,
+            request_payload.style,
+            session_payload,
+            simulate_open=simulate_open,
+        )
+    except TypeError:
+        context, context_banner, dq = _evaluate_scan_context(
+            request_payload.asof_policy,
+            request_payload.style,
+            session_payload,
+        )
     try:
         universe_limit = max(request_payload.limit, 100)
         tickers = await expand_universe(request_payload.universe, style=request_payload.style, limit=universe_limit)
@@ -4347,6 +4422,7 @@ async def gpt_scan_endpoint(
                 as_of=context.as_of,
                 label="frozen",
                 is_open=False,
+                simulate_open=context.simulate_open,
                 data_timeframe=context.data_timeframe,
                 market_meta=context.market_meta,
                 data_meta=dq,
@@ -4471,7 +4547,19 @@ async def gpt_scan_endpoint(
     subset = filtered_symbols[: rank_limit * 2]
     try:
         market_subset = {symbol: market_data[symbol] for symbol in subset if symbol in market_data}
-        signals = await scan_market(subset, market_subset, as_of=context.as_of)
+        try:
+            signals = await scan_market(
+                subset,
+                market_subset,
+                as_of=context.as_of,
+                simulate_open=context.simulate_open,
+            )
+        except TypeError:
+            signals = await scan_market(
+                subset,
+                market_subset,
+                as_of=context.as_of,
+            )
         strategy_counts = Counter(signal.strategy_id for signal in signals)
         symbol_set = {signal.symbol for signal in signals}
         logger.info(
@@ -4483,6 +4571,7 @@ async def gpt_scan_endpoint(
                 "top_strategies": dict(strategy_counts.most_common(5)),
                 "planning_context": context.label,
                 "data_mode": dq.get("mode"),
+                "sim_open": context.simulate_open,
             },
         )
         if not signals:
@@ -4510,6 +4599,7 @@ async def gpt_scan_endpoint(
         as_of=context.as_of,
         label=context.label,
         is_open=context.is_open,
+        simulate_open=context.simulate_open,
         data_timeframe=context.data_timeframe,
         market_meta=context.market_meta,
         data_meta=dq,
@@ -4594,6 +4684,8 @@ async def gpt_scan_endpoint(
         "universe_size": len(filtered_symbols),
         "symbols": filtered_symbols[: min(len(filtered_symbols), 50)],
     }
+    if context.simulate_open:
+        meta["simulated_open"] = True
 
     planning_context = "frozen" if str(dq.get("mode")).lower() == "degraded" else context.label
     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -4615,6 +4707,7 @@ async def gpt_scan_endpoint(
             "session_status": session_payload.get("status"),
             "session_as_of": session_payload.get("as_of"),
             "metric_count": metric_count,
+            "sim_open": context.simulate_open,
         },
     )
     return ScanPage(
@@ -4633,6 +4726,7 @@ async def _legacy_scan(
     request: Request,
     user: AuthedUser,
     *,
+    simulate_open: bool = False,
     stub_mode: bool = False,
     fetch_options: bool | None = None,
 ) -> List[Dict[str, Any]]:
@@ -4673,7 +4767,11 @@ async def _legacy_scan(
         resolved_tickers = resolved_tickers[:limit]
 
     session_payload = _session_payload_from_request(request)
-    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(session_payload)
+    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(
+        session_payload,
+        simulate_open=simulate_open,
+    )
+    simulated_banner_text = _format_simulated_banner(as_of_dt) if simulate_open else None
 
     style_filter = _normalize_style(universe.style)
     data_timeframe = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}.get(style_filter, "5")
@@ -4728,7 +4826,19 @@ async def _legacy_scan(
     if not market_data:
         logger.warning("No market data available after fallbacks for %s", resolved_tickers)
         return []
-    signals = await scan_market(resolved_tickers, market_data, as_of=as_of_dt)
+    try:
+        signals = await scan_market(
+            resolved_tickers,
+            market_data,
+            as_of=as_of_dt,
+            simulate_open=simulate_open,
+        )
+    except TypeError:
+        signals = await scan_market(
+            resolved_tickers,
+            market_data,
+            as_of=as_of_dt,
+        )
 
     unique_symbols = sorted({signal.symbol for signal in signals})
 
@@ -4740,6 +4850,7 @@ async def _legacy_scan(
             as_of=as_of_dt,
             label="live" if is_open else "frozen",
             is_open=is_open,
+            simulate_open=simulate_open,
             data_timeframe=data_timeframe,
             market_meta=market_meta,
             data_meta=dict(data_meta),
@@ -5315,10 +5426,17 @@ async def gpt_scan(
     universe: ScanUniverse,
     request: Request,
     user: AuthedUser,
+    *,
+    simulate_open: bool = False,
 ) -> List[Dict[str, Any]]:
     """Backward-compatible helper used by legacy tests and gpt_plan."""
 
-    return await _legacy_scan(universe, request, user)
+    return await _legacy_scan(
+        universe,
+        request,
+        user,
+        simulate_open=simulate_open,
+    )
 
 
 async def _generate_fallback_plan(
@@ -5326,6 +5444,8 @@ async def _generate_fallback_plan(
     style: str | None,
     request: Request,
     user: AuthedUser,
+    *,
+    simulate_open: bool = False,
 ) -> PlanResponse | None:
     settings = get_settings()
     style_token = _fallback_style_token(style)
@@ -5336,7 +5456,10 @@ async def _generate_fallback_plan(
     options_contracts: List[Dict[str, Any]] | None = None
     options_note: str | None = None
     session_payload = _session_payload_from_request(request)
-    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(session_payload)
+    market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(
+        session_payload,
+        simulate_open=simulate_open,
+    )
     is_plan_live = bool(is_open)
     timeframe_map = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}
     timeframe = timeframe_map.get(style_token, "5")
@@ -5640,6 +5763,13 @@ async def _generate_fallback_plan(
     plan_block["idea_url"] = chart_url_with_ids
     plan_block["chart_timeframe"] = chart_timeframe_hint
     plan_block["chart_guidance"] = hint_guidance
+    if simulated_banner_text:
+        banners_list = plan_block.get("banners") if isinstance(plan_block.get("banners"), list) else None
+        if banners_list is None:
+            banners_list = []
+            plan_block["banners"] = banners_list
+        if simulated_banner_text not in banners_list:
+            banners_list.append(simulated_banner_text)
     if confidence_visual:
         plan_block["confidence_visual"] = confidence_visual
     if confluence_tags:
@@ -5700,11 +5830,20 @@ async def _generate_fallback_plan(
         structured_plan["risk_block"] = risk_block
     if execution_rules:
         structured_plan["execution_rules"] = execution_rules
+    if simulated_banner_text:
+        banners_list = structured_plan.get("banners") if isinstance(structured_plan.get("banners"), list) else None
+        if banners_list is None:
+            banners_list = []
+            structured_plan["banners"] = banners_list
+        if simulated_banner_text not in banners_list:
+            banners_list.append(simulated_banner_text)
     chart_params_payload = {key: str(value) for key, value in chart_params.items()}
     charts_payload: Dict[str, Any] = {"params": chart_params_payload, "interactive": chart_url_with_ids}
     charts_payload["live"] = is_plan_live
     charts_payload["timeframe"] = chart_timeframe_hint
     charts_payload["guidance"] = hint_guidance
+    if simulated_banner_text:
+        charts_payload.setdefault("banners", []).append(simulated_banner_text)
     enrichment = None
     events_block: Dict[str, Any] | None = None
     earnings_block: Dict[str, Any] | None = None
@@ -5811,6 +5950,11 @@ async def _generate_fallback_plan(
         confidence_visual=confidence_visual,
         tp_reasons=tp_reasons or None,
     )
+    if simulate_open:
+        response_meta = {"simulated_open": True}
+        if simulated_banner_text:
+            response_meta["banner"] = simulated_banner_text
+        response.meta = response_meta
     if include_plan_layers:
         layers = build_plan_layers(
             symbol=symbol.upper(),
@@ -5870,6 +6014,12 @@ async def gpt_plan(
         raise HTTPException(status_code=400, detail="Invalid symbol; use /gpt/scan for universe requests.")
     forced_plan_id = (request_payload.plan_id or "").strip()
     settings = get_settings()
+    fields_set = getattr(request_payload, "model_fields_set", set())
+    simulate_open = _resolve_simulate_open(
+        request,
+        explicit_value=request_payload.simulate_open,
+        explicit_field_set="simulate_open" in fields_set,
+    )
     session_payload = _session_payload_from_request(request)
     include_plan_layers = bool(
         getattr(settings, "ff_chart_canonical_v1", False) or getattr(settings, "ff_layers_endpoint", False)
@@ -5881,12 +6031,22 @@ async def gpt_plan(
             "symbol": symbol,
             "style": request_payload.style,
             "user_id": getattr(user, "user_id", None),
+            "sim_open": simulate_open,
         },
     )
     universe = ScanUniverse(tickers=[symbol], style=request_payload.style)
-    results = await gpt_scan(universe, request, user)
+    try:
+        results = await gpt_scan(universe, request, user, simulate_open=simulate_open)
+    except TypeError:
+        results = await gpt_scan(universe, request, user)
     if not results:
-        fallback_plan = await _generate_fallback_plan(symbol, request_payload.style, request, user)
+        fallback_plan = await _generate_fallback_plan(
+            symbol,
+            request_payload.style,
+            request,
+            user,
+            simulate_open=simulate_open,
+        )
         if fallback_plan is not None:
             logger.info(
                 "gpt_plan fallback_generated",
@@ -5912,7 +6072,13 @@ async def gpt_plan(
     # Build calc_notes + htf from available payload
     raw_plan = first.get("plan") or {}
     if not raw_plan:
-        fallback_plan = await _generate_fallback_plan(symbol, request_payload.style, request, user)
+        fallback_plan = await _generate_fallback_plan(
+            symbol,
+            request_payload.style,
+            request,
+            user,
+            simulate_open=simulate_open,
+        )
         if fallback_plan is not None:
             logger.info(
                 "gpt_plan fallback_generated",
@@ -5952,6 +6118,22 @@ async def gpt_plan(
     plan["chart_timeframe"] = chart_timeframe_hint
     plan["chart_guidance"] = hint_guidance
     is_plan_live = str(first.get("planning_context") or "").strip().lower() == "live"
+    if simulate_open:
+        first["planning_context"] = "live"
+        is_plan_live = True
+        for key in ("meta", "data", "market"):
+            container = first.get(key)
+            if isinstance(container, dict):
+                container.setdefault("simulated_open", True)
+        if simulated_banner_text:
+            existing_banners = plan.get("banners")
+            if isinstance(existing_banners, list):
+                banners_list = existing_banners
+            else:
+                banners_list = []
+                plan["banners"] = banners_list
+            if simulated_banner_text not in banners_list:
+                banners_list.append(simulated_banner_text)
     logger.info(
         "plan identity normalized",
         extra={
@@ -5977,6 +6159,21 @@ async def gpt_plan(
             data_meta.setdefault("as_of_ts", fallback_data["as_of_ts"])
             data_meta.setdefault("frozen", fallback_data["frozen"])
             data_meta.setdefault("ok", fallback_data.get("ok", True))
+    simulated_banner_text: str | None = None
+    if simulate_open:
+        banner_dt: datetime | None = None
+        if isinstance(data_meta, dict):
+            ts_value = data_meta.get("as_of_ts")
+            try:
+                if ts_value is not None:
+                    banner_dt = datetime.fromtimestamp(float(ts_value) / 1000.0, tz=timezone.utc)
+            except (TypeError, ValueError):
+                banner_dt = None
+        if banner_dt is None:
+            banner_dt = parse_session_as_of(session_payload)
+        if banner_dt is None:
+            banner_dt = datetime.now(timezone.utc)
+        simulated_banner_text = _format_simulated_banner(banner_dt)
     session_state_payload: Dict[str, Any] | None = None
     if isinstance(market_meta, dict):
         session_state_payload = market_meta.get("session_state")
@@ -5986,6 +6183,8 @@ async def gpt_plan(
         mode_token = str(data_meta.get("mode") or "").lower()
         if mode_token == "degraded" and planning_context_value != "frozen":
             planning_context_value = "degraded"
+    if simulate_open and planning_context_value not in {"degraded"}:
+        planning_context_value = "live"
     charts_container = first.get("charts") or {}
     charts = charts_container.get("params") if isinstance(charts_container, dict) else None
     chart_params_payload: Dict[str, Any] = charts if isinstance(charts, dict) else {}
@@ -6096,6 +6295,8 @@ async def gpt_plan(
         charts_payload["params"] = chart_params_payload
         charts_payload["timeframe"] = chart_timeframe_hint
         charts_payload["guidance"] = hint_guidance
+        if simulated_banner_text:
+            charts_payload.setdefault("banners", []).append(simulated_banner_text)
     if chart_url_value:
         chart_url_value = _append_query_params(
             chart_url_value,
@@ -6415,7 +6616,18 @@ async def gpt_plan(
             logger.debug("structured plan build failed for %s: %s", symbol, exc)
             target_profile_dict = None
             structured_plan_payload = None
-    if isinstance(market_meta_context, dict) and market_meta_context.get("status") != "open":
+    if structured_plan_payload is not None and simulated_banner_text:
+        banners_list = structured_plan_payload.get("banners") if isinstance(structured_plan_payload.get("banners"), list) else None
+        if banners_list is None:
+            banners_list = []
+            structured_plan_payload["banners"] = banners_list
+        if simulated_banner_text not in banners_list:
+            banners_list.append(simulated_banner_text)
+    if (
+        isinstance(market_meta_context, dict)
+        and market_meta_context.get("status") != "open"
+        and not simulate_open
+    ):
         planning_context_value = "frozen"
 
     tp_meta_source: Sequence[Mapping[str, Any]] | None = None
@@ -6601,6 +6813,7 @@ async def gpt_plan(
             "version": version,
             "chart_url_present": bool(chart_url_value),
             "targets": targets_list[:2],
+            "sim_open": simulate_open,
         },
     )
 
@@ -6811,8 +7024,15 @@ async def gpt_plan(
             "session_status": session_payload.get("status"),
             "session_as_of": session_payload.get("as_of"),
             "metric_count": metric_count,
+            "sim_open": simulate_open,
         },
     )
+
+    response_meta: Dict[str, Any] | None = None
+    if simulate_open:
+        response_meta = {"simulated_open": True}
+        if simulated_banner_text:
+            response_meta["banner"] = simulated_banner_text
 
     return PlanResponse(
         plan_id=plan_id,
@@ -6874,6 +7094,7 @@ async def gpt_plan(
         confidence_visual=confidence_visual_value,
         plan_layers=plan_layers,
         tp_reasons=tp_reasons or None,
+        meta=response_meta,
     )
 
 

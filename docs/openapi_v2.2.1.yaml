@@ -118,6 +118,12 @@ components:
           type: string
           nullable: true
           description: Force plan refresh for a specific plan id
+        simulate_open:
+          type: boolean
+          default: false
+          description: >-
+            When true, treats closed sessions as simulated-live for strategy evaluation.
+            Also accepts the `X-Simulate-Open: 1` header.
 
     ScanFilters:
       type: object
@@ -165,6 +171,12 @@ components:
         cursor:
           type: string
           nullable: true
+        simulate_open:
+          type: boolean
+          default: false
+          description: >-
+            When true, evaluates the scan as if the market were open even if the
+            current session is closed. Also accepts the `X-Simulate-Open: 1` header.
 
     ChartUrlRequest:
       type: object
@@ -243,7 +255,9 @@ components:
         as_of: { type: string, format: date-time }
         planning_context: { type: string, enum: [live, frozen] }
         banner: { type: string, nullable: true }
-        meta: { type: object }
+        meta:
+          type: object
+          description: Additional metadata (includes `simulated_open` when simulated live mode is used).
         candidates:
           type: array
           items: { $ref: '#/components/schemas/ScanCandidate' }
@@ -397,7 +411,10 @@ components:
         plan: { type: object, nullable: true }
         structured_plan: { $ref: '#/components/schemas/StructuredPlan' }
         target_profile: { $ref: '#/components/schemas/TargetProfile' }
-        charts: { type: object, nullable: true }
+        charts:
+          type: object
+          nullable: true
+          description: Chart payload (includes `live=1` / `last_update` when live or simulated-live contexts apply).
         key_levels:
           type: object
           additionalProperties: { type: number, format: double }
@@ -448,6 +465,10 @@ components:
         execution_rules:
           $ref: '#/components/schemas/ExecutionRules'
           nullable: true
+        meta:
+          type: object
+          nullable: true
+          description: Additional metadata flags (e.g., `simulated_open`).
 
     StructuredPlan:
       type: object

@@ -1384,7 +1384,7 @@ def _fib_extensions_from_frame(frame: pd.DataFrame | None, window: int = 50) -> 
     return {"long": long_levels, "short": short_levels}
 
 
-def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
+def _build_context(frame: pd.DataFrame, *, simulate_open: bool = False) -> Dict[str, Any]:
     session_df, prev_session_df = _latest_sessions(frame)
     latest = frame.iloc[-1]
     atr_value = float(latest["atr14"]) if math.isfinite(latest["atr14"]) else math.nan
@@ -1507,6 +1507,9 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
         anchored_vwaps_intraday = {}
 
     phase_ts = _phase_timestamp(frame.index)
+    phase = _session_phase(phase_ts)
+    if simulate_open and phase not in {"open_drive", "morning", "midday", "afternoon", "power_hour"}:
+        phase = "morning"
 
     return {
         "frame": frame,
@@ -1523,7 +1526,8 @@ def _build_context(frame: pd.DataFrame) -> Dict[str, Any]:
         "volume_median": volume_median,
         "minutes_vector": minutes_vector,
         "timestamp": frame.index[-1],
-        "session_phase": _session_phase(phase_ts),
+        "session_phase": phase,
+        "simulate_open": simulate_open,
         "htf_levels": _collect_htf_levels(session_df, prev_session_df, latest),
         "expected_move_horizon": expected_move_horizon,
         "key": key_levels,
@@ -2011,7 +2015,7 @@ def _detect_orb_retest(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> 
 
 
 def _detect_power_hour_trend(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> Signal | None:
-    if ctx["session_phase"] != "power_hour":
+    if ctx["session_phase"] != "power_hour" and not ctx.get("simulate_open"):
         return None
     session = ctx["session"]
     if session.empty:
@@ -2394,7 +2398,7 @@ def _detect_gap_fill(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> Si
         return None
 
     phase = ctx["session_phase"]
-    if phase not in {"open_drive", "morning"}:
+    if phase not in {"open_drive", "morning"} and not ctx.get("simulate_open"):
         return None
 
     latest = ctx["latest"]
@@ -2489,7 +2493,7 @@ def _detect_gap_fill(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> Si
 
 
 def _detect_midday_mean_revert(symbol: str, strategy: Strategy, ctx: Dict[str, Any]) -> Signal | None:
-    if ctx["session_phase"] != "midday":
+    if ctx["session_phase"] != "midday" and not ctx.get("simulate_open"):
         return None
     session = ctx["session"]
     if session.empty:
@@ -2588,6 +2592,7 @@ async def scan_market(
     market_data: Dict[str, pd.DataFrame],
     *,
     as_of: datetime | None = None,
+    simulate_open: bool = False,
 ) -> List[Signal]:
     """Scan the provided tickers for strategy setups using real indicator data."""
 
@@ -2610,7 +2615,7 @@ async def scan_market(
         except ValueError:
             continue
 
-        ctx = _build_context(frame)
+        ctx = _build_context(frame, simulate_open=simulate_open)
         ctx.setdefault("target_stats", {})
         style_stats_cache: Dict[Tuple[str, Optional[str]], Dict[str, object] | None] = {}
 

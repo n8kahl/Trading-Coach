@@ -20,6 +20,7 @@ class ScanRequest(BaseModel):
     asof_policy: Literal["live", "frozen", "live_or_lkg"] = "live_or_lkg"
     filters: ScanFilters | None = None
     cursor: str | None = None
+    simulate_open: bool = False
 
     @field_validator("universe")
     @staticmethod

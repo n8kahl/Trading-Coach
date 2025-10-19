@@ -63,6 +63,7 @@ class MetricsContext:
     style: Style
     as_of: datetime
     is_open: bool
+    simulate_open: bool
     history: pd.DataFrame
     signal: Signal
     plan: Plan | None
@@ -89,7 +90,7 @@ def compute_metrics_fast(symbol: str, style: Style, context: MetricsContext) -> 
     rr_multi = _clamp((rr_t1 + rr_t2) / 2.0, 0.0, 3.0)
     macro_fit = _macro_alignment(features, context.as_of)
     context_score = _context_score(context, features)
-    penalties = _penalties(features, context.data_meta)
+    penalties = _penalties(features, context.data_meta, simulate_open=context.simulate_open)
     last_close = float("nan")
     try:
         if "close" in context.history.columns and not context.history["close"].empty:
@@ -283,10 +284,11 @@ def _context_score(context: MetricsContext, features: Dict[str, Any]) -> float:
     return _clamp(base)
 
 
-def _penalties(features: Dict[str, Any], data_meta: Dict[str, Any]) -> Penalties:
+def _penalties(features: Dict[str, Any], data_meta: Dict[str, Any], *, simulate_open: bool = False) -> Penalties:
     earnings_days = float(features.get("earnings_days") or 10.0)
     pen_event = 0.2 if earnings_days <= 2 else 0.0
-    dq_pen = 0.1 if str(data_meta.get("mode")).lower() == "degraded" else 0.0
+    dq_mode = str(data_meta.get("mode") or "").lower()
+    dq_pen = 0.0 if simulate_open else (0.1 if dq_mode == "degraded" else 0.0)
     spread_pct = float(features.get("option_spread_pct") or 0.12)
     pen_spread = min(max(spread_pct - 0.12, 0.0) / 0.3, 0.1)
     chop_risk = float(features.get("chop_risk") or 0.0)

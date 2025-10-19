@@ -63,6 +63,33 @@ Authentication is optional. Set `BACKEND_API_KEY` to require Bearer tokens; incl
   Plans also surface `confluence_tags`, multi-timeframe `confluence`, `key_levels_used`, `risk_block`, `execution_rules`, and (when `FF_OPTIONS_ALWAYS=1`) top-ranked `options_contracts` so the GPT can explain levels, risk, and contract selection without fabricating details.
   Access in `trade-coach-ui` under `/replay/:symbol`.
 
+## Simulated Live Mode
+
+Strategy engines can now evaluate setups even when the market session is closed. Opt in per request by passing `"simulate_open": true` in the JSON body (or the `X-Simulate-Open: 1` header). Responses remain deterministic—the `as_of` timestamp is unchanged—and include a banner such as `Simulated live — analysis as of 2024-03-02 16:00 ET`. Chart links behave like live scans (`live=1` + `last_update`), and both scan/plan payloads surface `meta.simulated_open = true` so clients can highlight the simulated context.
+
+```bash
+curl -X POST "$BASE_URL/gpt/scan" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "universe": ["TSLA", "NVDA", "META"],
+    "style": "intraday",
+    "limit": 10,
+    "simulate_open": true
+  }'
+```
+
+```bash
+curl -X POST "$BASE_URL/gpt/plan" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbol": "TSLA",
+    "style": "intraday",
+    "simulate_open": true
+  }'
+```
+
+Legacy clients can keep their payloads unchanged and simply add `X-Simulate-Open: 1` to trigger the simulated-live path.
+
 ---
 
 ## Project layout
