@@ -6519,30 +6519,7 @@ async def gpt_plan(
     snapshot = first.get("market_snapshot") or {}
     indicators = (snapshot.get("indicators") or {})
     volatility = (snapshot.get("volatility") or {})
-    expected_move_abs: float | None = None
-    if isinstance(plan.get("expected_move"), (int, float, str)):
-        try:
-            candidate = float(plan.get("expected_move"))
-            if math.isfinite(candidate) and candidate > 0:
-                expected_move_abs = candidate
-        except (TypeError, ValueError):
-            expected_move_abs = None
-    if expected_move_abs is None and isinstance(volatility.get("expected_move_horizon"), (int, float, str)):
-        try:
-            candidate = float(volatility.get("expected_move_horizon"))
-            if math.isfinite(candidate) and candidate > 0:
-                expected_move_abs = candidate
-        except (TypeError, ValueError):
-            expected_move_abs = None
-    if expected_move_abs is None and isinstance(data_meta, dict):
-        try:
-            candidate = float(data_meta.get("expected_move_horizon"))
-            if math.isfinite(candidate) and candidate > 0:
-                expected_move_abs = candidate
-        except (TypeError, ValueError, TypeError):
-            expected_move_abs = None
     em_cap_used = False
-    # Build calc_notes + htf from available payload
     raw_plan = first.get("plan") or {}
     if not raw_plan:
         if allow_plan_fallback:
@@ -6625,6 +6602,33 @@ async def gpt_plan(
             data_meta.setdefault("as_of_ts", fallback_data["as_of_ts"])
             data_meta.setdefault("frozen", fallback_data["frozen"])
             data_meta.setdefault("ok", fallback_data.get("ok", True))
+    expected_move_abs: float | None = None
+    plan_expected_move = plan.get("expected_move")
+    if isinstance(plan_expected_move, (int, float, str)):
+        try:
+            candidate = float(plan_expected_move)
+            if math.isfinite(candidate) and candidate > 0:
+                expected_move_abs = candidate
+        except (TypeError, ValueError):
+            expected_move_abs = None
+    if expected_move_abs is None:
+        vol_expected = (volatility or {}).get("expected_move_horizon")
+        if isinstance(vol_expected, (int, float, str)):
+            try:
+                candidate = float(vol_expected)
+                if math.isfinite(candidate) and candidate > 0:
+                    expected_move_abs = candidate
+            except (TypeError, ValueError):
+                expected_move_abs = None
+    if expected_move_abs is None and isinstance(data_meta, dict):
+        data_expected = data_meta.get("expected_move_horizon")
+        if isinstance(data_expected, (int, float, str)):
+            try:
+                candidate = float(data_expected)
+                if math.isfinite(candidate) and candidate > 0:
+                    expected_move_abs = candidate
+            except (TypeError, ValueError):
+                expected_move_abs = None
     if simulate_open:
         banner_dt: datetime | None = None
         if isinstance(data_meta, dict):
@@ -6758,6 +6762,10 @@ async def gpt_plan(
             if default_note and not chart_params_payload.get("notes"):
                 chart_params_payload["notes"] = default_note
         _attach_market_chart_params(chart_params_payload, market_meta, data_meta)
+        allowed_chart_keys = set(ChartParams.model_fields.keys())
+        extra_chart_keys = [key for key in list(chart_params_payload.keys()) if key not in allowed_chart_keys]
+        for key in extra_chart_keys:
+            chart_params_payload.pop(key, None)
         try:
             chart_model = ChartParams(**chart_params_payload)
             chart_links = await gpt_chart_url(chart_model, request)

@@ -16,6 +16,7 @@
   - Event-window gating populates `within_event_window`/`minutes_to_event`, blocks options when styles are in `FT_EVENT_BLOCKED_STYLES`, and raises an `EVENT_WINDOW_BLOCKED` warning.  
   - Response fields now expose `phase="hydrate"`, `layers_fetched`, enriched `meta`, and expanded session state details.
 - Mirrored the same EM-cap, invariant enforcement, event-window gating, and metadata/warning propagation in the main `/gpt/plan` path (including options blocking + hydration metadata).
+- Captured a full planning-mode architecture (dynamic universes, readiness scoring, contract templates, finalizer) in `docs/dev_notes/planning_mode_architecture.md` for implementation.
 
 ## In Progress / Next Steps
 1. Mirror invariant + EM-cap + event-window enforcement in the primary `/gpt/plan` path (currently only covered in fallback generator).  
