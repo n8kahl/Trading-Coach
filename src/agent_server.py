@@ -5572,6 +5572,10 @@ async def _legacy_scan(
         chart_links = None
         required_chart_keys = {"direction", "entry", "stop", "tp"}
         if chart_query and required_chart_keys.issubset(chart_query.keys()):
+            allowed_chart_keys = set(ChartParams.model_fields.keys())
+            extra_chart_keys = [key for key in list(chart_query.keys()) if key not in allowed_chart_keys]
+            for key in extra_chart_keys:
+                chart_query.pop(key, None)
             try:
                 chart_links = await gpt_chart_url(ChartParams(**chart_query), request)
             except HTTPException as exc:
@@ -6003,39 +6007,6 @@ async def _generate_fallback_plan(
             logger.info("fallback contract lookup skipped for %s: %s", symbol, exc)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("fallback contract lookup error for %s: %s", symbol, exc)
-    if include_options_contracts:
-        extracted_contracts = _extract_options_contracts(options_payload)
-        filtered_contracts, guardrail_rejections = _apply_option_guardrails(
-            extracted_contracts,
-            max_spread_pct=float(getattr(settings, "ft_max_spread_pct", 8.0)),
-            min_open_interest=int(getattr(settings, "ft_min_oi", 300)),
-        )
-        if guardrail_rejections:
-            rejected_contracts.extend(guardrail_rejections)
-        if filtered_contracts:
-            options_contracts = filtered_contracts
-        else:
-            options_contracts = []
-            if guardrail_rejections and not options_note:
-                options_note = "Contracts filtered by liquidity guardrails"
-            elif isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
-                options_note = str(options_payload["quotes_notice"])
-            elif not side_hint:
-                options_note = "Options side unavailable for this plan"
-            else:
-                options_note = "No tradeable contracts met filters"
-    if include_options_contracts and event_window_blocked:
-        options_contracts = []
-        options_note = "Blocked by event window"
-        if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
-            rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
-    if include_options_contracts and event_window_blocked:
-        options_contracts = []
-        options_note = "Blocked by event window"
-        if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
-            rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
-    else:
-        options_payload = None
     hint_interval_raw, hint_guidance = _chart_hint("baseline_auto", style_token)
     try:
         chart_timeframe_hint = normalize_interval(hint_interval_raw)
@@ -6110,6 +6081,10 @@ async def _generate_fallback_plan(
     if levels_param:
         chart_params["levels"] = levels_param
     chart_links = None
+    allowed_chart_keys = set(ChartParams.model_fields.keys())
+    extra_chart_params = [key for key in list(chart_params.keys()) if key not in allowed_chart_keys]
+    for key in extra_chart_params:
+        chart_params.pop(key, None)
     try:
         chart_links = await gpt_chart_url(ChartParams(**chart_params), request)
     except HTTPException:
@@ -6122,6 +6097,96 @@ async def _generate_fallback_plan(
             "plan_version": "1",
         },
     )
+    enrichment = None
+    events_block: Dict[str, Any] | None = None
+    earnings_block: Dict[str, Any] | None = None
+    sentiment_block: Dict[str, Any] | None = None
+    try:
+        enrichment = await _fetch_context_enrichment(symbol)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("fallback enrichment fetch failed for %s: %s", symbol, exc)
+        enrichment = None
+    if enrichment:
+        events_block = enrichment.get("events")
+        earnings_block = enrichment.get("earnings")
+        sentiment_block = enrichment.get("sentiment")
+    session_state_payload_raw = market_meta.get("session_state") if isinstance(market_meta, dict) else None
+    if session_state_payload_raw is None and isinstance(data_meta, dict):
+        session_state_payload_raw = data_meta.get("session_state")
+    session_state_payload = dict(session_state_payload_raw) if isinstance(session_state_payload_raw, Mapping) else {}
+    if not events_block:
+        macro_window = _macro_event_block(symbol, session_state_payload)
+        if macro_window:
+            events_block = macro_window
+    within_event_window = bool((events_block or {}).get("within_event_window"))
+    minutes_to_event_token = (events_block or {}).get("min_minutes_to_event")
+    minutes_to_event: Optional[int] = None
+    if minutes_to_event_token is not None:
+        try:
+            minutes_to_event = int(float(minutes_to_event_token))
+        except (TypeError, ValueError):
+            minutes_to_event = None
+    session_state_payload["within_event_window"] = within_event_window
+    if minutes_to_event is not None:
+        session_state_payload["minutes_to_event"] = minutes_to_event
+    blocked_styles = {
+        token.strip().lower()
+        for token in getattr(settings, "ft_event_blocked_styles", [])
+        if token and token.strip()
+    }
+    style_lower = (style_token or "").strip().lower()
+    event_window_blocked = within_event_window and (style_lower in blocked_styles)
+    event_warnings: List[str] = []
+    if event_window_blocked:
+        event_warnings.append("EVENT_WINDOW_BLOCKED")
+    if include_options_contracts:
+        extracted_contracts = _extract_options_contracts(options_payload)
+        filtered_contracts, guardrail_rejections = _apply_option_guardrails(
+            extracted_contracts,
+            max_spread_pct=float(getattr(settings, "ft_max_spread_pct", 8.0)),
+            min_open_interest=int(getattr(settings, "ft_min_oi", 300)),
+        )
+        if guardrail_rejections:
+            rejected_contracts.extend(guardrail_rejections)
+        if filtered_contracts:
+            options_contracts = filtered_contracts
+        else:
+            options_contracts = []
+            if guardrail_rejections and not options_note:
+                options_note = "Contracts filtered by liquidity guardrails"
+            elif isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
+                options_note = str(options_payload["quotes_notice"])
+            elif not side_hint:
+                options_note = "Options side unavailable for this plan"
+            else:
+                options_note = "No tradeable contracts met filters"
+        if event_window_blocked:
+            options_contracts = []
+            options_note = "Blocked by event window"
+            if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
+                rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
+        if event_window_blocked:
+            options_contracts = []
+            options_note = "Blocked by event window"
+            if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
+                rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
+        if event_window_blocked:
+            options_contracts = []
+            options_note = "Blocked by event window"
+            if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
+                rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
+        if event_window_blocked:
+            options_contracts = []
+            options_note = "Blocked by event window"
+            if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
+                rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
+        if event_window_blocked:
+            options_contracts = []
+            options_note = "Blocked by event window"
+            if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
+                rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
+        else:
+            options_payload = None
     plan_block = {
         "symbol": symbol.upper(),
         "style": style_token,
@@ -6244,54 +6309,17 @@ async def _generate_fallback_plan(
     charts_payload["guidance"] = hint_guidance
     if simulated_banner_text:
         charts_payload.setdefault("banners", []).append(simulated_banner_text)
-    enrichment = None
-    events_block: Dict[str, Any] | None = None
-    earnings_block: Dict[str, Any] | None = None
-    sentiment_block: Dict[str, Any] | None = None
-    try:
-        enrichment = await _fetch_context_enrichment(symbol)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("fallback enrichment fetch failed for %s: %s", symbol, exc)
-        enrichment = None
-    if enrichment:
-        events_block = enrichment.get("events")
-        earnings_block = enrichment.get("earnings")
-        sentiment_block = enrichment.get("sentiment")
-    session_state_payload_raw = market_meta.get("session_state") if isinstance(market_meta, dict) else None
-    if session_state_payload_raw is None and isinstance(data_meta, dict):
-        session_state_payload_raw = data_meta.get("session_state")
-    session_state_payload = dict(session_state_payload_raw) if isinstance(session_state_payload_raw, Mapping) else {}
-    if not events_block:
-        macro_window = _macro_event_block(symbol, session_state_payload)
-        if macro_window:
-            events_block = macro_window
-    within_event_window = bool((events_block or {}).get("within_event_window"))
-    minutes_to_event_token = (events_block or {}).get("min_minutes_to_event")
-    minutes_to_event: Optional[int] = None
-    if minutes_to_event_token is not None:
-        try:
-            minutes_to_event = int(float(minutes_to_event_token))
-        except (TypeError, ValueError):
-            minutes_to_event = None
-    session_state_payload["within_event_window"] = within_event_window
-    if minutes_to_event is not None:
-        session_state_payload["minutes_to_event"] = minutes_to_event
-    blocked_styles = {
-        token.strip().lower()
-        for token in getattr(settings, "ft_event_blocked_styles", [])
-        if token and token.strip()
-    }
-    style_lower = (style_token or "").strip().lower()
-    event_window_blocked = within_event_window and (style_lower in blocked_styles)
-    event_warnings: List[str] = []
-    if event_window_blocked:
-        event_warnings.append("EVENT_WINDOW_BLOCKED")
     if symbol.upper() in ETF_EVENT_SYMBOLS:
         earnings_block = None
     if isinstance(data_meta, dict):
         data_meta = dict(data_meta)
         data_meta["earnings_present"] = bool(earnings_block)
         data_meta["events_present"] = bool(events_block)
+        data_meta["within_event_window"] = within_event_window
+        if minutes_to_event is not None:
+            data_meta["minutes_to_event"] = minutes_to_event
+        if event_window_blocked:
+            data_meta["event_window_blocked"] = True
     data_payload = dict(data_meta)
     bars_url = f"{_resolved_base_url(request)}/gpt/context/{symbol.upper()}?interval={interval_token}&lookback=300"
     if is_plan_live:
@@ -6470,6 +6498,22 @@ async def gpt_plan(
         explicit_field_set="simulate_open" in fields_set,
     )
     session_payload = _session_payload_from_request(request)
+    session_token = _session_tracking_id(session_payload)
+    user_id = getattr(user, "user_id", "anonymous")
+    style_norm_req = (request_payload.style or "").strip().lower()
+    style_lookup_key = style_norm_req or _SCAN_STYLE_ANY
+    if session_token:
+        allowed_symbols = _SCAN_SYMBOL_REGISTRY.get((user_id, session_token, style_lookup_key))
+        if allowed_symbols is None and style_lookup_key != _SCAN_STYLE_ANY:
+            allowed_symbols = _SCAN_SYMBOL_REGISTRY.get((user_id, session_token, _SCAN_STYLE_ANY))
+        if allowed_symbols is not None and symbol not in allowed_symbols:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PLAN_NOT_IN_LAST_SCAN",
+                    "message": f"{symbol} not present in most recent scan",
+                },
+            )
     include_plan_layers = bool(
         getattr(settings, "ff_chart_canonical_v1", False) or getattr(settings, "ff_layers_endpoint", False)
     )
@@ -6652,17 +6696,72 @@ async def gpt_plan(
                 plan["banners"] = banners_list
             if simulated_banner_text not in banners_list:
                 banners_list.append(simulated_banner_text)
-    session_state_payload: Dict[str, Any] | None = None
+    session_state_payload_raw: Mapping[str, Any] | None = None
     if isinstance(market_meta, dict):
-        session_state_payload = market_meta.get("session_state")
-    if session_state_payload is None and isinstance(data_meta, dict):
-        session_state_payload = data_meta.get("session_state")
+        session_state_payload_raw = market_meta.get("session_state")
+    if session_state_payload_raw is None and isinstance(data_meta, dict):
+        session_state_payload_raw = data_meta.get("session_state")
+    session_state_payload: Dict[str, Any] = (
+        dict(session_state_payload_raw) if isinstance(session_state_payload_raw, Mapping) else {}
+    )
     if isinstance(data_meta, dict):
         mode_token = str(data_meta.get("mode") or "").lower()
         if mode_token == "degraded" and planning_context_value != "frozen":
             planning_context_value = "degraded"
     if simulate_open and planning_context_value not in {"degraded"}:
         planning_context_value = "live"
+    sentiment_block = first.get("sentiment")
+    events_block = first.get("events")
+    earnings_block = first.get("earnings")
+    events_source = "payload" if events_block else None
+    earnings_source = "payload" if earnings_block else None
+    enrichment = None
+    if not events_block or not earnings_block:
+        try:
+            enrichment = await _fetch_context_enrichment(symbol)
+        except Exception as exc:
+            logger.debug("enrichment fetch failed for %s: %s", symbol, exc)
+            enrichment = None
+        if not events_block:
+            enriched_events = (enrichment or {}).get("events")
+            if enriched_events:
+                events_block = enriched_events
+                events_source = events_source or "enrichment"
+        if not earnings_block:
+            enriched_earnings = (enrichment or {}).get("earnings")
+            if enriched_earnings:
+                earnings_block = enriched_earnings
+                earnings_source = earnings_source or "enrichment"
+    if not events_block:
+        macro_events = _macro_event_block(symbol, session_state_payload)
+        if macro_events:
+            events_block = macro_events
+            events_source = events_source or "macro_window"
+    within_event_window = bool((events_block or {}).get("within_event_window"))
+    minutes_to_event_token = (events_block or {}).get("min_minutes_to_event")
+    minutes_to_event: Optional[int] = None
+    if minutes_to_event_token is not None:
+        try:
+            minutes_to_event = int(float(minutes_to_event_token))
+        except (TypeError, ValueError):
+            minutes_to_event = None
+    session_state_payload["within_event_window"] = within_event_window
+    if minutes_to_event is not None:
+        session_state_payload["minutes_to_event"] = minutes_to_event
+    blocked_styles = {
+        token.strip().lower()
+        for token in getattr(settings, "ft_event_blocked_styles", [])
+        if token and token.strip()
+    }
+    style_lower = (style_token or "").strip().lower()
+    event_window_blocked = within_event_window and (style_lower in blocked_styles)
+    event_warnings: List[str] = []
+    if event_window_blocked:
+        event_warnings.append("EVENT_WINDOW_BLOCKED")
+    if isinstance(data_meta, dict):
+        data_meta = dict(data_meta)
+        data_meta["earnings_present"] = bool(earnings_block)
+        data_meta["events_present"] = bool(events_block)
     charts_container = first.get("charts") or {}
     charts = charts_container.get("params") if isinstance(charts_container, dict) else None
     chart_params_payload: Dict[str, Any] = charts if isinstance(charts, dict) else {}
@@ -7050,9 +7149,14 @@ async def gpt_plan(
     data_quality = {
         "series_present": True,
         "iv_present": True,
-        "events_present": False,
-        "earnings_present": False,
+        "events_present": bool(events_block),
+        "earnings_present": bool(earnings_block),
     }
+    data_quality["within_event_window"] = within_event_window
+    if minutes_to_event is not None:
+        data_quality["minutes_to_event"] = minutes_to_event
+    if event_window_blocked:
+        data_quality["event_window_blocked"] = True
     raw_warnings = first.get("warnings") or plan.get("warnings") or []
     if isinstance(raw_warnings, list):
         plan_warnings: List[str] = list(raw_warnings)
@@ -7169,6 +7273,12 @@ async def gpt_plan(
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("contract lookup error for %s: %s", symbol, exc)
 
+    rejected_contracts: List[Dict[str, Any]] = []
+    baseline_rejections = plan.get("rejected_contracts") or first.get("rejected_contracts")
+    if isinstance(baseline_rejections, Sequence):
+        for entry in baseline_rejections:
+            if isinstance(entry, Mapping):
+                rejected_contracts.append(dict(entry))
     options_contracts: List[Dict[str, Any]] | None = None
     options_note: str | None = None
     if include_options_contracts:
@@ -7192,6 +7302,11 @@ async def gpt_plan(
                 options_note = "Options side unavailable for this plan"
             else:
                 options_note = "No tradeable contracts met filters"
+        if event_window_blocked:
+            options_contracts = []
+            options_note = "Blocked by event window"
+            if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
+                rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
 
     price_close = snapshot.get("price", {}).get("close")
     decimals_value = 2
@@ -7370,34 +7485,6 @@ async def gpt_plan(
             expected_move_basis = f"EM ≈ {expected_move_abs:.2f} ({pct:.1f}%)"
         else:
             expected_move_basis = f"EM ≈ {expected_move_abs:.2f}"
-    sentiment_block = first.get("sentiment")
-    events_block = first.get("events")
-    earnings_block = first.get("earnings")
-    events_source = "payload" if events_block else None
-    earnings_source = "payload" if earnings_block else None
-    if not events_block or not earnings_block:
-        try:
-            enrichment = await _fetch_context_enrichment(symbol)
-        except Exception as exc:
-            logger.debug("enrichment fetch failed for %s: %s", symbol, exc)
-            enrichment = None
-        if not events_block:
-            enriched_events = (enrichment or {}).get("events")
-            if enriched_events:
-                events_block = enriched_events
-                events_source = events_source or "enrichment"
-        if not earnings_block:
-            enriched_earnings = (enrichment or {}).get("earnings")
-            if enriched_earnings:
-                earnings_block = enriched_earnings
-                earnings_source = earnings_source or "enrichment"
-    if not events_block:
-        macro_events = _macro_event_block(symbol, session_state_payload)
-        if macro_events:
-            events_block = macro_events
-            events_source = events_source or "macro_window"
-    data_quality["events_present"] = bool(events_block)
-    data_quality["earnings_present"] = bool(earnings_block)
     confidence_factors: List[str] | None = None
     feature_block = first.get("features") or {}
     for key in ("plan_confidence_factors", "plan_confidence_reasons", "confidence_reasons"):

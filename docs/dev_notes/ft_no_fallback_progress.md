@@ -10,6 +10,8 @@
 - Added options guardrails (spread %, open interest, IV presence) and surfaced `rejected_contracts` in plan responses (both fallback and primary).  
 - Registered `AllowedHostsMiddleware`; chart generation validates against `FT_ALLOWED_HOSTS`, `PUBLIC_BASE_URL`, and `CHART_BASE_URL`.  
 - Hardened chart request models (`extra="forbid"`) and applied host checks to both canonical and fallback chart URLs.  
+- Sanitised all ChartParams call-sites (scan + fallback plan) so extra fields are stripped before validation.  
+- Unified event-window gating + options blocking between primary and fallback `/gpt/plan` paths (prevents NameError + ensures consistent warnings).  
 - In the fallback plan pipeline:
   - Added SL/TP invariant checks (stop-entry-target ordering per direction).  
   - Applied EM cap using `FT_EM_FACTOR`; plans now flag `em_used` when ceilings/floors activate.  
@@ -19,7 +21,7 @@
 - Captured a full planning-mode architecture (dynamic universes, readiness scoring, contract templates, finalizer) in `docs/dev_notes/planning_mode_architecture.md` for implementation.
 
 ## In Progress / Next Steps
-1. Mirror invariant + EM-cap + event-window enforcement in the primary `/gpt/plan` path (currently only covered in fallback generator).  
+1. Add regression coverage (unit/integration) for plan gating, event-window blocks, and ChartParams sanitization to prevent future regressions.  
 2. Add data-quality drift detection (`FT_MAX_DRIFT_BPS`) and banner logic in scan results; ensure top-N filtering respects drift flag.  
 3. Populate `source_paths`, `accuracy_levels`, `plan_layers`, and other new schema fields for live plans; ensure `tp_reasons`, `confluence`, `options_contracts` are non-null arrays.  
 4. Wire hydration progress metadata for `/gpt/chart-layers` (`phase`, `layers_count`).  
