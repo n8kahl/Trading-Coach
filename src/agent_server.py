@@ -118,6 +118,7 @@ from .indicators import get_indicator_bundle
 from zoneinfo import ZoneInfo
 
 from .market_clock import MarketClock
+from .plans.geometry import build_plan_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -532,6 +533,33 @@ def _apply_em_cap(
             em_used = True
         adjusted.append(tp_f)
     return adjusted, em_used
+
+
+def _ensure_monotonic_targets(
+    direction: str | None,
+    entry: Any,
+    targets: Sequence[Any],
+) -> List[float]:
+    dir_token = (direction or "").strip().lower()
+    cleaned: List[float] = []
+    try:
+        prev = float(entry)
+    except (TypeError, ValueError):
+        prev = None
+    for raw in targets:
+        try:
+            target = round(float(raw), 2)
+        except (TypeError, ValueError):
+            continue
+        if dir_token == "long":
+            if prev is not None and math.isfinite(prev) and target <= prev:
+                target = round(prev + 0.01, 2)
+        elif dir_token == "short":
+            if prev is not None and math.isfinite(prev) and target >= prev:
+                target = round(prev - 0.01, 2)
+        cleaned.append(target)
+        prev = target
+    return cleaned
 
 
 @dataclass(slots=True)
@@ -6086,19 +6114,6 @@ async def _generate_fallback_plan(
             if isinstance(val, (int, float)) and math.isfinite(float(val))
         )
         entry = round(entry_base, 2)
-        stop = round(entry - atr_value * 1.25, 2)
-        if stop <= 0 or stop >= entry:
-            stop = round(entry - max(atr_value, close_price * 0.004), 2)
-        target_multipliers = {
-            "scalp": (0.9, 1.4, 2.0),
-            "intraday": (1.2, 1.9, 2.8),
-            "swing": (2.2, 3.4, 4.8),
-            "leap": (3.6, 5.2, 7.0),
-        }.get(style_token, (1.2, 1.9, 2.8))
-        targets = [round(entry + atr_value * mult, 2) for mult in target_multipliers]
-        if session_high and isinstance(session_high, (int, float)) and session_high > entry:
-            targets[0] = round(float(session_high), 2)
-            targets[1] = round(entry + atr_value * 1.9, 2)
     else:
         candidates = [close_price, session_low, or_low]
         entry_base = min(
@@ -6107,42 +6122,62 @@ async def _generate_fallback_plan(
             if isinstance(val, (int, float)) and math.isfinite(float(val))
         )
         entry = round(entry_base, 2)
-        stop = round(entry + atr_value * 1.25, 2)
-        if stop <= entry:
-            stop = round(entry + max(atr_value, close_price * 0.004), 2)
-        target_multipliers = {
-            "scalp": (0.9, 1.4, 2.0),
-            "intraday": (1.2, 1.9, 2.8),
-            "swing": (2.2, 3.4, 4.8),
-            "leap": (3.6, 5.2, 7.0),
-        }.get(style_token, (1.2, 1.9, 2.8))
-        targets = [round(entry - atr_value * mult, 2) for mult in target_multipliers]
-        if session_low and isinstance(session_low, (int, float)) and session_low < entry:
-            targets[0] = round(float(session_low), 2)
-            targets[1] = round(entry - atr_value * 1.9, 2)
-    rr_to_t1 = _risk_reward(entry, stop, targets[0], direction)
-    if rr_to_t1 is None or rr_to_t1 < 1.2:
-        scale = 1.2 / max(rr_to_t1 or 0.6, 0.4)
-        if direction == "long":
-            targets = [round(entry + (target - entry) * scale, 2) for target in targets]
-        else:
-            targets = [round(entry - (entry - target) * scale, 2) for target in targets]
-        rr_to_t1 = _risk_reward(entry, stop, targets[0], direction)
-    em_factor = float(getattr(settings, "ft_em_factor", 1.1))
-    capped_targets, cap_used = _apply_em_cap(direction, entry, targets, expected_move_abs, em_factor)
-    if capped_targets and len(capped_targets) == len(targets):
-        targets = [round(val, 2) for val in capped_targets]
-        em_cap_used = cap_used
-        rr_to_t1 = _risk_reward(entry, stop, targets[0], direction)
+    gap_fill_level = key_levels.get("prev_close")
+    if isinstance(gap_fill_level, (int, float)):
+        gap_fill_level = float(gap_fill_level)
     else:
-        targets = [round(float(val), 2) for val in targets]
-    valid_levels, invariant_reason = _validate_level_invariants(direction, entry, stop, targets)
-    if not valid_levels:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "INVARIANT_BROKEN", "message": invariant_reason or "invalid_levels"},
-        )
-    rr_to_t1 = float(rr_to_t1) if rr_to_t1 is not None else None
+        gap_fill_level = None
+    levels_map = {
+        "pdh": key_levels.get("prev_high"),
+        "pdl": key_levels.get("prev_low"),
+        "pdc": key_levels.get("prev_close"),
+        "orh": key_levels.get("opening_range_high"),
+        "orl": key_levels.get("opening_range_low"),
+        "session_high": key_levels.get("session_high"),
+        "session_low": key_levels.get("session_low"),
+        "vwap": context.get("vwap"),
+        "swing_high": key_levels.get("swing_high"),
+        "swing_low": key_levels.get("swing_low"),
+    }
+    profile = context.get("volume_profile") or {}
+    if isinstance(profile, Mapping):
+        levels_map["vah"] = profile.get("VAH")
+        levels_map["val"] = profile.get("VAL")
+        levels_map["poc"] = profile.get("POC")
+    anchored = context.get("anchored_vwaps") or {}
+    if isinstance(anchored, Mapping):
+        levels_map["avwap"] = anchored.get("AVWAP_SESSION_OPEN") or anchored.get("AVWAP_PREV_HIGH")
+    if gap_fill_level:
+        levels_map["gap_fill"] = gap_fill_level
+    atr_daily = context.get("atr_1d") or context.get("atr_1w") or atr_value
+    iv_move = volatility.get("expected_move") if isinstance(volatility, Mapping) else None
+    realized_range = 0.0
+    try:
+        high = key_levels.get("session_high")
+        low = key_levels.get("session_low")
+        if isinstance(high, (int, float)) and isinstance(low, (int, float)):
+            realized_range = float(max(high, low) - min(high, low))
+    except Exception:
+        realized_range = 0.0
+    geometry = build_plan_geometry(
+        entry=entry,
+        side=direction,
+        style=style_token,
+        strategy=first.get("strategy_id"),
+        atr_tf=atr_value,
+        atr_daily=atr_daily or atr_value,
+        iv_expected_move=iv_move,
+        realized_range=realized_range,
+        levels=levels_map,
+        timestamp=plan_ts_utc,
+    )
+    stop = geometry.stop.price
+    targets = [meta.price for meta in geometry.targets]
+    em_cap_used = geometry.em_used
+    expected_move_abs = geometry.em_day
+    rr_to_t1 = _risk_reward(entry, stop, targets[0], direction)
+    if rr_to_t1 is not None:
+        rr_to_t1 = float(rr_to_t1)
     trend_component = 0.8 if (direction == "long" and ema_trend_up) or (direction == "short" and ema_trend_down) else 0.6
     liquidity_component = 0.65 if isinstance(context.get("volume_median"), (int, float)) and context["volume_median"] > 0 else 0.5
     regime_component = 0.6 if isinstance(context.get("atr_1d"), (int, float)) and math.isfinite(context["atr_1d"] or float("nan")) else 0.52
@@ -6162,24 +6197,30 @@ async def _generate_fallback_plan(
         expected_move_basis = f"EM ≈ {expected_move_abs:.2f} ({expected_move_pct:.1f}%)"
     confidence_visual = _confidence_visual(confidence)
     target_meta = []
-    for idx, target in enumerate(targets, start=1):
-        distance = round(abs(target - entry), 2)
-        prob_base = 0.58 if idx == 1 else 0.34 if idx == 2 else 0.2
-        trend_bonus = 0.07 if confidence > 0.75 and idx == 1 else 0.0
-        prob = _clamp(prob_base + trend_bonus, 0.15, 0.92)
-        target_meta.append(
-            {
-                "label": f"TP{idx}",
-                "prob_touch": round(prob, 2),
-                "distance": distance,
-            }
-        )
+    for idx, meta in enumerate(geometry.targets, start=1):
+        item = {
+            "label": f"TP{idx}",
+            "prob_touch": meta.prob_touch,
+            "distance": meta.distance,
+            "em_fraction": meta.em_fraction,
+            "rr_multiple": meta.rr_multiple,
+        }
+        if meta.reason:
+            item["snap_tag"] = meta.reason
+        target_meta.append(item)
     tp_reasons = _tp_reason_entries(target_meta)
-    runner_trail = "ATR(14) x 0.8" if style_token in {"scalp", "intraday"} else "ATR(14) x 1.0"
-    runner = {"trail": runner_trail}
+    runner_trail_desc = f"ATR trail x {geometry.runner.atr_trail_mult:.2f}"
+    runner = {
+        "trail": runner_trail_desc,
+        "trail_multiple": geometry.runner.atr_trail_mult,
+        "trail_step": geometry.runner.atr_trail_step,
+        "fraction": geometry.runner.fraction,
+        "em_cap_fraction": geometry.runner.em_fraction_cap,
+        "notes": geometry.runner.notes,
+    }
     direction_label = "Long" if direction == "long" else "Short"
     notes = (
-        f"{direction_label} bias with EMA stack supportive; manage risk using {runner_trail} and watch VWAP for continuation."
+        f"{direction_label} bias with EMA stack supportive; manage risk using {runner_trail_desc} and watch VWAP for continuation."
     )
     options_payload: Dict[str, Any] | None = None
     rejected_contracts: List[Dict[str, str]] = []
@@ -6437,6 +6478,9 @@ async def _generate_fallback_plan(
         plan_block["risk_block"] = risk_block
     if execution_rules:
         plan_block["execution_rules"] = execution_rules
+    plan_block["runner_policy"] = runner
+    if geometry.snap_trace:
+        plan_block["snap_trace"] = geometry.snap_trace
     plan_warnings: List[str] = list(event_warnings)
     target_profile = build_target_profile(
         entry=entry,
@@ -6452,8 +6496,11 @@ async def _generate_fallback_plan(
         bias=direction,
     )
     target_profile_dict = target_profile.to_dict()
-    if em_cap_used:
-        target_profile_dict["em_used"] = True
+    target_profile_dict["expected_move"] = round(expected_move_abs, 4) if expected_move_abs else None
+    target_profile_dict["em_used"] = bool(em_cap_used)
+    target_profile_dict["runner_fraction"] = runner.get("fraction")
+    if geometry.snap_trace:
+        target_profile_dict["snap_trace"] = geometry.snap_trace
     structured_plan = build_structured_plan(
         plan_id=plan_id,
         symbol=symbol.upper(),
@@ -6479,12 +6526,16 @@ async def _generate_fallback_plan(
         structured_plan["tp_reasons"] = tp_reasons
     if confluence_tags:
         structured_plan["confluence_tags"] = confluence_tags
+    structured_plan["runner_policy"] = runner
+    if geometry.snap_trace:
+        structured_plan["snap_trace"] = geometry.snap_trace
     if include_options_contracts and options_contracts is not None:
         structured_plan["options_contracts"] = options_contracts
     if include_options_contracts and options_note:
         structured_plan["options_note"] = options_note
     if rejected_contracts:
         structured_plan["rejected_contracts"] = rejected_contracts
+    structured_plan["target_meta"] = target_meta
     structured_plan["target_profile"] = target_profile_dict
     if mtf_confluence_tags:
         structured_plan["mtf_confluence"] = mtf_confluence_tags

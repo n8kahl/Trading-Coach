@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import pandas as pd
 
 from ..calculations import atr, ema
+from ..plans.geometry import build_plan_geometry
 from .contract_rules import ContractRuleBook, ContractTemplate
 from .polygon_client import AggregatesResult, PolygonAggregatesClient
 from .universe import UniverseSnapshot
@@ -203,11 +204,56 @@ class PlanningScanEngine:
         pullback_atr = pullback / atr_val if atr_val else None
         actionability = max(0.0, 1.0 - min((pullback_atr or 0.0), 3.0) / 3.0)
 
-        # Risk/reward using simple ATR band targets.
-        stop = max(last_close - atr_val, 0.01)
-        target = last_close + atr_val * 2.0
+        levels_map: Dict[str, float] = {}
+        try:
+            levels_map["session_high"] = float(high_series.iloc[-1])
+            levels_map["session_low"] = float(low_series.iloc[-1])
+            if len(high_series) > 1:
+                levels_map["pdh"] = float(high_series.iloc[-2])
+                levels_map["pdl"] = float(low_series.iloc[-2])
+                levels_map["pdc"] = float(close_series.iloc[-2])
+        except Exception:
+            pass
+        realized_range = 0.0
+        try:
+            realized_range = abs(float(high_series.iloc[-1]) - float(low_series.iloc[-1]))
+        except Exception:
+            realized_range = 0.0
+        atr_daily_series = atr(high_series, low_series, close_series, 14)
+        atr_daily_val = _latest(atr_daily_series) or atr_val
+        geometry = None
+        try:
+            timestamp = None
+            index_payload = getattr(daily, "index", None)
+            if index_payload is not None and len(index_payload) > 0:
+                ts = index_payload[-1]
+                if isinstance(ts, datetime):
+                    timestamp = ts
+                else:
+                    try:
+                        timestamp = datetime.fromisoformat(str(ts))
+                    except Exception:
+                        timestamp = None
+            geometry = build_plan_geometry(
+                entry=float(last_close),
+                side="long",
+                style=style,
+                strategy=None,
+                atr_tf=float(atr_val),
+                atr_daily=float(atr_daily_val or atr_val),
+                iv_expected_move=None,
+                realized_range=realized_range,
+                levels=levels_map,
+                timestamp=timestamp,
+            )
+        except ValueError as exc:
+            logger.debug("geometry build failed for %s: %s", symbol, exc)
+            return None
+        stop = geometry.stop.price
+        target = geometry.targets[0].price if geometry.targets else last_close + atr_val * 2.0
         rr = (target - last_close) / (last_close - stop) if last_close != stop else 0.0
         risk_reward = max(0.0, min(rr / 3.0, 1.0))  # normalise assuming 3:1 as ideal
+        probability = float(geometry.targets[0].prob_touch if geometry.targets else probability)
 
         readiness = 0.45 * probability + 0.25 * actionability + 0.30 * risk_reward
         readiness = max(0.0, min(readiness, 1.0))
@@ -220,7 +266,26 @@ class PlanningScanEngine:
         levels = {
             "entry": round(last_close, 2),
             "invalidation": round(stop, 2),
-            "targets": [round(target, 2)],
+            "targets": [round(meta.price, 2) for meta in geometry.targets] or [round(target, 2)],
+        }
+        target_meta_payload = [
+            {
+                "price": round(meta.price, 2),
+                "prob_touch": meta.prob_touch,
+                "distance": meta.distance,
+                "rr_multiple": meta.rr_multiple,
+                "em_fraction": meta.em_fraction,
+                "snap_tag": meta.reason,
+                "em_capped": meta.em_capped,
+            }
+            for meta in geometry.targets
+        ]
+        runner_payload = {
+            "fraction": geometry.runner.fraction,
+            "atr_multiple": geometry.runner.atr_trail_mult,
+            "atr_step": geometry.runner.atr_trail_step,
+            "em_fraction_cap": geometry.runner.em_fraction_cap,
+            "notes": geometry.runner.notes,
         }
         metrics = {
             "atr": round(atr_val, 4),
@@ -231,6 +296,17 @@ class PlanningScanEngine:
             "volume_avg": round(volume_series.tail(20).mean(), 2) if not volume_series.empty else None,
             "entry_distance_pct": round(pullback_pct, 2) if pullback_pct is not None else None,
             "entry_distance_atr": round(pullback_atr, 3) if pullback_atr is not None else None,
+            "target_meta": target_meta_payload,
+            "runner_policy": runner_payload,
+            "expected_move": round(geometry.em_day, 4) if geometry.em_day else None,
+            "remaining_atr": round(geometry.ratr, 4) if geometry.ratr else None,
+            "em_used": bool(geometry.em_used),
+            "snap_trace": geometry.snap_trace,
+            "stop_detail": {
+                "structural": geometry.stop.structural,
+                "volatility": geometry.stop.volatility,
+                "snapped": geometry.stop.snapped,
+            },
         }
         components = {
             "probability": round(probability, 3),
