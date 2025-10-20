@@ -118,7 +118,18 @@ class UniverseProvider:
 
         if not symbols:
             metadata["warning"] = "polygon_unavailable"
-            logger.warning("Universe provider could not retrieve symbols for %s", universe)
+            logger.warning("Universe provider could not retrieve symbols for %s; using legacy fallback", universe)
+            try:
+                legacy_symbols = await legacy_universe.expand_universe("FT-TOPLIQUIDITY", style=style, limit=limit)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Legacy universe fallback failed for %s: %s", universe, exc)
+                legacy_symbols = []
+            if legacy_symbols:
+                symbols = legacy_symbols
+                source = "legacy"
+                metadata["fallback"] = "legacy_expand"
+            else:
+                metadata.setdefault("fallback", "none")
 
         trimmed = _normalize(symbols)[:limit]
         snapshot = UniverseSnapshot(

@@ -19,7 +19,7 @@ import httpx
 import pandas as pd
 
 from ..config import get_settings
-from ..data_sources import fetch_polygon_ohlcv
+from ..data_sources import fetch_polygon_ohlcv, fetch_yahoo_ohlcv
 
 logger = logging.getLogger(__name__)
 
@@ -186,10 +186,20 @@ class PolygonAggregatesClient:
             try:
                 async with self._sem:
                     frame = await fetch_polygon_ohlcv(symbol, timeframe)
-                break
+                if frame is not None:
+                    break
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Polygon aggregates fetch error for %s/%s (attempt %d): %s", symbol, timeframe, attempt, exc)
-                await asyncio.sleep(0.5 * attempt)
+            await asyncio.sleep(0.5 * attempt)
+
+        if frame is None:
+            try:
+                frame = await fetch_yahoo_ohlcv(symbol, timeframe)
+                if frame is not None:
+                    logger.debug("Yahoo fallback used for %s/%s", symbol, timeframe)
+                    self._json_cache.setdefault(("fallback", symbol.upper()), (_now_ts(), True))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Yahoo fallback failed for %s/%s: %s", symbol, timeframe, exc)
 
         self._agg_cache[cache_key] = (_now_ts(), frame)
         return frame.copy() if frame is not None else None
