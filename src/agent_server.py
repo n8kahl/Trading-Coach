@@ -6858,6 +6858,12 @@ async def _generate_fallback_plan(
             if idx < len(target_meta):
                 target_meta[idx]["prob_touch_raw"] = float(meta.prob_touch)
 
+    version_token = plan.get("version")
+    try:
+        version = int(version_token) if version_token is not None else 1
+    except (TypeError, ValueError):
+        version = 1
+
     plan_block = dict(plan)
     plan_block.update(
         {
