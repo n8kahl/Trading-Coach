@@ -4,7 +4,7 @@ from .geometry import GeometryConfig, PlanGeometry, RunnerPolicy, StopResult, Ta
 from .entry import select_structural_entry
 from .expected_move import session_expected_move
 from .clamp import clamp_targets_to_em, ensure_monotonic
-from .levels import STRUCTURAL_ORDER, directional_nodes, profile_nodes
+from .levels import STRUCTURAL_ORDER, directional_nodes, profile_nodes, populate_recent_extrema
 from .snap import snap_targets, stop_from_structure, build_key_levels_used
 from .runner import compute_runner
 from .actionability import actionability_score, compute_entry_candidates
@@ -25,6 +25,7 @@ __all__ = [
     "STRUCTURAL_ORDER",
     "directional_nodes",
     "profile_nodes",
+    "populate_recent_extrema",
     "snap_targets",
     "stop_from_structure",
     "build_key_levels_used",

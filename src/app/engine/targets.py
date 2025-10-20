@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 
@@ -21,6 +21,10 @@ class TargetEngineResult:
     bias: Optional[str] = None
     style: Optional[str] = None
     expected_move: Optional[float] = None
+    key_levels_used: Optional[Dict[str, Any]] = None
+    tp_reasons: List[Dict[str, Any]] = field(default_factory=list)
+    entry_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    runner_policy: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
@@ -69,6 +73,10 @@ def build_target_profile(
     expected_move: Optional[float],
     style: Optional[str],
     bias: Optional[str],
+    key_levels_used: Optional[Dict[str, Any]] = None,
+    tp_reasons: Optional[List[Dict[str, Any]]] = None,
+    entry_candidates: Optional[List[Dict[str, Any]]] = None,
+    runner_policy: Optional[Dict[str, Any]] = None,
 ) -> TargetEngineResult:
     meta = [dict(item) for item in target_meta or []]
     probabilities = _probability_map(meta)
@@ -100,6 +108,13 @@ def build_target_profile(
         except (TypeError, ValueError):
             expected = None
 
+    key_levels_payload = dict(key_levels_used) if isinstance(key_levels_used, dict) else None
+    tp_reasons_payload = [dict(reason) for reason in (tp_reasons or []) if isinstance(reason, dict)]
+    entry_candidates_payload = [
+        dict(candidate) for candidate in (entry_candidates or []) if isinstance(candidate, dict)
+    ]
+    runner_policy_payload = dict(runner_policy) if isinstance(runner_policy, dict) else None
+
     return TargetEngineResult(
         entry=float(entry),
         stop=float(stop),
@@ -114,6 +129,10 @@ def build_target_profile(
         bias=bias,
         style=style,
         expected_move=expected,
+        key_levels_used=key_levels_payload,
+        tp_reasons=tp_reasons_payload,
+        entry_candidates=entry_candidates_payload,
+        runner_policy=runner_policy_payload,
     )
 
 

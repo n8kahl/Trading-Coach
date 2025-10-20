@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Tuple
+import math
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 STRUCTURAL_ORDER = [
     "orh",
@@ -75,4 +76,45 @@ def profile_nodes(levels: Dict[str, float]) -> List[str]:
     return nodes
 
 
-__all__ = ["STRUCTURAL_ORDER", "directional_nodes", "last_lower_high", "last_higher_low", "profile_nodes"]
+def populate_recent_extrema(
+    levels: Dict[str, float],
+    highs: Sequence[float],
+    lows: Sequence[float],
+    *,
+    window: int = 5,
+) -> None:
+    """
+    Ensure swing_high/swing_low exist using recent highs/lows when source data is available.
+    """
+
+    def _valid(value: float | None) -> bool:
+        return isinstance(value, (int, float)) and math.isfinite(value)
+
+    def _recent(series: Sequence[float], mode: str) -> float | None:
+        values = [float(val) for val in series if _valid(val)]
+        if not values:
+            return None
+        windowed = values[-window:] if len(values) >= window else values
+        if mode == "max":
+            return max(windowed)
+        return min(windowed)
+
+    if not _valid(levels.get("swing_high")):
+        candidate = _recent(highs, "max")
+        if _valid(candidate):
+            levels["swing_high"] = float(candidate)
+
+    if not _valid(levels.get("swing_low")):
+        candidate = _recent(lows, "min")
+        if _valid(candidate):
+            levels["swing_low"] = float(candidate)
+
+
+__all__ = [
+    "STRUCTURAL_ORDER",
+    "directional_nodes",
+    "last_lower_high",
+    "last_higher_low",
+    "profile_nodes",
+    "populate_recent_extrema",
+]

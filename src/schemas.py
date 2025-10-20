@@ -58,6 +58,8 @@ class ScanCandidate(BaseModel):
     target_profile: Dict[str, Any] | None = None
     runner_policy: Dict[str, Any] | None = None
     snap_trace: list[str] | None = None
+    key_levels_used: Dict[str, Any] | None = None
+    entry_candidates: list[Dict[str, Any]] = Field(default_factory=list)
     expected_move: float | None = None
     remaining_atr: float | None = None
     em_used: bool | None = None

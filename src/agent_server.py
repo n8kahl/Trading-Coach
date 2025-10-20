@@ -134,6 +134,7 @@ from .plans import (
     RunnerPolicy,
     compute_entry_candidates,
     build_structured_geometry,
+    populate_recent_extrema,
 )
 from .plans.entry import select_structural_entry
 from .levels import inject_style_levels
@@ -251,6 +252,21 @@ def _hydrate_secondary_fields(payload: "PlanResponse") -> "PlanResponse":
         candidate = structured_block.get("target_profile") if isinstance(structured_block, Mapping) else None
         if candidate:
             payload.target_profile = candidate
+
+    if payload.key_levels_used in (None, {}):
+        candidate = _first_non_empty("key_levels_used")
+        if candidate:
+            payload.key_levels_used = candidate
+
+    if not payload.tp_reasons:
+        candidate = _first_non_empty("tp_reasons")
+        if candidate:
+            payload.tp_reasons = candidate
+
+    if not payload.entry_candidates:
+        candidate = _first_non_empty("entry_candidates")
+        if candidate:
+            payload.entry_candidates = candidate
 
     if (not payload.badges) and isinstance(plan_block, Mapping):
         candidate = _first_non_empty("badges")
@@ -1010,6 +1026,9 @@ async def _build_scan_stub_candidate(
         if bars_to_trigger_val is not None and bars_to_trigger_val <= 3:
             actionable_soon = True
 
+        key_levels_used_payload: Dict[str, List[Dict[str, Any]]] = {"session": [], "structural": []}
+        entry_candidates_payload: List[Dict[str, Any]] = []
+
         candidate = ScanCandidate(
             symbol=signal.symbol.upper(),
             rank=0,
@@ -1028,6 +1047,8 @@ async def _build_scan_stub_candidate(
             actionable_soon=actionable_soon,
             source_paths={},
             planning_snapshot=planning_snapshot,
+            key_levels_used=key_levels_used_payload,
+            entry_candidates=entry_candidates_payload,
         )
         features = _metrics_to_features(metrics, style_token)
         logger.debug(
@@ -1454,6 +1475,7 @@ class PlanResponse(BaseModel):
     targets: List[float] | None = None
     target_meta: List[Dict[str, Any]] | None = None
     targets_meta: List[Dict[str, Any]] | None = None
+    entry_candidates: List[Dict[str, Any]] = Field(default_factory=list)
     rr_to_t1: float | None = None
     confidence: float | None = None
     confidence_factors: List[str] | None = None
@@ -3839,14 +3861,39 @@ def _planning_scan_to_page(
         }
         if target_meta_payload:
             planning_snapshot["target_meta"] = target_meta_payload
-        if metrics.get("runner_policy"):
-            planning_snapshot["runner_policy"] = metrics.get("runner_policy")
-        if metrics.get("snap_trace"):
-            planning_snapshot["snap_trace"] = metrics.get("snap_trace")
-        if metrics.get("expected_move") is not None:
-            planning_snapshot["expected_move"] = metrics.get("expected_move")
-        if metrics.get("remaining_atr") is not None:
-            planning_snapshot["remaining_atr"] = metrics.get("remaining_atr")
+        runner_policy_raw = metrics.get("runner_policy")
+        runner_policy_payload = dict(runner_policy_raw) if isinstance(runner_policy_raw, Mapping) else None
+        if runner_policy_payload:
+            planning_snapshot["runner_policy"] = runner_policy_payload
+        snap_trace_payload_raw = metrics.get("snap_trace")
+        if isinstance(snap_trace_payload_raw, list) and snap_trace_payload_raw:
+            planning_snapshot["snap_trace"] = snap_trace_payload_raw
+        expected_move_val = metrics.get("expected_move")
+        if expected_move_val is not None:
+            planning_snapshot["expected_move"] = expected_move_val
+        remaining_atr_val = metrics.get("remaining_atr")
+        if remaining_atr_val is not None:
+            planning_snapshot["remaining_atr"] = remaining_atr_val
+        em_used_val = metrics.get("em_used")
+        raw_key_levels_used = metrics.get("key_levels_used")
+        key_levels_used_payload = dict(raw_key_levels_used) if isinstance(raw_key_levels_used, dict) else None
+        if key_levels_used_payload:
+            planning_snapshot["key_levels_used"] = key_levels_used_payload
+        raw_entry_candidates = metrics.get("entry_candidates")
+        entry_candidates_payload = [
+            dict(candidate) for candidate in raw_entry_candidates if isinstance(candidate, dict)
+        ] if isinstance(raw_entry_candidates, list) else []
+        if entry_candidates_payload:
+            planning_snapshot["entry_candidates"] = entry_candidates_payload
+        raw_tp_reasons = metrics.get("tp_reasons")
+        tp_reasons_payload = [
+            dict(reason) for reason in raw_tp_reasons if isinstance(reason, dict)
+        ] if isinstance(raw_tp_reasons, list) else _tp_reason_entries(target_meta_payload)
+        if tp_reasons_payload:
+            planning_snapshot["tp_reasons"] = tp_reasons_payload
+        warnings_payload = metrics.get("geometry_warnings")
+        if isinstance(warnings_payload, list) and warnings_payload:
+            planning_snapshot.setdefault("warnings", warnings_payload)
         entry_level = candidate.levels.get("entry")
         stop_level = candidate.levels.get("invalidation")
         targets_level = list(candidate.levels.get("targets") or [])
@@ -3892,15 +3939,7 @@ def _planning_scan_to_page(
             "targets": "geometry_engine",
         }
         planning_snapshot["source_paths"] = source_paths
-        runner_policy_payload = metrics.get("runner_policy") or None
-        snap_trace_payload_raw = metrics.get("snap_trace")
         snap_trace_payload = [str(item) for item in snap_trace_payload_raw] if isinstance(snap_trace_payload_raw, list) else None
-        expected_move_val = metrics.get("expected_move")
-        remaining_atr_val = metrics.get("remaining_atr")
-        em_used_val = metrics.get("em_used")
-        tp_reasons_payload = _tp_reason_entries(target_meta_payload)
-        if tp_reasons_payload:
-            planning_snapshot["tp_reasons"] = tp_reasons_payload
         plan_slug = f"{candidate.symbol.upper()}-{result.as_of_utc.strftime('%Y%m%d%H%M')}-P{idx}"
         planning_snapshot["plan_id"] = plan_slug
 
@@ -3932,7 +3971,7 @@ def _planning_scan_to_page(
                 targets=targets_level_float,
                 direction=default_direction,
                 precision=2,
-                key_levels_used=None,
+                key_levels_used=key_levels_used_payload,
                 runner=runner_policy_payload,
             )
         except Exception:
@@ -3952,6 +3991,10 @@ def _planning_scan_to_page(
                     expected_move=expected_move_val,
                     style=request_payload.style,
                     bias=default_direction,
+                    key_levels_used=key_levels_used_payload,
+                    tp_reasons=tp_reasons_payload,
+                    entry_candidates=entry_candidates_payload,
+                    runner_policy=runner_policy_payload,
                 )
                 target_profile_dict = target_profile.to_dict()
                 if snap_trace_payload is not None:
@@ -3981,6 +4024,10 @@ def _planning_scan_to_page(
                 structured_plan_payload["target_profile"] = target_profile_dict
                 if tp_reasons_payload:
                     structured_plan_payload["tp_reasons"] = tp_reasons_payload
+                if key_levels_used_payload:
+                    structured_plan_payload["key_levels_used"] = key_levels_used_payload
+                if entry_candidates_payload:
+                    structured_plan_payload["entry_candidates"] = entry_candidates_payload
                 if runner_policy_payload:
                     structured_plan_payload["runner_policy"] = runner_policy_payload
                 if snap_trace_payload is not None:
@@ -6496,6 +6543,15 @@ async def _generate_fallback_plan(
     if gap_fill_level:
         levels_map["gap_fill"] = gap_fill_level
     inject_style_levels(levels_map, context, style_token)
+    try:
+        populate_recent_extrema(
+            levels_map,
+            prepared["high"].tolist(),
+            prepared["low"].tolist(),
+            window=6,
+        )
+    except Exception:
+        pass
     entry_seed = select_structural_entry(
         direction=direction,
         style=style_token,
@@ -6581,33 +6637,84 @@ async def _generate_fallback_plan(
         rr_floor=geometry.stop.rr_min,
         em_hint=expected_move_abs if isinstance(expected_move_abs, (int, float)) else None,
     )
-    if any(warning == "INVARIANT_BROKEN" for warning in structured_geometry.warnings):
-        logger.warning("structured geometry invariants broken for %s fallback plan", symbol)
-    stop = structured_geometry.stop
-    targets = structured_geometry.targets
-    em_cap_used = structured_geometry.clamp_applied or geometry.em_used
-    expected_move_abs = structured_geometry.em_points
-    geometry.stop.price = stop
-    geometry.stop.structural = stop
-    geometry.stop.snapped = structured_geometry.stop_label
-    geometry.em_day = expected_move_abs
-    geometry.em_used = em_cap_used
-    if len(geometry.targets) < len(targets):
-        missing = len(targets) - len(geometry.targets)
-        geometry.targets.extend(geometry.targets[-1:] * missing)
-    for idx, (meta, price, reason) in enumerate(zip(geometry.targets, targets, structured_geometry.tp_reasons)):
-        meta.price = round(float(price), 2)
-        meta.distance = round(abs(float(price) - entry_price), 2)
-        risk = entry_price - stop if direction == "long" else stop - entry_price
-        reward = float(price) - entry_price if direction == "long" else entry_price - float(price)
-        if risk > 0:
-            meta.rr_multiple = round(max(reward, 0.0) / risk, 2)
-        meta.em_fraction = round(meta.distance / expected_move_abs, 2) if expected_move_abs else None
-        meta.reason = reason.get("snap_tag") or reason.get("reason")
-        meta.em_capped = em_cap_used
+    structured_warnings = list(structured_geometry.warnings)
+    invariant_broken = any(warning == "INVARIANT_BROKEN" for warning in structured_warnings)
+    key_levels_used = structured_geometry.key_levels_used or {}
+    structured_runner = dict(structured_geometry.runner_policy or {})
+    structured_tp_reasons_raw = list(structured_geometry.tp_reasons or [])
+    stop_label = structured_geometry.stop_label
+
+    def _ensure_tp_reasons(reasons: List[Dict[str, Any]], count: int) -> List[Dict[str, Any]]:
+        aligned: List[Dict[str, Any]] = []
+        for idx in range(count):
+            if idx < len(reasons) and isinstance(reasons[idx], dict):
+                payload = dict(reasons[idx])
+            else:
+                payload = {"label": f"TP{idx + 1}", "reason": "Legacy geometry"}
+            payload.setdefault("label", f"TP{idx + 1}")
+            aligned.append(payload)
+        return aligned
+
+    if invariant_broken:
+        logger.warning("structured geometry invariants broken for %s fallback plan; reverting to legacy geometry", symbol)
+        stop = round(float(geometry.stop.structural or geometry.stop.price or geometry.stop.volatility or entry_price), 2)
+        targets = [round(float(meta.price), 2) for meta in geometry.targets] or raw_targets
+        expected_move_abs = structured_geometry.em_points or geometry.em_day
+        em_cap_used = bool(geometry.em_used or structured_geometry.clamp_applied)
+        stop_label = geometry.stop.snapped or stop_label or "LEGACY_STOP"
+        if "STRUCTURED_GEOMETRY_FALLBACK" not in structured_warnings:
+            structured_geometry.warnings.append("STRUCTURED_GEOMETRY_FALLBACK")
+            structured_warnings.append("STRUCTURED_GEOMETRY_FALLBACK")
+        if not structured_tp_reasons_raw:
+            structured_tp_reasons_raw = _tp_reason_entries(
+                [
+                    {
+                        "label": f"TP{idx + 1}",
+                        "rr": getattr(meta, "rr_multiple", None),
+                        "distance": getattr(meta, "distance", None),
+                    }
+                    for idx, meta in enumerate(geometry.targets)
+                ]
+            )
+        structured_runner = structured_runner or _runner_policy_to_dict(geometry.runner)
+    else:
+        stop = structured_geometry.stop
+        targets = structured_geometry.targets
+        expected_move_abs = structured_geometry.em_points
+        em_cap_used = structured_geometry.clamp_applied or geometry.em_used
+        geometry.stop.price = stop
+        geometry.stop.structural = stop
+        geometry.stop.snapped = stop_label
+        geometry.em_day = expected_move_abs
+        geometry.em_used = em_cap_used
+        if len(geometry.targets) < len(targets):
+            missing = len(targets) - len(geometry.targets)
+            geometry.targets.extend(geometry.targets[-1:] * missing)
     rr_to_t1 = _risk_reward(entry_price, stop, targets[0], direction)
     if rr_to_t1 is not None:
         rr_to_t1 = float(rr_to_t1)
+
+    tp_reasons = _ensure_tp_reasons(structured_tp_reasons_raw, len(targets))
+    for idx, meta in enumerate(geometry.targets, start=1):
+        price_token = targets[idx - 1] if idx - 1 < len(targets) else getattr(meta, "price", None)
+        try:
+            price_val = round(float(price_token), 2)
+        except (TypeError, ValueError):
+            price_val = getattr(meta, "price", None)
+            if price_val is None:
+                continue
+            price_val = round(float(price_val), 2)
+        meta.price = price_val
+        meta.distance = round(abs(price_val - entry_price), 2)
+        risk = entry_price - stop if direction == "long" else stop - entry_price
+        reward = price_val - entry_price if direction == "long" else entry_price - price_val
+        if risk > 0:
+            meta.rr_multiple = round(max(reward, 0.0) / risk, 2)
+        meta.em_fraction = round(meta.distance / expected_move_abs, 2) if expected_move_abs else None
+        meta.em_capped = em_cap_used
+        reason_payload = tp_reasons[idx - 1] if idx - 1 < len(tp_reasons) else {}
+        meta.reason = reason_payload.get("snap_tag") or reason_payload.get("reason")
+
     trend_component = 0.8 if (direction == "long" and ema_trend_up) or (direction == "short" and ema_trend_down) else 0.6
     liquidity_component = 0.65 if isinstance(context.get("volume_median"), (int, float)) and context["volume_median"] > 0 else 0.5
     regime_component = 0.6 if isinstance(context.get("atr_1d"), (int, float)) and math.isfinite(context["atr_1d"] or float("nan")) else 0.52
@@ -6628,7 +6735,7 @@ async def _generate_fallback_plan(
     confidence_visual = _confidence_visual(confidence)
     target_meta = []
     for idx, meta in enumerate(geometry.targets, start=1):
-        reason_payload = structured_geometry.tp_reasons[idx - 1] if idx - 1 < len(structured_geometry.tp_reasons) else {}
+        reason_payload = tp_reasons[idx - 1] if idx - 1 < len(tp_reasons) else {}
         snap_tag = reason_payload.get("snap_tag")
         item = {
             "label": f"TP{idx}",
@@ -6639,9 +6746,9 @@ async def _generate_fallback_plan(
         }
         if snap_tag:
             item["snap_tag"] = snap_tag
+        if reason_payload.get("reason"):
+            item["reason"] = reason_payload["reason"]
         target_meta.append(item)
-    tp_reasons = structured_geometry.tp_reasons
-    structured_runner = structured_geometry.runner_policy
     try:
         geometry.runner.fraction = float(structured_runner.get("fraction", geometry.runner.fraction))
         geometry.runner.atr_trail_mult = float(
@@ -6740,7 +6847,7 @@ async def _generate_fallback_plan(
         targets=targets,
         direction=direction,
         precision=get_precision(symbol),
-        key_levels_used=structured_geometry.key_levels_used,
+        key_levels_used=key_levels_used,
         runner=runner,
     )
     plan_id = f"{symbol.upper()}-{plan_ts_utc.strftime('%Y%m%dT%H%M%S')}-{style_token}-auto"
@@ -6959,6 +7066,7 @@ async def _generate_fallback_plan(
     except (TypeError, ValueError):
         version = 1
 
+    entry_candidates_payload = [dict(candidate) for candidate in entry_candidates] if entry_candidates else []
     plan_block = dict(plan)
     plan_block.update(
         {
@@ -6985,7 +7093,9 @@ async def _generate_fallback_plan(
             "debug": dict(plan.get("debug") or {}),
             "snap_trace": geometry.snap_trace or [],
             "em_used": bool(em_cap_used),
-            "key_levels_used": structured_geometry.key_levels_used,
+            "key_levels_used": key_levels_used,
+            "tp_reasons": tp_reasons,
+            "entry_candidates": entry_candidates_payload,
         }
     )
     plan_block["strategy_profile"] = strategy_profile_payload
@@ -7004,11 +7114,11 @@ async def _generate_fallback_plan(
     if em_cap_used and "EM cap" not in accuracy_levels:
         accuracy_levels.append("EM cap")
     plan_block["accuracy_levels"] = accuracy_levels
-    if entry_candidates:
+    if entry_candidates_payload:
         meta_block = plan_block.get("meta")
         if not isinstance(meta_block, dict):
             meta_block = {}
-        meta_block["entry_candidates"] = entry_candidates
+        meta_block["entry_candidates"] = entry_candidates_payload
         plan_block["meta"] = meta_block
     badge_confluence = confluence_tags or confidence_factors or []
     plan_badges = compose_strategy_badges(
@@ -7089,6 +7199,10 @@ async def _generate_fallback_plan(
         expected_move=expected_move_abs,
         style=style_token,
         bias=direction,
+        key_levels_used=key_levels_used,
+        tp_reasons=tp_reasons,
+        entry_candidates=entry_candidates_payload,
+        runner_policy=runner,
     )
     target_profile_dict = target_profile.to_dict()
     target_profile_dict["expected_move"] = round(expected_move_abs, 4) if expected_move_abs else None
@@ -7096,6 +7210,13 @@ async def _generate_fallback_plan(
     target_profile_dict["runner_fraction"] = runner.get("fraction")
     if geometry.snap_trace:
         target_profile_dict["snap_trace"] = geometry.snap_trace
+    if key_levels_used:
+        target_profile_dict["key_levels_used"] = key_levels_used
+    if entry_candidates_payload:
+        target_profile_dict["entry_candidates"] = entry_candidates_payload
+    if tp_reasons:
+        target_profile_dict["tp_reasons"] = tp_reasons
+    target_profile_dict.setdefault("runner_policy", runner)
     structured_plan = build_structured_plan(
         plan_id=plan_id,
         symbol=symbol.upper(),
@@ -7135,6 +7256,10 @@ async def _generate_fallback_plan(
         structured_plan["rejected_contracts"] = rejected_contracts
     structured_plan["target_meta"] = target_meta
     structured_plan["target_profile"] = target_profile_dict
+    if key_levels_used:
+        structured_plan["key_levels_used"] = key_levels_used
+    if entry_candidates_payload:
+        structured_plan["entry_candidates"] = entry_candidates_payload
     structured_plan["strategy_profile"] = strategy_profile_payload
     structured_plan["badges"] = plan_badges
     if mtf_confluence_tags:
@@ -7267,6 +7392,7 @@ async def _generate_fallback_plan(
         targets=targets,
         target_meta=target_meta,
         targets_meta=target_meta,
+        entry_candidates=entry_candidates_payload,
         rr_to_t1=rr_to_t1,
         confidence=confidence,
         confidence_factors=confidence_factors or None,
@@ -7288,7 +7414,7 @@ async def _generate_fallback_plan(
         target_profile=target_profile_dict,
         charts=charts_payload,
         key_levels={k: float(v) for k, v in key_levels.items() if isinstance(v, (int, float))},
-        key_levels_used=None,
+        key_levels_used=key_levels_used,
         market_snapshot=market_meta,
         features={
             "ema_trend_up": ema_trend_up,
@@ -7310,6 +7436,7 @@ async def _generate_fallback_plan(
         data_quality=data_quality,
         debug={"source": "auto_fallback_plan"},
         runner=runner,
+        runner_policy=runner_policy_output,
         risk_block=risk_block,
         execution_rules=execution_rules,
         market=market_meta,
@@ -7319,6 +7446,10 @@ async def _generate_fallback_plan(
         chart_guidance=hint_guidance,
         confidence_visual=confidence_visual,
         tp_reasons=tp_reasons_payload,
+        snap_trace=snap_trace_output,
+        expected_move=expected_move_output,
+        remaining_atr=remaining_atr_output,
+        em_used=em_used_output,
         rejected_contracts=rejected_contracts,
         calibration_meta=calibration_meta_payload,
         strategy_profile=strategy_profile_payload,
@@ -7392,6 +7523,12 @@ async def _generate_fallback_plan(
         meta_payload["accuracy_levels"] = plan_response.accuracy_levels
     if plan_response.targets_meta:
         meta_payload["targets_meta"] = plan_response.targets_meta
+    if plan_response.key_levels_used:
+        meta_payload["key_levels_used"] = plan_response.key_levels_used
+    if plan_response.entry_candidates:
+        meta_payload["entry_candidates"] = plan_response.entry_candidates
+    if plan_response.tp_reasons:
+        meta_payload["tp_reasons"] = plan_response.tp_reasons
     if strategy_profile_payload:
         meta_payload["strategy_profile"] = strategy_profile_payload
     if plan_badges:
@@ -7982,7 +8119,7 @@ async def gpt_plan(
         atr=calc_notes.get("atr14") if calc_notes else None,
         stop_multiple=calc_notes.get("stop_multiple") if calc_notes else None,
         expected_move=plan.get("expected_move") or (snapshot.get("volatility") or {}).get("expected_move_horizon"),
-        runner=plan.get("runner") if plan else None,
+        runner=(plan.get("runner_policy") or plan.get("runner")) if plan else None,
     )
     execution_rules = _build_execution_rules(
         entry=entry_val,
@@ -7991,7 +8128,7 @@ async def gpt_plan(
         direction=plan.get("direction") or direction_hint,
         precision=precision_for_levels,
         key_levels_used=None,  # populated later once matches resolved
-        runner=plan.get("runner") if plan else None,
+        runner=(plan.get("runner_policy") or plan.get("runner")) if plan else None,
     )
     mtf_confluence_tags: List[str] = []
     try:
@@ -8187,6 +8324,28 @@ async def gpt_plan(
         and stop_for_engine is not None
         and targets_for_engine
     ):
+        key_levels_watch_raw = plan.get("key_levels_used") or first.get("key_levels_used")
+        key_levels_watch = (
+            {
+                bucket: [dict(entry) for entry in entries]
+                for bucket, entries in key_levels_watch_raw.items()
+                if isinstance(entries, list)
+            }
+            if isinstance(key_levels_watch_raw, Mapping)
+            else None
+        )
+        tp_reasons_watch_raw = plan.get("tp_reasons") or first.get("tp_reasons")
+        tp_reasons_watch = [
+            dict(reason) for reason in tp_reasons_watch_raw if isinstance(reason, Mapping)
+        ] if isinstance(tp_reasons_watch_raw, list) else []
+        entry_candidates_watch = plan.get("entry_candidates")
+        if not entry_candidates_watch:
+            meta_block = plan.get("meta")
+            if isinstance(meta_block, Mapping):
+                entry_candidates_watch = meta_block.get("entry_candidates")
+        entry_candidates_watch = [
+            dict(candidate) for candidate in entry_candidates_watch
+        ] if isinstance(entry_candidates_watch, list) else []
         try:
             target_profile = build_target_profile(
                 entry=float(entry_for_engine),
@@ -8200,10 +8359,21 @@ async def gpt_plan(
                 expected_move=plan.get("expected_move"),
                 style=style_token,
                 bias=plan.get("direction") or direction_hint,
+                key_levels_used=key_levels_watch,
+                tp_reasons=tp_reasons_watch,
+                entry_candidates=entry_candidates_watch,
+                runner_policy=plan.get("runner_policy") or plan.get("runner"),
             )
             target_profile_dict = target_profile.to_dict()
             if em_cap_used:
                 target_profile_dict["em_used"] = True
+            if key_levels_watch:
+                target_profile_dict["key_levels_used"] = key_levels_watch
+            if entry_candidates_watch:
+                target_profile_dict["entry_candidates"] = entry_candidates_watch
+            if tp_reasons_watch:
+                target_profile_dict["tp_reasons"] = tp_reasons_watch
+            target_profile_dict.setdefault("runner_policy", plan.get("runner_policy") or plan.get("runner"))
             structured_plan_payload = build_structured_plan(
                 plan_id=plan_id,
                 symbol=symbol,
@@ -8240,7 +8410,7 @@ async def gpt_plan(
         tp_meta_source = target_profile.meta
     elif isinstance(plan.get("target_meta"), list):
         tp_meta_source = plan.get("target_meta")  # type: ignore[assignment]
-    tp_reasons = _tp_reason_entries(tp_meta_source)
+    tp_reasons = tp_reasons_watch or _tp_reason_entries(tp_meta_source)
 
     style_public = public_style(style_token) or "intraday"
     side_hint = _infer_contract_side(plan.get("side"), plan.get("direction") or direction_hint)
@@ -8355,7 +8525,7 @@ async def gpt_plan(
         direction=plan.get("direction") or direction_hint,
         precision=precision_for_levels,
         key_levels_used=key_levels_used,
-        runner=plan.get("runner") if plan else None,
+        runner=(plan.get("runner_policy") or plan.get("runner")) if plan else None,
     )
 
     plan_core = _extract_plan_core(first, plan_id, version, decimals_value)
@@ -8384,6 +8554,9 @@ async def gpt_plan(
     if key_levels_used:
         plan_core["key_levels_used"] = key_levels_used
         plan.setdefault("key_levels_used", key_levels_used)
+    if entry_candidates_watch:
+        plan_core["entry_candidates"] = entry_candidates_watch
+        plan.setdefault("entry_candidates", entry_candidates_watch)
     if risk_block:
         plan_core["risk_block"] = risk_block
         plan.setdefault("risk_block", risk_block)
@@ -8532,6 +8705,8 @@ async def gpt_plan(
             structured_plan_payload["rejected_contracts"] = rejected_contracts
         if key_levels_used:
             structured_plan_payload["key_levels_used"] = key_levels_used
+        if entry_candidates_watch:
+            structured_plan_payload["entry_candidates"] = entry_candidates_watch
         if risk_block:
             structured_plan_payload["risk_block"] = risk_block
         if execution_rules:
@@ -8681,6 +8856,7 @@ async def gpt_plan(
         targets=targets_output,
         target_meta=plan.get("target_meta") if plan else None,
         targets_meta=plan.get("target_meta") if plan else None,
+        entry_candidates=entry_candidates_watch,
         rr_to_t1=rr_output,
         confidence=confidence_output,
         confidence_factors=confidence_factors,
@@ -8755,6 +8931,12 @@ async def gpt_plan(
         meta_payload["runner_policy"] = plan_response.runner_policy
     if plan_response.snap_trace:
         meta_payload["snap_trace"] = plan_response.snap_trace
+    if plan_response.key_levels_used:
+        meta_payload["key_levels_used"] = plan_response.key_levels_used
+    if plan_response.entry_candidates:
+        meta_payload["entry_candidates"] = plan_response.entry_candidates
+    if plan_response.tp_reasons:
+        meta_payload["tp_reasons"] = plan_response.tp_reasons
     plan_response.meta = meta_payload or None
     return _finalize_plan_response(plan_response)
 

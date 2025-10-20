@@ -237,6 +237,7 @@ Use this when promoting to production:
 - Tradier fallback: sandbox tokens skip quote batches with a single INFO log and surface a “Sandbox quotes unavailable” banner; production keys now request ≤25 symbols per batch and Yahoo fills intraday data when Polygon is >15 min stale.
 - Tests: `pytest` (59 passed) covering calculations, plan rendering, live engine, and data-source fallbacks.
 - Canonical roll-out: session middleware attaches `{status, as_of, next_open, tz}` to every request/response, plan payloads expose `confluence_tags` + `tp_reasons` and (behind `FF_OPTIONS_ALWAYS`) server-picked `options_contracts`, `/api/v1/gpt/chart-layers` now requires persisted overlays with as-of parity checks, and caches incorporate the session `as_of` so frozen/live scans stay deterministic.
+- Structured geometry parity: stop/target runners now feed `key_levels_used`, `tp_reasons`, and `entry_candidates` through plan, structured plan, target profile, and planning scan snapshots (including cache replays), with swing-high/low backfills reducing ATR fallback stops.
 
 ##### Up next – canonical plan completeness & parity rollout
 1. **Session SSOT middleware** (`src/agent_server.py`, new `session_middleware.py`): introduce `get_session()` that attaches `{status, as_of, next_open, tz}` to `request.state` and headers. Ensure all plan/scan endpoints consume this context and clamp frozen computations to `session.as_of`.

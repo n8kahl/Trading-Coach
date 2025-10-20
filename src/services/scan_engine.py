@@ -7,13 +7,13 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
 from ..calculations import atr, ema
 from ..levels import inject_style_levels
-from ..plans import build_plan_geometry, build_structured_geometry, compute_entry_candidates
+from ..plans import build_plan_geometry, build_structured_geometry, compute_entry_candidates, populate_recent_extrema
 from ..plans.entry import select_structural_entry
 from .contract_rules import ContractRuleBook, ContractTemplate
 from .polygon_client import AggregatesResult, PolygonAggregatesClient
@@ -254,6 +254,15 @@ class PlanningScanEngine:
             },
             style,
         )
+        try:
+            populate_recent_extrema(
+                levels_map,
+                list(high_series.tail(20)),
+                list(low_series.tail(20)),
+                window=6,
+            )
+        except Exception:
+            pass
         realized_range = 0.0
         try:
             realized_range = abs(float(high_series.iloc[-1]) - float(low_series.iloc[-1]))
@@ -330,6 +339,7 @@ class PlanningScanEngine:
                 return None
             fallback_geometry = True
 
+        structured_warnings: List[str] = []
         if fallback_geometry or geometry is None:
             stop = float(entry_price - max(atr_val, 1e-6))
             target = float(entry_price + max(atr_val * 2.0, 1e-6))
@@ -373,67 +383,130 @@ class PlanningScanEngine:
                 rr_floor=geometry.stop.rr_min,
                 em_hint=None,
             )
-            if any(warning == "INVARIANT_BROKEN" for warning in structured_geometry.warnings):
-                logger.warning("planning scan invariants broken for %s", symbol)
-            stop = structured_geometry.stop
-            targets_final = structured_geometry.targets
+            structured_warnings = list(structured_geometry.warnings)
+            invariant_broken = any(warning == "INVARIANT_BROKEN" for warning in structured_warnings)
+            key_levels_used = structured_geometry.key_levels_used or {}
+            structured_runner = dict(structured_geometry.runner_policy or {})
+            structured_tp_reasons_raw = list(structured_geometry.tp_reasons or [])
+
+            def _ensure_tp_reasons(reasons: List[Dict[str, Any]], count: int) -> List[Dict[str, Any]]:
+                aligned: List[Dict[str, Any]] = []
+                for idx in range(count):
+                    if idx < len(reasons) and isinstance(reasons[idx], dict):
+                        payload = dict(reasons[idx])
+                    else:
+                        payload = {"label": f"TP{idx + 1}", "reason": "Legacy geometry"}
+                    payload.setdefault("label", f"TP{idx + 1}")
+                    aligned.append(payload)
+                return aligned
+
+            if invariant_broken:
+                logger.warning("planning scan invariants broken for %s; reverting to legacy geometry", symbol)
+                if "STRUCTURED_GEOMETRY_FALLBACK" not in structured_geometry.warnings:
+                    structured_geometry.warnings.append("STRUCTURED_GEOMETRY_FALLBACK")
+                structured_warnings = list(structured_geometry.warnings)
+                stop = round(float(geometry.stop.structural or geometry.stop.price or geometry.stop.volatility or entry_price), 2)
+                targets_final = [round(float(meta.price), 2) for meta in geometry.targets] or raw_targets
+                expected_move_points = structured_geometry.em_points or geometry.em_day
+                clamp_flag = bool(geometry.em_used or structured_geometry.clamp_applied)
+                if not structured_tp_reasons_raw:
+                    structured_tp_reasons_raw = _ensure_tp_reasons([], len(targets_final))
+                if not structured_runner:
+                    structured_runner = {
+                        "fraction": geometry.runner.fraction,
+                        "atr_trail_mult": geometry.runner.atr_trail_mult,
+                        "atr_trail_step": geometry.runner.atr_trail_step,
+                        "em_fraction_cap": geometry.runner.em_fraction_cap,
+                        "notes": list(getattr(geometry.runner, "notes", [])),
+                    }
+            else:
+                stop = structured_geometry.stop
+                targets_final = structured_geometry.targets
+                expected_move_points = structured_geometry.em_points
+                clamp_flag = structured_geometry.clamp_applied or geometry.em_used
+                geometry.stop.price = stop
+                geometry.stop.structural = stop
+                geometry.stop.snapped = structured_geometry.stop_label
+                geometry.em_day = expected_move_points
+                geometry.em_used = clamp_flag
             if len(geometry.targets) < len(targets_final):
                 geometry.targets.extend(geometry.targets[-1:] * (len(targets_final) - len(geometry.targets)))
-            risk = entry_price - stop if entry_price > stop else entry_price - stop
+
+            geometry.em_day = expected_move_points
+            geometry.em_used = clamp_flag
+            geometry.stop.price = stop
+            geometry.stop.structural = stop
+            if structured_geometry.stop_label:
+                geometry.stop.snapped = structured_geometry.stop_label
+
+            tp_reasons_aligned = _ensure_tp_reasons(structured_tp_reasons_raw, len(targets_final))
             target_entries = []
-            for idx, (meta, price, reason) in enumerate(zip(geometry.targets, targets_final, structured_geometry.tp_reasons), start=1):
-                meta.price = round(float(price), 2)
-                meta.distance = round(abs(float(price) - entry_price), 2)
-                reward = float(price) - entry_price
-                if entry_price != stop:
-                    meta.rr_multiple = round(max(reward, 0.0) / max(entry_price - stop, 1e-6), 2)
-                meta.em_fraction = (
-                    round(meta.distance / structured_geometry.em_points, 2) if structured_geometry.em_points else None
-                )
-                meta.reason = reason.get("snap_tag") or reason.get("reason")
-                meta.em_capped = structured_geometry.clamp_applied
+            risk_points = abs(entry_price - stop)
+            for idx, meta in enumerate(geometry.targets, start=1):
+                price_token = targets_final[idx - 1] if idx - 1 < len(targets_final) else getattr(meta, "price", entry_price)
+                try:
+                    price_val = round(float(price_token), 2)
+                except (TypeError, ValueError):
+                    price_val = round(float(entry_price), 2)
+                meta.price = price_val
+                meta.distance = round(abs(price_val - entry_price), 2)
+                reward = price_val - entry_price
+                rr_multiple = 0.0
+                if risk_points > 0:
+                    rr_multiple = max(reward, 0.0) / risk_points
+                meta.rr_multiple = round(rr_multiple, 2)
+                meta.em_fraction = round(meta.distance / expected_move_points, 2) if expected_move_points else None
+                meta.em_capped = clamp_flag
+                reason_payload = tp_reasons_aligned[idx - 1] if idx - 1 < len(tp_reasons_aligned) else {}
+                meta.reason = reason_payload.get("snap_tag") or reason_payload.get("reason")
                 target_entries.append(
                     {
-                        "price": round(float(price), 2),
+                        "price": price_val,
                         "prob_touch": meta.prob_touch,
                         "distance": meta.distance,
                         "rr_multiple": meta.rr_multiple,
                         "em_fraction": meta.em_fraction,
-                        "snap_tag": reason.get("snap_tag"),
-                        "em_capped": structured_geometry.clamp_applied,
+                        "snap_tag": reason_payload.get("snap_tag"),
+                        "em_capped": clamp_flag,
+                        "reason": reason_payload.get("reason"),
                     }
                 )
-            geometry.stop.price = stop
-            geometry.stop.structural = stop
-            geometry.stop.snapped = structured_geometry.stop_label
-            geometry.em_day = structured_geometry.em_points
-            geometry.em_used = structured_geometry.clamp_applied
-            geometry.runner.notes = list(structured_geometry.runner_policy.get("notes", geometry.runner.notes))
-            geometry.runner.fraction = float(structured_geometry.runner_policy.get("fraction", geometry.runner.fraction))
-            geometry.runner.atr_trail_mult = float(
-                structured_geometry.runner_policy.get("atr_trail_mult", geometry.runner.atr_trail_mult)
-            )
-            geometry.runner.atr_trail_step = float(
-                structured_geometry.runner_policy.get("atr_trail_step", geometry.runner.atr_trail_step)
-            )
-            geometry.runner.em_fraction_cap = float(
-                structured_geometry.runner_policy.get("em_fraction_cap", geometry.runner.em_fraction_cap)
-            )
-            stop = geometry.stop.price
-            rr = (targets_final[0] - entry_price) / (entry_price - stop) if entry_price != stop else 0.0
+
+            try:
+                geometry.runner.fraction = float(structured_runner.get("fraction", geometry.runner.fraction))
+                geometry.runner.atr_trail_mult = float(
+                    structured_runner.get("atr_trail_mult", geometry.runner.atr_trail_mult)
+                )
+                geometry.runner.atr_trail_step = float(
+                    structured_runner.get("atr_trail_step", geometry.runner.atr_trail_step)
+                )
+                geometry.runner.em_fraction_cap = float(
+                    structured_runner.get("em_fraction_cap", geometry.runner.em_fraction_cap)
+                )
+                geometry.runner.notes = list(structured_runner.get("notes", geometry.runner.notes))
+            except Exception:
+                geometry.runner.notes = list(structured_runner.get("notes", geometry.runner.notes))
+
+            if not structured_runner.get("trail"):
+                structured_runner["trail"] = f"ATR trail x {geometry.runner.atr_trail_mult:.2f}"
+
+            stop = round(float(stop), 2)
+            rr = (targets_final[0] - entry_price) / (entry_price - stop) if targets_final and entry_price != stop else 0.0
             probability = float(geometry.targets[0].prob_touch if geometry.targets else probability)
             runner_payload = {
-                "fraction": structured_geometry.runner_policy.get("fraction"),
-                "atr_multiple": structured_geometry.runner_policy.get("atr_trail_mult"),
-                "atr_step": structured_geometry.runner_policy.get("atr_trail_step"),
-                "em_fraction_cap": structured_geometry.runner_policy.get("em_fraction_cap"),
-                "notes": structured_geometry.runner_policy.get("notes"),
-                "trail": structured_geometry.runner_policy.get("trail"),
+                "fraction": structured_runner.get("fraction"),
+                "atr_multiple": structured_runner.get("atr_trail_mult"),
+                "atr_step": structured_runner.get("atr_trail_step"),
+                "em_fraction_cap": structured_runner.get("em_fraction_cap"),
+                "notes": structured_runner.get("notes"),
+                "trail": structured_runner.get("trail"),
             }
-            em_used_flag = structured_geometry.clamp_applied
+            em_used_flag = bool(clamp_flag)
             snap_trace_payload = geometry.snap_trace
-            structured_tp_reasons = structured_geometry.tp_reasons
-            key_levels_used_payload = structured_geometry.key_levels_used
+            structured_tp_reasons = tp_reasons_aligned
+            key_levels_used_payload = {
+                bucket: [dict(entry) for entry in entries] for bucket, entries in (key_levels_used or {}).items() if isinstance(entries, list)
+            }
         logger.debug(
             "planning_geometry",
             extra={
@@ -485,6 +558,7 @@ class PlanningScanEngine:
             "key_levels_used": key_levels_used_payload,
             "tp_reasons": structured_tp_reasons,
             "entry_candidates": entry_candidates,
+            "geometry_warnings": structured_warnings,
         }
         components = {
             "probability": round(probability, 3),
@@ -553,6 +627,42 @@ class PlanningScanEngine:
                     metrics = json.loads(metrics)
                 except Exception:
                     metrics = {}
+            if isinstance(metrics, Mapping):
+                entry_candidates_cached = metrics.get("entry_candidates")
+                if isinstance(entry_candidates_cached, list):
+                    metrics["entry_candidates"] = [
+                        dict(candidate) for candidate in entry_candidates_cached if isinstance(candidate, Mapping)
+                    ]
+                elif entry_candidates_cached is not None:
+                    metrics["entry_candidates"] = []
+                key_levels_used_cached = metrics.get("key_levels_used")
+                if isinstance(key_levels_used_cached, Mapping):
+                    metrics["key_levels_used"] = {
+                        bucket: [
+                            dict(entry) for entry in entries if isinstance(entry, Mapping)
+                        ]
+                        for bucket, entries in key_levels_used_cached.items()
+                        if isinstance(entries, list)
+                    }
+                elif key_levels_used_cached is not None:
+                    metrics["key_levels_used"] = {}
+                tp_reasons_cached = metrics.get("tp_reasons")
+                if isinstance(tp_reasons_cached, list):
+                    metrics["tp_reasons"] = [
+                        dict(reason) for reason in tp_reasons_cached if isinstance(reason, Mapping)
+                    ]
+                elif tp_reasons_cached is not None:
+                    metrics["tp_reasons"] = []
+                runner_policy_cached = metrics.get("runner_policy")
+                if isinstance(runner_policy_cached, Mapping):
+                    metrics["runner_policy"] = dict(runner_policy_cached)
+                elif runner_policy_cached is not None:
+                    metrics["runner_policy"] = {}
+                target_meta_cached = metrics.get("target_meta")
+                if isinstance(target_meta_cached, list):
+                    metrics["target_meta"] = [
+                        dict(item) for item in target_meta_cached if isinstance(item, Mapping)
+                    ]
             levels = row["levels"] or {}
             if isinstance(levels, str):
                 try:
