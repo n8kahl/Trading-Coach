@@ -306,14 +306,24 @@ def _quantize_stop_toward_entry(price: float, side: str, entry: float) -> float:
     return round(quantized, 2)
 
 
-def _enforce_monotonic_targets(entry: float, side: str, targets: Sequence[TargetMeta]) -> None:
+def _enforce_monotonic_targets(
+    entry: float,
+    side: str,
+    targets: Sequence[TargetMeta],
+    min_step: float = 0.01,
+) -> None:
+    min_step = max(0.01, float(min_step))
     prev = entry
     side_token = (side or "").lower()
     for meta in targets:
-        if side_token == "long" and meta.price <= prev:
-            meta.price = round(prev + 0.01, 2)
-        elif side_token == "short" and meta.price >= prev:
-            meta.price = round(prev - 0.01, 2)
+        if side_token == "long":
+            threshold = prev + min_step
+            if meta.price <= threshold - 1e-9:
+                meta.price = round(threshold, 2)
+        elif side_token == "short":
+            threshold = prev - min_step
+            if meta.price >= threshold + 1e-9:
+                meta.price = round(threshold, 2)
         prev = meta.price
         meta.distance = round(abs(meta.price - entry), 2)
 
@@ -328,7 +338,7 @@ def build_targets(
     style: str,
     strategy: Optional[str],
     levels: Optional[Mapping[str, float]],
-) -> Tuple[List[TargetMeta], bool]:
+) -> Tuple[List[TargetMeta], bool, Optional[float]]:
     style_key = _style_key(style)
     config = _STYLE_DEFAULTS[style_key]
     modifiers = _strategy_modifiers(strategy)
@@ -388,7 +398,12 @@ def build_targets(
                         other.price = round(first.price - max(0.1, atr_tf * 0.5), 2)
                     other.distance = round(abs(other.price - entry), 2)
     _enforce_monotonic_targets(entry, side, targets)
-    return targets, em_used
+    capped_distance: Optional[float]
+    if far_cap == float("inf"):
+        capped_distance = None
+    else:
+        capped_distance = float(far_cap)
+    return targets, em_used, capped_distance
 
 
 def compute_runner_policy(style: str, strategy: Optional[str]) -> RunnerPolicy:
@@ -468,7 +483,9 @@ def build_plan_geometry(
     if isinstance(tod_boost, (int, float)) and math.isfinite(tod_boost) and tod_boost > 0:
         tod_mult *= float(tod_boost)
     stop = derive_stop(entry, side, levels, atr_tf, style, strategy)
-    targets, em_used = build_targets(entry, side, atr_tf, em_day, ratr, tod_mult, style, strategy, levels)
+    targets, em_used, cap_distance = build_targets(
+        entry, side, atr_tf, em_day, ratr, tod_mult, style, strategy, levels
+    )
     runner = compute_runner_policy(style, strategy)
     style_key = _style_key(style)
     config = _STYLE_DEFAULTS[style_key]
@@ -515,6 +532,10 @@ def build_plan_geometry(
     risk = entry - stop.price if side == "long" else stop.price - entry
     if risk <= 0:
         risk = 0.001
+    required_reward = stop.rr_min * risk
+    rr_spacing: Optional[float] = None
+    if cap_distance is not None and required_reward > cap_distance + 1e-6:
+        rr_spacing = max(0.05, round(atr_tf * 0.5, 2))
     for meta in targets:
         meta.distance = round(abs(meta.price - entry), 2)
         reward = meta.price - entry if side == "long" else entry - meta.price
@@ -522,14 +543,13 @@ def build_plan_geometry(
         if em_day > 0:
             meta.em_fraction = round(meta.distance / em_day, 2)
     if targets and targets[0].rr_multiple < stop.rr_min:
-        required_reward = stop.rr_min * risk
         if side == "long":
             new_price = round(entry + required_reward, 2)
             targets[0].price = max(targets[0].price, new_price)
         else:
             new_price = round(entry - required_reward, 2)
             targets[0].price = min(targets[0].price, new_price)
-        _enforce_monotonic_targets(entry, side, targets)
+        _enforce_monotonic_targets(entry, side, targets, rr_spacing or 0.01)
         for meta in targets:
             meta.distance = round(abs(meta.price - entry), 2)
             reward = meta.price - entry if side == "long" else entry - meta.price
@@ -557,6 +577,11 @@ def build_plan_geometry(
                 risk = entry - stop.price if side == "long" else stop.price - entry
                 if risk <= 0:
                     risk = 0.001
+                required_reward = stop.rr_min * risk
+                spacing = 0.01
+                if cap_distance is not None and required_reward > cap_distance + 1e-6:
+                    spacing = max(0.05, round(atr_tf * 0.5, 2))
+                _enforce_monotonic_targets(entry, side, targets, spacing)
                 for meta in targets:
                     meta.distance = round(abs(meta.price - entry), 2)
                     reward = meta.price - entry if side == "long" else entry - meta.price
