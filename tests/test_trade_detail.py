@@ -606,7 +606,8 @@ async def test_gpt_plan_populates_completeness_fields(monkeypatch):
     assert response.source_paths.get("runner_policy") == "geometry_engine"
     assert response.plan and response.plan.get("target_meta")
     assert response.target_meta
-    assert response.snap_trace is not None
+    assert response.snap_trace is None
+    assert "snap_trace" not in (response.plan or {})
     assert response.targets_meta == response.target_meta
     assert response.risk_block and response.risk_block["risk_points"] > 0
     assert response.execution_rules and response.execution_rules["trigger"]

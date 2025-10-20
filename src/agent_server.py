@@ -7341,7 +7341,24 @@ async def gpt_plan(
     style_norm_req = (request_payload.style or "").strip().lower()
     style_lookup_key = style_norm_req or _SCAN_STYLE_ANY
 
+    def _prune_plan_payload(plan_payload: PlanResponse) -> None:
+        plan_payload.snap_trace = None
+        plan_payload.rejected_contracts = []
+        plan_payload.plan_layers = {}
+        if isinstance(plan_payload.plan, dict):
+            plan_payload.plan.pop("snap_trace", None)
+            plan_payload.plan.pop("rejected_contracts", None)
+        if isinstance(plan_payload.structured_plan, dict):
+            plan_payload.structured_plan.pop("snap_trace", None)
+            plan_payload.structured_plan.pop("rejected_contracts", None)
+        if isinstance(plan_payload.target_profile, dict):
+            plan_payload.target_profile.pop("snap_trace", None)
+        if isinstance(plan_payload.meta, dict):
+            plan_payload.meta.pop("snap_trace", None)
+            plan_payload.meta.pop("rejected_contracts", None)
+
     def _finalize_plan_response(plan_payload: PlanResponse) -> PlanResponse:
+        _prune_plan_payload(plan_payload)
         response.headers["X-No-Fabrication"] = "1"
         return plan_payload
     if session_token:
