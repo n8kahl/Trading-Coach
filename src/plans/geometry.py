@@ -280,6 +280,32 @@ def _probability_from_mfe_quantile(idx: int) -> float:
     return quantiles[min(idx, len(quantiles) - 1)]
 
 
+def _quantize_stop_toward_entry(price: float, side: str, entry: float) -> float:
+    """
+    Quantize the stop price to two decimals while moving it toward the entry.
+    Ensures we do not cross the entry boundary and bias rounding to preserve rr tightening.
+    """
+    side_token = (side or "").lower()
+    target = float(price)
+    if side_token == "long":
+        max_allowed = entry - 0.01
+        target = min(target, max_allowed)
+        cents = target * 100.0
+        quantized = math.ceil(cents - 1e-9) / 100.0
+        if quantized > max_allowed:
+            quantized = max_allowed
+    elif side_token == "short":
+        min_allowed = entry + 0.01
+        target = max(target, min_allowed)
+        cents = target * 100.0
+        quantized = math.floor(cents + 1e-9) / 100.0
+        if quantized < min_allowed:
+            quantized = min_allowed
+    else:
+        quantized = round(target, 2)
+    return round(quantized, 2)
+
+
 def _enforce_monotonic_targets(entry: float, side: str, targets: Sequence[TargetMeta]) -> None:
     prev = entry
     side_token = (side or "").lower()
@@ -521,7 +547,7 @@ def build_plan_geometry(
             else:
                 tightened = entry + min_risk
                 tightened = max(entry + 0.01, min(stop.price, tightened))
-            tightened = round(tightened, 2)
+            tightened = _quantize_stop_toward_entry(tightened, side, entry)
             if tightened != stop.price:
                 if stop.snapped:
                     stop.snapped = f"{stop.snapped}|rr_floor_stop_adjust"
