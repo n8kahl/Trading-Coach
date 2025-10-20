@@ -6370,6 +6370,7 @@ async def _generate_fallback_plan(
         getattr(settings, "ff_chart_canonical_v1", False) or getattr(settings, "ff_layers_endpoint", False)
     )
     include_options_contracts = True
+    plan: Dict[str, Any] = {}
     rejected_contracts: List[Dict[str, str]] = []
     options_contracts: List[Dict[str, Any]] | None = None
     options_note: str | None = None
@@ -6800,26 +6801,6 @@ async def _generate_fallback_plan(
                 options_note = "Options side unavailable for this plan"
             else:
                 options_note = "No tradeable contracts met filters"
-        if event_window_blocked:
-            options_contracts = []
-            options_note = "Blocked by event window"
-            if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
-                rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
-        if event_window_blocked:
-            options_contracts = []
-            options_note = "Blocked by event window"
-            if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
-                rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
-        if event_window_blocked:
-            options_contracts = []
-            options_note = "Blocked by event window"
-            if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
-                rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
-        if event_window_blocked:
-            options_contracts = []
-            options_note = "Blocked by event window"
-            if not any(rc.get("reason") == "EVENT_WINDOW_BLOCKED" for rc in rejected_contracts):
-                rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
         if event_window_blocked:
             options_contracts = []
             options_note = "Blocked by event window"
