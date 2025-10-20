@@ -6440,6 +6440,13 @@ async def _generate_fallback_plan(
         atr_value = max(close_price * 0.006, 0.25)
     key_levels = context.get("key") or {}
     snapshot = _build_market_snapshot(prepared, key_levels)
+    plan_ts = context.get("timestamp")
+    if isinstance(plan_ts, pd.Timestamp):
+        plan_ts_utc = plan_ts.tz_convert("UTC") if plan_ts.tzinfo else plan_ts.tz_localize("UTC")
+    else:
+        plan_ts_utc = pd.Timestamp.utcnow()
+    if is_plan_live:
+        plan_ts_utc = pd.Timestamp.utcnow()
     volatility = snapshot.get("volatility") or {}
     ema_trend_up = ema9 > ema20 > ema50
     ema_trend_down = ema9 < ema20 < ema50
@@ -6511,7 +6518,7 @@ async def _generate_fallback_plan(
         entry=entry,
         side=direction,
         style=style_token,
-        strategy=first.get("strategy_id"),
+        strategy=None,
         atr_tf=atr_value,
         atr_daily=atr_daily or atr_value,
         iv_expected_move=iv_move,
@@ -6645,13 +6652,6 @@ async def _generate_fallback_plan(
         key_levels_used=None,
         runner=runner,
     )
-    plan_ts = context.get("timestamp")
-    if isinstance(plan_ts, pd.Timestamp):
-        plan_ts_utc = plan_ts.tz_convert("UTC") if plan_ts.tzinfo else plan_ts.tz_localize("UTC")
-    else:
-        plan_ts_utc = pd.Timestamp.utcnow()
-    if is_plan_live:
-        plan_ts_utc = pd.Timestamp.utcnow()
     plan_id = f"{symbol.upper()}-{plan_ts_utc.strftime('%Y%m%dT%H%M%S')}-{style_token}-auto"
     view_token = _view_for_style(style_token)
     range_token = _range_for_style(style_token)
