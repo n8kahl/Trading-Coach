@@ -6967,9 +6967,6 @@ async def _generate_fallback_plan(
     if calibration_meta_payload:
         plan_block["calibration_meta"] = calibration_meta_payload
     plan = plan_block
-    first_ref = globals().get("first")
-    if isinstance(first_ref, dict):
-        first_ref["plan"] = plan_block
 
     plan_block["runner_policy"] = runner
     if geometry.snap_trace:
@@ -7298,9 +7295,7 @@ async def _generate_fallback_plan(
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
     mode_label = "live" if is_plan_live else "frozen"
     record_plan_duration(mode_label, elapsed_ms)
-    results_ref = globals().get("results")
-    candidate_count = len(results_ref) if isinstance(results_ref, Sequence) else 0
-    record_candidate_count(mode_label, candidate_count)
+    record_candidate_count(mode_label, 0)
     return plan_response
 
 
