@@ -10,7 +10,7 @@ from .levels import directional_nodes, last_higher_low, last_lower_high, profile
 MIN_ATR_MULT_TP1 = {"scalp": 0.50, "intraday": 0.75, "swing": 1.0, "leaps": 1.0}
 TP2_MIN_MULT = 1.5
 
-MAJOR_NODES = {"vah", "val", "poc", "gap_top", "gap_bottom", "gap"}
+MAJOR_NODES = {"vah", "val", "poc", "gap_top", "gap_bottom", "gap", "pwh", "pwl", "pwc", "pdh", "pdl", "pdc"}
 
 
 def _style_token(style: str) -> str:
@@ -47,6 +47,8 @@ def snap_targets(
     snapped: List[float] = []
     reasons: List[Dict[str, str | None]] = []
 
+    htf_labels = {"pwh", "pwl", "pwc", "pdh", "pdl", "pdc"}
+
     def pick_node(
         minimum_mult: float,
         target_hint: float | None = None,
@@ -62,6 +64,9 @@ def snap_targets(
                 if direction == "long" and price < target_hint:
                     continue
                 if direction == "short" and price > target_hint and distance > abs(target_hint - entry_val):
+                    continue
+            if label.lower() in htf_labels and target_hint is not None:
+                if abs(price - float(target_hint)) > max(atr_value * 0.25, 0.01):
                     continue
             if prefer_major and label.lower() not in MAJOR_NODES:
                 continue

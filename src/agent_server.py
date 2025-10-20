@@ -21,7 +21,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Set, Tuple, cast
 from collections import Counter
 import copy
 
@@ -139,6 +139,9 @@ from .plans import (
 from .plans.entry import select_structural_entry
 from .levels import inject_style_levels
 from .levels.snapper import Level, SnapContext, collect_levels, snap_prices
+from .features.mtf import compute_mtf_bundle, MTFBundle
+from .features.htf_levels import compute_htf_levels, HTFLevels
+from .strategy.engine import infer_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +334,9 @@ _PLAN_SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9\.:]{0,9}$")
 
 _MARKET_DATA_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _MARKET_DATA_CACHE_TTL = 300.0  # seconds
+
+_MTF_FRAME_CACHE: Dict[Tuple[str, str], Tuple[float, pd.DataFrame]] = {}
+_MTF_FRAME_CACHE_TTL = 180.0
 
 _CHART_URL_CACHE_TTL = 600.0
 _CHART_URL_CACHE: Dict[str, Tuple[float, str]] = {}
@@ -3054,6 +3060,87 @@ def _confluence_tags_for_snapshot(
             tags.append(f"RSI bearish ({interval_label})")
     tags.extend(_volume_profile_tags(entry, overlays, indicators.get("atr14"), interval_label))
     return tags
+
+
+async def _hydrate_mtf_context(
+    symbol: str,
+    *,
+    vwap_hint: Optional[float],
+) -> Tuple[Optional[MTFBundle], Optional[HTFLevels], Dict[str, pd.DataFrame]]:
+    """Fetch multi-timeframe bar data and derive MTF/HTF context."""
+
+    symbol_upper = symbol.upper()
+    interval_map = {"5m": "5", "15m": "15", "60m": "60", "D": "D"}
+    frames: Dict[str, pd.DataFrame] = {}
+    pending: List[Awaitable[pd.DataFrame | None]] = []
+    meta: List[Tuple[str, str, Tuple[str, str]]] = []
+    now = time.monotonic()
+
+    for tf, code in interval_map.items():
+        cache_key = (symbol_upper, code)
+        cached = _MTF_FRAME_CACHE.get(cache_key)
+        if cached and now - cached[0] < _MTF_FRAME_CACHE_TTL:
+            frames[tf] = cached[1].copy()
+            continue
+        pending.append(_load_remote_ohlcv(symbol, code))
+        meta.append((tf, code, cache_key))
+
+    if pending:
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        for (tf, code, cache_key), result in zip(meta, results):
+            if isinstance(result, Exception) or result is None:
+                logger.debug(
+                    "mtf_series_missing",
+                    extra={"symbol": symbol_upper, "timeframe": code, "detail": getattr(result, "args", None)},
+                )
+                frames[tf] = pd.DataFrame()
+                continue
+            frame = result.copy(deep=True)
+            if frame.empty:
+                frames[tf] = pd.DataFrame()
+                continue
+            if not isinstance(frame.index, pd.DatetimeIndex):
+                frame.index = pd.to_datetime(frame.index)
+            frame = frame.sort_index()
+            frames[tf] = frame
+            _MTF_FRAME_CACHE[cache_key] = (now, frame)
+
+    for tf in interval_map:
+        frames.setdefault(tf, pd.DataFrame())
+
+    try:
+        bundle = compute_mtf_bundle(
+            symbol_upper,
+            frames["5m"],
+            frames["15m"],
+            frames["60m"],
+            frames["D"],
+            vwap_hint,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("mtf_bundle_error", extra={"symbol": symbol_upper, "detail": str(exc)})
+        bundle = None
+
+    daily_frame = frames.get("D")
+    weekly_frame: Optional[pd.DataFrame] = None
+    if daily_frame is not None and not daily_frame.empty:
+        try:
+            daily_sorted = daily_frame.sort_index()
+            weekly_frame = (
+                daily_sorted.resample("1W")
+                .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+                .dropna()
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("weekly_resample_failed", extra={"symbol": symbol_upper, "detail": str(exc)})
+            weekly_frame = None
+    try:
+        htf_levels = compute_htf_levels(daily_frame if daily_frame is not None else None, weekly_frame)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("htf_levels_error", extra={"symbol": symbol_upper, "detail": str(exc)})
+        htf_levels = None
+
+    return bundle, htf_levels, frames
 
 
 async def _compute_multi_timeframe_confluence(
@@ -5955,6 +6042,7 @@ async def _legacy_scan(
 
     payload: List[Dict[str, Any]] = []
     options_cache: Dict[tuple[str, str], Dict[str, Any] | None] = {}
+    mtf_cache: Dict[str, Tuple[Optional[MTFBundle], Optional[HTFLevels], Dict[str, pd.DataFrame]]] = {}
     for signal in signals:
         style = _style_for_strategy(signal.strategy_id)
         if style_filter and style_filter != style:
@@ -6128,6 +6216,151 @@ async def _legacy_scan(
                 plan_direction or direction_hint,
                 snapshot,
             )
+
+        mtf_bundle: Optional[MTFBundle] = None
+        htf_levels: Optional[HTFLevels] = None
+        mtf_frames: Dict[str, pd.DataFrame] = {}
+        matched_rules_payload: List[Dict[str, Any]] = []
+        mtf_notes: List[str] = []
+        waiting_for_text: Optional[str] = None
+        htf_bias_token: Optional[str] = None
+        mtf_amp_feature: Optional[float] = None
+
+        try:
+            cached_mtf = mtf_cache.get(signal.symbol)
+            if cached_mtf is None:
+                vwap_hint_raw = (snapshot.get("indicators") or {}).get("vwap")
+                vwap_hint_val = float(vwap_hint_raw) if isinstance(vwap_hint_raw, (int, float)) else None
+                mtf_bundle, htf_levels, mtf_frames = await _hydrate_mtf_context(
+                    signal.symbol,
+                    vwap_hint=vwap_hint_val,
+                )
+                mtf_cache[signal.symbol] = (mtf_bundle, htf_levels, mtf_frames)
+            else:
+                mtf_bundle, htf_levels, mtf_frames = cached_mtf
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("mtf_context_inference_failed", extra={"symbol": signal.symbol, "detail": str(exc)})
+            mtf_bundle, htf_levels, mtf_frames = None, None, {}
+
+        timestamp_token = snapshot.get("timestamp_utc")
+        ts_value: Optional[datetime] = None
+        if isinstance(timestamp_token, str):
+            try:
+                ts_value = pd.Timestamp(timestamp_token).to_pydatetime()
+            except Exception:
+                ts_value = None
+
+        direction_token = (plan_direction or direction_hint or "long").lower()
+
+        strategy_ctx = {
+            "symbol": signal.symbol,
+            "timestamp": ts_value,
+            "mtf": mtf_bundle,
+            "htf_levels": htf_levels,
+            "price": entry_price,
+            "vwap": _safe_number((snapshot.get("indicators") or {}).get("vwap")),
+            "opening_range_high": key_levels.get("opening_range_high"),
+            "opening_range_low": key_levels.get("opening_range_low"),
+            "bars_5m": mtf_frames.get("5m"),
+            "bars_15m": mtf_frames.get("15m"),
+            "bars_60m": mtf_frames.get("60m"),
+        }
+
+        inferred_id = signal.strategy_id
+        strategy_profile_internal = None
+        try:
+            inferred_id, strategy_profile_internal = infer_strategy(direction_token, strategy_ctx)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("strategy_inference_failed", extra={"symbol": signal.symbol, "detail": str(exc)})
+
+        if inferred_id:
+            signal.strategy_id = inferred_id
+            style = _style_for_strategy(signal.strategy_id)
+
+        if strategy_profile_internal:
+            matched_rules_payload = [
+                {"id": item.id, "score": item.score, "reasons": list(item.reasons)}
+                for item in strategy_profile_internal.matched_rules
+            ]
+            waiting_for_text = strategy_profile_internal.waiting_for
+            if strategy_profile_internal.mtf:
+                mtf_payload_internal = dict(strategy_profile_internal.mtf)
+                mtf_notes = list(mtf_payload_internal.get("notes") or [])
+                htf_bias_token = mtf_payload_internal.get("bias")
+            else:
+                mtf_payload_internal = None
+        else:
+            mtf_payload_internal = None
+
+        if mtf_bundle and not mtf_notes:
+            mtf_notes = list(mtf_bundle.notes)
+        if mtf_bundle and not htf_bias_token:
+            htf_bias_token = mtf_bundle.bias_htf
+
+        if isinstance(signal.score, (int, float)) and mtf_bundle:
+            amp = mtf_amplifier(direction_token, mtf_bundle)
+            amp = max(0.9, min(1.1, amp))
+            signal.score = max(0.0, min(signal.score * amp, 1.0))
+            mtf_amp_feature = amp
+
+        merged_profile: Dict[str, Any] = get_strategy_profile(signal.strategy_id, style)
+
+        if strategy_profile_internal:
+            if strategy_profile_internal.badges:
+                combined_badges = list(merged_profile.get("badges") or [])
+                for badge in strategy_profile_internal.badges:
+                    if badge not in combined_badges:
+                        combined_badges.append(badge)
+                merged_profile["badges"] = combined_badges
+            if waiting_for_text:
+                merged_profile["waiting_for"] = waiting_for_text
+            if matched_rules_payload:
+                merged_profile["matched_rules"] = matched_rules_payload
+            if mtf_payload_internal:
+                merged_profile["mtf"] = mtf_payload_internal
+
+        if mtf_bundle and "mtf" not in merged_profile:
+            merged_profile["mtf"] = {
+                "bias": mtf_bundle.bias_htf,
+                "agreement": round(mtf_bundle.agreement, 2),
+                "notes": mtf_notes,
+            }
+
+        if plan_payload is not None:
+            plan_payload["strategy"] = signal.strategy_id
+            existing_profile = plan_payload.get("strategy_profile")
+            if isinstance(existing_profile, Mapping):
+                merged_profile.update(existing_profile)
+                if existing_profile.get("badges"):
+                    existing_badges = list(existing_profile.get("badges") or [])
+                    for badge in merged_profile.get("badges", []):
+                        if badge not in existing_badges:
+                            existing_badges.append(badge)
+                    merged_profile["badges"] = existing_badges
+            if waiting_for_text:
+                plan_payload["waiting_for"] = waiting_for_text
+                merged_profile["waiting_for"] = waiting_for_text
+            if matched_rules_payload:
+                plan_payload["matched_rules"] = matched_rules_payload
+                merged_profile["matched_rules"] = matched_rules_payload
+            if mtf_notes:
+                existing_notes = plan_payload.get("mtf_confluence") or []
+                plan_payload["mtf_confluence"] = _unique_tags(list(existing_notes) + mtf_notes)
+            if htf_bias_token:
+                htf_block = plan_payload.setdefault("htf", {})
+                if isinstance(htf_block, dict):
+                    htf_block["bias"] = htf_bias_token
+            existing_confluence = plan_payload.get("confluence") or []
+            if mtf_notes:
+                plan_payload["confluence"] = _unique_tags(list(existing_confluence) + mtf_notes)
+            plan_payload["strategy_profile"] = merged_profile
+
+        hint_interval_raw, hint_guidance = _chart_hint(signal.strategy_id, style)
+        try:
+            chart_interval_hint = normalize_interval(hint_interval_raw)
+        except ValueError:
+            chart_interval_hint = interval
+        chart_query["interval"] = chart_interval_hint
         chart_query["range"] = _range_for_style(style)
         bias_for_chart = plan_direction or direction_hint
         chart_query["title"] = _format_chart_title(signal.symbol, bias_for_chart, signal.strategy_id)
@@ -6196,6 +6429,18 @@ async def _legacy_scan(
         feature_payload = _serialize_features(signal.features)
         feature_payload.setdefault("atr", snapshot.get("indicators", {}).get("atr14"))
         feature_payload.setdefault("adx", snapshot.get("indicators", {}).get("adx14"))
+        if merged_profile.get("name"):
+            feature_payload.setdefault("strategy_name", merged_profile["name"])
+        if waiting_for_text:
+            feature_payload.setdefault("waiting_for", waiting_for_text)
+        if htf_bias_token:
+            feature_payload.setdefault("htf_bias", htf_bias_token)
+        if mtf_notes:
+            feature_payload.setdefault("mtf_confluence", mtf_notes)
+        if matched_rules_payload:
+            feature_payload.setdefault("matched_rules", matched_rules_payload)
+        if mtf_amp_feature is not None:
+            feature_payload.setdefault("mtf_amplifier", mtf_amp_feature)
         if signal.plan is not None:
             plan_dict = signal.plan.as_dict()
             for key, value in plan_dict.items():
@@ -6550,6 +6795,40 @@ async def _generate_fallback_plan(
         "swing_high": key_levels.get("swing_high"),
         "swing_low": key_levels.get("swing_low"),
     }
+    mtf_bundle: Optional[MTFBundle] = None
+    htf_levels: Optional[HTFLevels] = None
+    mtf_frames: Dict[str, pd.DataFrame] = {}
+    mtf_notes: List[str] = []
+    matched_rules_payload: List[Dict[str, Any]] = []
+    waiting_for_text: Optional[str] = None
+    htf_bias_token: Optional[str] = None
+    htf_payload: Dict[str, Any] | None = None
+
+    try:
+        vwap_hint_val = float(vwap_value) if isinstance(vwap_value, (int, float)) else None
+        mtf_bundle, htf_levels, mtf_frames = await _hydrate_mtf_context(symbol, vwap_hint=vwap_hint_val)
+    except Exception:  # pragma: no cover - defensive
+        mtf_bundle, htf_levels, mtf_frames = None, None, {}
+
+    if htf_levels:
+        htf_level_map = {
+            "pdh": htf_levels.pdh,
+            "pdl": htf_levels.pdl,
+            "pdc": htf_levels.pdc,
+            "pwh": htf_levels.pwh,
+            "pwl": htf_levels.pwl,
+            "pwc": htf_levels.pwc,
+            "vah": htf_levels.vah,
+            "val": htf_levels.val,
+            "poc": htf_levels.poc,
+        }
+        for key, value in htf_level_map.items():
+            if value is not None and math.isfinite(float(value)):
+                try:
+                    levels_map[key] = round(float(value), 2)
+                except (TypeError, ValueError):
+                    continue
+
     profile = context.get("volume_profile") or {}
     if isinstance(profile, Mapping):
         levels_map["vah"] = profile.get("VAH")
@@ -6613,6 +6892,115 @@ async def _generate_fallback_plan(
         entry_price = float(entry_candidates[0]["level"])
     else:
         entry_price = entry_seed if entry_seed else round(close_price, 2)
+
+    strategy_timestamp = plan_ts_utc.to_pydatetime() if isinstance(plan_ts_utc, pd.Timestamp) else plan_ts_utc
+    strategy_ctx = {
+        "symbol": symbol,
+        "timestamp": strategy_timestamp,
+        "mtf": mtf_bundle,
+        "htf_levels": htf_levels,
+        "price": entry_price,
+        "vwap": _safe_number(vwap_value),
+        "opening_range_high": levels_map.get("orh"),
+        "opening_range_low": levels_map.get("orl"),
+        "bars_5m": mtf_frames.get("5m"),
+        "bars_15m": mtf_frames.get("15m"),
+        "bars_60m": mtf_frames.get("60m"),
+    }
+
+    strategy_profile_internal = None
+    try:
+        inferred_id, strategy_profile_internal = infer_strategy(direction, strategy_ctx)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("fallback_strategy_inference_failed", extra={"symbol": symbol, "detail": str(exc)})
+        inferred_id = strategy_id_value
+
+    if inferred_id:
+        strategy_id_value = inferred_id
+
+    strategy_profile_payload = dict(get_strategy_profile(strategy_id_value, style_token))
+
+    if strategy_profile_internal:
+        matched_rules_payload = [
+            {"id": item.id, "score": item.score, "reasons": list(item.reasons)}
+            for item in strategy_profile_internal.matched_rules
+        ]
+        waiting_for_text = strategy_profile_internal.waiting_for
+        if strategy_profile_internal.badges:
+            base_badges = list(strategy_profile_payload.get("badges") or [])
+            for badge in strategy_profile_internal.badges:
+                if badge not in base_badges:
+                    base_badges.append(badge)
+            strategy_profile_payload["badges"] = base_badges
+        if strategy_profile_internal.mtf:
+            strategy_profile_payload["mtf"] = dict(strategy_profile_internal.mtf)
+
+    if mtf_bundle and "mtf" not in strategy_profile_payload:
+        strategy_profile_payload["mtf"] = {
+            "bias": mtf_bundle.bias_htf,
+            "agreement": round(mtf_bundle.agreement, 2),
+            "notes": list(mtf_bundle.notes),
+        }
+
+    mtf_payload_dict = strategy_profile_payload.get("mtf") or {}
+    if mtf_payload_dict:
+        mtf_notes = list(mtf_payload_dict.get("notes") or mtf_notes)
+        htf_bias_token = mtf_payload_dict.get("bias") or htf_bias_token
+        if "agreement" in mtf_payload_dict:
+            try:
+                mtf_payload_dict["agreement"] = round(float(mtf_payload_dict.get("agreement", 0.0)), 2)
+            except (TypeError, ValueError):
+                pass
+        strategy_profile_payload["mtf"] = mtf_payload_dict
+
+    if not mtf_notes and mtf_bundle:
+        mtf_notes = list(mtf_bundle.notes)
+    if not htf_bias_token and mtf_bundle:
+        htf_bias_token = mtf_bundle.bias_htf
+
+    if waiting_for_text:
+        strategy_profile_payload["waiting_for"] = waiting_for_text
+    if matched_rules_payload:
+        strategy_profile_payload["matched_rules"] = matched_rules_payload
+
+    if strategy_id_value != "baseline_auto" and strategy_profile_payload.get("name") == "Discretionary Setup":
+        strategy_id_value = "baseline_auto"
+        strategy_profile_payload = dict(get_strategy_profile(strategy_id_value, style_token))
+        matched_rules_payload = []
+        waiting_for_text = None
+        mtf_notes = list(mtf_bundle.notes) if mtf_bundle else []
+
+    plan["strategy"] = strategy_id_value
+    plan["strategy_profile"] = strategy_profile_payload
+    if waiting_for_text:
+        plan["waiting_for"] = waiting_for_text
+    else:
+        plan.pop("waiting_for", None)
+    if matched_rules_payload:
+        plan["matched_rules"] = matched_rules_payload
+    else:
+        plan.pop("matched_rules", None)
+    if mtf_notes:
+        existing_notes = plan.get("mtf_confluence") or []
+        plan["mtf_confluence"] = _unique_tags(list(existing_notes) + mtf_notes)
+    if htf_bias_token:
+        htf_payload = {"bias": htf_bias_token}
+        plan_htf_block = plan.setdefault("htf", {})
+        if isinstance(plan_htf_block, dict):
+            plan_htf_block["bias"] = htf_bias_token
+    elif mtf_bundle:
+        htf_payload = {"bias": mtf_bundle.bias_htf}
+        plan.setdefault("htf", dict(htf_payload))
+
+    if mtf_bundle:
+        debug_block = plan.setdefault("debug", {})
+        strategy_debug = debug_block.setdefault("strategy", {})
+        strategy_debug["mtf"] = {
+            "bias": mtf_bundle.bias_htf,
+            "agreement": round(mtf_bundle.agreement, 2),
+            "notes": mtf_notes,
+        }
+
     atr_daily = context.get("atr_1d") or context.get("atr_1w") or atr_value
     iv_move = volatility.get("expected_move") if isinstance(volatility, Mapping) else None
     realized_range = 0.0
@@ -6746,6 +7134,8 @@ async def _generate_fallback_plan(
         if direction == "short" and close_price <= vwap_value:
             confidence_factors.append("Below VWAP")
     confluence_tags = _unique_tags(confidence_factors)
+    if mtf_notes:
+        confluence_tags = _unique_tags(confluence_tags + mtf_notes)
     expected_move_basis = None
     if isinstance(expected_move_abs, (int, float)) and math.isfinite(expected_move_abs) and expected_move_abs > 0:
         expected_move_pct = (expected_move_abs / close_price) * 100 if close_price else 0.0
@@ -6833,7 +7223,7 @@ async def _generate_fallback_plan(
             logger.info("fallback contract lookup skipped for %s: %s", symbol, exc)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("fallback contract lookup error for %s: %s", symbol, exc)
-    hint_interval_raw, hint_guidance = _chart_hint("baseline_auto", style_token)
+    hint_interval_raw, hint_guidance = _chart_hint(strategy_id_value, style_token)
     try:
         chart_timeframe_hint = normalize_interval(hint_interval_raw)
     except ValueError:
@@ -6850,6 +7240,13 @@ async def _generate_fallback_plan(
         )
     except Exception:  # pragma: no cover - defensive
         mtf_confluence_tags = []
+    plan_mtf_confluence = plan.get("mtf_confluence") if isinstance(plan, Mapping) else None
+    if isinstance(plan_mtf_confluence, (list, tuple)):
+        mtf_confluence_tags = _unique_tags(list(mtf_confluence_tags) + [str(item) for item in plan_mtf_confluence if item])
+    if mtf_notes:
+        mtf_confluence_tags = _unique_tags(list(mtf_confluence_tags) + mtf_notes)
+    if mtf_notes:
+        mtf_confluence_tags = _unique_tags(list(mtf_confluence_tags) + mtf_notes)
     stop_multiple_val = None
     if atr_value and atr_value > 0:
         stop_multiple_val = abs(entry_price - stop) / atr_value
@@ -7413,6 +7810,13 @@ async def _generate_fallback_plan(
         runner_policy_output = runner_output
     if (not runner_policy_output) and runner_policy_geometry:
         runner_policy_output = runner_policy_geometry
+    htf_payload_final: Dict[str, Any]
+    if htf_payload:
+        htf_payload_final = dict(htf_payload)
+    else:
+        htf_payload_final = {"bias": direction}
+    htf_payload_final.setdefault("snapped_targets", [])
+
     plan_response = PlanResponse(
         plan_id=plan_id,
         version=1,
@@ -7462,15 +7866,12 @@ async def _generate_fallback_plan(
         options_note=options_note if include_options_contracts else None,
         calc_notes={
             "atr14": round(float(atr_value), 4),
-        "rr_inputs": {"entry": entry_price, "stop": stop, "tp1": targets[0]},
+            "rr_inputs": {"entry": entry_price, "stop": stop, "tp1": targets[0]},
         },
-        htf={
-            "bias": direction,
-            "snapped_targets": [],
-        },
+        htf=htf_payload_final,
         decimals=2,
         data_quality=data_quality,
-        debug={"source": "auto_fallback_plan"},
+        debug=plan_block.get("debug") or {"source": "auto_fallback_plan"},
         runner=runner,
         runner_policy=runner_policy_output,
         risk_block=risk_block,
@@ -7567,6 +7968,10 @@ async def _generate_fallback_plan(
         meta_payload["tp_reasons"] = plan_response.tp_reasons
     if strategy_profile_payload:
         meta_payload["strategy_profile"] = strategy_profile_payload
+    if htf_payload_final:
+        meta_payload["htf"] = htf_payload_final
+    if mtf_confluence_payload:
+        meta_payload["mtf_confluence"] = mtf_confluence_payload
     if plan_badges:
         meta_payload["badges"] = plan_badges
     plan_response.meta = meta_payload or None
@@ -7746,9 +8151,43 @@ async def gpt_plan(
     runner_policy_output = None
     snap_trace_output = None
 
-    strategy_id_value = first.get("strategy_id") or plan.get("strategy")
+    strategy_id_value = (plan.get("strategy") or first.get("strategy_id") or "baseline_auto")
+    plan["strategy"] = strategy_id_value
     style_token = plan.get("style") or first.get("style") or request_payload.style
-    strategy_profile_payload = get_strategy_profile(strategy_id_value, style_token)
+    base_strategy_profile = get_strategy_profile(strategy_id_value, style_token)
+    existing_strategy_profile = plan.get("strategy_profile")
+    if isinstance(existing_strategy_profile, Mapping):
+        strategy_profile_payload = dict(base_strategy_profile)
+        strategy_profile_payload.update(existing_strategy_profile)
+        existing_badges = list(existing_strategy_profile.get("badges") or [])
+        base_badges = list(strategy_profile_payload.get("badges") or [])
+        combined_badges = list(dict.fromkeys(base_badges + existing_badges)) if base_badges or existing_badges else []
+        if combined_badges:
+            strategy_profile_payload["badges"] = combined_badges
+        waiting_for_existing = plan.get("waiting_for") or existing_strategy_profile.get("waiting_for")
+        if waiting_for_existing:
+            strategy_profile_payload.setdefault("waiting_for", waiting_for_existing)
+        matched_rules_existing = plan.get("matched_rules") or existing_strategy_profile.get("matched_rules")
+        if matched_rules_existing:
+            strategy_profile_payload.setdefault("matched_rules", matched_rules_existing)
+    else:
+        strategy_profile_payload = dict(base_strategy_profile)
+    plan["strategy_profile"] = strategy_profile_payload
+    htf_payload = plan.get("htf") if isinstance(plan.get("htf"), Mapping) else None
+    mtf_notes_plan: List[str] = []
+    mtf_payload_plan = strategy_profile_payload.get("mtf")
+    if isinstance(mtf_payload_plan, Mapping):
+        mtf_notes_plan = list(mtf_payload_plan.get("notes") or [])
+    if mtf_payload_plan:
+        plan_debug_block = plan.setdefault("debug", {})
+        strategy_debug_block = plan_debug_block.setdefault("strategy", {})
+        strategy_debug_block["mtf"] = dict(mtf_payload_plan)
+        if mtf_notes_plan and not plan.get("mtf_confluence"):
+            plan["mtf_confluence"] = list(mtf_notes_plan)
+    if strategy_profile_payload.get("waiting_for"):
+        plan["waiting_for"] = strategy_profile_payload.get("waiting_for")
+    if strategy_profile_payload.get("matched_rules"):
+        plan["matched_rules"] = strategy_profile_payload.get("matched_rules")
     hint_interval_raw, hint_guidance = _chart_hint(strategy_id_value, style_token)
     try:
         chart_timeframe_hint = normalize_interval(hint_interval_raw)
@@ -8311,10 +8750,12 @@ async def gpt_plan(
         snapped_names = []
         key_level_matches = []
 
-    htf = {
-        "bias": ((snapshot.get("trend") or {}).get("ema_stack") or "unknown"),
-        "snapped_targets": snapped_names,
-    }
+    if isinstance(htf_payload, Mapping):
+        htf = dict(htf_payload)
+    else:
+        htf = {"bias": (plan.get("direction") or (snapshot.get("trend") or {}).get("direction_hint") or (snapshot.get("trend") or {}).get("ema_stack") or "unknown")}
+    htf.setdefault("snapped_targets", snapped_names)
+    plan.setdefault("htf", htf)
     data_quality = {
         "series_present": True,
         "iv_present": True,
@@ -8702,6 +9143,8 @@ async def gpt_plan(
             break
     confidence_values = list(confidence_factors or [])
     confluence_tags = _unique_tags(confidence_values + list(snapped_names))
+    if mtf_notes_plan:
+        confluence_tags = _unique_tags(confluence_tags + mtf_notes_plan)
     if plan_layers is not None:
         meta = plan_layers.setdefault("meta", {})
         if not isinstance(meta.get("level_groups"), dict):
@@ -8907,6 +9350,12 @@ async def gpt_plan(
     key_levels_used = _nativeify(key_levels_used) if key_levels_used else key_levels_used
     plan = _nativeify(plan) if isinstance(plan, Mapping) else plan
     plan_block = plan if isinstance(plan, Mapping) else {}
+    plan_debug_block = plan_block.get("debug") if isinstance(plan_block.get("debug"), Mapping) else None
+    if plan_debug_block:
+        combined_debug = dict(plan_debug_block)
+        if debug_payload:
+            combined_debug.update(debug_payload)
+        debug_payload = combined_debug
     accuracy_levels_payload = _nativeify(plan_block.get("accuracy_levels")) if plan_block.get("accuracy_levels") else []
     source_paths_payload = _nativeify(plan_block.get("source_paths")) if plan_block.get("source_paths") else {}
     plan_target_meta = _nativeify(plan_block.get("target_meta")) if plan_block.get("target_meta") else None
@@ -8919,7 +9368,7 @@ async def gpt_plan(
         symbol=first.get("symbol"),
         style=first.get("style"),
         bias=bias_output,
-        setup=first.get("strategy_id"),
+        setup=strategy_id_value,
         entry=entry_output,
         stop=stop_output,
         targets=targets_output,
@@ -8941,7 +9390,7 @@ async def gpt_plan(
         chart_url=chart_url_output,
         chart_timeframe=chart_timeframe_hint,
         chart_guidance=hint_guidance,
-        strategy_id=first.get("strategy_id"),
+        strategy_id=strategy_id_value,
         description=first.get("description"),
         score=first.get("score"),
         plan=plan_payload,
@@ -9006,6 +9455,12 @@ async def gpt_plan(
         meta_payload["entry_candidates"] = plan_response.entry_candidates
     if plan_response.tp_reasons:
         meta_payload["tp_reasons"] = plan_response.tp_reasons
+    if plan_response.strategy_profile:
+        meta_payload["strategy_profile"] = plan_response.strategy_profile
+    if plan_response.htf:
+        meta_payload["htf"] = plan_response.htf
+    if plan_response.confluence:
+        meta_payload["mtf_confluence"] = plan_response.confluence
     plan_response.meta = meta_payload or None
     return _finalize_plan_response(plan_response)
 
