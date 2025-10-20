@@ -6003,7 +6003,13 @@ async def _generate_fallback_plan(
         session_payload,
         simulate_open=simulate_open,
     )
+    simulated_banner_text = _format_simulated_banner(as_of_dt) if simulate_open else None
     is_plan_live = bool(is_open)
+    if simulate_open:
+        if isinstance(market_meta, dict):
+            market_meta.setdefault("simulated_open", True)
+        if isinstance(data_meta, dict):
+            data_meta.setdefault("simulated_open", True)
     timeframe_map = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}
     timeframe = timeframe_map.get(style_token, "5")
     try:
