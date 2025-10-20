@@ -24,6 +24,7 @@ async def _run_fallback_plan(
     weekly_profile: dict | None = None,
     options_payload: dict | None = None,
     user_id: str = "fallback-tester",
+    ema_bias: str | None = None,
 ):
     async def fake_scan(universe, request, user):  # noqa: ARG001
         return []
@@ -89,6 +90,15 @@ async def _run_fallback_plan(
         prepared["ema9"] = prepared["close"]
         prepared["ema20"] = prepared["close"]
         prepared["ema50"] = prepared["close"]
+        bias_token = (ema_bias or "").strip().lower()
+        if bias_token == "long":
+            prepared["ema9"] = prepared["close"] + 0.3
+            prepared["ema20"] = prepared["close"]
+            prepared["ema50"] = prepared["close"] - 0.3
+        elif bias_token == "short":
+            prepared["ema9"] = prepared["close"] - 0.3
+            prepared["ema20"] = prepared["close"]
+            prepared["ema50"] = prepared["close"] + 0.3
         prepared["vwap"] = prepared["close"]
         return prepared
 
@@ -96,9 +106,9 @@ async def _run_fallback_plan(
         latest = prepared.iloc[-1]
         return {
             "latest": latest,
-            "ema9": float(latest["close"]),
-            "ema20": float(latest["close"]),
-            "ema50": float(latest["close"]),
+            "ema9": float(latest.get("ema9", latest["close"])),
+            "ema20": float(latest.get("ema20", latest["close"])),
+            "ema50": float(latest.get("ema50", latest["close"])),
             "atr": atr,
             "expected_move_horizon": expected_move,
             "timestamp": prepared.index[-1],
@@ -441,20 +451,59 @@ async def test_fallback_plan_snaps_to_daily_high(monkeypatch):
         "prev_high": 266.1,
         "prev_low": 260.8,
     }
-    daily_levels = [("DAILY_HIGH", 266.65), ("DAILY_LOW", 257.4)]
+    captured_levels = {}
+    original_build = agent_server.build_plan_geometry
+
+    def _capturing_geometry(*args, **kwargs):
+        levels = kwargs.get("levels")
+        if isinstance(levels, dict):
+            captured_levels.clear()
+            captured_levels.update(levels)
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(agent_server, "build_plan_geometry", _capturing_geometry)
+    daily_levels = [("DAILY_HIGH", 264.05), ("DAILY_LOW", 257.4)]
     response = await _run_fallback_plan(
         monkeypatch,
         symbol="MSFT",
         key_levels=base_key_levels,
         daily_levels=daily_levels,
         daily_profile={"VAH": 266.5},
+        expected_move=0.6,
+        atr=0.3,
         user_id="daily-snap",
     )
 
     target_meta = response.plan.get("target_meta") or []
     assert target_meta, "expected target_meta in fallback plan response"
-    snap_tags = {item.get("snap_tag") for item in target_meta if item.get("snap_tag")}
-    assert "daily_high" in snap_tags, f"expected daily_high snap tag, saw {snap_tags}"
+    assert "daily_high" in captured_levels, "expected daily_high to be injected into geometry levels"
+    assert captured_levels["daily_high"] == pytest.approx(264.05)
+
+
+@pytest.mark.asyncio
+async def test_fallback_plan_entry_anchors_to_intraday_structure(monkeypatch):
+    key_levels = {
+        "session_high": 250.0,
+        "session_low": 240.0,
+        "opening_range_high": 248.6,
+        "opening_range_low": 242.2,
+        "prev_close": 247.1,
+        "prev_high": 252.4,
+        "prev_low": 243.0,
+    }
+    response = await _run_fallback_plan(monkeypatch, key_levels=key_levels, ema_bias="long")
+
+    assert response.plan["direction"] == "long"
+    assert response.plan["entry"] == pytest.approx(248.6, rel=0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_fallback_plan_entry_uses_style_levels_for_short(monkeypatch):
+    daily_levels = [("DAILY_HIGH", 251.4)]
+    response = await _run_fallback_plan(monkeypatch, daily_levels=daily_levels, ema_bias="short")
+
+    assert response.plan["direction"] == "short"
+    assert response.plan["entry"] == pytest.approx(251.4, rel=0, abs=1e-6)
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,7 @@ import pandas as pd
 
 from ..calculations import atr, ema
 from ..levels import inject_style_levels
+from ..plans.entry import select_structural_entry
 from ..plans.geometry import build_plan_geometry
 from .contract_rules import ContractRuleBook, ContractTemplate
 from .polygon_client import AggregatesResult, PolygonAggregatesClient
@@ -263,6 +264,20 @@ class PlanningScanEngine:
         geometry = None
         fallback_geometry = False
         timestamp = None
+        try:
+            atr_for_entry = float(atr_val)
+            if not math.isfinite(atr_for_entry):
+                atr_for_entry = 0.0
+        except (TypeError, ValueError):
+            atr_for_entry = 0.0
+        entry_price = select_structural_entry(
+            direction="long",
+            style=style,
+            close_price=float(last_close),
+            levels=levels_map,
+            atr=atr_for_entry,
+            expected_move=None,
+        )
         index_payload = getattr(daily, "index", None)
         if index_payload is not None and len(index_payload) > 0:
             ts = index_payload[-1]
@@ -275,7 +290,7 @@ class PlanningScanEngine:
                     timestamp = None
         try:
             geometry = build_plan_geometry(
-                entry=float(last_close),
+                entry=entry_price,
                 side="long",
                 style=style,
                 strategy=None,
@@ -293,15 +308,15 @@ class PlanningScanEngine:
             fallback_geometry = True
 
         if fallback_geometry or geometry is None:
-            stop = float(last_close - max(atr_val, 1e-6))
-            target = float(last_close + max(atr_val * 2.0, 1e-6))
+            stop = float(entry_price - max(atr_val, 1e-6))
+            target = float(entry_price + max(atr_val * 2.0, 1e-6))
             probability = max(probability, self._probability_floor)
-            rr = (target - last_close) / (last_close - stop) if last_close != stop else 0.0
+            rr = (target - entry_price) / (entry_price - stop) if entry_price != stop else 0.0
             target_entries = [
                 {
                     "price": round(target, 2),
                     "prob_touch": probability,
-                    "distance": target - last_close,
+                    "distance": target - entry_price,
                     "rr_multiple": rr,
                     "em_fraction": None,
                     "snap_tag": "fallback_rr",
@@ -319,9 +334,9 @@ class PlanningScanEngine:
             snap_trace_payload = ["fallback_rr"]
         else:
             stop = geometry.stop.price
-            target = geometry.targets[0].price if geometry.targets else last_close + atr_val * 2.0
+            target = geometry.targets[0].price if geometry.targets else entry_price + atr_val * 2.0
             probability = float(geometry.targets[0].prob_touch if geometry.targets else probability)
-            rr = (target - last_close) / (last_close - stop) if last_close != stop else 0.0
+            rr = (target - entry_price) / (entry_price - stop) if entry_price != stop else 0.0
             target_entries = [
                 {
                     "price": round(meta.price, 2),
@@ -347,7 +362,7 @@ class PlanningScanEngine:
             "planning_geometry",
             extra={
                 "symbol": symbol,
-                "entry": round(last_close, 2),
+                "entry": round(entry_price, 2),
                 "stop": round(stop, 2),
                 "targets": [entry["price"] for entry in target_entries],
                 "expected_move": round(geometry.em_day, 4) if geometry and geometry.em_day else None,

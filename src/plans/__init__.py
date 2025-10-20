@@ -11,6 +11,7 @@ from .geometry import (
     remaining_atr,
     tod_multiplier,
 )
+from .entry import select_structural_entry
 
 __all__ = [
     "GeometryConfig",
@@ -22,4 +23,5 @@ __all__ = [
     "compute_expected_move",
     "remaining_atr",
     "tod_multiplier",
+    "select_structural_entry",
 ]

@@ -130,8 +130,9 @@ from .telemetry import (
     record_selector_rejections,
 )
 from .plans.geometry import build_plan_geometry, RunnerPolicy
+from .plans.entry import select_structural_entry
 from .levels import inject_style_levels
-from .levels.snapper import Level, SnapContext, snap_prices
+from .levels.snapper import Level, SnapContext, collect_levels, snap_prices
 
 logger = logging.getLogger(__name__)
 
@@ -6462,27 +6463,6 @@ async def _generate_fallback_plan(
         direction = "short"
     else:
         direction = "long" if close_price >= ema50 else "short"
-    session_high = key_levels.get("session_high")
-    session_low = key_levels.get("session_low")
-    or_high = key_levels.get("opening_range_high")
-    or_low = key_levels.get("opening_range_low")
-    if direction == "long":
-        candidates = [close_price, session_high, or_high]
-        entry_base = max(
-            float(val)
-            for val in candidates
-            if isinstance(val, (int, float)) and math.isfinite(float(val))
-        )
-        entry = round(entry_base, 2)
-    else:
-        candidates = [close_price, session_low, or_low]
-        entry_base = min(
-            float(val)
-            for val in candidates
-            if isinstance(val, (int, float)) and math.isfinite(float(val))
-        )
-        entry = round(entry_base, 2)
-    entry_price = float(entry)
     gap_fill_level = key_levels.get("prev_close")
     if isinstance(gap_fill_level, (int, float)):
         gap_fill_level = float(gap_fill_level)
@@ -6511,6 +6491,14 @@ async def _generate_fallback_plan(
     if gap_fill_level:
         levels_map["gap_fill"] = gap_fill_level
     inject_style_levels(levels_map, context, style_token)
+    entry_price = select_structural_entry(
+        direction=direction,
+        style=style_token,
+        close_price=close_price,
+        levels=levels_map,
+        atr=atr_value if isinstance(atr_value, (int, float)) else 0.0,
+        expected_move=expected_move_abs,
+    )
     atr_daily = context.get("atr_1d") or context.get("atr_1w") or atr_value
     iv_move = volatility.get("expected_move") if isinstance(volatility, Mapping) else None
     realized_range = 0.0
@@ -6603,7 +6591,7 @@ async def _generate_fallback_plan(
     side_hint = _infer_contract_side(None, direction)
     if include_options_contracts and side_hint:
         plan_anchor = {
-            "underlying_entry": entry,
+            "underlying_entry": entry_price,
             "stop": stop,
             "targets": targets[:2],
             "horizon_minutes": 60 if style_public in {"swing", "leaps"} else 30,
@@ -6668,7 +6656,7 @@ async def _generate_fallback_plan(
         "symbol": _tv_symbol(symbol),
         "interval": chart_timeframe_hint or interval_token,
         "direction": direction,
-        "entry": f"{entry:.2f}",
+        "entry": f"{entry_price:.2f}",
         "stop": f"{stop:.2f}",
         "tp": ",".join(f"{target:.2f}" for target in targets),
         "ema": "9,20,50",
@@ -6926,7 +6914,7 @@ async def _generate_fallback_plan(
             "symbol": symbol,
             "style": style_token,
             "strategy": None,
-            "entry": entry,
+            "entry": entry_price,
             "stop": stop,
             "targets": targets,
             "expected_move": plan_block.get("expected_move"),
@@ -7160,7 +7148,7 @@ async def _generate_fallback_plan(
         style=style_token,
         bias=direction,
         setup=strategy_id_value or "baseline_auto",
-        entry=entry,
+        entry=entry_price,
         stop=stop,
         targets=targets,
         target_meta=target_meta,
@@ -9035,7 +9023,7 @@ async def simulate_trade(
 ) -> StreamingResponse:
     params = {
         "minutes": minutes,
-        "entry": entry,
+        "entry": entry_price,
         "stop": stop,
         "tp1": tp1,
         "tp2": tp2,

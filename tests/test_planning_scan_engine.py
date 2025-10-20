@@ -86,6 +86,7 @@ async def test_planning_scan_injects_daily_levels(monkeypatch):
     )
 
     captured_levels: Dict[str, float] = {}
+    captured_entry: Dict[str, float | None] = {"value": None}
     original_build = scan_engine_module.build_plan_geometry
 
     def _capturing_build_plan_geometry(*args, **kwargs):
@@ -93,6 +94,8 @@ async def test_planning_scan_injects_daily_levels(monkeypatch):
         if isinstance(levels, dict):
             captured_levels.clear()
             captured_levels.update(levels)
+        if "entry" in kwargs:
+            captured_entry["value"] = kwargs["entry"]
         return original_build(*args, **kwargs)
 
     monkeypatch.setattr(scan_engine_module, "build_plan_geometry", _capturing_build_plan_geometry)
@@ -100,3 +103,6 @@ async def test_planning_scan_injects_daily_levels(monkeypatch):
     result = await engine.run(universe, style="intraday")
     assert result.candidates, "Expected at least one candidate"
     assert "daily_high" in captured_levels, f"expected daily_high in injected levels, saw {captured_levels.keys()}"
+    assert captured_entry["value"] is not None, "expected entry to be captured"
+    expected_entry = round(prices[-1] * 0.99, 2)
+    assert captured_entry["value"] == pytest.approx(expected_entry, rel=0, abs=1e-6)
