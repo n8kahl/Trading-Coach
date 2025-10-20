@@ -40,7 +40,7 @@ async def test_planning_candidate_includes_actionability():
 
     page = _planning_scan_to_page(output, request)
 
-    assert page.candidates[0].confidence == pytest.approx(0.85)
+    assert page.candidates[0].confidence == pytest.approx(0.88)
     assert page.candidates[0].actionable_soon is True
     assert any("Actionability" in reason for reason in page.candidates[0].reasons)
     assert page.candidates[0].entry_distance_atr == pytest.approx(0.4)

@@ -3632,6 +3632,7 @@ def _planning_scan_to_page(
         components = candidate.components or {}
         metrics = candidate.metrics or {}
         probability = float(components.get("probability") or 0.0)
+        readiness_score = float(candidate.readiness_score or 0.0)
         actionability_component = components.get("actionability")
         risk_reward_component = components.get("risk_reward")
         entry_distance_pct = metrics.get("entry_distance_pct")
@@ -3673,7 +3674,7 @@ def _planning_scan_to_page(
             entry=candidate.levels.get("entry"),
             stop=candidate.levels.get("invalidation"),
             tps=list(candidate.levels.get("targets") or []),
-            confidence=probability,
+            confidence=readiness_score,
             entry_distance_pct=entry_distance_pct,
             entry_distance_atr=entry_distance_atr,
             bars_to_trigger=bars_to_trigger,
@@ -6450,6 +6451,9 @@ async def _generate_fallback_plan(
         style=style_token,
         bias=direction,
     )
+    target_profile_dict = target_profile.to_dict()
+    if em_cap_used:
+        target_profile_dict["em_used"] = True
     structured_plan = build_structured_plan(
         plan_id=plan_id,
         symbol=symbol.upper(),
@@ -6495,9 +6499,6 @@ async def _generate_fallback_plan(
             structured_plan["banners"] = banners_list
         if simulated_banner_text not in banners_list:
             banners_list.append(simulated_banner_text)
-    target_profile_dict = target_profile.to_dict()
-    if em_cap_used:
-        target_profile_dict["em_used"] = True
     warnings_payload = list(dict.fromkeys(plan_warnings)) if plan_warnings else []
     chart_params_payload = {key: str(value) for key, value in chart_params.items()}
     charts_payload: Dict[str, Any] = {"params": chart_params_payload, "interactive": chart_url_with_ids}

@@ -19,9 +19,11 @@ from .. import db
 logger = logging.getLogger(__name__)
 
 
+# ...
+
 @dataclass
 class PlanningRunRecord:
-    as_of_utc: str
+    as_of_utc: datetime
     universe_name: str
     universe_source: str
     tickers: Sequence[str]
@@ -133,6 +135,17 @@ class PlanningPersistence:
         try:
             async with pool.acquire() as conn:
                 supports_style = await self._has_run_style_column(conn)
+                as_of_value: datetime | str = run.as_of_utc
+                if isinstance(as_of_value, str):
+                    iso_token = as_of_value.replace("Z", "+00:00") if as_of_value.endswith("Z") else as_of_value
+                    try:
+                        as_of_value = datetime.fromisoformat(iso_token)
+                    except ValueError:
+                        logger.debug("unable to parse as_of_utc %s; using current UTC timestamp", as_of_value)
+                        as_of_value = datetime.utcnow()
+                elif not isinstance(as_of_value, datetime):
+                    logger.debug("unexpected as_of_utc type %s; coercing to UTC now", type(as_of_value))
+                    as_of_value = datetime.utcnow()
                 if supports_style:
                     record = await conn.fetchrow(
                         """
@@ -149,7 +162,7 @@ class PlanningPersistence:
                         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8)
                         RETURNING id
                         """,
-                        run.as_of_utc,
+                        as_of_value,
                         run.style,
                         run.universe_name,
                         run.universe_source,
@@ -176,7 +189,7 @@ class PlanningPersistence:
                         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7)
                         RETURNING id
                         """,
-                        run.as_of_utc,
+                        as_of_value,
                         run.universe_name,
                         run.universe_source,
                         json.dumps(list(run.tickers)),

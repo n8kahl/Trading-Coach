@@ -108,7 +108,7 @@ class PlanningScanEngine:
         run_id = None
         if candidates:
             run_record = PlanningRunRecord(
-                as_of_utc=as_of.isoformat(),
+                as_of_utc=as_of,
                 universe_name=universe.name,
                 universe_source=universe.source,
                 tickers=universe.symbols,
