@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -11,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import pandas as pd
 
 from ..calculations import atr, ema
+from ..levels import inject_style_levels
 from ..plans.geometry import build_plan_geometry
 from .contract_rules import ContractRuleBook, ContractTemplate
 from .polygon_client import AggregatesResult, PolygonAggregatesClient
@@ -214,6 +216,43 @@ class PlanningScanEngine:
                 levels_map["pdc"] = float(close_series.iloc[-2])
         except Exception:
             pass
+        daily_levels_ctx: List[Tuple[str, float]] = []
+        weekly_levels_ctx: List[Tuple[str, float]] = []
+
+        def _append_level(target: List[Tuple[str, float]], tag: str, value: Any) -> None:
+            try:
+                price = float(value)
+            except (TypeError, ValueError):
+                return
+            if math.isfinite(price):
+                target.append((tag, price))
+
+        try:
+            _append_level(daily_levels_ctx, "DAILY_HIGH", high_series.iloc[-1])
+            _append_level(daily_levels_ctx, "DAILY_LOW", low_series.iloc[-1])
+            _append_level(daily_levels_ctx, "DAILY_CLOSE", close_series.iloc[-1])
+        except Exception:
+            pass
+
+        try:
+            weekly_window = daily.tail(5)
+            if not weekly_window.empty:
+                _append_level(weekly_levels_ctx, "WEEKLY_HIGH", weekly_window["high"].max())
+                _append_level(weekly_levels_ctx, "WEEKLY_LOW", weekly_window["low"].min())
+                _append_level(weekly_levels_ctx, "WEEKLY_CLOSE", weekly_window["close"].iloc[-1])
+        except Exception:
+            pass
+
+        inject_style_levels(
+            levels_map,
+            {
+                "levels_daily": daily_levels_ctx,
+                "levels_weekly": weekly_levels_ctx,
+                "vol_profile_daily": {},
+                "vol_profile_weekly": {},
+            },
+            style,
+        )
         realized_range = 0.0
         try:
             realized_range = abs(float(high_series.iloc[-1]) - float(low_series.iloc[-1]))

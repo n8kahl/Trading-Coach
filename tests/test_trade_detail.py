@@ -18,6 +18,10 @@ async def _run_fallback_plan(
     expected_move: float = 3.5,
     atr: float = 1.2,
     key_levels: dict | None = None,
+    daily_levels: list | None = None,
+    weekly_levels: list | None = None,
+    daily_profile: dict | None = None,
+    weekly_profile: dict | None = None,
     options_payload: dict | None = None,
     user_id: str = "fallback-tester",
 ):
@@ -75,6 +79,10 @@ async def _run_fallback_plan(
         },
         index=index,
     )
+    daily_levels = daily_levels or []
+    weekly_levels = weekly_levels or []
+    daily_profile = daily_profile or {}
+    weekly_profile = weekly_profile or {}
 
     def fake_prepare_symbol_frame(raw_frame):
         prepared = raw_frame.copy()
@@ -96,6 +104,10 @@ async def _run_fallback_plan(
             "timestamp": prepared.index[-1],
             "volume_profile": {},
             "key": dict(key_levels),
+            "levels_daily": list(daily_levels),
+            "levels_weekly": list(weekly_levels),
+            "vol_profile_daily": dict(daily_profile),
+            "vol_profile_weekly": dict(weekly_profile),
         }
 
     def fake_build_market_snapshot(prepared, levels):  # noqa: ARG001
@@ -416,6 +428,33 @@ async def test_fallback_plan_em_capped_targets_spread(monkeypatch):
     second_gap = round(targets[2] - targets[1], 2)
     assert first_gap >= 0.1, f"expected spacing >= 0.1, got {first_gap}"
     assert second_gap >= 0.1, f"expected spacing >= 0.1, got {second_gap}"
+
+
+@pytest.mark.asyncio
+async def test_fallback_plan_snaps_to_daily_high(monkeypatch):
+    base_key_levels = {
+        "session_high": 265.4,
+        "session_low": 258.2,
+        "opening_range_high": 264.9,
+        "opening_range_low": 259.6,
+        "prev_close": 263.75,
+        "prev_high": 266.1,
+        "prev_low": 260.8,
+    }
+    daily_levels = [("DAILY_HIGH", 266.65), ("DAILY_LOW", 257.4)]
+    response = await _run_fallback_plan(
+        monkeypatch,
+        symbol="MSFT",
+        key_levels=base_key_levels,
+        daily_levels=daily_levels,
+        daily_profile={"VAH": 266.5},
+        user_id="daily-snap",
+    )
+
+    target_meta = response.plan.get("target_meta") or []
+    assert target_meta, "expected target_meta in fallback plan response"
+    snap_tags = {item.get("snap_tag") for item in target_meta if item.get("snap_tag")}
+    assert "daily_high" in snap_tags, f"expected daily_high snap tag, saw {snap_tags}"
 
 
 @pytest.mark.asyncio

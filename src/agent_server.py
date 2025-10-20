@@ -130,6 +130,7 @@ from .telemetry import (
     record_selector_rejections,
 )
 from .plans.geometry import build_plan_geometry, RunnerPolicy
+from .levels import inject_style_levels
 from .levels.snapper import Level, SnapContext, snap_prices
 
 logger = logging.getLogger(__name__)
@@ -6509,6 +6510,7 @@ async def _generate_fallback_plan(
         levels_map["avwap"] = anchored.get("AVWAP_SESSION_OPEN") or anchored.get("AVWAP_PREV_HIGH")
     if gap_fill_level:
         levels_map["gap_fill"] = gap_fill_level
+    inject_style_levels(levels_map, context, style_token)
     atr_daily = context.get("atr_1d") or context.get("atr_1w") or atr_value
     iv_move = volatility.get("expected_move") if isinstance(volatility, Mapping) else None
     realized_range = 0.0

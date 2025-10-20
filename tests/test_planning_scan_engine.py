@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, timezone
+from typing import Dict
 
 import pandas as pd
 import pytest
 
 from src.services.contract_rules import ContractRuleBook
+from src.services import scan_engine as scan_engine_module
 from src.services.scan_engine import PlanningScanEngine
 from src.services.persist import PlanningPersistence
 from src.services.polygon_client import AggregatesResult
@@ -60,3 +62,41 @@ async def test_planning_scan_engine_scores_candidates(monkeypatch):
     candidate = result.candidates[0]
     assert candidate.symbol == "AAPL"
     assert 0.0 <= candidate.readiness_score <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_planning_scan_injects_daily_levels(monkeypatch):
+    prices = [300 + i for i in range(40)]
+    daily_frame = make_frame(prices)
+    intraday_60 = make_frame(prices[-60:])
+    intraday_30 = make_frame(prices[-30:])
+    frames = {
+        "MSFT": AggregatesResult(symbol="MSFT", windows={"1d": daily_frame, "60": intraday_60, "30": intraday_30}),
+        "I:SPX": AggregatesResult(symbol="I:SPX", windows={"1d": daily_frame}),
+    }
+    stub_client = StubPolygonClient(frames)
+    persistence = PlanningPersistence()
+    engine = PlanningScanEngine(stub_client, persistence, rulebook=ContractRuleBook(), min_readiness=0.0)
+    universe = UniverseSnapshot(
+        name="mega-cap",
+        source="test",
+        as_of_utc=datetime.now(timezone.utc),
+        symbols=["MSFT"],
+        metadata={},
+    )
+
+    captured_levels: Dict[str, float] = {}
+    original_build = scan_engine_module.build_plan_geometry
+
+    def _capturing_build_plan_geometry(*args, **kwargs):
+        levels = kwargs.get("levels")
+        if isinstance(levels, dict):
+            captured_levels.clear()
+            captured_levels.update(levels)
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(scan_engine_module, "build_plan_geometry", _capturing_build_plan_geometry)
+
+    result = await engine.run(universe, style="intraday")
+    assert result.candidates, "Expected at least one candidate"
+    assert "daily_high" in captured_levels, f"expected daily_high in injected levels, saw {captured_levels.keys()}"
