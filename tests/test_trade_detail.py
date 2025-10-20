@@ -1,5 +1,5 @@
-import asyncio
 import json
+from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
@@ -219,6 +219,108 @@ async def test_gpt_plan_macro_events_fallback(monkeypatch):
     data_meta = response.data or {}
     assert data_meta.get("events_present") is True
     assert data_meta.get("earnings_present") is False
+
+
+@pytest.mark.asyncio
+async def test_fallback_plan_handles_missing_strategy_profile(monkeypatch):
+    async def fake_scan(universe, request, user):  # noqa: ARG001
+        return []
+
+    async def fake_collect_market_data(symbols, timeframe, as_of=None):  # noqa: ARG001
+        index = pd.date_range("2025-10-20 14:30", periods=6, freq="5T", tz="UTC")
+        frame = pd.DataFrame(
+            {
+                "open": [250.0, 250.5, 251.0, 251.2, 251.5, 252.0],
+                "high": [250.6, 251.1, 251.4, 251.8, 252.1, 252.4],
+                "low": [249.4, 249.9, 250.4, 250.6, 250.9, 251.3],
+                "close": [250.3, 250.9, 251.2, 251.6, 251.9, 252.2],
+                "volume": [100_000, 110_000, 120_000, 130_000, 125_000, 140_000],
+                "atr14": [1.2, 1.2, 1.2, 1.2, 1.2, 1.2],
+            },
+            index=index,
+        )
+        symbol = symbols[0]
+        return {symbol: frame}, {symbol: "polygon"}
+
+    def fake_prepare_symbol_frame(frame):
+        prepared = frame.copy()
+        prepared["ema9"] = prepared["close"]
+        prepared["ema20"] = prepared["close"]
+        prepared["ema50"] = prepared["close"]
+        prepared["vwap"] = prepared["close"]
+        return prepared
+
+    def fake_build_context(prepared):
+        latest = prepared.iloc[-1]
+        return {
+            "latest": latest,
+            "ema9": float(latest["close"]),
+            "ema20": float(latest["close"]),
+            "ema50": float(latest["close"]),
+            "atr": 1.2,
+            "expected_move_horizon": 3.5,
+            "timestamp": prepared.index[-1],
+            "volume_profile": {},
+            "key": {
+                "session_high": float(prepared["high"].max()),
+                "session_low": float(prepared["low"].min()),
+                "opening_range_high": float(prepared["high"].iloc[1]),
+                "opening_range_low": float(prepared["low"].iloc[1]),
+                "prev_close": float(prepared["close"].iloc[-2]),
+                "session_open": float(prepared["open"].iloc[0]),
+            },
+        }
+
+    def fake_build_market_snapshot(prepared, key_levels):  # noqa: ARG001
+        return {"volatility": {"expected_move": 3.5}}
+
+    async def fake_fetch_context_enrichment(symbol):  # noqa: ARG001
+        return {}
+
+    async def fake_gpt_contracts(request, user):  # noqa: ARG001
+        return {}
+
+    async def fake_chart_url(params, request):  # noqa: ARG001
+        return agent_server.ChartLinks(interactive="https://example.com/chart")
+
+    async def fake_mtf_confluence(**kwargs):  # noqa: ARG001
+        return []
+
+    monkeypatch.setattr(agent_server, "gpt_scan", fake_scan)
+    monkeypatch.setattr(agent_server, "_session_payload_from_request", lambda request: {})
+    monkeypatch.setattr(
+        agent_server,
+        "_market_snapshot_payload",
+        lambda session_payload, simulate_open=False: (
+            {"session_state": {"status": "closed"}},
+            {"session_state": {"status": "closed"}},
+            datetime(2025, 10, 20, 15, 30, tzinfo=timezone.utc),
+            False,
+        ),
+    )
+    monkeypatch.setattr(agent_server, "_collect_market_data", fake_collect_market_data)
+    monkeypatch.setattr(agent_server, "_prepare_symbol_frame", fake_prepare_symbol_frame)
+    monkeypatch.setattr(agent_server, "_build_context", fake_build_context)
+    monkeypatch.setattr(agent_server, "_build_market_snapshot", fake_build_market_snapshot)
+    monkeypatch.setattr(agent_server, "_fetch_context_enrichment", fake_fetch_context_enrichment)
+    monkeypatch.setattr(agent_server, "gpt_contracts", fake_gpt_contracts)
+    monkeypatch.setattr(agent_server, "gpt_chart_url", fake_chart_url)
+    monkeypatch.setattr(agent_server, "_compute_multi_timeframe_confluence", fake_mtf_confluence)
+    monkeypatch.setattr(agent_server, "_get_index_mode", lambda: None)
+    monkeypatch.setattr(agent_server, "first", {}, raising=False)
+    monkeypatch.setattr(agent_server, "results", [], raising=False)
+
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": b""}
+    request = Request(scope)
+    user = agent_server.AuthedUser(user_id="fallback-tester")
+
+    response = await agent_server._generate_fallback_plan("TSLA", "intraday", request, user)
+
+    assert response is not None
+    assert response.plan["strategy_profile"]["name"] == "Baseline Geometry"
+    badges = response.plan.get("badges") or []
+    assert any(badge.get("kind") == "strategy" for badge in badges)
+    assert response.plan["runner_policy"]
 
 
 @pytest.mark.asyncio

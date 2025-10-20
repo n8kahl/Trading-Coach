@@ -6364,6 +6364,7 @@ async def _generate_fallback_plan(
     *,
     simulate_open: bool = False,
 ) -> PlanResponse | None:
+    start_time = time.perf_counter()
     settings = get_settings()
     style_token = _fallback_style_token(style)
     include_plan_layers = bool(
@@ -6371,7 +6372,8 @@ async def _generate_fallback_plan(
     )
     include_options_contracts = True
     plan: Dict[str, Any] = {}
-    strategy_profile_payload: Dict[str, Any] | None = None
+    strategy_id_value = "baseline_auto"
+    strategy_profile_payload: Dict[str, Any] = get_strategy_profile(strategy_id_value, style_token)
     rejected_contracts: List[Dict[str, str]] = []
     options_contracts: List[Dict[str, Any]] | None = None
     options_note: str | None = None
@@ -6887,7 +6889,7 @@ async def _generate_fallback_plan(
             "atr": atr_value,
             "interval": interval_token,
             "warnings": list(plan.get("warnings") or []),
-            "strategy": plan.get("strategy") or "baseline_auto",
+            "strategy": strategy_id_value,
             "debug": dict(plan.get("debug") or {}),
             "snap_trace": geometry.snap_trace or [],
             "em_used": bool(em_cap_used),
@@ -6965,7 +6967,9 @@ async def _generate_fallback_plan(
     if calibration_meta_payload:
         plan_block["calibration_meta"] = calibration_meta_payload
     plan = plan_block
-    first["plan"] = plan_block
+    first_ref = globals().get("first")
+    if isinstance(first_ref, dict):
+        first_ref["plan"] = plan_block
 
     plan_block["runner_policy"] = runner
     if geometry.snap_trace:
@@ -7294,7 +7298,9 @@ async def _generate_fallback_plan(
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
     mode_label = "live" if is_plan_live else "frozen"
     record_plan_duration(mode_label, elapsed_ms)
-    record_candidate_count(mode_label, len(results))
+    results_ref = globals().get("results")
+    candidate_count = len(results_ref) if isinstance(results_ref, Sequence) else 0
+    record_candidate_count(mode_label, candidate_count)
     return plan_response
 
 
