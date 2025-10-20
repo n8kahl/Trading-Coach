@@ -252,3 +252,200 @@ Deliverables: updated frontend bundle with streaming indicator + confluence clea
 
 Deployment notes
 - After pulling `main`, redeploy Railway to pick up the TV bundle bump and server fixes. Hard-refresh `/tv` pages to clear cached JS.
+
+##### Upcoming – MTF Strategy Integration
+- Documented implementation plan for first-class multi-timeframe (MTF) analysis driving strategy selection without altering TP/SL geometry or API contracts.
+- Work queued to add MTF/HTF helper modules, hydrate bundles in plan/scan flows, and amplify strategy rules while keeping legacy behaviour when MTF data is absent.
+- See Codex hand-off prompt below for the detailed task breakdown.
+
+##### Codex Hand-off Prompt
+```
+You are editing the Trading Coach Backend. Implement robust Multi-Timeframe (MTF) analysis and connect it to the Strategy engine so plans/scan no longer default to “Baseline” when rules match. Do NOT break existing Take-Profit/Stop logic or change any public API schema.
+
+STRICT INVARIANTS (do not violate)
+- Keep all existing public response shapes exactly as in components.schemas.* (PlanResponse, ScanCandidate, StructuredPlan, etc.).
+- Keep the TP/SL selection + snapping behavior intact. You may only pass extra context into existing functions, but default behavior must be identical when that context is missing.
+- No feature flags. All behavior must be graceful if MTF data is unavailable (fallback to current behavior).
+- Runner logic (fractions, ATR trail) must remain unchanged.
+
+FILES TO ADD
+- src/types/mtf.ts
+- src/features/mtf.ts        (compute MTF bundle)
+- src/features/htfLevels.ts  (HTF structural levels D/W)
+- tests/mtf/*.test.ts        (unit + regression)
+
+FILES TO MODIFY (surgically, additive only)
+- src/features/hydrator.ts
+- src/strategy/engine.ts
+- src/strategy/rules.ts
+- src/services/plan.ts
+- src/services/scan.ts
+- presenters/topList.ts (or wherever Top-10 table is built)
+- src/types/strategy.ts (augment, do not change existing fields)
+
+========================================
+1) Types
+----------------------------------------
+Create src/types/mtf.ts:
+
+export type TF = "5m" | "15m" | "60m" | "D";
+export interface TFState {
+  tf: TF;
+  emaUp: boolean;       // EMA(9)>EMA(20)>EMA(50)
+  emaDown: boolean;     // EMA(9)<EMA(20)<EMA(50)
+  adxSlope: number|null;  // last-N slope (+ up momentum)
+  vwapRel: "above"|"below"|"near"|"unknown";
+  atr: number|null;       // TF ATR if available
+}
+export interface MTFBundle {
+  byTF: Record<TF, TFState>;
+  biasHTF: "long"|"short"|"neutral";     // from 60m + D weighting
+  agreement: number;                      // fraction of TFs aligned with direction
+  notes: string[];                        // human bullets
+}
+
+Augment src/types/strategy.ts:
+export interface StrategyProfile {
+  // existing fields...
+  mtf?: { bias: "long"|"short"|"neutral"; agreement: number; notes: string[] };
+  matched_rules?: Array<{ id: string; score: number; reasons: string[] }>;
+  waiting_for?: string;  // compact pre-trade condition
+}
+
+========================================
+2) MTF bundle (works in live & planning)
+----------------------------------------
+Add src/features/mtf.ts:
+
+- export async function computeMTFBundle(symbol, bars5m, bars15m, bars60m, barsD, vwap5m) : Promise<MTFBundle>
+  * For each TF compute EMA(9/20/50) stack booleans, ADX slope over last 10 bars (simple linear regression on ADX), VWAP relation (for 60m/D treat “near” if distance < 0.25×ATR(5m)).
+  * biasHTF: weighted vote {D:0.5, 60m:0.3, 15m:0.15, 5m:0.05}. If score between -0.2..0.2 => "neutral".
+  * agreement = share of {5m,15m,60m,D} aligned with candidate direction at runtime.
+  * notes like ["D↓, 60m↓, 15m≈flat", "VWAP<"].
+
+Add src/features/htfLevels.ts:
+
+export interface HTFLevels {
+  pdh: number; pdl: number; pdc: number;
+  pwh: number; pwl: number; pwc: number;
+  vah?: number; val?: number; poc?: number; // optional if available
+}
+export function computeHTFLevels(dailyBars, weeklyBars): HTFLevels { /* derive from cached series, no network */ }
+
+Update src/features/hydrator.ts:
+- Ensure bars for 5m/15m/60m/D are hydrated in BOTH live and planning/fallback.
+- Add helper hydrateMTF(symbol) that builds MTFBundle and HTFLevels; swallow errors and return nulls.
+
+========================================
+3) Strategy engine uses MTF (no flags)
+----------------------------------------
+In src/strategy/engine.ts (inferStrategy):
+
+- Accept new ctx.mtf?: MTFBundle and ctx.htfLevels?: HTFLevels.
+- Score rules from rules.ts as before, then apply MTF amplifier:
+
+function mtfAmplifier(direction: "long"|"short", mtf?: MTFBundle) {
+  if (!mtf) return 1; // backward compatible
+  let amp = 1;
+  // mild boosts/penalties; keep bounded to avoid TP/SL perturbation
+  if (mtf.biasHTF === "long" && direction === "long") amp += 0.08;
+  if (mtf.biasHTF === "short" && direction === "short") amp += 0.08;
+  if (mtf.biasHTF !== "neutral" && ((mtf.biasHTF==="long" && direction==="short")||(mtf.biasHTF==="short" && direction==="long"))) amp -= 0.10;
+  // agreement signal (5m/15m/60m/D)
+  amp += (mtf.agreement - 0.5) * 0.2; // range ~[-0.1 .. +0.1]
+  return Math.max(0.8, Math.min(1.15, amp));
+}
+
+- Multiply each rule.score *= mtfAmplifier(direction, mtf).
+- Choose top non-baseline rule if its score >= (baselineScore + 0.03). Else fall back to baseline. (No flags; deterministic.)
+- Populate strategy_profile.mtf and matched_rules[].
+- Build strategy_profile.waiting_for by comparing current price state to the selected rule’s unmet preconditions (e.g., “5m close above VWAP and acceptance over ORH”).
+
+Important: do NOT change how entry/stop/targets are computed here. Strategy influences *selection and text* plus the *trigger/invalidation* strings only.
+
+========================================
+4) Strategy rules read MTF (light touch)
+----------------------------------------
+In src/strategy/rules.ts:
+- Pass ctx.mtf into rules. Examples:
+
+PowerHourContinuation (long):
+  requires: session.time in [15:00, 16:00] ET,
+            (ctx.mtf?.byTF["5m"].emaUp && ctx.mtf?.byTF["15m"].emaUp)
+  boosts: if ctx.mtf?.byTF["60m"].emaUp score+=0.05; if D emaUp score+=0.05
+  waiting_for: "5m close above VWAP + acceptance over ORH"
+
+VWAPReclaim (long):
+  requires: vwapRel in {"near","above"} AND 5m emaUp
+  penalty: if mtf.biasHTF==="short" => score-=0.08
+
+HTFPullbackContinuation (long/short):
+  requires: D & 60m aligned with direction, 5m pullback end signal (HL/LH), ADX slope turns up
+  waiting_for: "5m HL + close above 9EMA"
+
+Ensure every rule computes `waiting_for` succinctly. Keep rule IDs stable.
+
+========================================
+5) Plan & Scan wiring (backward compatible)
+----------------------------------------
+src/services/plan.ts:
+- After fetching series, call hydrateMTF(symbol) to get {mtf, htfLevels}. Attach to planning context.
+- Pass {mtf, htfLevels} into inferStrategy, but DO NOT change the TP/SL pipeline:
+  * Keep existing functions: solveEntry(), solveStop(), buildTargetPool(), snapTargetsToStructure(), clampByATRExpectedMove(), finalizeRunner().
+  * Only enhancement: when buildTargetPool() already collects structural magnets, include htfLevels (PDH/PDL/PWH/PWL/VAL/VAH) as *additional* candidates.
+  * IMPORTANT: snapTargetsToStructure() and stop snapping MUST behave identically if htfLevels is undefined. Guard all new params.
+- In the response, populate:
+  - strategy_profile.mtf, waiting_for, matched_rules
+  - htf.bias (mirror of mtf.biasHTF)
+  - mtf_confluence bullets into `confluence` array (compact like: "D↓ 60m↓", "VWAP<")
+
+src/services/scan.ts:
+- For each candidate, hydrate lightweight MTF (reuse cached bundle if available). Include:
+  candidate.strategy_profile.name (top rule name, else "Baseline")
+  candidate.strategy_profile.waiting_for
+  candidate.mtf_confluence (bullets) and htf.bias
+- Ranking: keep existing readiness formula but multiply readiness *= mtfAmplifier(direction, mtf) bounded [0.9..1.1] so we don’t reorder wildly.
+
+presenters/topList.ts:
+- Columns: Rank | Symbol | Strategy | Waiting For | MTF | Entry | Stop | TPs | RR
+- MTF column: join mtf notes (e.g., "D↓ 60m↓ · VWAP<").
+
+========================================
+6) DO NOT BREAK TP/SL: guard rails + tests
+----------------------------------------
+Absolute “do not touch” functions (except adding optional params):
+- snapTargetsToStructure()
+- clampByATRExpectedMove()
+- solveStopFromGeometry()
+- finalizeRunner()
+
+Only safe change: allow these functions to accept `{ htfLevels? }` but **must** be null-tolerant. When htfLevels is undefined, output must match current snapshots exactly.
+
+Add tests (tests/mtf):
+- mtf_bundle.test.ts: computeMTFBundle returns stable bias for synthetic series.
+- strategy_mtf_gate.test.ts: with same price context, non-baseline rule outranks baseline when MTF agrees; falls back when conflicts.
+- tp_sl_regression.test.ts: with htfLevels=undefined, TP/SL/runner snapshots identical to current ones.
+- snapping_prefers_structure.test.ts: when nearest HTF level lies within 0.25×ATR of EM cap, TP snaps to structure; otherwise cap wins. (This uses existing logic; ensure unchanged outcomes for legacy fixtures.)
+
+========================================
+7) Logging & graceful fallback
+----------------------------------------
+- If MTF hydration fails, log once at DEBUG and proceed (baseline allowed).
+- Include `debug.strategy.mtf = { bias:..., agreement:..., notes }` in plan.debug for troubleshooting.
+
+========================================
+8) Acceptance checklist (must pass)
+----------------------------------------
+- /gpt/plan now returns non-baseline strategies when rules match and MTF agrees, with:
+  - strategy_profile.mtf, waiting_for, matched_rules
+  - confluence includes concise MTF bullets
+  - htf.bias mirrored under `htf.bias`
+- /gpt/scan Top-10 shows “Strategy” and “Waiting For” with MTF bullets.
+- With identical inputs and htfLevels undefined, TP/SL/runner outputs are byte-for-byte identical to pre-change snapshots.
+
+Deliverables
+- New files + modified modules above
+- Unit tests green
+- Changelog entry:
+  "feat(mtf+strategy): first-class MTF gating & strategy selection; non-breaking TP/SL."
+```
