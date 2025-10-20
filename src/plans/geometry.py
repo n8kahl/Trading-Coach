@@ -499,13 +499,9 @@ def build_plan_geometry(
         required_reward = stop.rr_min * risk
         if side == "long":
             new_price = round(entry + required_reward, 2)
-            if len(targets) > 1:
-                new_price = min(new_price, targets[1].price - 0.01)
             targets[0].price = max(targets[0].price, new_price)
         else:
             new_price = round(entry - required_reward, 2)
-            if len(targets) > 1:
-                new_price = max(new_price, targets[1].price + 0.01)
             targets[0].price = min(targets[0].price, new_price)
         _enforce_monotonic_targets(entry, side, targets)
         for meta in targets:
@@ -514,6 +510,33 @@ def build_plan_geometry(
             meta.rr_multiple = round(max(reward, 0.0) / risk, 2)
             if em_day > 0:
                 meta.em_fraction = round(meta.distance / em_day, 2)
+    if targets and targets[0].rr_multiple < stop.rr_min:
+        first = targets[0]
+        reward = first.price - entry if side == "long" else entry - first.price
+        if reward > 0 and stop.rr_min > 0:
+            min_risk = reward / stop.rr_min
+            if side == "long":
+                tightened = entry - min_risk
+                tightened = min(entry - 0.01, max(stop.price, tightened))
+            else:
+                tightened = entry + min_risk
+                tightened = max(entry + 0.01, min(stop.price, tightened))
+            tightened = round(tightened, 2)
+            if tightened != stop.price:
+                if stop.snapped:
+                    stop.snapped = f"{stop.snapped}|rr_floor_stop_adjust"
+                else:
+                    stop.snapped = "rr_floor_stop_adjust"
+                stop.price = tightened
+                risk = entry - stop.price if side == "long" else stop.price - entry
+                if risk <= 0:
+                    risk = 0.001
+                for meta in targets:
+                    meta.distance = round(abs(meta.price - entry), 2)
+                    reward = meta.price - entry if side == "long" else entry - meta.price
+                    meta.rr_multiple = round(max(reward, 0.0) / risk, 2)
+                    if em_day > 0:
+                        meta.em_fraction = round(meta.distance / em_day, 2)
     validate_invariants(entry, stop.price, targets, side, stop.rr_min)
     return PlanGeometry(
         entry=round(entry, 2),
