@@ -6481,6 +6481,7 @@ async def _generate_fallback_plan(
             if isinstance(val, (int, float)) and math.isfinite(float(val))
         )
         entry = round(entry_base, 2)
+    entry_price = float(entry)
     gap_fill_level = key_levels.get("prev_close")
     if isinstance(gap_fill_level, (int, float)):
         gap_fill_level = float(gap_fill_level)
@@ -6519,7 +6520,7 @@ async def _generate_fallback_plan(
     except Exception:
         realized_range = 0.0
     geometry = build_plan_geometry(
-        entry=entry,
+        entry=entry_price,
         side=direction,
         style=style_token,
         strategy=None,
@@ -6639,7 +6640,7 @@ async def _generate_fallback_plan(
     if atr_value and atr_value > 0:
         stop_multiple_val = abs(entry - stop) / atr_value
     risk_block = _build_risk_block(
-        entry=entry,
+        entry=entry_price,
         stop=stop,
         targets=targets,
         atr=atr_value,
@@ -6875,7 +6876,7 @@ async def _generate_fallback_plan(
             "symbol": symbol.upper(),
             "style": style_token,
             "direction": direction,
-            "entry": entry,
+            "entry": entry_price,
             "stop": stop,
             "targets": targets,
             "target_meta": target_meta,
@@ -7195,7 +7196,7 @@ async def _generate_fallback_plan(
         options_note=options_note if include_options_contracts else None,
         calc_notes={
             "atr14": round(float(atr_value), 4),
-            "rr_inputs": {"entry": entry, "stop": stop, "tp1": targets[0]},
+        "rr_inputs": {"entry": entry_price, "stop": stop, "tp1": targets[0]},
         },
         htf={
             "bias": direction,
