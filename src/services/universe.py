@@ -91,7 +91,22 @@ class UniverseProvider:
         metadata: Dict[str, object] = {"style": style}
         symbols: List[str] = []
 
-        if name in {"sp500", "s&p500", "spx"}:
+        if name in {"*", "all", "__any__", "__any"}:
+            metadata["alias"] = name
+            metadata["universe_kind"] = "ft_topliquidity"
+            try:
+                legacy_symbols = await legacy_universe.expand_universe("FT-TOPLIQUIDITY", style=style, limit=limit)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Legacy FT-TOPLIQUIDITY expansion failed for %s: %s", universe, exc)
+                legacy_symbols = []
+            if legacy_symbols:
+                symbols = legacy_symbols
+                source = "legacy"
+            else:
+                metadata["universe_kind"] = "top_market_cap"
+                metadata["fallback"] = "top_market_cap"
+                symbols = await self._polygon.fetch_top_market_cap(limit)
+        elif name in {"sp500", "s&p500", "spx"}:
             symbols = await self._polygon.fetch_index_constituents("I:SPX")
             metadata["index"] = "I:SPX"
         elif name in {"nasdaq100", "ndx", "qqq"}:

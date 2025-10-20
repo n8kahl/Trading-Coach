@@ -84,12 +84,13 @@ class PlanningScanEngine:
         persistence: PlanningPersistence,
         *,
         rulebook: Optional[ContractRuleBook] = None,
-        min_readiness: float = 0.45,
+        min_readiness: float = 0.30,
     ) -> None:
         self._polygon = polygon_client
         self._persist = persistence
         self._rules = rulebook or ContractRuleBook()
         self._min_readiness = min_readiness
+        self._probability_floor = 0.55
 
     async def run(self, universe: UniverseSnapshot, *, style: str) -> PlanningScanResult:
         as_of = datetime.now(timezone.utc)
@@ -208,7 +209,8 @@ class PlanningScanEngine:
 
         readiness = 0.45 * probability + 0.25 * actionability + 0.30 * risk_reward
         readiness = max(0.0, min(readiness, 1.0))
-        if readiness < self._min_readiness:
+        include_candidate = readiness >= self._min_readiness or probability >= self._probability_floor
+        if not include_candidate:
             return None
 
         template = self._rules.build(style)

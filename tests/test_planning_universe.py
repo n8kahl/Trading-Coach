@@ -35,6 +35,14 @@ async def test_universe_provider_fetches_index_and_caches(monkeypatch):
     persistence = NoOpPersistence()
     provider = UniverseProvider(client, persistence=persistence)
 
+    async def fake_expand(token, *, style, limit):
+        assert token == "FT-TOPLIQUIDITY"
+        assert style == "intraday"
+        assert limit == 2
+        return ["LEGACY1", "LEGACY2", "LEGACY3"]
+
+    monkeypatch.setattr("src.services.universe.legacy_universe.expand_universe", fake_expand)
+
     snapshot = await provider.get_universe("sp500", style="intraday", limit=2)
     assert snapshot.symbols == ["AAPL", "MSFT"]
     assert persistence.last_snapshot.name == "sp500"
@@ -49,3 +57,9 @@ async def test_universe_provider_fetches_index_and_caches(monkeypatch):
     snapshot_top = await provider.get_universe("unknown", style="intraday", limit=2)
     assert snapshot_top.symbols == ["TSLA", "NVDA"]
     assert client.top_calls >= 1
+
+    snapshot_wildcard = await provider.get_universe("*", style="intraday", limit=2)
+    assert snapshot_wildcard.symbols == ["LEGACY1", "LEGACY2"]
+    assert snapshot_wildcard.source == "legacy"
+    assert snapshot_wildcard.metadata.get("universe_kind") == "ft_topliquidity"
+    assert client.top_calls == 1
