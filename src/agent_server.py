@@ -6945,6 +6945,31 @@ async def gpt_plan(
             targets_list = [round(float(val), 2) for val in targets_list]
         valid_levels, invariant_reason = _validate_level_invariants(direction_for_levels, entry_val, stop_val, targets_list)
         if not valid_levels:
+            logger.warning(
+                "plan_invariant_broken",
+                extra={
+                    "symbol": symbol,
+                    "style": request_payload.style,
+                    "reason": invariant_reason,
+                    "plan_id": plan_id,
+                },
+            )
+            if allow_plan_fallback:
+                fallback_plan = await _generate_fallback_plan(
+                    symbol,
+                    request_payload.style,
+                    request,
+                    user,
+                    simulate_open=simulate_open,
+                )
+                if fallback_plan is not None:
+                    fallback_meta = dict(fallback_plan.meta or {}) if fallback_plan.meta else {}
+                    warnings_field = fallback_meta.setdefault("warnings", [])
+                    warning_msg = f"fallback_applied_due_to_invariant: {invariant_reason}" if invariant_reason else "fallback_applied_due_to_invariant"
+                    if warning_msg not in warnings_field:
+                        warnings_field.append(warning_msg)
+                    fallback_plan.meta = fallback_meta or None
+                    return _finalize_plan_response(fallback_plan)
             raise HTTPException(
                 status_code=422,
                 detail={"code": "INVARIANT_BROKEN", "message": invariant_reason or "invalid_levels"},
