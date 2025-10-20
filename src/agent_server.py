@@ -203,6 +203,22 @@ def _runner_policy_to_dict(policy: RunnerPolicy | None) -> Dict[str, Any]:
     }
 
 
+def _nativeify(value: Any) -> Any:
+    """
+    Recursively convert numpy scalar types to native Python primitives so Pydantic can serialise payloads.
+    """
+
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, list):
+        return [_nativeify(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_nativeify(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _nativeify(item) for key, item in value.items()}
+    return value
+
+
 def _hydrate_secondary_fields(payload: "PlanResponse") -> "PlanResponse":
     plan_block = payload.plan if isinstance(payload.plan, Mapping) else {}
     structured_block = payload.structured_plan if isinstance(payload.structured_plan, Mapping) else {}
@@ -3849,7 +3865,8 @@ def _planning_scan_to_page(
                 actionable_soon = True
             if not actionable_soon and actionability_component is not None and actionability_component >= 0.8:
                 actionable_soon = True
-        target_meta_payload = metrics.get("target_meta") or []
+        raw_target_meta_payload = metrics.get("target_meta") or []
+        target_meta_payload = _nativeify(list(raw_target_meta_payload)) if raw_target_meta_payload else []
         planning_snapshot = {
             "planning_mode": True,
             "readiness_score": candidate.readiness_score,
@@ -3862,7 +3879,7 @@ def _planning_scan_to_page(
         if target_meta_payload:
             planning_snapshot["target_meta"] = target_meta_payload
         runner_policy_raw = metrics.get("runner_policy")
-        runner_policy_payload = dict(runner_policy_raw) if isinstance(runner_policy_raw, Mapping) else None
+        runner_policy_payload = _nativeify(dict(runner_policy_raw)) if isinstance(runner_policy_raw, Mapping) else None
         if runner_policy_payload:
             planning_snapshot["runner_policy"] = runner_policy_payload
         snap_trace_payload_raw = metrics.get("snap_trace")
@@ -3876,24 +3893,25 @@ def _planning_scan_to_page(
             planning_snapshot["remaining_atr"] = remaining_atr_val
         em_used_val = metrics.get("em_used")
         raw_key_levels_used = metrics.get("key_levels_used")
-        key_levels_used_payload = dict(raw_key_levels_used) if isinstance(raw_key_levels_used, dict) else None
+        key_levels_used_payload = _nativeify(dict(raw_key_levels_used)) if isinstance(raw_key_levels_used, dict) else None
         if key_levels_used_payload:
             planning_snapshot["key_levels_used"] = key_levels_used_payload
         raw_entry_candidates = metrics.get("entry_candidates")
-        entry_candidates_payload = [
+        entry_candidates_payload = _nativeify([
             dict(candidate) for candidate in raw_entry_candidates if isinstance(candidate, dict)
-        ] if isinstance(raw_entry_candidates, list) else []
+        ]) if isinstance(raw_entry_candidates, list) else []
         if entry_candidates_payload:
             planning_snapshot["entry_candidates"] = entry_candidates_payload
         raw_tp_reasons = metrics.get("tp_reasons")
-        tp_reasons_payload = [
+        tp_reasons_payload = _nativeify([
             dict(reason) for reason in raw_tp_reasons if isinstance(reason, dict)
-        ] if isinstance(raw_tp_reasons, list) else _tp_reason_entries(target_meta_payload)
+        ]) if isinstance(raw_tp_reasons, list) else _tp_reason_entries(target_meta_payload)
         if tp_reasons_payload:
             planning_snapshot["tp_reasons"] = tp_reasons_payload
         warnings_payload = metrics.get("geometry_warnings")
         if isinstance(warnings_payload, list) and warnings_payload:
             planning_snapshot.setdefault("warnings", warnings_payload)
+        planning_snapshot = _nativeify(planning_snapshot)
         entry_level = candidate.levels.get("entry")
         stop_level = candidate.levels.get("invalidation")
         targets_level = list(candidate.levels.get("targets") or [])
@@ -6639,8 +6657,8 @@ async def _generate_fallback_plan(
     )
     structured_warnings = list(structured_geometry.warnings)
     invariant_broken = any(warning == "INVARIANT_BROKEN" for warning in structured_warnings)
-    key_levels_used = structured_geometry.key_levels_used or {}
-    structured_runner = dict(structured_geometry.runner_policy or {})
+    key_levels_used = _nativeify(structured_geometry.key_levels_used or {})
+    structured_runner = _nativeify(dict(structured_geometry.runner_policy or {}))
     structured_tp_reasons_raw = list(structured_geometry.tp_reasons or [])
     stop_label = structured_geometry.stop_label
 
@@ -6694,7 +6712,7 @@ async def _generate_fallback_plan(
     if rr_to_t1 is not None:
         rr_to_t1 = float(rr_to_t1)
 
-    tp_reasons = _ensure_tp_reasons(structured_tp_reasons_raw, len(targets))
+    tp_reasons = _nativeify(_ensure_tp_reasons(structured_tp_reasons_raw, len(targets)))
     for idx, meta in enumerate(geometry.targets, start=1):
         price_token = targets[idx - 1] if idx - 1 < len(targets) else getattr(meta, "price", None)
         try:
@@ -6749,6 +6767,7 @@ async def _generate_fallback_plan(
         if reason_payload.get("reason"):
             item["reason"] = reason_payload["reason"]
         target_meta.append(item)
+    target_meta = _nativeify(target_meta)
     try:
         geometry.runner.fraction = float(structured_runner.get("fraction", geometry.runner.fraction))
         geometry.runner.atr_trail_mult = float(
@@ -6763,6 +6782,7 @@ async def _generate_fallback_plan(
         geometry.runner.notes = list(structured_runner.get("notes", []))
     except Exception:
         geometry.runner.notes = list(structured_runner.get("notes", geometry.runner.notes))
+    structured_runner = _nativeify(structured_runner)
     if calibration_enabled:
         rr_floor = getattr(geometry.stop, "rr_min", None)
         try:
@@ -6784,6 +6804,7 @@ async def _generate_fallback_plan(
             "em_cap_fraction": geometry.runner.em_fraction_cap,
         }
     )
+    runner = _nativeify(runner)
     direction_label = "Long" if direction == "long" else "Short"
     notes = (
         f"{direction_label} bias with EMA stack supportive; manage risk using {runner_trail_desc} and watch VWAP for continuation."
@@ -7066,7 +7087,7 @@ async def _generate_fallback_plan(
     except (TypeError, ValueError):
         version = 1
 
-    entry_candidates_payload = [dict(candidate) for candidate in entry_candidates] if entry_candidates else []
+    entry_candidates_payload = _nativeify([dict(candidate) for candidate in entry_candidates]) if entry_candidates else []
     plan_block = dict(plan)
     plan_block.update(
         {
@@ -7338,7 +7359,22 @@ async def _generate_fallback_plan(
     options_contracts_payload: List[Dict[str, Any]] = (
         list(options_contracts) if include_options_contracts and options_contracts else []
     )
-    plan_block = plan if isinstance(plan, Mapping) else {}
+    plan_block = _nativeify(plan_block)
+    plan = plan_block
+    structured_plan = _nativeify(structured_plan) if structured_plan else structured_plan
+    target_profile_dict = _nativeify(target_profile_dict) if target_profile_dict else target_profile_dict
+    options_contracts_payload = _nativeify(options_contracts_payload)
+    rejected_contracts = _nativeify(rejected_contracts)
+    entry_candidates_payload = _nativeify(entry_candidates_payload)
+    plan_badges = _nativeify(plan_badges)
+    strategy_profile_payload = _nativeify(strategy_profile_payload)
+    confluence_tags = _nativeify(confluence_tags)
+    mtf_confluence_tags = _nativeify(mtf_confluence_tags)
+    confluence_payload = _nativeify(confluence_payload)
+    mtf_confluence_payload = _nativeify(mtf_confluence_payload)
+    key_levels_used = _nativeify(key_levels_used) if key_levels_used else key_levels_used
+    plan_layers_value = locals().get("plan_layers")
+    plan_layers = _nativeify(plan_layers_value) if plan_layers_value else {}
     runner_policy_output = None
     snap_trace_output: Optional[List[str]] = None
     if isinstance(plan, Mapping):
@@ -8516,7 +8552,7 @@ async def gpt_plan(
             if source:
                 entry_payload["source"] = source
             formatted[bucket].append(entry_payload)
-        key_levels_used = {bucket: items for bucket, items in formatted.items() if items}
+        key_levels_used = _nativeify({bucket: items for bucket, items in formatted.items() if items})
 
     execution_rules = _build_execution_rules(
         entry=entry_val,
@@ -8840,7 +8876,40 @@ async def gpt_plan(
     options_contracts_payload: List[Dict[str, Any]] = (
         list(options_contracts) if include_options_contracts and options_contracts else []
     )
+    plan_payload = _nativeify(first.get("plan")) if isinstance(first.get("plan"), Mapping) else first.get("plan")
+    structured_plan_payload = _nativeify(structured_plan_payload) if structured_plan_payload else structured_plan_payload
+    target_profile_dict = _nativeify(target_profile_dict) if target_profile_dict else target_profile_dict
+    charts_field = _nativeify(charts_field) if charts_field else charts_field
+    charts_params_output = _nativeify(charts_params_output) if charts_params_output else charts_params_output
+    key_levels_payload = _nativeify(first.get("key_levels")) if isinstance(first.get("key_levels"), Mapping) else first.get("key_levels")
+    market_snapshot_payload = _nativeify(first.get("market_snapshot")) if isinstance(first.get("market_snapshot"), Mapping) else first.get("market_snapshot")
+    features_payload = _nativeify(first.get("features")) if isinstance(first.get("features"), Mapping) else first.get("features")
+    options_payload = _nativeify(first.get("options")) if isinstance(first.get("options"), Mapping) else first.get("options")
+    plan_layers = _nativeify(plan_layers) if plan_layers else plan_layers
+    plan_layers = plan_layers or {}
+    risk_block = _nativeify(risk_block) if risk_block else risk_block
+    execution_rules = _nativeify(execution_rules) if execution_rules else execution_rules
+    runner_policy_output = _nativeify(runner_policy_output) if runner_policy_output else runner_policy_output
+    runner_output = _nativeify(runner_output) if runner_output else runner_output
+    data_quality = _nativeify(data_quality)
+    response_meta = _nativeify(response_meta) if response_meta else response_meta
+    data_meta = _nativeify(data_meta) if isinstance(data_meta, dict) else data_meta
+    market_meta = _nativeify(market_meta) if isinstance(market_meta, dict) else market_meta
+    tp_reasons_payload = _nativeify(tp_reasons_payload)
+    options_contracts_payload = _nativeify(options_contracts_payload)
+    rejected_contracts = _nativeify(rejected_contracts)
+    entry_candidates_watch = _nativeify(entry_candidates_watch)
+    htf = _nativeify(htf)
+    confluence_payload = _nativeify(confluence_payload)
+    mtf_confluence_payload = _nativeify(mtf_confluence_payload)
+    relevant_levels = _nativeify(relevant_levels) if isinstance(relevant_levels, Mapping) else relevant_levels
+    calc_notes_output = _nativeify(calc_notes_output) if calc_notes_output else calc_notes_output
+    key_levels_used = _nativeify(key_levels_used) if key_levels_used else key_levels_used
+    plan = _nativeify(plan) if isinstance(plan, Mapping) else plan
     plan_block = plan if isinstance(plan, Mapping) else {}
+    accuracy_levels_payload = _nativeify(plan_block.get("accuracy_levels")) if plan_block.get("accuracy_levels") else []
+    source_paths_payload = _nativeify(plan_block.get("source_paths")) if plan_block.get("source_paths") else {}
+    plan_target_meta = _nativeify(plan_block.get("target_meta")) if plan_block.get("target_meta") else None
     plan_response = PlanResponse(
         plan_id=plan_id,
         version=version,
@@ -8854,8 +8923,8 @@ async def gpt_plan(
         entry=entry_output,
         stop=stop_output,
         targets=targets_output,
-        target_meta=plan.get("target_meta") if plan else None,
-        targets_meta=plan.get("target_meta") if plan else None,
+        target_meta=plan_target_meta,
+        targets_meta=plan_target_meta,
         entry_candidates=entry_candidates_watch,
         rr_to_t1=rr_output,
         confidence=confidence_output,
@@ -8875,15 +8944,15 @@ async def gpt_plan(
         strategy_id=first.get("strategy_id"),
         description=first.get("description"),
         score=first.get("score"),
-        plan=first.get("plan"),
+        plan=plan_payload,
         structured_plan=structured_plan_payload,
         target_profile=target_profile_dict,
         charts=charts_field,
-        key_levels=first.get("key_levels"),
+        key_levels=key_levels_payload,
         key_levels_used=key_levels_used or None,
-        market_snapshot=first.get("market_snapshot"),
-        features=first.get("features"),
-        options=first.get("options"),
+        market_snapshot=market_snapshot_payload,
+        features=features_payload,
+        options=options_payload,
         options_contracts=options_contracts_payload,
         options_note=options_note if include_options_contracts else None,
         calc_notes=calc_notes_output,
@@ -8897,8 +8966,8 @@ async def gpt_plan(
         expected_move=expected_move_output,
         remaining_atr=remaining_atr_output,
         em_used=em_used_output,
-        source_paths=plan_block.get("source_paths") or {},
-        accuracy_levels=plan_block.get("accuracy_levels") or [],
+        source_paths=source_paths_payload or {},
+        accuracy_levels=accuracy_levels_payload,
         updated_from_version=updated_from_version,
         update_reason=update_reason,
         market=market_meta,
@@ -8907,7 +8976,7 @@ async def gpt_plan(
         execution_rules=execution_rules,
         session_state=session_state_payload,
         confidence_visual=confidence_visual_value,
-        plan_layers=plan_layers or {},
+        plan_layers=plan_layers,
         tp_reasons=tp_reasons_payload,
         meta=response_meta,
         rejected_contracts=rejected_contracts,

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
+
 import pandas as pd
 
 from ..calculations import atr, ema
@@ -26,6 +28,18 @@ from .persist import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _nativeify(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, list):
+        return [_nativeify(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_nativeify(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _nativeify(item) for key, item in value.items()}
+    return value
 
 
 def _latest(series: pd.Series) -> Optional[float]:
@@ -309,6 +323,7 @@ class PlanningScanEngine:
                     "structure_quality": 0.75,
                 },
             )
+        entry_candidates = _nativeify(entry_candidates)
         entry_price = float(entry_candidates[0]["level"]) if entry_candidates else entry_seed or float(last_close)
         index_payload = getattr(daily, "index", None)
         if index_payload is not None and len(index_payload) > 0:
@@ -472,6 +487,8 @@ class PlanningScanEngine:
                     }
                 )
 
+            target_entries = _nativeify(target_entries)
+
             try:
                 geometry.runner.fraction = float(structured_runner.get("fraction", geometry.runner.fraction))
                 geometry.runner.atr_trail_mult = float(
@@ -503,10 +520,11 @@ class PlanningScanEngine:
             }
             em_used_flag = bool(clamp_flag)
             snap_trace_payload = geometry.snap_trace
-            structured_tp_reasons = tp_reasons_aligned
-            key_levels_used_payload = {
+            runner_payload = _nativeify(runner_payload)
+            structured_tp_reasons = _nativeify(tp_reasons_aligned)
+            key_levels_used_payload = _nativeify({
                 bucket: [dict(entry) for entry in entries] for bucket, entries in (key_levels_used or {}).items() if isinstance(entries, list)
-            }
+            })
         logger.debug(
             "planning_geometry",
             extra={
@@ -535,7 +553,7 @@ class PlanningScanEngine:
             "targets": [entry["price"] for entry in target_entries] or [round(target, 2)],
         }
         target_meta_payload = target_entries
-        metrics = {
+        metrics = _nativeify({
             "atr": round(atr_val, 4),
             "atr_pct": round(atr_pct, 2),
             "ema21": round(ema21, 4) if ema21 else None,
@@ -559,7 +577,7 @@ class PlanningScanEngine:
             "tp_reasons": structured_tp_reasons,
             "entry_candidates": entry_candidates,
             "geometry_warnings": structured_warnings,
-        }
+        })
         components = {
             "probability": round(probability, 3),
             "actionability": round(actionability, 3),
