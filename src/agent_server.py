@@ -6371,6 +6371,7 @@ async def _generate_fallback_plan(
     )
     include_options_contracts = True
     plan: Dict[str, Any] = {}
+    strategy_profile_payload: Dict[str, Any] | None = None
     rejected_contracts: List[Dict[str, str]] = []
     options_contracts: List[Dict[str, Any]] | None = None
     options_note: str | None = None
