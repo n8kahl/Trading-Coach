@@ -1,4 +1,5 @@
 import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from src.agent_server import ChartParams, gpt_chart_url
@@ -80,4 +81,97 @@ async def test_gpt_chart_url_strips_non_canonical_params(monkeypatch):
     assert "data_source" not in links.interactive
     assert "data_mode" not in links.interactive
     assert "last_update" not in links.interactive
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_gpt_chart_url_rejects_non_monotonic(monkeypatch):
+    monkeypatch.setenv("FF_CHART_CANONICAL_V1", "1")
+    get_settings.cache_clear()
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/gpt/chart-url",
+        "headers": [(b"host", b"example.com")],
+        "scheme": "https",
+        "client": ("127.0.0.1", 0),
+        "server": ("example.com", 443),
+        "query_string": b"",
+    }
+    request = Request(scope)
+    params = ChartParams(
+        symbol="TSLA",
+        interval="5m",
+        direction="long",
+        entry=250.0,
+        stop=248.0,
+        tp="251.0,250.5",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await gpt_chart_url(params, request)
+    assert exc.value.status_code == 422
+    assert "tp2" in exc.value.detail["error"]
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_gpt_chart_url_rejects_snapped_rr(monkeypatch):
+    monkeypatch.setenv("FF_CHART_CANONICAL_V1", "1")
+    get_settings.cache_clear()
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/gpt/chart-url",
+        "headers": [(b"host", b"example.com")],
+        "scheme": "https",
+        "client": ("127.0.0.1", 0),
+        "server": ("example.com", 443),
+        "query_string": b"",
+    }
+    request = Request(scope)
+    params = ChartParams(
+        symbol="TSLA",
+        interval="5m",
+        direction="long",
+        entry=250.0,
+        stop=249.0,
+        tp="251.2",
+        levels="251.05|PDH",
+    )
+    with pytest.raises(HTTPException) as exc:
+        await gpt_chart_url(params, request)
+    assert exc.value.status_code == 422
+    assert "R:R" in exc.value.detail["error"]
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_gpt_chart_url_rejects_snapped_monotonic(monkeypatch):
+    monkeypatch.setenv("FF_CHART_CANONICAL_V1", "1")
+    get_settings.cache_clear()
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/gpt/chart-url",
+        "headers": [(b"host", b"example.com")],
+        "scheme": "https",
+        "client": ("127.0.0.1", 0),
+        "server": ("example.com", 443),
+        "query_string": b"",
+    }
+    request = Request(scope)
+    params = ChartParams(
+        symbol="AAPL",
+        interval="5m",
+        direction="long",
+        entry=150.0,
+        stop=149.5,
+        tp="150.2,150.3",
+        levels="150.30|VAH;150.22|VWAP",
+    )
+    with pytest.raises(HTTPException) as exc:
+        await gpt_chart_url(params, request)
+    assert exc.value.status_code == 422
+    assert "R:R" in exc.value.detail["error"]
     get_settings.cache_clear()

@@ -1,15 +1,46 @@
+export type Badge = {
+  label: string;
+  kind: string;
+};
+
+export type StrategyProfile = {
+  name: string;
+  trigger: string[];
+  invalidation: string;
+  management: string;
+  reload?: string | null;
+  runner?: string | null;
+  badges?: string[];
+};
+
+export type TargetMetaEntry = {
+  label: string;
+  price?: number;
+  distance?: number;
+  rr_multiple?: number;
+  prob_touch?: number;
+  prob_touch_raw?: number;
+  prob_touch_calibrated?: number;
+  em_fraction?: number;
+  snap_tag?: string;
+  em_capped?: boolean;
+  [key: string]: unknown;
+};
+
 export type StructuredPlan = {
   plan_id: string;
   symbol: string;
   style: string | null;
   direction: string | null;
-  entry: { type: string; level: number };
-  stop: number;
+  entry: { type: string; level: number } | null;
+  stop: number | null;
   invalid?: boolean;
   targets: number[];
   runner?: Record<string, unknown> | null;
   chart_url?: string | null;
   as_of?: string | null;
+  badges?: Badge[];
+  strategy_profile?: StrategyProfile | null;
 };
 
 export type PlanSnapshot = {
@@ -25,6 +56,14 @@ export type PlanSnapshot = {
     confidence?: number | null;
     notes?: string | null;
     warnings?: string[];
+    badges?: Badge[];
+    strategy_profile?: StrategyProfile | null;
+    target_meta?: TargetMetaEntry[];
+    accuracy_levels?: string[];
+    source_paths?: Record<string, string>;
+    options_contracts?: Array<Record<string, unknown>>;
+    options_note?: string | null;
+    rejected_contracts?: Array<Record<string, unknown>>;
     session_state?: {
       status: string;
       banner: string;

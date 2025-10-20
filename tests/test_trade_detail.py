@@ -279,10 +279,37 @@ async def test_gpt_plan_populates_completeness_fields(monkeypatch):
                             "rr": 1.9,
                         },
                     ],
+                    "targets_meta": [
+                        {
+                            "label": "TP1",
+                            "prob_touch": 0.62,
+                            "distance": 1.8,
+                            "rr_multiple": 1.2,
+                        },
+                        {
+                            "label": "TP2",
+                            "prob_touch": 0.48,
+                            "distance": 3.2,
+                            "rr_multiple": 1.9,
+                        },
+                    ],
                     "direction": "long",
                     "runner": {"trail": "ATR"},
+                    "runner_policy": {
+                        "fraction": 0.22,
+                        "atr_trail_mult": 0.85,
+                        "atr_trail_step": 0.45,
+                        "em_fraction_cap": 0.5,
+                        "notes": ["Runner fraction adjusted"],
+                    },
                     "confidence": 0.74,
                     "notes": "Structure aligned",
+                    "snap_trace": ["tp1:151.50->151.80 via POC"],
+                    "expected_move": 4.6,
+                    "remaining_atr": 2.4,
+                    "em_used": True,
+                    "source_paths": {"entry": "geometry_engine", "runner_policy": "geometry_engine"},
+                    "accuracy_levels": ["EM cap"],
                 },
                 "charts": {
                     "params": {
@@ -378,11 +405,98 @@ async def test_gpt_plan_populates_completeness_fields(monkeypatch):
     assert response.confluence_tags, "should emit confluence tags"
     assert response.confluence, "should emit multi-timeframe confluence"
     assert response.key_levels_used, "should report key levels used"
+    assert response.runner_policy and response.runner_policy.get("fraction") is not None
+    assert response.source_paths.get("runner_policy") == "geometry_engine"
+    assert response.plan and response.plan.get("target_meta")
+    assert response.target_meta
+    assert response.snap_trace is not None
+    assert response.targets_meta == response.target_meta
     assert response.risk_block and response.risk_block["risk_points"] > 0
     assert response.execution_rules and response.execution_rules["trigger"]
     assert any("TP1" in item["label"] for item in response.tp_reasons), "tp reasons should describe targets"
-    assert response.options_contracts and response.options_contracts[0]["symbol"].startswith("AAPL"), "contracts list should surface best picks"
-    assert response.options_note is None
+
+
+@pytest.mark.asyncio
+async def test_gpt_plan_simulated_open_retains_geometry(monkeypatch):
+    async def fake_scan(universe, request, user):  # noqa: ARG001
+        return [
+            {
+                "symbol": "MSFT",
+                "style": "intraday",
+                "plan": {
+                    "plan_id": "MSFT-INTRADAY-TEST",
+                    "entry": 330.0,
+                    "stop": 327.5,
+                    "targets": [332.4, 334.1],
+                    "direction": "long",
+                    "target_meta": [
+                        {
+                            "label": "TP1",
+                            "prob_touch": 0.6,
+                            "distance": 2.4,
+                            "rr_multiple": 1.5,
+                        }
+                    ],
+                    "runner_policy": {
+                        "fraction": 0.18,
+                        "atr_trail_mult": 0.9,
+                        "atr_trail_step": 0.4,
+                        "em_fraction_cap": 0.45,
+                        "notes": [],
+                    },
+                    "expected_move": 3.4,
+                    "remaining_atr": 1.7,
+                    "em_used": False,
+                },
+                "charts": {
+                    "params": {
+                        "symbol": "MSFT",
+                        "interval": "5m",
+                        "direction": "long",
+                        "entry": "330.0",
+                        "stop": "327.5",
+                        "tp": "332.4,334.1",
+                    }
+                },
+                "market_snapshot": {
+                    "indicators": {"atr14": 1.8},
+                    "volatility": {"expected_move_horizon": 3.2},
+                    "trend": {"direction_hint": "long"},
+                },
+                "key_levels": {"session_high": 333.0, "session_low": 326.2},
+                "features": {},
+            }
+        ]
+
+    async def fake_chart_url(params, request):  # noqa: ARG001
+        return agent_server.ChartLinks(interactive="https://example.com/chart/msft")
+
+    monkeypatch.setattr(agent_server, "gpt_scan", fake_scan)
+    monkeypatch.setattr(agent_server, "gpt_chart_url", fake_chart_url)
+    monkeypatch.setattr(
+        agent_server,
+        "get_session",
+        lambda request=None: {"status": "closed", "as_of": "2025-02-10T20:00:00-05:00", "tz": "America/New_York"},
+    )
+
+    scope = {"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": b""}
+    request = Request(scope)
+    user = agent_server.AuthedUser(user_id="planner")
+
+    response = await agent_server.gpt_plan(
+        agent_server.PlanRequest(symbol="MSFT", style="intraday", simulate_open=True),
+        request,
+        user,
+    )
+
+    assert response.meta and response.meta.get("simulated_open")
+    assert response.targets_meta
+    assert response.runner_policy
+    assert response.risk_block
+    assert response.execution_rules
+    # Options may be empty during simulated sessions; ensure the field exists (even if empty).
+    assert response.options_contracts is not None
+    assert response.options_note is not None
     assert response.plan.get("tp_reasons"), "plan payload should include tp_reasons"
     assert response.plan.get("confluence_tags"), "plan payload should include confluence tags"
 

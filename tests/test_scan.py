@@ -198,6 +198,9 @@ async def test_scan_top100_paging(monkeypatch):
     assert first_page.candidates[0].symbol == "SYM0"
     assert first_page.candidates[0].score >= first_page.candidates[1].score
     assert first_page.next_cursor is not None
+    first_candidate = first_page.candidates[0]
+    assert first_candidate.rr_t1 is not None
+    assert first_candidate.planning_snapshot.get("chart_params")
 
     second_payload = request_payload.model_copy(update={"cursor": first_page.next_cursor})
     second_page: ScanPage = await gpt_scan_endpoint(second_payload, request, user)

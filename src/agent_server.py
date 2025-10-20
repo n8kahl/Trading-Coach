@@ -96,6 +96,8 @@ from .app.services import parse_session_as_of, make_chart_url, build_plan_layers
 from .app.providers.macro import get_event_window
 from .app.providers.universe import load_universe
 from .context_overlays import compute_context_overlays
+from .strategies.catalog import compose_strategy_badges, get_strategy_profile
+from .overlays.reader import extract_plan_layers
 from .db import (
     ensure_schema as ensure_db_schema,
     fetch_idea_snapshot as db_fetch_idea_snapshot,
@@ -242,6 +244,16 @@ def _hydrate_secondary_fields(payload: "PlanResponse") -> "PlanResponse":
         candidate = structured_block.get("target_profile") if isinstance(structured_block, Mapping) else None
         if candidate:
             payload.target_profile = candidate
+
+    if (not payload.badges) and isinstance(plan_block, Mapping):
+        candidate = _first_non_empty("badges")
+        if candidate:
+            payload.badges = candidate
+
+    if payload.strategy_profile is None and isinstance(plan_block, Mapping):
+        candidate = _first_non_empty("strategy_profile")
+        if candidate:
+            payload.strategy_profile = candidate
 
     return payload
 
@@ -1484,6 +1496,8 @@ class PlanResponse(BaseModel):
     source_paths: Dict[str, str] = Field(default_factory=dict)
     accuracy_levels: List[str] = Field(default_factory=list)
     rejected_contracts: List[RejectedContract] = Field(default_factory=list)
+    strategy_profile: Dict[str, Any] | None = None
+    badges: List[Dict[str, str]] = Field(default_factory=list)
     layers_fetched: bool | None = None
     phase: str | None = None
     runner_policy: Dict[str, Any] | None = None
@@ -6891,6 +6905,7 @@ async def _generate_fallback_plan(
             "em_used": bool(em_cap_used),
         }
     )
+    plan_block["strategy_profile"] = strategy_profile_payload
     source_paths = dict(plan_block.get("source_paths") or {})
     source_paths.setdefault("entry", "geometry_engine")
     source_paths.setdefault("stop", "geometry_engine")
@@ -6902,6 +6917,16 @@ async def _generate_fallback_plan(
     if em_cap_used and "EM cap" not in accuracy_levels:
         accuracy_levels.append("EM cap")
     plan_block["accuracy_levels"] = accuracy_levels
+    badge_confluence = confluence_tags or confidence_factors or []
+    plan_badges = compose_strategy_badges(
+        strategy_profile_payload,
+        bias=direction,
+        style=style_token,
+        confluence=badge_confluence,
+        extra_badges=accuracy_levels,
+        limit=5,
+    )
+    plan_block["badges"] = plan_badges
     logger.info(
         "plan_geometry_metrics",
         extra={
@@ -7016,6 +7041,8 @@ async def _generate_fallback_plan(
         structured_plan["rejected_contracts"] = rejected_contracts
     structured_plan["target_meta"] = target_meta
     structured_plan["target_profile"] = target_profile_dict
+    structured_plan["strategy_profile"] = strategy_profile_payload
+    structured_plan["badges"] = plan_badges
     if mtf_confluence_tags:
         structured_plan["mtf_confluence"] = mtf_confluence_tags
     if risk_block:
@@ -7140,7 +7167,7 @@ async def _generate_fallback_plan(
         symbol=symbol.upper(),
         style=style_token,
         bias=direction,
-        setup="baseline_auto",
+        setup=strategy_id_value or "baseline_auto",
         entry=entry,
         stop=stop,
         targets=targets,
@@ -7159,7 +7186,7 @@ async def _generate_fallback_plan(
         earnings=earnings_block,
         charts_params=chart_params_payload,
         chart_url=chart_url_with_ids,
-        strategy_id="baseline_auto",
+        strategy_id=strategy_id_value or "baseline_auto",
         description=None,
         score=confidence,
         plan=plan_block,
@@ -7200,6 +7227,8 @@ async def _generate_fallback_plan(
         tp_reasons=tp_reasons_payload,
         rejected_contracts=rejected_contracts,
         calibration_meta=calibration_meta_payload,
+        strategy_profile=strategy_profile_payload,
+        badges=plan_badges,
     )
     plan_response = _hydrate_secondary_fields(plan_response)
     if simulate_open:
@@ -7269,6 +7298,10 @@ async def _generate_fallback_plan(
         meta_payload["accuracy_levels"] = plan_response.accuracy_levels
     if plan_response.targets_meta:
         meta_payload["targets_meta"] = plan_response.targets_meta
+    if strategy_profile_payload:
+        meta_payload["strategy_profile"] = strategy_profile_payload
+    if plan_badges:
+        meta_payload["badges"] = plan_badges
     plan_response.meta = meta_payload or None
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
     mode_label = "live" if is_plan_live else "frozen"
@@ -7431,6 +7464,7 @@ async def gpt_plan(
 
     strategy_id_value = first.get("strategy_id") or plan.get("strategy")
     style_token = plan.get("style") or first.get("style") or request_payload.style
+    strategy_profile_payload = get_strategy_profile(strategy_id_value, style_token)
     hint_interval_raw, hint_guidance = _chart_hint(strategy_id_value, style_token)
     try:
         chart_timeframe_hint = normalize_interval(hint_interval_raw)
@@ -10151,50 +10185,6 @@ async def _rebuild_plan_layers(plan_id: str, snapshot: Dict[str, Any], request: 
     return response.plan_layers
 
 
-def _fallback_plan_layers(plan_block: Mapping[str, Any], plan_id: str, *, reason: str = "missing") -> Dict[str, Any]:
-    session_state = plan_block.get("session_state") or {}
-    as_of = str(session_state.get("as_of") or "")
-    symbol = (plan_block.get("symbol") or "").strip().upper()
-    interval = (
-        plan_block.get("chart_timeframe")
-        or plan_block.get("interval")
-        or plan_block.get("charts", {}).get("params", {}).get("interval")
-        or ""
-    )
-    precision = get_precision(symbol) if symbol else 2
-    planning_context = plan_block.get("planning_context") or plan_block.get("planningContext") or "unknown"
-    notes = ["Plan layers unavailable; showing chart without annotations"]
-    if reason == "stale":
-        notes = ["Plan layers out of date; displaying chart without annotations"]
-    meta: Dict[str, Any] = {
-        "confidence_factors": [],
-        "confluence": [],
-        "status": reason,
-        "notes": notes,
-    }
-    logger.info(
-        "chart_layers_fallback",
-        extra={
-            "plan_id": plan_id,
-            "symbol": symbol or None,
-            "interval": interval,
-            "reason": reason,
-        },
-    )
-    return {
-        "plan_id": plan_id,
-        "symbol": symbol or None,
-        "interval": interval,
-        "as_of": as_of,
-        "planning_context": planning_context,
-        "precision": precision,
-        "levels": [],
-        "zones": [],
-        "annotations": [],
-        "meta": meta,
-    }
-
-
 @app.get(
     "/api/v1/gpt/chart-layers",
     summary="Return plan-bound chart layers",
@@ -10208,79 +10198,53 @@ async def chart_layers_endpoint(
     settings = get_settings()
     if not getattr(settings, "ff_layers_endpoint", False):
         raise HTTPException(status_code=404, detail="Plan layers unavailable")
-    logger.info(
-        "chart_layers_request",
-        extra={"plan_id": plan_id, "refresh": refresh},
-    )
+
+    logger.info("chart_layers_request", extra={"plan_id": plan_id, "refresh": refresh})
+
     snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
     plan_block = snapshot.get("plan") or {}
-    layers: Dict[str, Any] | None = plan_block.get("plan_layers") or snapshot.get("plan_layers")
+    layers = extract_plan_layers(snapshot, plan_id=plan_id)
+    attempted_rebuild = False
 
-    refreshed = False
-
-    while True:
-        if not layers or not isinstance(layers, dict):
-            if refreshed and not refresh:
-                layers = _fallback_plan_layers(plan_block, plan_id, reason="missing")
-                break
-            rebuilt = await _rebuild_plan_layers(plan_id, snapshot, request)
-            if rebuilt is None:
-                logger.warning(
-                    "plan_layers_missing_backfill_failed",
-                    extra={"plan_id": plan_id},
-                )
-                layers = _fallback_plan_layers(plan_block, plan_id, reason="missing")
-                break
-            logger.info(
-                "plan_layers_missing_rebuilt",
-                extra={"plan_id": plan_id, "attempt": refreshed + 1},
-            )
-            refreshed = True
+    if layers is None:
+        rebuilt = await _rebuild_plan_layers(plan_id, snapshot, request)
+        attempted_rebuild = True
+        if rebuilt:
             snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
             plan_block = snapshot.get("plan") or {}
-            layers = plan_block.get("plan_layers") or snapshot.get("plan_layers")
-            continue
+            layers = extract_plan_layers(snapshot, plan_id=plan_id)
 
-        plan_session = plan_block.get("session_state") or {}
-        plan_as_of = str(plan_session.get("as_of") or "").strip()
-        layers_as_of = str(layers.get("as_of") or "").strip()
+    if layers is None:
+        raise HTTPException(status_code=404, detail={"message": "No overlays persisted for plan", "plan_id": plan_id})
 
-        if plan_as_of and layers_as_of and plan_as_of != layers_as_of:
+    plan_session = plan_block.get("session_state") or {}
+    plan_as_of = str(plan_session.get("as_of") or "").strip()
+    layers_as_of = str(layers.get("as_of") or "").strip()
+
+    if plan_as_of and layers_as_of and plan_as_of != layers_as_of:
+        if refresh and not attempted_rebuild:
             rebuilt = await _rebuild_plan_layers(plan_id, snapshot, request)
+            attempted_rebuild = True
             if rebuilt:
-                refreshed = True
                 snapshot = await _ensure_snapshot(plan_id, version=None, request=request)
                 plan_block = snapshot.get("plan") or {}
-                layers = plan_block.get("plan_layers") or snapshot.get("plan_layers")
-                logger.info(
-                    "plan_layers_stale_rebuilt",
-                    extra={
-                        "plan_id": plan_id,
-                        "plan_as_of": plan_as_of,
-                        "layers_as_of": layers_as_of,
-                    },
-                )
-                continue
-            logger.warning(
-                "plan_layers_asof_mismatch",
-                extra={
-                    "plan_id": plan_id,
-                    "plan_as_of": plan_as_of,
-                    "layers_as_of": layers_as_of,
-                },
-            )
-            layers = _fallback_plan_layers(plan_block, plan_id, reason="stale")
-            break
-        break
+                layers = extract_plan_layers(snapshot, plan_id=plan_id)
+                layers_as_of = str(layers.get("as_of") or "").strip() if layers else ""
 
-    if not layers or not isinstance(layers, dict):
-        logger.warning("plan_layers_missing", extra={"plan_id": plan_id})
-        layers = _fallback_plan_layers(plan_block, plan_id)
+        if plan_as_of and layers_as_of and plan_as_of != layers_as_of:
+            detail = {
+                "message": "Plan overlays are stale compared to session timestamp.",
+                "plan_id": plan_id,
+                "plan_as_of": plan_as_of,
+                "layers_as_of": layers_as_of,
+            }
+            log_extra = {key: value for key, value in detail.items() if key != "message"}
+            log_extra["warning"] = detail["message"]
+            logger.warning("plan_layers_asof_mismatch", extra=log_extra)
+            raise HTTPException(status_code=409, detail=detail)
 
     payload = copy.deepcopy(layers)
-    payload.setdefault("plan_id", plan_id)
-    if str(payload.get("plan_id")) != plan_id:
-        payload["plan_id"] = plan_id
+    payload["plan_id"] = plan_id
     return payload
 
 

@@ -51,6 +51,24 @@ class ScanCandidate(BaseModel):
     rr_t1: float | None = None
     confidence: float | None = None
     chart_url: AnyUrl | None = None
+    target_meta: list[Dict[str, Any]] | None = None
+    targets_meta: list[Dict[str, Any]] | None = None
+    tp_reasons: list[Dict[str, Any]] = Field(default_factory=list)
+    structured_plan: Dict[str, Any] | None = None
+    target_profile: Dict[str, Any] | None = None
+    runner_policy: Dict[str, Any] | None = None
+    snap_trace: list[str] | None = None
+    expected_move: float | None = None
+    remaining_atr: float | None = None
+    em_used: bool | None = None
+    risk_block: Dict[str, Any] | None = None
+    execution_rules: Dict[str, Any] | None = None
+    confluence: list[str] = Field(default_factory=list)
+    accuracy_levels: list[str] = Field(default_factory=list)
+    events: Dict[str, Any] | None = None
+    options: Dict[str, Any] | None = None
+    options_contracts: list[Dict[str, Any]] = Field(default_factory=list)
+    options_note: str | None = None
     entry_distance_pct: float | None = None
     entry_distance_atr: float | None = None
     bars_to_trigger: float | None = None

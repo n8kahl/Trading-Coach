@@ -4,7 +4,8 @@ import { useEffect, useMemo, useReducer, useState } from "react";
 import clsx from "clsx";
 import PriceChart from "@/components/PriceChart";
 import { API_BASE_URL, WS_BASE_URL } from "@/lib/env";
-import type { PlanDeltaEvent, PlanSnapshot, SymbolTickEvent } from "@/lib/types";
+import type { PlanDeltaEvent, PlanSnapshot, StructuredPlan, SymbolTickEvent } from "@/lib/types";
+import PlanDetail from "@/components/PlanDetail";
 import type { LineData } from "lightweight-charts";
 import Link from "next/link";
 
@@ -84,7 +85,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
   const [nextPlanId, setNextPlanId] = useState<string | null>(null);
 
   const plan = initialSnapshot.plan;
-  const structured = plan.structured_plan;
+  const structured = (plan.structured_plan ?? null) as StructuredPlan | null;
   const entryLevel = structured?.entry?.level ?? plan.entry ?? null;
   const baseStop = plan.stop ?? structured?.stop ?? null;
   const summaryLevels = useMemo(() => {
@@ -235,6 +236,8 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
 
   return (
     <div className="space-y-8 px-6 py-10 sm:px-10">
+      <PlanDetail plan={plan} structured={structured} planId={plan.plan_id} />
+
       <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="text-sm uppercase tracking-[0.3em] text-neutral-400">Plan console</div>

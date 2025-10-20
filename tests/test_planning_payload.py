@@ -21,6 +21,20 @@ async def test_planning_candidate_includes_actionability():
             "entry_distance_pct": 0.5,
             "entry_distance_atr": 0.4,
             "runner_policy": {"fraction": 0.2, "atr_multiple": 1.0},
+            "target_meta": [
+                {
+                    "price": 262.0,
+                    "distance": 12.0,
+                    "prob_touch": 0.62,
+                    "rr_multiple": 2.4,
+                    "snap_tag": "pdh",
+                }
+            ],
+            "snap_trace": ["tp1:262.00 via pdh"],
+            "expected_move": 8.5,
+            "remaining_atr": 4.2,
+            "em_used": False,
+            "atr": 2.5,
         },
         levels={"entry": 250.0, "invalidation": 245.0, "targets": [262.0]},
         contract_template=template,
@@ -51,3 +65,12 @@ async def test_planning_candidate_includes_actionability():
     assert page.candidates[0].entry_distance_pct == pytest.approx(0.5)
     assert page.candidates[0].planning_snapshot.get("runner_policy") is not None
     assert page.candidates[0].planning_snapshot["runner_policy"]["fraction"] == pytest.approx(0.2)
+    candidate_payload = page.candidates[0]
+    assert candidate_payload.plan_id
+    assert candidate_payload.target_meta and candidate_payload.targets_meta
+    assert candidate_payload.tp_reasons
+    assert candidate_payload.runner_policy and candidate_payload.runner_policy["fraction"] == pytest.approx(0.2)
+    assert candidate_payload.snap_trace and "pdh" in candidate_payload.snap_trace[0]
+    assert candidate_payload.structured_plan and candidate_payload.structured_plan.get("target_profile")
+    assert candidate_payload.target_profile and candidate_payload.target_profile.get("targets")
+    assert candidate_payload.risk_block and candidate_payload.execution_rules

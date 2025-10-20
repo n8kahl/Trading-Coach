@@ -114,7 +114,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/PlanLayers'
         '404': { description: Not found }
-        '409': { description: as_of mismatch }
+        '409':
+          description: Plan/session timestamp mismatch
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  plan_id: { type: string }
+                  plan_as_of: { type: string }
+                  layers_as_of: { type: string }
 
 components:
   schemas:
@@ -758,6 +768,28 @@ components:
           type: object
           nullable: true
           description: Additional metadata flags (e.g., `simulated_open`).
+        strategy_profile:
+          type: object
+          nullable: true
+          properties:
+            name: { type: string }
+            trigger:
+              type: array
+              items: { type: string }
+            invalidation: { type: string }
+            management: { type: string }
+            reload: { type: string, nullable: true }
+            runner: { type: string, nullable: true }
+            badges:
+              type: array
+              items: { type: string }
+        badges:
+          type: array
+          items:
+            type: object
+            properties:
+              label: { type: string }
+              kind: { type: string }
       example:
         plan_id: "AAPL-INTRADAY-20251017"
         version: 2
@@ -838,6 +870,21 @@ components:
         expected_move: 4.5
         remaining_atr: 3.1
         em_used: true
+        strategy_profile:
+          name: "Power Hour Continuation"
+          trigger:
+            - "3–4pm ET, price above/below session VWAP"
+            - "Short EMAs stacked in trade direction with rising ADX"
+          invalidation: "Close back through VWAP or ADX rollover below threshold."
+          management: "Trim into prior high/low liquidity; trail into the close."
+          reload: "Avoid re-entries after 3:45pm ET unless fresh VWAP reclaim."
+          runner: "Tighten to 0.6× ATR once TP1 hits."
+          badges: ["Power Hour"]
+        badges:
+          - { label: "Power Hour Continuation", kind: "strategy" }
+          - { label: "Power Hour", kind: "strategy" }
+          - { label: "Intraday", kind: "style" }
+          - { label: "Long", kind: "bias" }
         calibration_meta:
           style: intraday
           cohort: open_session

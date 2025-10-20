@@ -9,7 +9,7 @@ Status: Production ready (current GitHub build)
 
 Scope considered production-ready
 - Core APIs: `/gpt/scan`, `/gpt/context/{symbol}`, `/gpt/multi-context`, `/gpt/contracts`, `/gpt/chart-url`, `/api/v1/gpt/chart-layers`, `/tv`, `/healthz`.
-- OpenAPI: served at `/openapi.json` and mirrored in `docs/openapi_v2.2.1.yaml`.
+- OpenAPI: served at `/openapi.json` and mirrored in `docs/openapi_v2.2.2.yaml`.
 - Auth: optional Bearer via `BACKEND_API_KEY`; honors `X-User-Id` for scoping.
 - Deployment: Railway (Nixpacks + Procfile) with in-memory caches (30s/120s/15s windows).
 

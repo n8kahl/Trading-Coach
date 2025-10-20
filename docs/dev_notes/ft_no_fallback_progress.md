@@ -32,7 +32,7 @@
    - Header checks (`X-No-Fabrication`).  
    - Extra-field rejection (thanks to `extra="forbid"`).  
    - Options guardrail rejection coverage.  
-6. Add CI step comparing runtime `/openapi.json` vs. `docs/openapi_v2.2.1.yaml`.  
+6. Add CI step comparing runtime `/openapi.json` vs. `docs/openapi_v2.2.2.yaml`.  
 7. Update OpenAPI + prompt docs to reflect new response attributes and error codes.
 
 ## Reference
