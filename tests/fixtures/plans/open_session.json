@@ -1,0 +1,155 @@
+{
+  "cohort": "open_session",
+  "style": "intraday",
+  "plans": [
+    {
+      "plan_id": "OPEN-1",
+      "symbol": "AAPL",
+      "direction": "long",
+      "entry": 100.0,
+      "stop": 98.7,
+      "rr_to_t1": 2.0,
+      "targets": [
+        { "label": "TP1", "price": 101.2, "prob_touch": 0.55, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 100.3, "low": 99.2 },
+        { "high": 101.4, "low": 100.6 }
+      ]
+    },
+    {
+      "plan_id": "OPEN-2",
+      "symbol": "MSFT",
+      "direction": "long",
+      "entry": 245.0,
+      "stop": 243.4,
+      "rr_to_t1": 1.9,
+      "targets": [
+        { "label": "TP1", "price": 247.2, "prob_touch": 0.55, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 245.4, "low": 244.1 },
+        { "high": 247.6, "low": 245.8 }
+      ]
+    },
+    {
+      "plan_id": "OPEN-3",
+      "symbol": "AAPL",
+      "direction": "long",
+      "entry": 100.0,
+      "stop": 98.7,
+      "rr_to_t1": 2.0,
+      "targets": [
+        { "label": "TP1", "price": 101.2, "prob_touch": 0.55, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 100.2, "low": 99.1 },
+        { "high": 99.8, "low": 98.6 }
+      ]
+    },
+    {
+      "plan_id": "OPEN-4",
+      "symbol": "MSFT",
+      "direction": "long",
+      "entry": 245.0,
+      "stop": 243.4,
+      "rr_to_t1": 1.9,
+      "targets": [
+        { "label": "TP1", "price": 247.2, "prob_touch": 0.55, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 245.2, "low": 244.0 },
+        { "high": 244.4, "low": 243.2 }
+      ]
+    },
+    {
+      "plan_id": "OPEN-5",
+      "symbol": "TSLA",
+      "direction": "long",
+      "entry": 190.0,
+      "stop": 187.5,
+      "rr_to_t1": 1.7,
+      "targets": [
+        { "label": "TP1", "price": 192.6, "prob_touch": 0.72, "em_capped": true }
+      ],
+      "bars": [
+        { "high": 190.8, "low": 188.9 },
+        { "high": 193.1, "low": 191.0 }
+      ]
+    },
+    {
+      "plan_id": "OPEN-6",
+      "symbol": "TSLA",
+      "direction": "long",
+      "entry": 190.0,
+      "stop": 187.5,
+      "rr_to_t1": 1.7,
+      "targets": [
+        { "label": "TP1", "price": 192.6, "prob_touch": 0.72, "em_capped": true }
+      ],
+      "bars": [
+        { "high": 190.7, "low": 188.9 },
+        { "high": 192.9, "low": 189.8 }
+      ]
+    },
+    {
+      "plan_id": "OPEN-7",
+      "symbol": "NVDA",
+      "direction": "long",
+      "entry": 420.0,
+      "stop": 416.5,
+      "rr_to_t1": 1.8,
+      "targets": [
+        { "label": "TP1", "price": 423.5, "prob_touch": 0.72, "em_capped": true }
+      ],
+      "bars": [
+        { "high": 421.2, "low": 418.6 },
+        { "high": 424.0, "low": 421.1 }
+      ]
+    },
+    {
+      "plan_id": "OPEN-8",
+      "symbol": "NVDA",
+      "direction": "long",
+      "entry": 420.0,
+      "stop": 416.5,
+      "rr_to_t1": 1.8,
+      "targets": [
+        { "label": "TP1", "price": 423.5, "prob_touch": 0.72, "em_capped": true }
+      ],
+      "bars": [
+        { "high": 421.0, "low": 418.8 },
+        { "high": 418.9, "low": 416.1 }
+      ]
+    },
+    {
+      "plan_id": "OPEN-9",
+      "symbol": "AMD",
+      "direction": "short",
+      "entry": 110.0,
+      "stop": 111.6,
+      "rr_to_t1": 1.6,
+      "targets": [
+        { "label": "TP1", "price": 107.8, "prob_touch": 0.72, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 109.4, "low": 108.2 },
+        { "high": 108.8, "low": 107.4 }
+      ]
+    },
+    {
+      "plan_id": "OPEN-10",
+      "symbol": "AMD",
+      "direction": "short",
+      "entry": 110.0,
+      "stop": 111.6,
+      "rr_to_t1": 1.6,
+      "targets": [
+        { "label": "TP1", "price": 107.8, "prob_touch": 0.72, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 111.9, "low": 109.5 }
+      ]
+    }
+  ]
+}

@@ -66,7 +66,7 @@ def test_screen_contracts_includes_liquidity_score():
 
     filters = {"min_dte": 0, "max_dte": 10, "min_delta": 0.4, "max_delta": 0.6, "max_spread_pct": 50.0, "min_oi": 100}
 
-    result = _screen_contracts(
+    screened = _screen_contracts(
         chain,
         quotes={},
         symbol="AAPL",
@@ -75,9 +75,10 @@ def test_screen_contracts_includes_liquidity_score():
         filters=filters,
     )
 
-    assert result
-    assert result[0].get("liquidity_score") is not None
-    assert result[0]["tradeability"] >= 0
+    assert screened
+    first = screened[0]
+    assert first.get("liquidity_score") is not None
+    assert first["tradeability"] >= 0
 
 
 @pytest.mark.asyncio

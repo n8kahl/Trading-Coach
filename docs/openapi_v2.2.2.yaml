@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Trading Coach Backend API
-  version: "2.2.1"
+  version: "2.2.2"
   description: |
     Fancy Trader endpoints powering GPT integrations.
     Session-aware payloads clamp data when markets are closed (frozen).
@@ -87,9 +87,9 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [url]
+                required: [interactive]
                 properties:
-                  url:
+                  interactive:
                     type: string
                     format: uri
                     example: >-
@@ -300,10 +300,56 @@ components:
         rr_t1: { type: number, format: double, nullable: true }
         confidence: { type: number, format: double, nullable: true }
         chart_url: { type: string, format: uri, nullable: true }
+        target_meta:
+          type: array
+          items: { $ref: '#/components/schemas/TargetMeta' }
+        targets_meta:
+          type: array
+          items: { $ref: '#/components/schemas/TargetMeta' }
+        tp_reasons:
+          type: array
+          items: { $ref: '#/components/schemas/TpReason' }
+        structured_plan:
+          $ref: '#/components/schemas/StructuredPlan'
+          nullable: true
+        target_profile:
+          $ref: '#/components/schemas/TargetProfile'
+          nullable: true
+        runner_policy: { type: object, nullable: true }
+        snap_trace:
+          type: array
+          items: { type: string }
+          nullable: true
+        expected_move: { type: number, format: double, nullable: true }
+        remaining_atr: { type: number, format: double, nullable: true }
+        em_used: { type: boolean, nullable: true }
+        risk_block:
+          $ref: '#/components/schemas/RiskBlock'
+          nullable: true
+        execution_rules:
+          $ref: '#/components/schemas/ExecutionRules'
+          nullable: true
+        confluence:
+          type: array
+          items: { type: string }
+        accuracy_levels:
+          type: array
+          items: { type: string }
+        events:
+          $ref: '#/components/schemas/EventsBlock'
+          nullable: true
+        options: { type: object, nullable: true }
+        options_contracts:
+          type: array
+          items: { $ref: '#/components/schemas/Contract' }
+        options_note: { type: string, nullable: true }
         entry_distance_pct: { type: number, format: double, nullable: true }
         entry_distance_atr: { type: number, format: double, nullable: true }
         bars_to_trigger: { type: number, format: double, nullable: true }
         actionable_soon: { type: boolean, nullable: true }
+        source_paths:
+          type: object
+          additionalProperties: { type: string }
         planning_snapshot:
           type: object
           nullable: true
@@ -330,6 +376,28 @@ components:
             missing_live_inputs:
               type: array
               items: { type: string }
+            target_meta:
+              type: array
+              items: { $ref: '#/components/schemas/TargetMeta' }
+            runner_policy: { type: object }
+            snap_trace:
+              type: array
+              items: { type: string }
+            expected_move: { type: number, format: double, nullable: true }
+            remaining_atr: { type: number, format: double, nullable: true }
+            chart_params:
+              type: object
+              properties:
+                symbol: { type: string }
+                interval: { type: string }
+                direction: { type: string }
+                entry: { type: string }
+                stop: { type: string }
+                tp: { type: string }
+            direction: { type: string }
+            source_paths:
+              type: object
+              additionalProperties: { type: string }
 
     ScanPage:
       type: object
@@ -345,7 +413,96 @@ components:
           type: array
           items: { $ref: '#/components/schemas/ScanCandidate' }
         data_quality: { type: object }
+        session: { type: object, nullable: true }
+        phase: { type: string, enum: [scan], nullable: true }
+        count_candidates: { type: integer, nullable: true }
         next_cursor: { type: string, nullable: true }
+      example:
+        as_of: "2025-10-20T01:00:00Z"
+        planning_context: frozen
+        banner: "Planning mode — market closed"
+        meta:
+          planning_mode: true
+          run_id: 4123
+          indices_context:
+            I:SPX: { close: 4710.5, change_pct: 0.45 }
+          universe:
+            name: FT-TopLiquidity
+            source: planner
+            count: 3
+        candidates:
+          - symbol: AAPL
+            rank: 1
+            score: 0.82
+            rr_t1: 1.6
+            entry: 188.42
+            stop: 185.9
+            tps: [189.8, 191.2, 192.4]
+            reasons: ["Readiness 0.82", "Probability 79%", "Risk/Reward 1.95"]
+            target_meta:
+              - label: TP1
+                prob_touch: 0.62
+                rr_multiple: 1.6
+            targets_meta:
+              - label: TP1
+                prob_touch: 0.62
+                rr_multiple: 1.6
+            tp_reasons:
+              - label: TP1
+                reason: "Snapped to VAH"
+            runner_policy:
+              fraction: 0.2
+              atr_multiple: 0.8
+            snap_trace:
+              - "tp1:189.20->189.80 via VAH"
+            expected_move: 4.5
+            remaining_atr: 3.1
+            em_used: true
+            risk_block:
+              risk_points: 2.52
+            execution_rules:
+              trigger: "Trigger on acceptance above VAH."
+            confluence: ["EMA stack"]
+            accuracy_levels: ["EM cap"]
+            structured_plan:
+              plan_id: AAPL-INTRADAY-20251017
+              entry: { type: limit, level: 188.42 }
+              stop: 185.9
+              targets: [189.8, 191.2, 192.4]
+              probabilities: { tp1: 0.62 }
+            target_profile:
+              entry: 188.42
+              stop: 185.9
+              targets: [189.8, 191.2, 192.4]
+            source_paths:
+              entry: geometry_engine
+              stop: geometry_engine
+            planning_snapshot:
+              planning_mode: true
+              readiness_score: 0.82
+              target_meta:
+                - prob_touch: 0.62
+                  rr_multiple: 1.6
+              runner_policy:
+                fraction: 0.2
+              chart_params:
+                symbol: AAPL
+                interval: 5m
+                direction: long
+                entry: "188.42"
+                stop: "185.90"
+                tp: "189.80,191.20,192.40"
+        data_quality:
+          planning_mode: true
+          series_present: true
+          indices_present: true
+        session:
+          planning_mode: true
+          universe: FT-TopLiquidity
+          symbols: [AAPL, MSFT, NVDA]
+        phase: scan
+        count_candidates: 3
+        next_cursor: null
 
     # ---------- Plans ----------
     Contract:
@@ -442,12 +599,28 @@ components:
       properties:
         label: { type: string }
         prob_touch: { type: number, format: double }
+        prob_touch_raw:
+          type: number
+          format: double
+          description: Raw model probability prior to calibration.
+        prob_touch_calibrated:
+          type: number
+          format: double
+          description: Calibrated probability mapped from reliability tables.
         distance: { type: number, format: double }
         optional: { type: boolean }
         em_fraction: { type: number, format: double }
         em_basis: { type: number, format: double }
         mfe_quantile: { type: string }
         mfe_ratio: { type: number, format: double }
+        rr_multiple: { type: number, format: double, description: "Risk/reward multiple to this target." }
+
+    TpReason:
+      type: object
+      properties:
+        label: { type: string }
+        reason: { type: string }
+        source: { type: string, nullable: true }
 
     PlanResponse:
       type: object
@@ -472,6 +645,10 @@ components:
         target_meta:
           type: array
           items: { $ref: '#/components/schemas/TargetMeta' }
+        targets_meta:
+          type: array
+          items: { $ref: '#/components/schemas/TargetMeta' }
+          description: Alias of `target_meta` for clients that expect pluralised naming.
         rr_to_t1: { type: number, format: double, nullable: true }
         confidence: { type: number, format: double, nullable: true }
         confidence_factors:
@@ -521,8 +698,23 @@ components:
             series_present: { type: boolean }
             iv_present: { type: boolean }
             earnings_present: { type: boolean }
+            expected_move: { type: number, format: double }
+            remaining_atr: { type: number, format: double }
+            em_used: { type: boolean }
         debug: { type: object, nullable: true }
         runner: { type: object, nullable: true }
+        runner_policy: { type: object, nullable: true }
+        snap_trace:
+          type: array
+          items: { type: string }
+          nullable: true
+        expected_move: { type: number, format: double, nullable: true }
+        remaining_atr: { type: number, format: double, nullable: true }
+        em_used: { type: boolean, nullable: true }
+        calibration_meta:
+          type: object
+          nullable: true
+          description: Reliability bins and scoring metadata backing probability calibration.
         updated_from_version: { type: integer, nullable: true }
         update_reason: { type: string, nullable: true }
         market: { type: object, nullable: true }
@@ -532,14 +724,26 @@ components:
         confluence:
           type: array
           items: { type: string }
+        accuracy_levels:
+          type: array
+          items: { type: string }
+          nullable: true
+          description: Indicator-specific accuracy or cap annotations delivered by the geometry engine.
         tp_reasons:
-          type: object
-          additionalProperties: { type: string }
-          description: String reasons keyed by target price (formatted)
+          type: array
+          items: { $ref: '#/components/schemas/TpReason' }
         options_contracts:
           type: array
           items: { $ref: '#/components/schemas/Contract' }
         options_note: { type: string, nullable: true }
+        rejected_contracts:
+          type: array
+          items:
+            type: object
+            properties:
+              symbol: { type: string }
+              reason: { type: string }
+              message: { type: string, nullable: true }
         plan_layers: { $ref: '#/components/schemas/PlanLayers' }
         risk_block:
           $ref: '#/components/schemas/RiskBlock'
@@ -547,10 +751,119 @@ components:
         execution_rules:
           $ref: '#/components/schemas/ExecutionRules'
           nullable: true
+        source_paths:
+          type: object
+          additionalProperties: { type: string }
         meta:
           type: object
           nullable: true
           description: Additional metadata flags (e.g., `simulated_open`).
+      example:
+        plan_id: "AAPL-INTRADAY-20251017"
+        version: 2
+        trade_detail: "https://trading-coach-production.up.railway.app/tv?plan_id=AAPL-INTRADAY-20251017&plan_version=2&interval=5m"
+        warnings: []
+        planning_context: frozen
+        symbol: AAPL
+        style: intraday
+        bias: long
+        entry: 188.42
+        stop: 185.9
+        targets: [189.8, 191.2, 192.4]
+        target_meta:
+          - label: TP1
+            prob_touch: 0.62
+            prob_touch_raw: 0.62
+            prob_touch_calibrated: 0.59
+            distance: 1.38
+            rr_multiple: 1.6
+            em_fraction: 0.46
+            snap_tag: VAH
+          - label: TP2
+            prob_touch: 0.48
+            prob_touch_raw: 0.48
+            prob_touch_calibrated: 0.45
+            distance: 2.78
+            rr_multiple: 2.0
+        targets_meta:
+          - label: TP1
+            prob_touch: 0.62
+            prob_touch_raw: 0.62
+            prob_touch_calibrated: 0.59
+            distance: 1.38
+            rr_multiple: 1.6
+            em_fraction: 0.46
+            snap_tag: VAH
+          - label: TP2
+            prob_touch: 0.48
+            prob_touch_raw: 0.48
+            prob_touch_calibrated: 0.45
+            distance: 2.78
+            rr_multiple: 2.0
+        rr_to_t1: 1.6
+        confidence: 0.78
+        confluence: ["EMA stack", "VWAP reclaim"]
+        accuracy_levels: ["EM cap"]
+        tp_reasons:
+          - label: TP1
+            reason: "Snapped to VAH"
+            source: pdh
+        options_contracts: []
+        rejected_contracts:
+          - symbol: "AAPL 2025-10-17 190C"
+            reason: SPREAD_TOO_WIDE
+            message: "spread 12.5% exceeds limit 8.0%"
+        plan_layers: { plan_id: AAPL-INTRADAY-20251017 }
+        risk_block:
+          risk_points: 2.52
+          reward_to_target: { tp1: 1.6 }
+          atr_stop_multiple: 1.2
+        execution_rules:
+          trigger: "Break above VAH"
+        data_quality:
+          series_present: true
+          iv_present: true
+          earnings_present: false
+          expected_move: 4.5
+          remaining_atr: 3.1
+          em_used: true
+        runner_policy:
+          fraction: 0.2
+          atr_trail_mult: 0.8
+          atr_trail_step: 0.4
+          notes: ["Runner fraction adjusted"]
+        snap_trace:
+          - "stop:185.90->185.80 via swing_low"
+          - "tp1:189.20->189.80 via VAH"
+        expected_move: 4.5
+        remaining_atr: 3.1
+        em_used: true
+        calibration_meta:
+          style: intraday
+          cohort: open_session
+          sample_size: 128
+          brier_score: 0.147
+          ece: 0.052
+          bins:
+            - lower: 0.4
+              upper: 0.6
+              count: 58
+              avg_prediction: 0.52
+              observed: 0.49
+        source_paths:
+          entry: geometry_engine
+          stop: geometry_engine
+          targets: geometry_engine
+        target_profile:
+          entry: 188.42
+          stop: 185.9
+          targets: [189.8, 191.2, 192.4]
+          probabilities: { tp1: 0.62, tp2: 0.48, tp3: 0.31 }
+          expected_move: 4.5
+          em_used: 1.0
+          atr_used: 1.32
+          snap_trace: ["tp1 snapped to VAH"]
+          warnings: []
 
     StructuredPlan:
       type: object
@@ -575,23 +888,32 @@ components:
           type: object
           additionalProperties: { type: number, format: double }
         runner: { type: object, nullable: true }
+        runner_policy: { type: object, nullable: true }
         confluence:
           type: array
           items: { type: string }
         confidence: { type: number, format: double, nullable: true }
         rationale: { type: string, nullable: true }
         options: { type: object, nullable: true }
-        em_used: { type: number, format: double, nullable: true }
+        em_used: { type: boolean, nullable: true }
         atr_used: { type: number, format: double, nullable: true }
+        expected_move: { type: number, format: double, nullable: true }
+        remaining_atr: { type: number, format: double, nullable: true }
         style_horizon_applied: { type: string, nullable: true }
         chart_url: { type: string, format: uri, nullable: true }
         as_of: { type: string, format: date-time, nullable: true }
         snap_trace:
           type: array
-          items: { type: object }
+          items: { type: string }
         meta:
           type: array
           items: { type: object }
+        target_meta:
+          type: array
+          items: { $ref: '#/components/schemas/TargetMeta' }
+        tp_reasons:
+          type: array
+          items: { $ref: '#/components/schemas/TpReason' }
         key_levels_used:
           $ref: '#/components/schemas/KeyLevelsUsed'
           nullable: true
@@ -618,11 +940,12 @@ components:
         probabilities:
           type: object
           additionalProperties: { type: number, format: double }
-        em_used: { type: number, format: double, nullable: true }
+        expected_move: { type: number, format: double, nullable: true }
+        em_used: { type: boolean, nullable: true }
         atr_used: { type: number, format: double, nullable: true }
         snap_trace:
           type: array
-          items: { type: object }
+          items: { type: string }
         meta:
           type: array
           items: { type: object }
@@ -632,7 +955,6 @@ components:
         runner: { type: object, nullable: true }
         bias: { type: string, nullable: true }
         style: { type: string, nullable: true }
-        expected_move: { type: number, format: double, nullable: true }
 
     EventsBlock:
       type: object

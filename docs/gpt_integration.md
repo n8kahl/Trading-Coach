@@ -18,7 +18,7 @@ focuses on data prep; the agent performs the higher-level reasoning.
 ## Prompt & Schema (Live)
 
 - Master prompt (**approved v3.9-lite+**): [`docs/prompts/master_prompt_v3.9-lite-plus.md`](prompts/master_prompt_v3.9-lite-plus.md)
-- API schema (**OpenAPI 2.2.1**): see [`docs/openapi_v2.2.1.yaml`](openapi_v2.2.1.yaml) or `https://trading-coach-production.up.railway.app/openapi.json`
+- API schema (**OpenAPI 2.2.2**): see [`docs/openapi_v2.2.2.yaml`](openapi_v2.2.2.yaml) or `https://trading-coach-production.up.railway.app/openapi.json`
 - Deployment status: **Production ready & approved** (2025-10-17 refresh)
 - Persistent storage: set `DB_URL` (or `DATABASE_URL`) so `/gpt/plan` snapshots and idea permalinks survive restarts.
 
@@ -46,13 +46,16 @@ What’s included
 - `/gpt/plan`
   - Returns: `plan`, `charts`, `key_levels`, `market_snapshot`, `features`, `options`, `trade_detail`
   - Provenance: `calc_notes` (atr14, rr_inputs, em_cap_applied), `htf` (bias, snapped_targets), `debug.tp1` (when structural TP1 is used)
-  - Targets carry `plan.target_meta` (per-TP `price`, `distance`, `rr`, `em_fraction`, `mfe_quantile`, `prob_touch`, `source`, `snap_tag`, `optional`) and `plan.runner` (trailing-stop settings: `type`, `timeframe`, `length`, `multiplier`, `anchor`, `initial_stop`, `note`, `bias`).
+  - Targets carry `plan.target_meta` (per-TP `price`, `distance`, `rr`, `em_fraction`, `mfe_quantile`, `prob_touch`, `prob_touch_raw`, `prob_touch_calibrated`, `source`, `snap_tag`, `optional`) and `plan.runner` (trailing-stop settings: `type`, `timeframe`, `length`, `multiplier`, `anchor`, `initial_stop`, `note`, `bias`).
+  - `calibration_meta` echoes the active reliability table (ECE, Brier score, bins) when `CALIBRATION_DATA_PATH` is provided; clients can map raw→calibrated probabilities without recomputing offline.
   - When `FF_OPTIONS_ALWAYS=1`, responses also include `confluence_tags` (deduped from confidence factors and snapped levels), `tp_reasons` (per-target rationale strings), and `options_contracts` (server-picked contracts with enriched P/L blocks). If no eligible contracts are found, `options_note` communicates why.
+  - `rejected_contracts[]` now carries explicit `reason` codes plus human-readable `message` strings (e.g. `DELTA_OUT_OF_RANGE`, `SPREAD_TOO_WIDE`) so UI copy can mirror server guardrails.
 - `/gpt/multi-context`
   - Request: `include_series` (default false), `intervals` (aka `frames`)
   - Response: `contexts` (series trimmed when gated), `summary` (frames_used, confluence_score, trend_notes, volatility_regime+label, expected_move_horizon, nearby_levels), `decimals`, `data_quality`
 - `/gpt/contracts`
   - Response adds `table` rows with: `label`, `dte`, `strike`, `price`, `bid`, `ask`, `delta`, `theta`, `iv`, `spread_pct`, `oi`, `liquidity_score`
+  - `rejections[]` lists per-leg failures with `reason` and `message` so frontends can surface guardrail feedback alongside `best[]`.
 - `/gpt/chart-url`
   - Server‑side validator: required fields, monotonic geometry, R:R gates, ATR distance w/ confluence override, whitelisted interval/view, percent‑encoding of notes/levels/strategy; BASE_URL respected verbatim; returns `/tv` link
   - Accepts optional `tp_meta` (JSON array of per-target metadata) and `runner` (JSON plan trail config) query params for richer chart annotations.
@@ -65,7 +68,9 @@ What’s included
     - `last_update`: ISO timestamp for cache‑busting and “Last update” text
     - `data_age_ms`, `data_mode`: optional freshness hints; the viewer shows a degraded badge only when `data_age_ms > 120000` ms
 - `/gpt/sentiment`
-  - Latest‑video sentiment + `tickers_detail` (price, change_pct, 15m EMA stack, ATR, range), robust to transcript issues; always JSON (204/502/503 on errors)
+  - Latest-video sentiment + `tickers_detail` (price, change_pct, 15m EMA stack, ATR, range), robust to transcript issues; always JSON (204/502/503 on errors)
+- `/metrics`
+  - Prometheus scrape endpoint exposing `plan_duration_ms`, `candidate_count`, `tp_hit`, `sl_hit`, `rr_below_min`, `em_capped_tp`, and `selector_rejected_total{reason=…}` for live and offline replay sources.
 
 Planner internals
 - Structural TP1 selector (both long and short): candidate generation (ORB/prior H/L, VWAP/EMAs, VAH/VAL/POC, Fib projections), style‑aware scoring, EM/ATR/ratio/R:R constraints, with graceful fallback to HTF snapper.

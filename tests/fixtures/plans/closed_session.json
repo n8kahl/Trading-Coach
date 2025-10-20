@@ -1,0 +1,155 @@
+{
+  "cohort": "closed_session",
+  "style": "swing",
+  "plans": [
+    {
+      "plan_id": "CLOSED-1",
+      "symbol": "NFLX",
+      "direction": "long",
+      "entry": 350.0,
+      "stop": 342.0,
+      "rr_to_t1": 2.4,
+      "targets": [
+        { "label": "TP1", "price": 362.0, "prob_touch": 0.36, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 354.0, "low": 347.5 },
+        { "high": 363.5, "low": 352.0 }
+      ]
+    },
+    {
+      "plan_id": "CLOSED-2",
+      "symbol": "NFLX",
+      "direction": "long",
+      "entry": 350.0,
+      "stop": 342.0,
+      "rr_to_t1": 2.4,
+      "targets": [
+        { "label": "TP1", "price": 362.0, "prob_touch": 0.36, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 352.5, "low": 345.8 },
+        { "high": 347.2, "low": 341.6 }
+      ]
+    },
+    {
+      "plan_id": "CLOSED-3",
+      "symbol": "CRM",
+      "direction": "long",
+      "entry": 210.0,
+      "stop": 202.5,
+      "rr_to_t1": 2.1,
+      "targets": [
+        { "label": "TP1", "price": 217.0, "prob_touch": 0.36, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 212.0, "low": 206.8 },
+        { "high": 210.5, "low": 201.8 }
+      ]
+    },
+    {
+      "plan_id": "CLOSED-4",
+      "symbol": "CRM",
+      "direction": "long",
+      "entry": 210.0,
+      "stop": 202.5,
+      "rr_to_t1": 2.1,
+      "targets": [
+        { "label": "TP1", "price": 217.0, "prob_touch": 0.36, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 214.5, "low": 207.9 },
+        { "high": 217.8, "low": 211.6 }
+      ]
+    },
+    {
+      "plan_id": "CLOSED-5",
+      "symbol": "META",
+      "direction": "short",
+      "entry": 290.0,
+      "stop": 297.5,
+      "rr_to_t1": 2.0,
+      "targets": [
+        { "label": "TP1", "price": 278.5, "prob_touch": 0.36, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 296.0, "low": 284.2 },
+        { "high": 298.4, "low": 282.5 }
+      ]
+    },
+    {
+      "plan_id": "CLOSED-6",
+      "symbol": "META",
+      "direction": "short",
+      "entry": 290.0,
+      "stop": 297.5,
+      "rr_to_t1": 2.0,
+      "targets": [
+        { "label": "TP1", "price": 278.5, "prob_touch": 0.36, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 296.8, "low": 288.4 },
+        { "high": 298.2, "low": 289.5 }
+      ]
+    },
+    {
+      "plan_id": "CLOSED-7",
+      "symbol": "SHOP",
+      "direction": "long",
+      "entry": 60.0,
+      "stop": 56.5,
+      "rr_to_t1": 1.9,
+      "targets": [
+        { "label": "TP1", "price": 64.0, "prob_touch": 0.52, "em_capped": true }
+      ],
+      "bars": [
+        { "high": 62.2, "low": 58.3 },
+        { "high": 64.7, "low": 61.8 }
+      ]
+    },
+    {
+      "plan_id": "CLOSED-8",
+      "symbol": "SHOP",
+      "direction": "long",
+      "entry": 60.0,
+      "stop": 56.5,
+      "rr_to_t1": 1.9,
+      "targets": [
+        { "label": "TP1", "price": 64.0, "prob_touch": 0.52, "em_capped": true }
+      ],
+      "bars": [
+        { "high": 61.4, "low": 58.9 },
+        { "high": 59.8, "low": 56.3 }
+      ]
+    },
+    {
+      "plan_id": "CLOSED-9",
+      "symbol": "BABA",
+      "direction": "short",
+      "entry": 90.0,
+      "stop": 95.0,
+      "rr_to_t1": 2.3,
+      "targets": [
+        { "label": "TP1", "price": 84.5, "prob_touch": 0.52, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 89.2, "low": 86.8 },
+        { "high": 87.4, "low": 84.2 }
+      ]
+    },
+    {
+      "plan_id": "CLOSED-10",
+      "symbol": "BABA",
+      "direction": "short",
+      "entry": 90.0,
+      "stop": 95.0,
+      "rr_to_t1": 2.3,
+      "targets": [
+        { "label": "TP1", "price": 84.5, "prob_touch": 0.52, "em_capped": false }
+      ],
+      "bars": [
+        { "high": 95.6, "low": 88.3 }
+      ]
+    }
+  ]
+}

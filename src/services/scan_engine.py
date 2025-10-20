@@ -222,18 +222,19 @@ class PlanningScanEngine:
         atr_daily_series = atr(high_series, low_series, close_series, 14)
         atr_daily_val = _latest(atr_daily_series) or atr_val
         geometry = None
+        fallback_geometry = False
+        timestamp = None
+        index_payload = getattr(daily, "index", None)
+        if index_payload is not None and len(index_payload) > 0:
+            ts = index_payload[-1]
+            if isinstance(ts, datetime):
+                timestamp = ts
+            else:
+                try:
+                    timestamp = datetime.fromisoformat(str(ts))
+                except Exception:
+                    timestamp = None
         try:
-            timestamp = None
-            index_payload = getattr(daily, "index", None)
-            if index_payload is not None and len(index_payload) > 0:
-                ts = index_payload[-1]
-                if isinstance(ts, datetime):
-                    timestamp = ts
-                else:
-                    try:
-                        timestamp = datetime.fromisoformat(str(ts))
-                    except Exception:
-                        timestamp = None
             geometry = build_plan_geometry(
                 entry=float(last_close),
                 side="long",
@@ -248,24 +249,74 @@ class PlanningScanEngine:
             )
         except ValueError as exc:
             logger.debug("geometry build failed for %s: %s", symbol, exc)
-            return None
-        stop = geometry.stop.price
-        target = geometry.targets[0].price if geometry.targets else last_close + atr_val * 2.0
+            if str(exc) != "rr_too_low":
+                return None
+            fallback_geometry = True
+
+        if fallback_geometry or geometry is None:
+            stop = float(last_close - max(atr_val, 1e-6))
+            target = float(last_close + max(atr_val * 2.0, 1e-6))
+            probability = max(probability, self._probability_floor)
+            rr = (target - last_close) / (last_close - stop) if last_close != stop else 0.0
+            target_entries = [
+                {
+                    "price": round(target, 2),
+                    "prob_touch": probability,
+                    "distance": target - last_close,
+                    "rr_multiple": rr,
+                    "em_fraction": None,
+                    "snap_tag": "fallback_rr",
+                    "em_capped": False,
+                }
+            ]
+            runner_payload = {
+                "fraction": 0.2,
+                "atr_multiple": 1.0,
+                "atr_step": 0.5,
+                "em_fraction_cap": 0.6,
+                "notes": ["fallback_runner"],
+            }
+            em_used_flag = False
+            snap_trace_payload = ["fallback_rr"]
+        else:
+            stop = geometry.stop.price
+            target = geometry.targets[0].price if geometry.targets else last_close + atr_val * 2.0
+            probability = float(geometry.targets[0].prob_touch if geometry.targets else probability)
+            rr = (target - last_close) / (last_close - stop) if last_close != stop else 0.0
+            target_entries = [
+                {
+                    "price": round(meta.price, 2),
+                    "prob_touch": meta.prob_touch,
+                    "distance": meta.distance,
+                    "rr_multiple": meta.rr_multiple,
+                    "em_fraction": meta.em_fraction,
+                    "snap_tag": meta.reason,
+                    "em_capped": meta.em_capped,
+                }
+                for meta in geometry.targets
+            ]
+            runner_payload = {
+                "fraction": geometry.runner.fraction,
+                "atr_multiple": geometry.runner.atr_trail_mult,
+                "atr_step": geometry.runner.atr_trail_step,
+                "em_fraction_cap": geometry.runner.em_fraction_cap,
+                "notes": geometry.runner.notes,
+            }
+            em_used_flag = bool(geometry.em_used)
+            snap_trace_payload = geometry.snap_trace
         logger.debug(
             "planning_geometry",
             extra={
                 "symbol": symbol,
                 "entry": round(last_close, 2),
                 "stop": round(stop, 2),
-                "targets": [round(meta.price, 2) for meta in geometry.targets],
-                "expected_move": round(geometry.em_day, 4) if geometry.em_day else None,
-                "remaining_atr": round(geometry.ratr, 4) if geometry.ratr else None,
-                "em_used": geometry.em_used,
+                "targets": [entry["price"] for entry in target_entries],
+                "expected_move": round(geometry.em_day, 4) if geometry and geometry.em_day else None,
+                "remaining_atr": round(geometry.ratr, 4) if geometry and geometry.ratr else None,
+                "em_used": em_used_flag,
             },
         )
-        rr = (target - last_close) / (last_close - stop) if last_close != stop else 0.0
         risk_reward = max(0.0, min(rr / 3.0, 1.0))  # normalise assuming 3:1 as ideal
-        probability = float(geometry.targets[0].prob_touch if geometry.targets else probability)
 
         readiness = 0.45 * probability + 0.25 * actionability + 0.30 * risk_reward
         readiness = max(0.0, min(readiness, 1.0))
@@ -278,27 +329,9 @@ class PlanningScanEngine:
         levels = {
             "entry": round(last_close, 2),
             "invalidation": round(stop, 2),
-            "targets": [round(meta.price, 2) for meta in geometry.targets] or [round(target, 2)],
+            "targets": [entry["price"] for entry in target_entries] or [round(target, 2)],
         }
-        target_meta_payload = [
-            {
-                "price": round(meta.price, 2),
-                "prob_touch": meta.prob_touch,
-                "distance": meta.distance,
-                "rr_multiple": meta.rr_multiple,
-                "em_fraction": meta.em_fraction,
-                "snap_tag": meta.reason,
-                "em_capped": meta.em_capped,
-            }
-            for meta in geometry.targets
-        ]
-        runner_payload = {
-            "fraction": geometry.runner.fraction,
-            "atr_multiple": geometry.runner.atr_trail_mult,
-            "atr_step": geometry.runner.atr_trail_step,
-            "em_fraction_cap": geometry.runner.em_fraction_cap,
-            "notes": geometry.runner.notes,
-        }
+        target_meta_payload = target_entries
         metrics = {
             "atr": round(atr_val, 4),
             "atr_pct": round(atr_pct, 2),
@@ -310,14 +343,14 @@ class PlanningScanEngine:
             "entry_distance_atr": round(pullback_atr, 3) if pullback_atr is not None else None,
             "target_meta": target_meta_payload,
             "runner_policy": runner_payload,
-            "expected_move": round(geometry.em_day, 4) if geometry.em_day else None,
-            "remaining_atr": round(geometry.ratr, 4) if geometry.ratr else None,
-            "em_used": bool(geometry.em_used),
-            "snap_trace": geometry.snap_trace,
+            "expected_move": round(geometry.em_day, 4) if geometry and geometry.em_day else None,
+            "remaining_atr": round(geometry.ratr, 4) if geometry and geometry.ratr else None,
+            "em_used": em_used_flag,
+            "snap_trace": snap_trace_payload,
             "stop_detail": {
-                "structural": geometry.stop.structural,
-                "volatility": geometry.stop.volatility,
-                "snapped": geometry.stop.snapped,
+                "structural": geometry.stop.structural if geometry else stop - last_close,
+                "volatility": geometry.stop.volatility if geometry else 0.0,
+                "snapped": geometry.stop.snapped if geometry else "fallback_rr",
             },
         }
         components = {

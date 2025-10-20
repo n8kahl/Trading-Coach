@@ -61,6 +61,7 @@ class Settings(BaseSettings):
         env="FT_ALLOWED_HOSTS",
     )
     ft_event_blocked_styles: list[str] = Field(default_factory=list, env="FT_EVENT_BLOCKED_STYLES")
+    calibration_data_path: str | None = Field(None, env="CALIBRATION_DATA_PATH")
 
     @field_validator("ft_allowed_hosts", "ft_event_blocked_styles", mode="before")
     @classmethod

@@ -118,7 +118,17 @@ from .indicators import get_indicator_bundle
 from zoneinfo import ZoneInfo
 
 from .market_clock import MarketClock
-from .plans.geometry import build_plan_geometry
+from .engine.calibration import CalibrationStore
+from .telemetry import (
+    prometheus_response,
+    record_candidate_count,
+    record_em_capped_tp,
+    record_plan_duration,
+    record_rr_below_min,
+    record_selector_rejections,
+)
+from .plans.geometry import build_plan_geometry, RunnerPolicy
+from .levels.snapper import Level, SnapContext, snap_prices
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +179,71 @@ def _record_metric(name: str, **labels: str) -> int:
     key = "|".join(key_parts)
     _METRIC_COUNTER[key] += 1
     return _METRIC_COUNTER[key]
+
+
+def _runner_policy_to_dict(policy: RunnerPolicy | None) -> Dict[str, Any]:
+    if policy is None:
+        return {}
+    return {
+        "fraction": round(policy.fraction, 3),
+        "atr_trail_mult": round(policy.atr_trail_mult, 3),
+        "atr_trail_step": round(policy.atr_trail_step, 3),
+        "em_fraction_cap": policy.em_fraction_cap,
+        "notes": list(policy.notes),
+    }
+
+
+def _hydrate_secondary_fields(payload: "PlanResponse") -> "PlanResponse":
+    plan_block = payload.plan if isinstance(payload.plan, Mapping) else {}
+    structured_block = payload.structured_plan if isinstance(payload.structured_plan, Mapping) else {}
+    target_profile_block = payload.target_profile if isinstance(payload.target_profile, Mapping) else {}
+
+    def _first_non_empty(key: str) -> Any:
+        for source in (plan_block, structured_block, target_profile_block):
+            if isinstance(source, Mapping):
+                value = source.get(key)
+                if value not in (None, [], {}):
+                    return value
+        return None
+
+    if payload.runner_policy in (None, {}):
+        candidate = _first_non_empty("runner_policy") or _first_non_empty("runner")
+        if candidate not in (None, {}, []):
+            payload.runner_policy = candidate
+
+    if not payload.snap_trace:
+        candidate = _first_non_empty("snap_trace")
+        if candidate:
+            payload.snap_trace = candidate
+
+    if payload.expected_move is None:
+        candidate = _first_non_empty("expected_move")
+        if candidate is not None:
+            payload.expected_move = candidate
+
+    if payload.remaining_atr is None:
+        candidate = _first_non_empty("remaining_atr")
+        if candidate is not None:
+            payload.remaining_atr = candidate
+
+    if payload.em_used is None:
+        candidate = _first_non_empty("em_used")
+        if candidate is not None:
+            payload.em_used = candidate
+
+    if payload.targets_meta is None or payload.targets_meta == []:
+        candidate = plan_block.get("targets_meta") or plan_block.get("target_meta")
+        if not candidate:
+            candidate = structured_block.get("target_meta") if isinstance(structured_block, Mapping) else None
+        if candidate:
+            payload.targets_meta = candidate
+
+    if payload.target_profile is None:
+        candidate = structured_block.get("target_profile") if isinstance(structured_block, Mapping) else None
+        if candidate:
+            payload.target_profile = candidate
+
+    return payload
 
 _STYLE_DELTA_PREF: Dict[str, float] = {
     "scalp": 0.55,
@@ -843,6 +918,29 @@ async def _build_scan_stub_candidate(
             levels=level_labels if level_labels else None,
         )
 
+        planning_snapshot: Dict[str, Any] | None = None
+        if entry is not None and stop is not None and targets:
+            direction_snapshot = direction_hint or ("long" if targets[0] >= entry else "short")
+            chart_params_snapshot = {
+                "symbol": signal.symbol.upper(),
+                "interval": _normalize_chart_interval(interval_hint or context.data_timeframe),
+                "direction": direction_snapshot,
+                "entry": f"{entry:.2f}",
+                "stop": f"{stop:.2f}",
+                "tp": ",".join(f"{tp:.2f}" for tp in targets),
+            }
+            planning_snapshot = {
+                "source": "scan",
+                "plan_id": plan_id,
+                "direction": direction_snapshot,
+                "levels": {
+                    "entry": entry,
+                    "stop": stop,
+                    "targets": targets,
+                },
+                "chart_params": chart_params_snapshot,
+            }
+
         fast_indicators = await _indicator_metrics(signal.symbol, history)
         combined_indicators: Dict[str, Any] = dict(fast_indicators)
         combined_indicators.update(bundle.get("snapshot", {}).get("indicators") or {})
@@ -910,6 +1008,7 @@ async def _build_scan_stub_candidate(
             bars_to_trigger=bars_to_trigger_val,
             actionable_soon=actionable_soon,
             source_paths={},
+            planning_snapshot=planning_snapshot,
         )
         features = _metrics_to_features(metrics, style_token)
         logger.debug(
@@ -1162,9 +1261,16 @@ if APP_STATIC_DIR.exists():
     app.mount("/app", StaticFiles(directory=str(APP_STATIC_DIR), html=True), name="app")
 
 
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint() -> Response:
+    payload, content_type = prometheus_response()
+    return Response(content=payload, media_type=content_type)
+
+
 @app.on_event("startup")
 async def _startup_tasks() -> None:
     global _IDEA_PERSISTENCE_ENABLED, _SYMBOL_STREAM_COORDINATOR
+    _load_calibrations_from_settings()
     persisted = await ensure_db_schema()
     if persisted:
         _IDEA_PERSISTENCE_ENABLED = True
@@ -1309,6 +1415,7 @@ class RejectedContract(BaseModel):
 
     symbol: str
     reason: str
+    message: str | None = None
 
 
 class PlanResponse(BaseModel):
@@ -1327,6 +1434,7 @@ class PlanResponse(BaseModel):
     stop: float | None = None
     targets: List[float] | None = None
     target_meta: List[Dict[str, Any]] | None = None
+    targets_meta: List[Dict[str, Any]] | None = None
     rr_to_t1: float | None = None
     confidence: float | None = None
     confidence_factors: List[str] | None = None
@@ -1383,6 +1491,7 @@ class PlanResponse(BaseModel):
     expected_move: float | None = None
     remaining_atr: float | None = None
     em_used: bool | None = None
+    calibration_meta: Dict[str, Any] | None = None
 
 
 class AssistantExecRequest(BaseModel):
@@ -1977,11 +2086,19 @@ def _extract_plan_core(first: Dict[str, Any], plan_id: str, version: int, decima
         "stop": plan_block.get("stop"),
         "targets": plan_block.get("targets"),
         "target_meta": plan_block.get("target_meta"),
-        "rr_to_t1": plan_block.get("risk_reward"),
+        "targets_meta": plan_block.get("target_meta"),
+        "rr_to_t1": plan_block.get("rr_to_t1"),
         "confidence": plan_block.get("confidence"),
         "decimals": decimals,
         "charts_params": charts.get("params") if isinstance(charts, dict) else None,
         "runner": plan_block.get("runner"),
+        "runner_policy": plan_block.get("runner_policy"),
+        "snap_trace": plan_block.get("snap_trace"),
+        "expected_move": plan_block.get("expected_move"),
+        "remaining_atr": plan_block.get("remaining_atr"),
+        "em_used": plan_block.get("em_used"),
+        "accuracy_levels": plan_block.get("accuracy_levels"),
+        "source_paths": plan_block.get("source_paths"),
     }
     return core
 
@@ -3210,9 +3327,9 @@ def _apply_option_guardrails(
     *,
     max_spread_pct: float,
     min_open_interest: int,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     filtered: List[Dict[str, Any]] = []
-    rejected: List[Dict[str, str]] = []
+    rejected: List[Dict[str, Any]] = []
     for contract in contracts:
         if not isinstance(contract, dict):
             continue
@@ -3230,18 +3347,22 @@ def _apply_option_guardrails(
             oi_numeric = float(oi_val) if oi_val is not None else None
         except (TypeError, ValueError):
             oi_numeric = None
-        iv_val = _safe_number(contract.get("iv"))
-
         reason: str | None = None
+        message: str | None = None
         if spread is not None and float(spread) > max_spread_pct:
-            reason = f"SPREAD_GT_{max_spread_pct:g}"
+            reason = "SPREAD_TOO_WIDE"
+            message = f"spread {float(spread):.2f}% exceeds limit {max_spread_pct:.2f}%"
         elif oi_numeric is None:
-            reason = "OI_MISSING"
+            reason = "OPEN_INTEREST_MISSING"
+            message = "open interest unavailable"
         elif oi_numeric < min_open_interest:
-            reason = f"OI_LT_{min_open_interest}"
-
+            reason = "OPEN_INTEREST_TOO_LOW"
+            message = f"open interest {int(oi_numeric)} < required {min_open_interest}"
         if reason:
-            rejected.append({"symbol": symbol or "UNKNOWN", "reason": reason})
+            rejection_entry = {"symbol": symbol or "UNKNOWN", "reason": reason}
+            if message:
+                rejection_entry["message"] = message
+            rejected.append(rejection_entry)
             continue
         filtered.append(contract)
 
@@ -3661,6 +3782,9 @@ def _planning_scan_to_page(
     base_data_quality: Dict[str, Any] | None = None,
 ) -> ScanPage:
     candidates: List[ScanCandidate] = []
+    style_hint = (request_payload.style or "intraday").strip().lower() if request_payload else "intraday"
+    interval_map = {"scalp": "1m", "intraday": "5m", "swing": "1h", "leaps": "d"}
+    default_interval = interval_map.get(style_hint, "5m")
     for idx, candidate in enumerate(result.candidates, start=1):
         components = candidate.components or {}
         metrics = candidate.metrics or {}
@@ -3682,6 +3806,7 @@ def _planning_scan_to_page(
                 actionable_soon = True
             if not actionable_soon and actionability_component is not None and actionability_component >= 0.8:
                 actionable_soon = True
+        target_meta_payload = metrics.get("target_meta") or []
         planning_snapshot = {
             "planning_mode": True,
             "readiness_score": candidate.readiness_score,
@@ -3691,6 +3816,8 @@ def _planning_scan_to_page(
             "requires_live_confirmation": candidate.requires_live_confirmation,
             "missing_live_inputs": list(candidate.missing_live_inputs),
         }
+        if target_meta_payload:
+            planning_snapshot["target_meta"] = target_meta_payload
         if metrics.get("runner_policy"):
             planning_snapshot["runner_policy"] = metrics.get("runner_policy")
         if metrics.get("snap_trace"):
@@ -3699,6 +3826,28 @@ def _planning_scan_to_page(
             planning_snapshot["expected_move"] = metrics.get("expected_move")
         if metrics.get("remaining_atr") is not None:
             planning_snapshot["remaining_atr"] = metrics.get("remaining_atr")
+        entry_level = candidate.levels.get("entry")
+        stop_level = candidate.levels.get("invalidation")
+        targets_level = list(candidate.levels.get("targets") or [])
+        direction = None
+        if entry_level is not None and targets_level:
+            direction = "long" if targets_level[0] >= entry_level else "short"
+        elif entry_distance_pct is not None and entry_distance_pct >= 0:
+            direction = "long"
+        default_direction = direction or "long"
+        if entry_level is not None and stop_level is not None and targets_level:
+            chart_params = {
+                "symbol": candidate.symbol,
+                "interval": default_interval,
+                "direction": default_direction,
+                "entry": f"{float(entry_level):.2f}",
+                "stop": f"{float(stop_level):.2f}",
+                "tp": ",".join(f"{float(tp):.2f}" for tp in targets_level),
+            }
+            planning_snapshot["chart_params"] = chart_params
+            planning_snapshot.setdefault("direction", default_direction)
+        elif default_direction:
+            planning_snapshot.setdefault("direction", default_direction)
         reasons = [
             f"Readiness {candidate.readiness_score:.2f}",
             "Probability {:.0%}".format(probability),
@@ -3707,20 +3856,165 @@ def _planning_scan_to_page(
             reasons.append(f"Actionability {actionability_component:.2f}")
         if risk_reward_component is not None:
             reasons.append(f"Risk/Reward {risk_reward_component:.2f}")
+        rr_t1 = None
+        if target_meta_payload:
+            first_meta = target_meta_payload[0]
+            rr_t1 = first_meta.get("rr_multiple") or first_meta.get("rr")
+            if isinstance(rr_t1, str):
+                try:
+                    rr_t1 = float(rr_t1)
+                except ValueError:
+                    rr_t1 = None
+        source_paths = {
+            "entry": "geometry_engine",
+            "stop": "geometry_engine",
+            "targets": "geometry_engine",
+        }
+        planning_snapshot["source_paths"] = source_paths
+        runner_policy_payload = metrics.get("runner_policy") or None
+        snap_trace_payload_raw = metrics.get("snap_trace")
+        snap_trace_payload = [str(item) for item in snap_trace_payload_raw] if isinstance(snap_trace_payload_raw, list) else None
+        expected_move_val = metrics.get("expected_move")
+        remaining_atr_val = metrics.get("remaining_atr")
+        em_used_val = metrics.get("em_used")
+        tp_reasons_payload = _tp_reason_entries(target_meta_payload)
+        if tp_reasons_payload:
+            planning_snapshot["tp_reasons"] = tp_reasons_payload
+        plan_slug = f"{candidate.symbol.upper()}-{result.as_of_utc.strftime('%Y%m%d%H%M')}-P{idx}"
+        planning_snapshot["plan_id"] = plan_slug
+
+        risk_block_payload = None
+        execution_rules_payload = None
+        target_profile_dict: Dict[str, Any] | None = None
+        structured_plan_payload: Dict[str, Any] | None = None
+        accuracy_levels_payload = list(metrics.get("accuracy_levels") or [])
+
+        entry_level_float = float(entry_level) if isinstance(entry_level, (int, float)) else None
+        stop_level_float = float(stop_level) if isinstance(stop_level, (int, float)) else None
+        targets_level_float = [float(tp) for tp in targets_level] if targets_level else []
+        try:
+            risk_block_payload = _build_risk_block(
+                entry=entry_level_float,
+                stop=stop_level_float,
+                targets=targets_level_float,
+                atr=metrics.get("atr"),
+                stop_multiple=None,
+                expected_move=expected_move_val,
+                runner=runner_policy_payload,
+            )
+        except Exception:
+            risk_block_payload = None
+        try:
+            execution_rules_payload = _build_execution_rules(
+                entry=entry_level_float,
+                stop=stop_level_float,
+                targets=targets_level_float,
+                direction=default_direction,
+                precision=2,
+                key_levels_used=None,
+                runner=runner_policy_payload,
+            )
+        except Exception:
+            execution_rules_payload = None
+
+        if entry_level_float is not None and stop_level_float is not None and targets_level_float:
+            try:
+                target_profile = build_target_profile(
+                    entry=entry_level_float,
+                    stop=stop_level_float,
+                    targets=targets_level_float,
+                    target_meta=target_meta_payload,
+                    debug=None,
+                    runner=runner_policy_payload,
+                    warnings=None,
+                    atr_used=metrics.get("atr"),
+                    expected_move=expected_move_val,
+                    style=request_payload.style,
+                    bias=default_direction,
+                )
+                target_profile_dict = target_profile.to_dict()
+                if snap_trace_payload is not None:
+                    target_profile_dict["snap_trace"] = snap_trace_payload
+                if expected_move_val is not None:
+                    try:
+                        target_profile_dict["expected_move"] = float(expected_move_val)
+                    except (TypeError, ValueError):
+                        pass
+                if em_used_val is not None:
+                    target_profile_dict["em_used"] = bool(em_used_val)
+                structured_plan_payload = build_structured_plan(
+                    plan_id=plan_slug,
+                    symbol=candidate.symbol.upper(),
+                    style=request_payload.style,
+                    direction=default_direction,
+                    profile=target_profile,
+                    confidence=readiness_score,
+                    rationale=None,
+                    options_block=None,
+                    chart_url=None,
+                    session={"planning_mode": True, "as_of": result.as_of_utc.isoformat()},
+                    confluence=None,
+                )
+                if target_meta_payload:
+                    structured_plan_payload["target_meta"] = target_meta_payload
+                structured_plan_payload["target_profile"] = target_profile_dict
+                if tp_reasons_payload:
+                    structured_plan_payload["tp_reasons"] = tp_reasons_payload
+                if runner_policy_payload:
+                    structured_plan_payload["runner_policy"] = runner_policy_payload
+                if snap_trace_payload is not None:
+                    structured_plan_payload["snap_trace"] = snap_trace_payload
+                if expected_move_val is not None:
+                    try:
+                        structured_plan_payload["expected_move"] = float(expected_move_val)
+                    except (TypeError, ValueError):
+                        pass
+                if remaining_atr_val is not None:
+                    try:
+                        structured_plan_payload["remaining_atr"] = float(remaining_atr_val)
+                    except (TypeError, ValueError):
+                        pass
+                if em_used_val is not None:
+                    structured_plan_payload["em_used"] = bool(em_used_val)
+            except Exception:
+                target_profile_dict = None
+                structured_plan_payload = None
+
         sc = ScanCandidate(
             symbol=candidate.symbol,
             rank=idx,
             score=candidate.readiness_score,
+            plan_id=plan_slug,
             reasons=reasons,
-            entry=candidate.levels.get("entry"),
-            stop=candidate.levels.get("invalidation"),
-            tps=list(candidate.levels.get("targets") or []),
+            entry=entry_level_float,
+            stop=stop_level_float,
+            tps=targets_level_float,
+            rr_t1=rr_t1,
             confidence=readiness_score,
+            chart_url=None,
+            target_meta=target_meta_payload or None,
+            targets_meta=target_meta_payload or None,
+            tp_reasons=tp_reasons_payload,
+            structured_plan=structured_plan_payload,
+            target_profile=target_profile_dict,
+            runner_policy=runner_policy_payload,
+            snap_trace=snap_trace_payload,
+            expected_move=float(expected_move_val) if isinstance(expected_move_val, (int, float)) else None,
+            remaining_atr=float(remaining_atr_val) if isinstance(remaining_atr_val, (int, float)) else None,
+            em_used=bool(em_used_val) if em_used_val is not None else None,
+            risk_block=risk_block_payload,
+            execution_rules=execution_rules_payload,
+            confluence=[],
+            accuracy_levels=accuracy_levels_payload,
+            events=None,
+            options=None,
+            options_contracts=[],
+            options_note=None,
             entry_distance_pct=entry_distance_pct,
             entry_distance_atr=entry_distance_atr,
             bars_to_trigger=bars_to_trigger,
             actionable_soon=actionable_soon,
-            source_paths={},
+            source_paths=source_paths,
             planning_snapshot=planning_snapshot,
         )
         candidates.append(sc)
@@ -4173,6 +4467,32 @@ _STREAM_HEARTBEAT_INTERVAL = 5.0
 _REALTIME_BAR_STREAM: Optional[PolygonRealtimeBarStreamer] = None
 _IV_METRICS_CACHE_TTL = 120.0
 _IV_METRICS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_CALIBRATION_STORE: CalibrationStore = CalibrationStore()
+_CALIBRATION_SOURCE: str | None = None
+
+
+def _load_calibrations_from_settings() -> None:
+    global _CALIBRATION_STORE, _CALIBRATION_SOURCE
+    settings = get_settings()
+    path_value = getattr(settings, "calibration_data_path", None)
+    if not path_value:
+        return
+    path = Path(path_value).expanduser()
+    if not path.exists():
+        logger.warning("calibration path %s does not exist", path)
+        return
+    try:
+        store = CalibrationStore.load(path)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("failed to load calibration tables from %s: %s", path, exc)
+        return
+    if store.to_payload():
+        _CALIBRATION_STORE = store
+        _CALIBRATION_SOURCE = str(path)
+        logger.info(
+            "calibration tables loaded",
+            extra={"source": _CALIBRATION_SOURCE, "tables": len(store.to_payload())},
+        )
 async def _symbol_stream_emit(symbol: str, event: Dict[str, Any]) -> None:
     await _ingest_stream_event(symbol, event)
 
@@ -6106,6 +6426,7 @@ async def _generate_fallback_plan(
         atr_value = max(close_price * 0.006, 0.25)
     key_levels = context.get("key") or {}
     snapshot = _build_market_snapshot(prepared, key_levels)
+    volatility = snapshot.get("volatility") or {}
     ema_trend_up = ema9 > ema20 > ema50
     ema_trend_down = ema9 < ema20 < ema50
     expected_move_abs = context.get("expected_move_horizon")
@@ -6184,6 +6505,7 @@ async def _generate_fallback_plan(
         levels=levels_map,
         timestamp=plan_ts_utc,
     )
+    calibration_enabled = _CALIBRATION_SOURCE is not None
     stop = geometry.stop.price
     targets = [meta.price for meta in geometry.targets]
     em_cap_used = geometry.em_used
@@ -6222,15 +6544,27 @@ async def _generate_fallback_plan(
             item["snap_tag"] = meta.reason
         target_meta.append(item)
     tp_reasons = _tp_reason_entries(target_meta)
+    if calibration_enabled:
+        rr_floor = getattr(geometry.stop, "rr_min", None)
+        try:
+            rr_floor_val = float(rr_floor) if rr_floor is not None else None
+        except (TypeError, ValueError):
+            rr_floor_val = None
+        if rr_floor_val is not None and rr_to_t1 is not None and rr_to_t1 < rr_floor_val:
+            record_rr_below_min("live")
+        if any(getattr(meta, "em_capped", False) for meta in geometry.targets):
+            record_em_capped_tp("live")
     runner_trail_desc = f"ATR trail x {geometry.runner.atr_trail_mult:.2f}"
-    runner = {
-        "trail": runner_trail_desc,
-        "trail_multiple": geometry.runner.atr_trail_mult,
-        "trail_step": geometry.runner.atr_trail_step,
-        "fraction": geometry.runner.fraction,
-        "em_cap_fraction": geometry.runner.em_fraction_cap,
-        "notes": geometry.runner.notes,
-    }
+    runner = _runner_policy_to_dict(geometry.runner)
+    runner.update(
+        {
+            "trail": runner_trail_desc,
+            "trail_multiple": round(geometry.runner.atr_trail_mult, 3),
+            "trail_step": round(geometry.runner.atr_trail_step, 3),
+            "fraction": round(geometry.runner.fraction, 3),
+            "em_cap_fraction": geometry.runner.em_fraction_cap,
+        }
+    )
     direction_label = "Long" if direction == "long" else "Short"
     notes = (
         f"{direction_label} bias with EMA stack supportive; manage risk using {runner_trail_desc} and watch VWAP for continuation."
@@ -6393,19 +6727,59 @@ async def _generate_fallback_plan(
         event_warnings.append("EVENT_WINDOW_BLOCKED")
     if include_options_contracts:
         extracted_contracts = _extract_options_contracts(options_payload)
+        selector_rejections: List[Dict[str, Any]] = []
+        if isinstance(options_payload, Mapping):
+            raw_rejections = options_payload.get("rejections") or []
+            if isinstance(raw_rejections, Sequence):
+                for entry in raw_rejections:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    symbol_token = str(entry.get("symbol") or symbol).upper()
+                    reason_token = str(entry.get("reason") or "").upper()
+                    if not reason_token:
+                        continue
+                    rejection_entry: Dict[str, Any] = {"symbol": symbol_token, "reason": reason_token}
+                    if entry.get("message"):
+                        rejection_entry["message"] = str(entry["message"])
+                    selector_rejections.append(rejection_entry)
         filtered_contracts, guardrail_rejections = _apply_option_guardrails(
             extracted_contracts,
             max_spread_pct=float(getattr(settings, "ft_max_spread_pct", 8.0)),
             min_open_interest=int(getattr(settings, "ft_min_oi", 300)),
         )
-        if guardrail_rejections:
-            rejected_contracts.extend(guardrail_rejections)
+        accepted_symbols = {str(item.get("symbol") or "").upper() for item in filtered_contracts if isinstance(item, Mapping)}
+        filtered_rejections: List[Dict[str, Any]] = []
+        for entry in [*selector_rejections, *guardrail_rejections]:
+            sym = str(entry.get("symbol") or "").upper()
+            if sym and sym in accepted_symbols:
+                continue
+            filtered_rejections.append(entry)
+        if filtered_rejections:
+            dedup: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            for entry in filtered_rejections:
+                sym = str(entry.get("symbol") or symbol).upper()
+                reason = str(entry.get("reason") or "").upper()
+                if not reason:
+                    continue
+                key = (sym, reason)
+                existing = dedup.get(key)
+                if existing is None:
+                    dedup[key] = {"symbol": sym, "reason": reason}
+                if entry.get("message"):
+                    dedup[key]["message"] = str(entry["message"])
+            rejection_list = list(dedup.values())
+            rejected_contracts.extend(rejection_list)
+            record_selector_rejections(rejection_list, source="live")
         if filtered_contracts:
             options_contracts = filtered_contracts
         else:
             options_contracts = []
-            if guardrail_rejections and not options_note:
-                options_note = "Contracts filtered by liquidity guardrails"
+            if filtered_rejections and not options_note:
+                reason_labels = sorted({entry.get("reason") for entry in filtered_rejections if entry.get("reason")})
+                if reason_labels:
+                    options_note = f"Contracts rejected ({', '.join(reason_labels)})"
+                else:
+                    options_note = "Contracts filtered by liquidity guardrails"
             elif isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
                 options_note = str(options_payload["quotes_notice"])
             elif not side_hint:
@@ -6445,30 +6819,89 @@ async def _generate_fallback_plan(
     remaining_atr_value = None
     if isinstance(geometry.ratr, (int, float)) and math.isfinite(geometry.ratr):
         remaining_atr_value = round(float(geometry.ratr), 4)
+    runner_existing = dict(plan.get("runner")) if isinstance(plan, Mapping) and isinstance(plan.get("runner"), Mapping) else {}
+    runner_geometry = _runner_policy_to_dict(geometry.runner)
+    runner = {**runner_existing, **runner_geometry}
+    runner.setdefault("trail", f"Trail with ATR x{geometry.runner.atr_trail_mult:.2f}")
+    runner_policy_geometry = dict(runner)
 
-    plan_block = {
-        "symbol": symbol.upper(),
-        "style": style_token,
-        "direction": direction,
-        "entry": entry,
-        "stop": stop,
-        "targets": targets,
-        "target_meta": target_meta,
-        "runner": runner,
-        "runner_policy": runner,
-        "confidence": confidence,
-        "notes": notes,
-        "rr_to_t1": rr_to_t1,
-        "expected_move": expected_move_value,
-        "remaining_atr": remaining_atr_value,
-        "atr": atr_value,
-        "interval": interval_token,
-        "warnings": [],
-        "strategy": "baseline_auto",
-        "debug": {},
-        "snap_trace": geometry.snap_trace or [],
-        "em_used": bool(em_cap_used),
-    }
+    calibration_meta_payload: Dict[str, Any] | None = None
+    if calibration_enabled and geometry.targets:
+        session_status_token = str(
+            session_state_payload.get("status")
+            or session_state_payload.get("session_status")
+            or session_state_payload.get("phase")
+            or ""
+        ).lower()
+        cohort_hint: str | None = None
+        if "open" in session_status_token:
+            cohort_hint = "open_session"
+        elif any(token in session_status_token for token in ("closed", "post", "after")):
+            cohort_hint = "closed_session"
+        elif simulate_open:
+            cohort_hint = "open_session"
+        style_for_calibration = (style_token or "intraday") or "intraday"
+        for idx, meta in enumerate(geometry.targets):
+            raw_probability = float(meta.prob_touch)
+            calibrated_probability, payload = _CALIBRATION_STORE.calibrate(style_for_calibration, raw_probability, cohort=cohort_hint)
+            if idx < len(target_meta):
+                target_meta[idx]["prob_touch_raw"] = raw_probability
+                target_meta[idx]["prob_touch_calibrated"] = calibrated_probability
+            else:
+                target_meta.append(
+                    {
+                        "label": f"TP{idx + 1}",
+                        "prob_touch": raw_probability,
+                        "prob_touch_raw": raw_probability,
+                        "prob_touch_calibrated": calibrated_probability,
+                    }
+                )
+            if calibration_meta_payload is None and payload:
+                calibration_meta_payload = payload
+    else:
+        for idx, meta in enumerate(geometry.targets):
+            if idx < len(target_meta):
+                target_meta[idx]["prob_touch_raw"] = float(meta.prob_touch)
+
+    plan_block = dict(plan)
+    plan_block.update(
+        {
+            "plan_id": plan_id,
+            "version": version,
+            "symbol": symbol.upper(),
+            "style": style_token,
+            "direction": direction,
+            "entry": entry,
+            "stop": stop,
+            "targets": targets,
+            "target_meta": target_meta,
+            "runner": runner,
+            "runner_policy": runner,
+            "confidence": confidence,
+            "notes": notes,
+            "rr_to_t1": rr_to_t1,
+            "expected_move": expected_move_value,
+            "remaining_atr": remaining_atr_value,
+            "atr": atr_value,
+            "interval": interval_token,
+            "warnings": list(plan.get("warnings") or []),
+            "strategy": plan.get("strategy") or "baseline_auto",
+            "debug": dict(plan.get("debug") or {}),
+            "snap_trace": geometry.snap_trace or [],
+            "em_used": bool(em_cap_used),
+        }
+    )
+    source_paths = dict(plan_block.get("source_paths") or {})
+    source_paths.setdefault("entry", "geometry_engine")
+    source_paths.setdefault("stop", "geometry_engine")
+    source_paths.setdefault("targets", "geometry_engine")
+    source_paths.setdefault("runner_policy", "geometry_engine")
+    source_paths.setdefault("target_meta", "geometry_engine")
+    plan_block["source_paths"] = source_paths
+    accuracy_levels: List[str] = list(plan_block.get("accuracy_levels") or [])
+    if em_cap_used and "EM cap" not in accuracy_levels:
+        accuracy_levels.append("EM cap")
+    plan_block["accuracy_levels"] = accuracy_levels
     logger.info(
         "plan_geometry_metrics",
         extra={
@@ -6516,6 +6949,11 @@ async def _generate_fallback_plan(
         plan_block["risk_block"] = risk_block
     if execution_rules:
         plan_block["execution_rules"] = execution_rules
+    if calibration_meta_payload:
+        plan_block["calibration_meta"] = calibration_meta_payload
+    plan = plan_block
+    first["plan"] = plan_block
+
     plan_block["runner_policy"] = runner
     if geometry.snap_trace:
         plan_block["snap_trace"] = geometry.snap_trace
@@ -6568,6 +7006,8 @@ async def _generate_fallback_plan(
     if geometry.snap_trace:
         structured_plan["snap_trace"] = geometry.snap_trace
     structured_plan["remaining_atr"] = plan_block.get("remaining_atr")
+    if accuracy_levels:
+        structured_plan["accuracy_levels"] = accuracy_levels
     if include_options_contracts and options_contracts is not None:
         structured_plan["options_contracts"] = options_contracts
     if include_options_contracts and options_note:
@@ -6582,6 +7022,8 @@ async def _generate_fallback_plan(
         structured_plan["risk_block"] = risk_block
     if execution_rules:
         structured_plan["execution_rules"] = execution_rules
+    if calibration_meta_payload:
+        structured_plan["calibration_meta"] = calibration_meta_payload
     if simulated_banner_text:
         banners_list = structured_plan.get("banners") if isinstance(structured_plan.get("banners"), list) else None
         if banners_list is None:
@@ -6630,25 +7072,29 @@ async def _generate_fallback_plan(
         data_quality["minutes_to_event"] = minutes_to_event
     if event_window_blocked:
         data_quality["event_window_blocked"] = True
-    expected_move_output = plan_block.get("expected_move")
-    if isinstance(expected_move_output, (int, float)) and math.isfinite(expected_move_output):
-        data_quality["expected_move"] = round(float(expected_move_output), 4)
-    remaining_atr_output = plan_block.get("remaining_atr")
-    if isinstance(remaining_atr_output, (int, float)) and math.isfinite(remaining_atr_output):
-        data_quality["remaining_atr"] = round(float(remaining_atr_output), 4)
+    expected_move_output = None
+    raw_expected_move = plan_block.get("expected_move")
+    if isinstance(raw_expected_move, (int, float)) and math.isfinite(raw_expected_move):
+        expected_move_output = float(raw_expected_move)
+        data_quality["expected_move"] = round(expected_move_output, 4)
+    remaining_atr_output = None
+    raw_remaining_atr = plan_block.get("remaining_atr")
+    if isinstance(raw_remaining_atr, (int, float)) and math.isfinite(raw_remaining_atr):
+        remaining_atr_output = float(raw_remaining_atr)
+        data_quality["remaining_atr"] = round(remaining_atr_output, 4)
+    em_used_output = None
     if plan_block.get("em_used") is not None:
-        data_quality["em_used"] = bool(plan_block["em_used"])
+        em_used_output = bool(plan_block["em_used"])
+        data_quality["em_used"] = em_used_output
     confluence_payload = list(confluence_tags) if confluence_tags else []
     mtf_confluence_payload = list(mtf_confluence_tags) if mtf_confluence_tags else []
     tp_reasons_payload = list(tp_reasons) if tp_reasons else []
     options_contracts_payload: List[Dict[str, Any]] = (
         list(options_contracts) if include_options_contracts and options_contracts else []
     )
+    plan_block = plan if isinstance(plan, Mapping) else {}
     runner_policy_output = None
     snap_trace_output: Optional[List[str]] = None
-    expected_move_output: Optional[float] = None
-    remaining_atr_output: Optional[float] = None
-    em_used_output: Optional[bool] = None
     if isinstance(plan, Mapping):
         runner_policy_output = plan.get("runner_policy")
         trace_val = plan.get("snap_trace")
@@ -6679,8 +7125,12 @@ async def _generate_fallback_plan(
         runner_output = structured_plan_payload.get("runner")
     if runner_output is None:
         runner_output = plan_block.get("runner")
+    if (not runner_output) and runner_policy_geometry:
+        runner_output = runner_policy_geometry
     if runner_policy_output is None:
         runner_policy_output = runner_output
+    if (not runner_policy_output) and runner_policy_geometry:
+        runner_policy_output = runner_policy_geometry
     plan_response = PlanResponse(
         plan_id=plan_id,
         version=1,
@@ -6695,6 +7145,7 @@ async def _generate_fallback_plan(
         stop=stop,
         targets=targets,
         target_meta=target_meta,
+        targets_meta=target_meta,
         rr_to_t1=rr_to_t1,
         confidence=confidence,
         confidence_factors=confidence_factors or None,
@@ -6748,7 +7199,9 @@ async def _generate_fallback_plan(
         confidence_visual=confidence_visual,
         tp_reasons=tp_reasons_payload,
         rejected_contracts=rejected_contracts,
+        calibration_meta=calibration_meta_payload,
     )
+    plan_response = _hydrate_secondary_fields(plan_response)
     if simulate_open:
         response_meta = {"simulated_open": True}
         if simulated_banner_text:
@@ -6810,7 +7263,17 @@ async def _generate_fallback_plan(
         meta_payload["runner_policy"] = plan_response.runner_policy
     if plan_response.snap_trace:
         meta_payload["snap_trace"] = plan_response.snap_trace
+    if plan_response.targets_meta:
+        meta_payload["targets_meta"] = plan_response.targets_meta
+    if plan_response.accuracy_levels:
+        meta_payload["accuracy_levels"] = plan_response.accuracy_levels
+    if plan_response.targets_meta:
+        meta_payload["targets_meta"] = plan_response.targets_meta
     plan_response.meta = meta_payload or None
+    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+    mode_label = "live" if is_plan_live else "frozen"
+    record_plan_duration(mode_label, elapsed_ms)
+    record_candidate_count(mode_label, len(results))
     return plan_response
 
 
@@ -6834,6 +7297,7 @@ async def gpt_plan(
 
     Internally reuses /gpt/scan to keep plan logic centralized.
     """
+    start_time = time.perf_counter()
     symbol = (request_payload.symbol or "").strip().upper()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
@@ -6957,6 +7421,13 @@ async def gpt_plan(
     plan.setdefault("style", first.get("style"))
     plan.setdefault("direction", plan.get("direction") or (snapshot.get("trend") or {}).get("direction_hint"))
     first["plan"] = plan
+
+    expected_move_output = None
+    remaining_atr_output = None
+    em_used_output = None
+    runner_output = None
+    runner_policy_output = None
+    snap_trace_output = None
 
     strategy_id_value = first.get("strategy_id") or plan.get("strategy")
     style_token = plan.get("style") or first.get("style") or request_payload.style
@@ -8049,6 +8520,7 @@ async def gpt_plan(
     options_contracts_payload: List[Dict[str, Any]] = (
         list(options_contracts) if include_options_contracts and options_contracts else []
     )
+    plan_block = plan if isinstance(plan, Mapping) else {}
     plan_response = PlanResponse(
         plan_id=plan_id,
         version=version,
@@ -8063,6 +8535,7 @@ async def gpt_plan(
         stop=stop_output,
         targets=targets_output,
         target_meta=plan.get("target_meta") if plan else None,
+        targets_meta=plan.get("target_meta") if plan else None,
         rr_to_t1=rr_output,
         confidence=confidence_output,
         confidence_factors=confidence_factors,
@@ -8103,6 +8576,8 @@ async def gpt_plan(
         expected_move=expected_move_output,
         remaining_atr=remaining_atr_output,
         em_used=em_used_output,
+        source_paths=plan_block.get("source_paths") or {},
+        accuracy_levels=plan_block.get("accuracy_levels") or [],
         updated_from_version=updated_from_version,
         update_reason=update_reason,
         market=market_meta,
@@ -8116,6 +8591,7 @@ async def gpt_plan(
         meta=response_meta,
         rejected_contracts=rejected_contracts,
     )
+    plan_response = _hydrate_secondary_fields(plan_response)
     plan_response.phase = "hydrate"
     plan_response.layers_fetched = bool(plan_response.plan_layers)
     meta_payload = dict(plan_response.meta or {})
@@ -8266,6 +8742,12 @@ async def assistant_exec(
         meta_block["snap_trace"] = plan_response.snap_trace
     if plan_response.em_used is not None:
         meta_block["em_used"] = plan_response.em_used
+    if plan_response.accuracy_levels:
+        meta_block["accuracy_levels"] = plan_response.accuracy_levels
+    if plan_response.source_paths:
+        meta_block["source_paths"] = plan_response.source_paths
+    if plan_response.targets_meta:
+        meta_block["targets_meta"] = plan_response.targets_meta
 
     return AssistantExecResponse(
         plan=plan_block,
@@ -8723,6 +9205,12 @@ def _prepare_contract_filters(payload: ContractsRequest, style: str) -> Dict[str
     return config
 
 
+class ScreenedContracts(list):
+    def __init__(self, iterable=None, rejections=None):
+        super().__init__(iterable or [])
+        self.rejections: List[Dict[str, Any]] = list(rejections or [])
+
+
 def _screen_contracts(
     chain: pd.DataFrame,
     quotes: Dict[str, Dict[str, Any]],
@@ -8731,22 +9219,35 @@ def _screen_contracts(
     style: str,
     side: str | None,
     filters: Dict[str, float | int],
-) -> List[Dict[str, Any]]:
+) -> ScreenedContracts:
     candidates: List[Dict[str, Any]] = []
+    rejections: List[Dict[str, Any]] = []
     min_dte = int(filters.get("min_dte", 0))
     max_dte = int(filters.get("max_dte", 366))
     min_delta = float(filters.get("min_delta", 0.0))
     max_delta = float(filters.get("max_delta", 1.0))
     max_spread = float(filters.get("max_spread_pct", 100.0))
     min_oi = int(filters.get("min_oi", 0))
-
     for _, row in chain.iterrows():
         option_symbol = row.get("symbol")
         if not option_symbol:
             continue
         quote = quotes.get(option_symbol)
         row_type = (row.get("option_type") or "").strip().lower()
+        expiration = quote.get("expiration_date") if quote else row.get("expiration_date")
+        strike = row.get("strike")
+        label = _contract_label(symbol, expiration, strike, row_type)
+
+        def _reject(reason: str, **detail: Any) -> None:
+            entry = {"symbol": str(option_symbol or label or "UNKNOWN"), "reason": reason}
+            if detail:
+                entry["message"] = ", ".join(f"{key}={value}" for key, value in detail.items())
+            elif label:
+                entry["message"] = label
+            rejections.append(entry)
+
         if side and row_type != side:
+            _reject("SIDE_MISMATCH", side=row_type or "unknown")
             continue
 
         bid = quote.get("bid") if quote else row.get("bid")
@@ -8754,15 +9255,16 @@ def _screen_contracts(
         last = quote.get("last") if quote else None
         price = _compute_price(bid, ask, last, row.get("mid"))
         if price is None:
+            _reject("NO_MARKET_DATA")
             continue
 
         spread_pct = _compute_spread_pct(bid, ask, price)
         if spread_pct is None:
             spread_pct = float(row.get("spread_pct") or 999.0) * 100.0 if row.get("spread_pct") is not None else 999.0
         if spread_pct > max_spread:
+            _reject("SPREAD_TOO_WIDE", spread=f"{float(spread_pct):.2f}%", max_allowed=f"{max_spread:.2f}%")
             continue
 
-        expiration = quote.get("expiration_date") if quote else row.get("expiration_date")
         dte = row.get("dte")
         if dte is None and expiration:
             try:
@@ -8771,16 +9273,20 @@ def _screen_contracts(
             except Exception:  # pragma: no cover - defensive
                 dte = None
         if dte is None:
+            _reject("DTE_UNAVAILABLE")
             continue
         dte_int = int(dte)
         if dte_int < min_dte or dte_int > max_dte:
+            _reject("DTE_OUT_OF_RANGE", dte=dte_int, min=min_dte, max=max_dte)
             continue
 
         delta = quote.get("delta") if quote else row.get("delta")
         if delta is None or not math.isfinite(delta):
+            _reject("DELTA_UNAVAILABLE")
             continue
         abs_delta = abs(float(delta))
         if abs_delta < min_delta or abs_delta > max_delta:
+            _reject("DELTA_OUT_OF_RANGE", delta=round(abs_delta, 3), min=min_delta, max=max_delta)
             continue
 
         oi = quote.get("open_interest") if quote else row.get("open_interest")
@@ -8788,6 +9294,7 @@ def _screen_contracts(
             oi = row.get("open_interest") or row.get("oi")
         oi_val = float(oi or 0)
         if oi_val < min_oi:
+            _reject("OPEN_INTEREST_TOO_LOW", oi=int(oi_val), min=min_oi)
             continue
 
         volume = quote.get("volume") if quote else row.get("volume")
@@ -8858,7 +9365,7 @@ def _screen_contracts(
         ),
         reverse=True,
     )
-    return candidates
+    return ScreenedContracts(candidates, rejections)
 
 
 def _enrich_contract_with_plan(contract: Dict[str, Any], plan_anchor: Any, risk_budget: float | None) -> Dict[str, Any]:
@@ -8996,20 +9503,44 @@ async def gpt_contracts(
     side = _infer_contract_side(request_payload.side, request_payload.bias)
     risk_amount = request_payload.risk_amount or request_payload.max_price or 100.0
 
-    candidates = _screen_contracts(chain, quotes, symbol=symbol, style=style, side=side, filters=filters)
+    candidates = _screen_contracts(
+        chain,
+        quotes,
+        symbol=symbol,
+        style=style,
+        side=side,
+        filters=filters,
+    )
 
     relaxed = False
+    collected_rejections: List[Dict[str, Any]] = list(getattr(candidates, "rejections", []))
     if not candidates:
         relaxed = True
         filters_delta = filters.copy()
         filters_delta["min_delta"] = _clamp(float(filters_delta.get("min_delta", 0.0)) - 0.05, 0.0, 1.0)
         filters_delta["max_delta"] = _clamp(float(filters_delta.get("max_delta", 1.0)) + 0.05, 0.0, 1.0)
-        candidates = _screen_contracts(chain, quotes, symbol=symbol, style=style, side=side, filters=filters_delta)
+        candidates = _screen_contracts(
+            chain,
+            quotes,
+            symbol=symbol,
+            style=style,
+            side=side,
+            filters=filters_delta,
+        )
+        collected_rejections.extend(getattr(candidates, "rejections", []))
         if not candidates:
             filters_dte = filters_delta.copy()
             filters_dte["min_dte"] = max(0, int(filters_dte.get("min_dte", 0)) - 2)
             filters_dte["max_dte"] = int(filters_dte.get("max_dte", 365)) + 2
-            candidates = _screen_contracts(chain, quotes, symbol=symbol, style=style, side=side, filters=filters_dte)
+            candidates = _screen_contracts(
+                chain,
+                quotes,
+                symbol=symbol,
+                style=style,
+                side=side,
+                filters=filters_dte,
+            )
+            collected_rejections.extend(getattr(candidates, "rejections", []))
             filters = filters_dte
         else:
             filters = filters_delta
@@ -9046,6 +9577,25 @@ async def gpt_contracts(
         except Exception:
             continue
 
+    deduped_rejections: List[Dict[str, Any]] = []
+    seen_pairs: set[Tuple[str, str]] = set()
+    for entry in collected_rejections:
+        if not isinstance(entry, Mapping):
+            continue
+        symbol_token = str(entry.get("symbol") or "").upper() or symbol
+        reason_token = str(entry.get("reason") or "").upper()
+        if not reason_token:
+            continue
+        key = (symbol_token, reason_token)
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        item = {"symbol": symbol_token, "reason": reason_token}
+        message = entry.get("message")
+        if message:
+            item["message"] = str(message)
+        deduped_rejections.append(item)
+
     response_payload = {
         "symbol": symbol,
         "side": side,
@@ -9056,7 +9606,10 @@ async def gpt_contracts(
         "best": best,
         "alternatives": alternatives,
         "table": table_rows,
+        "rejections": deduped_rejections,
     }
+    if deduped_rejections:
+        record_selector_rejections(deduped_rejections, source="selector")
     if quotes_meta.get("notice"):
         notice = quotes_meta.get("notice")
         if notice == "sandbox_quotes_disabled":
@@ -9109,12 +9662,24 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     try:
         entry_f = float(entry)
         stop_f = float(stop)
-        tp1_f = float(str(tp_csv).split(",")[0].strip())
     except Exception:
         raise HTTPException(status_code=422, detail={"error": "entry/stop/tp must be numeric"})
 
-    # 6) Whitelist interval + view
-    # Use charts_api.normalize_interval for canonical tokens: {'1m','5m','15m','1h','d'}
+    tp_values: List[float] = []
+    try:
+        for token in str(tp_csv).split(","):
+            token = token.strip()
+            if not token:
+                continue
+            tp_values.append(float(token))
+    except Exception:
+        raise HTTPException(status_code=422, detail={"error": "entry/stop/tp must be numeric"})
+
+    if not tp_values:
+        raise HTTPException(status_code=422, detail={"error": "tp must include at least one target"})
+
+    tp1_f = tp_values[0]
+
     try:
         interval_norm = normalize_interval(raw_interval)
     except ValueError as exc:
@@ -9127,21 +9692,74 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     view = str(data.get("view") or "6M").strip()
     allowed_views = {"1d", "5d", "1M", "3M", "6M", "1Y"}
     if view not in allowed_views:
-        # default to 6M if out of set
         view = "6M"
     data["view"] = view
 
-    # 2) Monotonic order
-    if direction == "long":
-        if not (stop_f < entry_f < tp1_f):
-            raise HTTPException(status_code=422, detail={"error": "order invalid for long (stop < entry < TP1)"})
-    elif direction == "short":
-        if not (stop_f > entry_f > tp1_f):
-            raise HTTPException(status_code=422, detail={"error": "order invalid for short (stop > entry > TP1)"})
-    else:
-        raise HTTPException(status_code=422, detail={"error": "direction must be 'long' or 'short'"})
+    interval_style_map = {
+        "1m": "scalp",
+        "5m": "intraday",
+        "15m": "intraday",
+        "1h": "swing",
+        "d": "swing",
+    }
+    style_token = interval_style_map.get(interval_norm, "intraday")
+    snap_defaults = {
+        "scalp": {"atr_mult": 0.15, "pct": 0.0008},
+        "intraday": {"atr_mult": 0.20, "pct": 0.0010},
+        "swing": {"atr_mult": 0.25, "pct": 0.0015},
+        "leaps": {"atr_mult": 0.30, "pct": 0.0020},
+    }
+    style_params = snap_defaults.get(style_token, snap_defaults["intraday"])
 
-    # 3) R:R gate
+    atr_raw = data.get("atr14") or data.get("atr")
+    atr_f: float | None = None
+    if atr_raw is not None:
+        try:
+            atr_f = float(atr_raw)
+        except Exception:
+            atr_f = None
+
+    level_priority_map = {
+        "gap_fill": 10,
+        "gapfill": 10,
+        "pdh": 9,
+        "pdl": 9,
+        "pdc": 8,
+        "orh": 8,
+        "orl": 8,
+        "vah": 7,
+        "val": 7,
+        "poc": 7,
+        "vwap": 6,
+        "avwap": 6,
+        "swing_high": 5,
+        "swing_low": 5,
+        "session_high": 4,
+        "session_low": 4,
+    }
+
+    def _canonical_level_label(label: str) -> str:
+        token = label.lower().strip()
+        token = token.replace(" ", "_").replace("-", "_").replace("/", "_")
+        return token
+
+    levels_literal = str(data.get("levels") or "")
+    snap_levels: List[Level] = []
+    if levels_literal:
+        for chunk in levels_literal.split(";"):
+            parts = [p.strip() for p in chunk.split("|") if p.strip()]
+            if not parts:
+                continue
+            try:
+                price_val = float(parts[0])
+            except Exception:
+                continue
+            if not math.isfinite(price_val):
+                continue
+            label_token = _canonical_level_label(parts[1] if len(parts) > 1 else f"level_{len(snap_levels)+1}")
+            priority = level_priority_map.get(label_token, 1)
+            snap_levels.append(Level(tag=label_token, price=price_val, priority=priority))
+
     def _rr(e: float, s: float, t: float, d: str) -> float:
         risk = (e - s) if d == "long" else (s - e)
         reward = (t - e) if d == "long" else (e - t)
@@ -9152,39 +9770,104 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     is_index = raw_symbol.upper() in {"SPY", "QQQ", "IWM"}
     is_intraday = interval_norm in {"1m", "5m", "15m"}
     min_rr = 1.5 if is_index and is_intraday else 1.2
-    rr_val = _rr(entry_f, stop_f, tp1_f, direction)
+
+    if direction == "long":
+        if not (stop_f < entry_f < tp1_f):
+            raise HTTPException(status_code=422, detail={"error": "order invalid for long (stop < entry < TP1)"})
+        prev = entry_f
+        for idx, value in enumerate(tp_values, start=1):
+            if value <= prev:
+                raise HTTPException(status_code=422, detail={"error": f"tp{idx} not above previous"})
+            prev = value
+    elif direction == "short":
+        if not (stop_f > entry_f > tp1_f):
+            raise HTTPException(status_code=422, detail={"error": "order invalid for short (stop > entry > TP1)"})
+        prev = entry_f
+        for idx, value in enumerate(tp_values, start=1):
+            if value >= prev:
+                raise HTTPException(status_code=422, detail={"error": f"tp{idx} not below previous"})
+            prev = value
+    else:
+        raise HTTPException(status_code=422, detail={"error": "direction must be 'long' or 'short'"})
+
+    window_atr_base = atr_f if atr_f and atr_f > 0 else abs(entry_f - stop_f)
+    if not window_atr_base or window_atr_base <= 0:
+        window_atr_base = max(abs(entry_f) * 0.005, 0.5)
+    window_atr = float(style_params["atr_mult"]) * float(window_atr_base)
+    window_pct = float(style_params["pct"])
+
+    snapped_stop = stop_f
+    snapped_pairs: List[Tuple[float, Optional[str]]] = [(value, None) for value in tp_values]
+    if snap_levels:
+        snap_ctx = SnapContext(
+            side=direction,
+            style=style_token,
+            strategy=str(data.get("strategy") or "").strip() or None,
+            window_atr=window_atr,
+            window_pct=window_pct,
+            rr_min=min_rr,
+            entry=entry_f,
+        )
+        try:
+            snapped_stop, _, snapped_pairs = snap_prices(
+                entry_f,
+                stop_f,
+                tp_values,
+                levels=snap_levels,
+                ctx=snap_ctx,
+            )
+        except Exception:
+            snapped_stop = stop_f
+            snapped_pairs = [(value, None) for value in tp_values]
+
+    snapped_tp_values = [pair[0] for pair in snapped_pairs] if snapped_pairs else list(tp_values)
+    if len(snapped_tp_values) != len(tp_values):
+        snapped_tp_values = list(tp_values)
+
+    if direction == "long":
+        if snapped_stop >= entry_f:
+            raise HTTPException(status_code=422, detail={"error": "snapped stop not below entry"})
+        prev = entry_f
+        for idx, value in enumerate(snapped_tp_values, start=1):
+            if value <= prev:
+                raise HTTPException(status_code=422, detail={"error": f"snapped tp{idx} not above previous"})
+            prev = value
+    else:
+        if snapped_stop <= entry_f:
+            raise HTTPException(status_code=422, detail={"error": "snapped stop not above entry"})
+        prev = entry_f
+        for idx, value in enumerate(snapped_tp_values, start=1):
+            if value >= prev:
+                raise HTTPException(status_code=422, detail={"error": f"snapped tp{idx} not below previous"})
+            prev = value
+
+    tp1_snapped = snapped_tp_values[0]
+    rr_val = _rr(entry_f, snapped_stop, tp1_snapped, direction)
     if rr_val < min_rr:
         raise HTTPException(status_code=422, detail={"error": f"R:R {rr_val:.2f} < {min_rr:.1f}"})
 
-    # 4) Min TP distance if ATR provided
-    atr_val = data.get("atr14") or data.get("atr")
-    if atr_val is not None:
-        try:
-            atr_f = float(atr_val)
-        except Exception:
-            atr_f = None
-        if atr_f and atr_f > 0:
-            k = 0.3 if interval_norm in {"1m", "5m", "15m", "1h"} else 0.6
-            min_tp = entry_f + k * atr_f if direction == "long" else entry_f - k * atr_f
-            ok = (tp1_f >= min_tp) if direction == "long" else (tp1_f <= min_tp)
-            if not ok:
-                # allow if confluence label exists at TP price in `levels` as price|label;...
-                levels = str(data.get("levels") or "")
-                has_confluence = False
-                if levels:
-                    for chunk in levels.split(";"):
-                        parts = [p.strip() for p in chunk.split("|")]
-                        if not parts:
-                            continue
-                        try:
-                            price = float(parts[0])
-                        except Exception:
-                            continue
-                        if len(parts) >= 2 and abs(price - tp1_f) <= max(1e-4, 0.01):
-                            has_confluence = True
-                            break
-                if not has_confluence:
-                    raise HTTPException(status_code=422, detail={"error": "TP1 too close; fails ATR gate"})
+    if atr_f and atr_f > 0:
+        k = 0.3 if interval_norm in {"1m", "5m", "15m", "1h"} else 0.6
+        min_tp = entry_f + k * atr_f if direction == "long" else entry_f - k * atr_f
+        tp_candidate = tp1_snapped
+        ok = (tp_candidate >= min_tp) if direction == "long" else (tp_candidate <= min_tp)
+        if not ok:
+            levels = str(data.get("levels") or "")
+            has_confluence = False
+            if levels:
+                for chunk in levels.split(";"):
+                    parts = [p.strip() for p in chunk.split("|")]
+                    if not parts:
+                        continue
+                    try:
+                        price = float(parts[0])
+                    except Exception:
+                        continue
+                    if len(parts) >= 2 and abs(price - tp_candidate) <= max(1e-4, 0.01):
+                        has_confluence = True
+                        break
+            if not has_confluence:
+                raise HTTPException(status_code=422, detail={"error": "TP1 too close; fails ATR gate"})
 
     settings = get_settings()
     session_snapshot = _session_payload_from_request(request)
@@ -9198,7 +9881,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     data["direction"] = direction
     data["entry"] = f"{entry_f:.2f}"
     data["stop"] = f"{stop_f:.2f}"
-    data["tp"] = str(tp_csv)
+    data["tp"] = ",".join(f"{value:.2f}" for value in tp_values)
 
     metric_count = _record_metric(
         "gpt_chart_url",
