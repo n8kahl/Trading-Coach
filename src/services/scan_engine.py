@@ -13,8 +13,8 @@ import pandas as pd
 
 from ..calculations import atr, ema
 from ..levels import inject_style_levels
+from ..plans import build_plan_geometry, build_structured_geometry, compute_entry_candidates
 from ..plans.entry import select_structural_entry
-from ..plans.geometry import build_plan_geometry
 from .contract_rules import ContractRuleBook, ContractTemplate
 from .polygon_client import AggregatesResult, PolygonAggregatesClient
 from .universe import UniverseSnapshot
@@ -270,7 +270,7 @@ class PlanningScanEngine:
                 atr_for_entry = 0.0
         except (TypeError, ValueError):
             atr_for_entry = 0.0
-        entry_price = select_structural_entry(
+        entry_seed = select_structural_entry(
             direction="long",
             style=style,
             close_price=float(last_close),
@@ -278,6 +278,29 @@ class PlanningScanEngine:
             atr=atr_for_entry,
             expected_move=None,
         )
+        indicators_payload = {"rvol": trend_component, "liquidity_rank": None}
+        prices_payload = {"close": float(last_close)}
+        try:
+            entry_candidates = compute_entry_candidates(symbol, style, levels_map, indicators_payload, prices_payload)
+        except Exception:
+            entry_candidates = []
+        if entry_seed and (not entry_candidates or not any(abs(float(candidate["level"]) - entry_seed) < 1e-4 for candidate in entry_candidates)):
+            distance_pct = abs(entry_seed - last_close) / last_close if last_close else 0.0
+            actionable = distance_pct <= 0.003
+            score = 0.40 * (1 - distance_pct) + 0.20 * (1 if actionable else 0)
+            entry_candidates.insert(
+                0,
+                {
+                    "level": round(entry_seed, 2),
+                    "label": "STRUCTURAL",
+                    "type": "STRUCTURAL",
+                    "bars_to_trigger": max(int(round(distance_pct * 400, 0)), 0),
+                    "entry_distance_pct": round(distance_pct, 4),
+                    "score": round(score, 4),
+                    "structure_quality": 0.75,
+                },
+            )
+        entry_price = float(entry_candidates[0]["level"]) if entry_candidates else entry_seed or float(last_close)
         index_payload = getattr(daily, "index", None)
         if index_payload is not None and len(index_payload) > 0:
             ts = index_payload[-1]
@@ -319,7 +342,7 @@ class PlanningScanEngine:
                     "distance": target - entry_price,
                     "rr_multiple": rr,
                     "em_fraction": None,
-                    "snap_tag": "fallback_rr",
+                    "snap_tag": "FALLBACK_RR",
                     "em_capped": False,
                 }
             ]
@@ -329,35 +352,88 @@ class PlanningScanEngine:
                 "atr_step": 0.5,
                 "em_fraction_cap": 0.6,
                 "notes": ["fallback_runner"],
+                "trail": "ATR-only trail",
             }
             em_used_flag = False
             snap_trace_payload = ["fallback_rr"]
+            structured_tp_reasons = [{"label": "TP1", "reason": "Fallback RR"}]
+            key_levels_used_payload = {"session": [], "structural": []}
         else:
+            plan_time_dt = timestamp or datetime.now(timezone.utc)
+            raw_targets = [float(meta.price) for meta in geometry.targets] or [entry_price + atr_val, entry_price + atr_val * 2, entry_price + atr_val * 3]
+            structured_geometry = build_structured_geometry(
+                symbol=symbol,
+                style=style,
+                direction="long",
+                entry=entry_price,
+                levels=levels_map,
+                atr_value=atr_val,
+                plan_time=plan_time_dt,
+                raw_targets=raw_targets,
+                rr_floor=geometry.stop.rr_min,
+                em_hint=None,
+            )
+            if any(warning == "INVARIANT_BROKEN" for warning in structured_geometry.warnings):
+                logger.warning("planning scan invariants broken for %s", symbol)
+            stop = structured_geometry.stop
+            targets_final = structured_geometry.targets
+            if len(geometry.targets) < len(targets_final):
+                geometry.targets.extend(geometry.targets[-1:] * (len(targets_final) - len(geometry.targets)))
+            risk = entry_price - stop if entry_price > stop else entry_price - stop
+            target_entries = []
+            for idx, (meta, price, reason) in enumerate(zip(geometry.targets, targets_final, structured_geometry.tp_reasons), start=1):
+                meta.price = round(float(price), 2)
+                meta.distance = round(abs(float(price) - entry_price), 2)
+                reward = float(price) - entry_price
+                if entry_price != stop:
+                    meta.rr_multiple = round(max(reward, 0.0) / max(entry_price - stop, 1e-6), 2)
+                meta.em_fraction = (
+                    round(meta.distance / structured_geometry.em_points, 2) if structured_geometry.em_points else None
+                )
+                meta.reason = reason.get("snap_tag") or reason.get("reason")
+                meta.em_capped = structured_geometry.clamp_applied
+                target_entries.append(
+                    {
+                        "price": round(float(price), 2),
+                        "prob_touch": meta.prob_touch,
+                        "distance": meta.distance,
+                        "rr_multiple": meta.rr_multiple,
+                        "em_fraction": meta.em_fraction,
+                        "snap_tag": reason.get("snap_tag"),
+                        "em_capped": structured_geometry.clamp_applied,
+                    }
+                )
+            geometry.stop.price = stop
+            geometry.stop.structural = stop
+            geometry.stop.snapped = structured_geometry.stop_label
+            geometry.em_day = structured_geometry.em_points
+            geometry.em_used = structured_geometry.clamp_applied
+            geometry.runner.notes = list(structured_geometry.runner_policy.get("notes", geometry.runner.notes))
+            geometry.runner.fraction = float(structured_geometry.runner_policy.get("fraction", geometry.runner.fraction))
+            geometry.runner.atr_trail_mult = float(
+                structured_geometry.runner_policy.get("atr_trail_mult", geometry.runner.atr_trail_mult)
+            )
+            geometry.runner.atr_trail_step = float(
+                structured_geometry.runner_policy.get("atr_trail_step", geometry.runner.atr_trail_step)
+            )
+            geometry.runner.em_fraction_cap = float(
+                structured_geometry.runner_policy.get("em_fraction_cap", geometry.runner.em_fraction_cap)
+            )
             stop = geometry.stop.price
-            target = geometry.targets[0].price if geometry.targets else entry_price + atr_val * 2.0
+            rr = (targets_final[0] - entry_price) / (entry_price - stop) if entry_price != stop else 0.0
             probability = float(geometry.targets[0].prob_touch if geometry.targets else probability)
-            rr = (target - entry_price) / (entry_price - stop) if entry_price != stop else 0.0
-            target_entries = [
-                {
-                    "price": round(meta.price, 2),
-                    "prob_touch": meta.prob_touch,
-                    "distance": meta.distance,
-                    "rr_multiple": meta.rr_multiple,
-                    "em_fraction": meta.em_fraction,
-                    "snap_tag": meta.reason,
-                    "em_capped": meta.em_capped,
-                }
-                for meta in geometry.targets
-            ]
             runner_payload = {
-                "fraction": geometry.runner.fraction,
-                "atr_multiple": geometry.runner.atr_trail_mult,
-                "atr_step": geometry.runner.atr_trail_step,
-                "em_fraction_cap": geometry.runner.em_fraction_cap,
-                "notes": geometry.runner.notes,
+                "fraction": structured_geometry.runner_policy.get("fraction"),
+                "atr_multiple": structured_geometry.runner_policy.get("atr_trail_mult"),
+                "atr_step": structured_geometry.runner_policy.get("atr_trail_step"),
+                "em_fraction_cap": structured_geometry.runner_policy.get("em_fraction_cap"),
+                "notes": structured_geometry.runner_policy.get("notes"),
+                "trail": structured_geometry.runner_policy.get("trail"),
             }
-            em_used_flag = bool(geometry.em_used)
+            em_used_flag = structured_geometry.clamp_applied
             snap_trace_payload = geometry.snap_trace
+            structured_tp_reasons = structured_geometry.tp_reasons
+            key_levels_used_payload = structured_geometry.key_levels_used
         logger.debug(
             "planning_geometry",
             extra={
@@ -381,7 +457,7 @@ class PlanningScanEngine:
         template = self._rules.build(style)
 
         levels = {
-            "entry": round(last_close, 2),
+            "entry": round(entry_price, 2),
             "invalidation": round(stop, 2),
             "targets": [entry["price"] for entry in target_entries] or [round(target, 2)],
         }
@@ -406,6 +482,9 @@ class PlanningScanEngine:
                 "volatility": geometry.stop.volatility if geometry else 0.0,
                 "snapped": geometry.stop.snapped if geometry else "fallback_rr",
             },
+            "key_levels_used": key_levels_used_payload,
+            "tp_reasons": structured_tp_reasons,
+            "entry_candidates": entry_candidates,
         }
         components = {
             "probability": round(probability, 3),

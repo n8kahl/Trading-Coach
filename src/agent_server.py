@@ -129,7 +129,12 @@ from .telemetry import (
     record_rr_below_min,
     record_selector_rejections,
 )
-from .plans.geometry import build_plan_geometry, RunnerPolicy
+from .plans import (
+    build_plan_geometry,
+    RunnerPolicy,
+    compute_entry_candidates,
+    build_structured_geometry,
+)
 from .plans.entry import select_structural_entry
 from .levels import inject_style_levels
 from .levels.snapper import Level, SnapContext, collect_levels, snap_prices
@@ -6491,7 +6496,7 @@ async def _generate_fallback_plan(
     if gap_fill_level:
         levels_map["gap_fill"] = gap_fill_level
     inject_style_levels(levels_map, context, style_token)
-    entry_price = select_structural_entry(
+    entry_seed = select_structural_entry(
         direction=direction,
         style=style_token,
         close_price=close_price,
@@ -6499,6 +6504,41 @@ async def _generate_fallback_plan(
         atr=atr_value if isinstance(atr_value, (int, float)) else 0.0,
         expected_move=expected_move_abs,
     )
+    indicators_payload = {
+        "rvol": context.get("relative_volume") or context.get("rvol"),
+        "liquidity_rank": context.get("liquidity_rank"),
+    }
+    prices_payload = {"close": close_price, "vwap": vwap_value}
+    try:
+        entry_candidates = compute_entry_candidates(
+            symbol,
+            style_token,
+            levels_map,
+            indicators_payload,
+            prices_payload,
+        )
+    except Exception:
+        entry_candidates = []
+    if entry_seed and (not entry_candidates or not any(abs(float(candidate["level"]) - entry_seed) < 1e-4 for candidate in entry_candidates)):
+        distance_pct = abs(entry_seed - close_price) / close_price if close_price else 0.0
+        actionable = distance_pct <= 0.003
+        score = 0.40 * (1 - distance_pct) + 0.20 * (1 if actionable else 0)
+        entry_candidates.insert(
+            0,
+            {
+                "level": round(entry_seed, 2),
+                "label": "STRUCTURAL",
+                "type": "STRUCTURAL",
+                "bars_to_trigger": max(int(round(distance_pct * 400, 0)), 0),
+                "entry_distance_pct": round(distance_pct, 4),
+                "score": round(score, 4),
+                "structure_quality": 0.75,
+            },
+        )
+    if entry_candidates:
+        entry_price = float(entry_candidates[0]["level"])
+    else:
+        entry_price = entry_seed if entry_seed else round(close_price, 2)
     atr_daily = context.get("atr_1d") or context.get("atr_1w") or atr_value
     iv_move = volatility.get("expected_move") if isinstance(volatility, Mapping) else None
     realized_range = 0.0
@@ -6520,12 +6560,51 @@ async def _generate_fallback_plan(
         realized_range=realized_range,
         levels=levels_map,
         timestamp=plan_ts_utc,
+        em_points=float(expected_move_abs) if isinstance(expected_move_abs, (int, float)) else None,
     )
     calibration_enabled = _CALIBRATION_SOURCE is not None
-    stop = geometry.stop.price
-    targets = [meta.price for meta in geometry.targets]
-    em_cap_used = geometry.em_used
-    expected_move_abs = geometry.em_day
+    plan_time_dt = plan_ts_utc.to_pydatetime() if isinstance(plan_ts_utc, pd.Timestamp) else plan_ts_utc
+    raw_targets = [float(meta.price) for meta in geometry.targets] or [
+        entry_price + (atr_value or 1.0),
+        entry_price + 2 * (atr_value or 1.0),
+        entry_price + 3 * (atr_value or 1.0),
+    ]
+    structured_geometry = build_structured_geometry(
+        symbol=symbol,
+        style=style_token,
+        direction=direction,
+        entry=entry_price,
+        levels=levels_map,
+        atr_value=atr_value,
+        plan_time=plan_time_dt,
+        raw_targets=raw_targets,
+        rr_floor=geometry.stop.rr_min,
+        em_hint=expected_move_abs if isinstance(expected_move_abs, (int, float)) else None,
+    )
+    if any(warning == "INVARIANT_BROKEN" for warning in structured_geometry.warnings):
+        logger.warning("structured geometry invariants broken for %s fallback plan", symbol)
+    stop = structured_geometry.stop
+    targets = structured_geometry.targets
+    em_cap_used = structured_geometry.clamp_applied or geometry.em_used
+    expected_move_abs = structured_geometry.em_points
+    geometry.stop.price = stop
+    geometry.stop.structural = stop
+    geometry.stop.snapped = structured_geometry.stop_label
+    geometry.em_day = expected_move_abs
+    geometry.em_used = em_cap_used
+    if len(geometry.targets) < len(targets):
+        missing = len(targets) - len(geometry.targets)
+        geometry.targets.extend(geometry.targets[-1:] * missing)
+    for idx, (meta, price, reason) in enumerate(zip(geometry.targets, targets, structured_geometry.tp_reasons)):
+        meta.price = round(float(price), 2)
+        meta.distance = round(abs(float(price) - entry_price), 2)
+        risk = entry_price - stop if direction == "long" else stop - entry_price
+        reward = float(price) - entry_price if direction == "long" else entry_price - float(price)
+        if risk > 0:
+            meta.rr_multiple = round(max(reward, 0.0) / risk, 2)
+        meta.em_fraction = round(meta.distance / expected_move_abs, 2) if expected_move_abs else None
+        meta.reason = reason.get("snap_tag") or reason.get("reason")
+        meta.em_capped = em_cap_used
     rr_to_t1 = _risk_reward(entry_price, stop, targets[0], direction)
     if rr_to_t1 is not None:
         rr_to_t1 = float(rr_to_t1)
@@ -6549,6 +6628,8 @@ async def _generate_fallback_plan(
     confidence_visual = _confidence_visual(confidence)
     target_meta = []
     for idx, meta in enumerate(geometry.targets, start=1):
+        reason_payload = structured_geometry.tp_reasons[idx - 1] if idx - 1 < len(structured_geometry.tp_reasons) else {}
+        snap_tag = reason_payload.get("snap_tag")
         item = {
             "label": f"TP{idx}",
             "prob_touch": meta.prob_touch,
@@ -6556,10 +6637,25 @@ async def _generate_fallback_plan(
             "em_fraction": meta.em_fraction,
             "rr_multiple": meta.rr_multiple,
         }
-        if meta.reason:
-            item["snap_tag"] = meta.reason
+        if snap_tag:
+            item["snap_tag"] = snap_tag
         target_meta.append(item)
-    tp_reasons = _tp_reason_entries(target_meta)
+    tp_reasons = structured_geometry.tp_reasons
+    structured_runner = structured_geometry.runner_policy
+    try:
+        geometry.runner.fraction = float(structured_runner.get("fraction", geometry.runner.fraction))
+        geometry.runner.atr_trail_mult = float(
+            structured_runner.get("atr_trail_mult", geometry.runner.atr_trail_mult)
+        )
+        geometry.runner.atr_trail_step = float(
+            structured_runner.get("atr_trail_step", geometry.runner.atr_trail_step)
+        )
+        geometry.runner.em_fraction_cap = float(
+            structured_runner.get("em_fraction_cap", geometry.runner.em_fraction_cap)
+        )
+        geometry.runner.notes = list(structured_runner.get("notes", []))
+    except Exception:
+        geometry.runner.notes = list(structured_runner.get("notes", geometry.runner.notes))
     if calibration_enabled:
         rr_floor = getattr(geometry.stop, "rr_min", None)
         try:
@@ -6644,7 +6740,7 @@ async def _generate_fallback_plan(
         targets=targets,
         direction=direction,
         precision=get_precision(symbol),
-        key_levels_used=None,
+        key_levels_used=structured_geometry.key_levels_used,
         runner=runner,
     )
     plan_id = f"{symbol.upper()}-{plan_ts_utc.strftime('%Y%m%dT%H%M%S')}-{style_token}-auto"
@@ -6811,7 +6907,12 @@ async def _generate_fallback_plan(
     runner_existing = dict(plan.get("runner")) if isinstance(plan, Mapping) and isinstance(plan.get("runner"), Mapping) else {}
     runner_geometry = _runner_policy_to_dict(geometry.runner)
     runner = {**runner_existing, **runner_geometry}
-    runner.setdefault("trail", f"Trail with ATR x{geometry.runner.atr_trail_mult:.2f}")
+    if isinstance(structured_runner.get("trail"), str):
+        runner["trail"] = structured_runner["trail"]
+    else:
+        runner.setdefault("trail", f"Trail with ATR x{geometry.runner.atr_trail_mult:.2f}")
+    if structured_runner.get("notes"):
+        runner["notes"] = list(structured_runner["notes"])
     runner_policy_geometry = dict(runner)
 
     calibration_meta_payload: Dict[str, Any] | None = None
@@ -6884,9 +6985,14 @@ async def _generate_fallback_plan(
             "debug": dict(plan.get("debug") or {}),
             "snap_trace": geometry.snap_trace or [],
             "em_used": bool(em_cap_used),
+            "key_levels_used": structured_geometry.key_levels_used,
         }
     )
     plan_block["strategy_profile"] = strategy_profile_payload
+    if structured_geometry.warnings:
+        current_warnings = list(plan_block.get("warnings") or [])
+        current_warnings.extend(structured_geometry.warnings)
+        plan_block["warnings"] = list(dict.fromkeys(current_warnings))
     source_paths = dict(plan_block.get("source_paths") or {})
     source_paths.setdefault("entry", "geometry_engine")
     source_paths.setdefault("stop", "geometry_engine")
@@ -6898,6 +7004,12 @@ async def _generate_fallback_plan(
     if em_cap_used and "EM cap" not in accuracy_levels:
         accuracy_levels.append("EM cap")
     plan_block["accuracy_levels"] = accuracy_levels
+    if entry_candidates:
+        meta_block = plan_block.get("meta")
+        if not isinstance(meta_block, dict):
+            meta_block = {}
+        meta_block["entry_candidates"] = entry_candidates
+        plan_block["meta"] = meta_block
     badge_confluence = confluence_tags or confidence_factors or []
     plan_badges = compose_strategy_badges(
         strategy_profile_payload,
@@ -6963,6 +7075,8 @@ async def _generate_fallback_plan(
     if geometry.snap_trace:
         plan_block["snap_trace"] = geometry.snap_trace
     plan_warnings: List[str] = list(event_warnings)
+    if structured_geometry.warnings:
+        plan_warnings.extend(structured_geometry.warnings)
     target_profile = build_target_profile(
         entry=entry_price,
         stop=stop,

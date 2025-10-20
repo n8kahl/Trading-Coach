@@ -468,6 +468,7 @@ def build_plan_geometry(
     realized_range: float,
     levels: Mapping[str, float],
     timestamp: Optional[datetime],
+    em_points: Optional[float] = None,
 ) -> PlanGeometry:
     symbol_ctx = {
         "iv_expected_move": iv_expected_move,
@@ -475,7 +476,10 @@ def build_plan_geometry(
         "atr_to_em_coeff": 1.7,
         "fallback_em": atr_daily * 1.7 if atr_daily else None,
     }
-    em_day = compute_expected_move(symbol_ctx)
+    if em_points is not None and isinstance(em_points, (int, float)) and math.isfinite(em_points) and em_points > 0:
+        em_day = float(em_points)
+    else:
+        em_day = compute_expected_move(symbol_ctx)
     ratr = remaining_atr(em_day, realized_range)
     modifiers = _strategy_modifiers(strategy)
     tod_mult = tod_multiplier(timestamp)
