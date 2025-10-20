@@ -7,6 +7,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence
+from datetime import datetime
 
 try:  # optional dependency
     import asyncpg  # type: ignore
@@ -27,6 +28,7 @@ class PlanningRunRecord:
     indices_context: Dict[str, Any]
     data_windows: Dict[str, Any]
     notes: Optional[str]
+    style: str
 
 
 @dataclass
@@ -107,6 +109,7 @@ class PlanningPersistence:
                     """
                     INSERT INTO evening_scan_runs (
                         as_of_utc,
+                        style,
                         universe_name,
                         universe_source,
                         tickers,
@@ -114,10 +117,11 @@ class PlanningPersistence:
                         data_windows,
                         notes
                     )
-                    VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7)
+                    VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8)
                     RETURNING id
                     """,
                     run.as_of_utc,
+                    run.style,
                     run.universe_name,
                     run.universe_source,
                     json.dumps(list(run.tickers)),
@@ -167,6 +171,54 @@ class PlanningPersistence:
             return int(record["id"]) if record else None
         except Exception as exc:  # pragma: no cover
             logger.warning("Candidate persistence failed: %s", exc)
+            return None
+
+    async def fetch_latest_run_with_candidates(
+        self,
+        *,
+        style: str,
+        as_of_utc: Optional[datetime] = None,
+    ) -> Optional[tuple[Any, Sequence[Any]]]:
+        if not await self.ensure_schema():
+            return None
+        pool = await db.get_pool()
+        if pool is None or asyncpg is None:
+            return None
+        try:
+            async with pool.acquire() as conn:
+                params = [style]
+                if as_of_utc is not None:
+                    run_sql = """
+                        SELECT id, as_of_utc, style, universe_name, universe_source, tickers, indices_context, data_windows, notes
+                        FROM evening_scan_runs
+                        WHERE style = $1 AND as_of_utc = $2
+                        ORDER BY as_of_utc DESC
+                        LIMIT 1
+                    """
+                    params.append(as_of_utc)
+                else:
+                    run_sql = """
+                        SELECT id, as_of_utc, style, universe_name, universe_source, tickers, indices_context, data_windows, notes
+                        FROM evening_scan_runs
+                        WHERE style = $1
+                        ORDER BY as_of_utc DESC
+                        LIMIT 1
+                    """
+                run_record = await conn.fetchrow(run_sql, *params)
+                if run_record is None:
+                    return None
+                candidates = await conn.fetch(
+                    """
+                        SELECT id, scan_id, symbol, metrics, levels, readiness_score, components, contract_template, requires_live_confirmation, missing_live_inputs
+                        FROM evening_candidates
+                        WHERE scan_id = $1
+                        ORDER BY readiness_score DESC
+                    """,
+                    run_record["id"],
+                )
+            return run_record, candidates
+        except Exception as exc:  # pragma: no cover
+            logger.warning("fetch latest planning run failed: %s", exc)
             return None
 
     async def upsert_finalization(self, record: FinalizationRecord) -> Optional[int]:

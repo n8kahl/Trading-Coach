@@ -79,6 +79,7 @@ src/
   - `preopen_finalize` (08:15 ET) → finalize templates; retry at open if data missing.
 
 ## Next Steps
-- Implement modules above and wire into `/gpt/scan` planning-mode branch.  
-- Update OpenAPI (`ScanRequest.planning_mode`, planning metadata).  
+- Implement modules above and wire into `/gpt/scan` planning-mode branch. ✅ (2025-10-20)
+- Cache the latest successful planning run (intraday/swing) and replay it when Polygon is briefly unavailable, ensuring readiness scores still surface with the correct strategies. ✅
+- Update OpenAPI (`ScanRequest.planning_mode`, planning metadata, `/gpt/finalize`). ✅
 - Extend UI to show “Planning Mode — requires live confirmation” badge and finalization status.

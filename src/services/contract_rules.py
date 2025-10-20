@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Mapping, Tuple
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,25 @@ class ContractTemplate:
             "min_oi": self.min_open_interest,
             "max_spread_pct": self.max_spread_pct,
         }
+
+    @staticmethod
+    def from_dict(payload: Mapping[str, object]) -> "ContractTemplate":
+        style = str(payload.get("style") or payload.get("style") or "intraday")
+        option_type = str(payload.get("type") or payload.get("option_type") or "CALL").upper()
+        delta_range_raw = payload.get("delta_range") or payload.get("deltaRange") or [0.3, 0.4]
+        dte_range_raw = payload.get("dte_range") or payload.get("dteRange") or [0, 3]
+        min_oi = int(float(payload.get("min_oi") or payload.get("min_open_interest") or 300))
+        max_spread = float(payload.get("max_spread_pct") or payload.get("maxSpreadPct") or 8.0)
+        delta_range = tuple(float(v) for v in delta_range_raw) if isinstance(delta_range_raw, (list, tuple)) else (0.3, 0.4)
+        dte_range = tuple(int(float(v)) for v in dte_range_raw) if isinstance(dte_range_raw, (list, tuple)) else (0, 3)
+        return ContractTemplate(
+            style=style,
+            option_type=option_type,
+            delta_range=(delta_range[0], delta_range[1]),
+            dte_range=(dte_range[0], dte_range[1]),
+            min_open_interest=min_oi,
+            max_spread_pct=max_spread,
+        )
 
 
 class ContractRuleBook:

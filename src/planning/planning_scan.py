@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Sequence
 
 from ..services.contract_rules import ContractRuleBook
 from ..services.persist import PlanningPersistence
@@ -76,6 +76,27 @@ class PlanningScanRunner:
             run_id=result.run_id,
             indices_context=result.indices_context,
             candidates=result.candidates,
+        )
+
+    async def load_cached(
+        self,
+        *,
+        style: str,
+        target_as_of: Optional[datetime],
+    ) -> Optional[PlanningScanOutput]:
+        record = await self._persistence.fetch_latest_run_with_candidates(style=style, as_of_utc=target_as_of)
+        if record is None:
+            record = await self._persistence.fetch_latest_run_with_candidates(style=style, as_of_utc=None)
+        if record is None:
+            return None
+        run_row, candidate_rows = record
+        cached = self._engine.replay_cached_run(run_row, candidate_rows)
+        return PlanningScanOutput(
+            as_of_utc=cached.as_of_utc,
+            universe=cached.universe,
+            run_id=cached.run_id,
+            indices_context=cached.indices_context,
+            candidates=cached.candidates,
         )
 
 

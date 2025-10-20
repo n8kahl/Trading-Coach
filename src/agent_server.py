@@ -1670,7 +1670,7 @@ async def _fallback_scan_page(
                 request,
                 base_banner=banner,
                 base_meta={"mode": mode, "label": label},
-                base_data_quality=dq,
+                base_data_quality=dict(dq),
             )
     except Exception as exc:  # pragma: no cover - defensive fallback
         logger.debug("planning fallback generation failed: %s", exc)
@@ -3673,7 +3673,7 @@ def _planning_scan_to_page(
         "indices_present": bool(result.indices_context),
     }
     if base_data_quality:
-        data_quality.update(base_data_quality)
+        data_quality.update({k: v for k, v in base_data_quality.items() if v is not None})
     session_meta = {
         "planning_mode": True,
         "universe": result.universe.name,
@@ -4842,7 +4842,27 @@ async def gpt_scan_endpoint(
         if planning_mode and planning_banner:
             banner_override = planning_banner if not banner_override else banner_override
             empty_override = planning_banner
+        planning_page: ScanPage | None = None
+        runner = _get_planning_runner()
+        target_as_of = getattr(context, "as_of", None)
+        if hasattr(target_as_of, "to_pydatetime"):
+            try:
+                target_as_of_dt = target_as_of.to_pydatetime()
+            except Exception:
+                target_as_of_dt = None
+        else:
+            target_as_of_dt = target_as_of if isinstance(target_as_of, datetime) else None
         if allow_fallback_trades:
+            cached_output = await runner.load_cached(style=request_payload.style, target_as_of=target_as_of_dt)
+            if cached_output and cached_output.candidates:
+                planning_page = _planning_scan_to_page(
+                    cached_output,
+                    request_payload,
+                    base_banner=banner_override,
+                    base_meta={"mode": mode, "label": label},
+                    base_data_quality=dict(dq),
+                )
+        if allow_fallback_trades and planning_page is None:
             fallback_page = await _fallback_scan_page(
                 request_payload,
                 context,
@@ -4856,7 +4876,10 @@ async def gpt_scan_endpoint(
                 session=session_payload,
             )
             if fallback_page is not None:
-                return fallback_page
+                planning_page = fallback_page
+        if planning_page is not None:
+            planning_page.meta.setdefault("fallback", True)
+            return planning_page
         if not allow_fallback_trades and empty_override:
             if banner and banner != empty_override:
                 notes_field = dq.setdefault("notes", [])

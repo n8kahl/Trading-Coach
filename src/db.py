@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS evening_scan_universe_snapshots (
 CREATE TABLE IF NOT EXISTS evening_scan_runs (
     id              SERIAL PRIMARY KEY,
     as_of_utc       TIMESTAMPTZ NOT NULL,
+    style           TEXT        NOT NULL DEFAULT 'intraday',
     universe_name   TEXT        NOT NULL,
     universe_source TEXT        NOT NULL,
     tickers         JSONB       NOT NULL,

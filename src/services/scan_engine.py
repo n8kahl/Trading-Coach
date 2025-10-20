@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -113,6 +114,7 @@ class PlanningScanEngine:
                 indices_context=indices_context,
                 data_windows={"primary": list(self._AGG_WINDOWS)},
                 notes=universe.metadata.get("notes") if universe.metadata else None,
+                style=style,
             )
             run_id = await self._persist.create_scan_run(run_record)
             if run_id:
@@ -240,6 +242,96 @@ class PlanningScanEngine:
             missing_live_inputs=["iv", "spread", "oi"],
         )
         return candidate
+
+    def replay_cached_run(
+        self,
+        run_record: Any,
+        candidate_rows: Sequence[Any],
+    ) -> PlanningScanResult:
+        as_of = run_record["as_of_utc"]
+        if not isinstance(as_of, datetime):
+            as_of = datetime.fromisoformat(str(as_of))
+        symbols_payload = run_record["tickers"]
+        if isinstance(symbols_payload, str):
+            try:
+                symbols = json.loads(symbols_payload)
+            except Exception:  # pragma: no cover - defensive
+                symbols = []
+        else:
+            symbols = list(symbols_payload or [])
+        indices_context = run_record["indices_context"] or {}
+        if isinstance(indices_context, str):
+            try:
+                indices_context = json.loads(indices_context)
+            except Exception:
+                indices_context = {}
+        data_windows = run_record["data_windows"] or {}
+        if isinstance(data_windows, str):
+            try:
+                data_windows = json.loads(data_windows)
+            except Exception:
+                data_windows = {}
+        metadata: Dict[str, Any] = {
+            "style": run_record.get("style", "intraday"),
+            "cache_replayed": True,
+        }
+        notes = run_record.get("notes")
+        if notes:
+            metadata["notes"] = notes
+        universe_snapshot = UniverseSnapshot(
+            name=run_record.get("universe_name", "fallback"),
+            source="cache",
+            as_of_utc=as_of,
+            symbols=[str(sym) for sym in symbols],
+            metadata=metadata,
+        )
+        candidates: List[PlanningCandidate] = []
+        for row in candidate_rows:
+            metrics = row["metrics"] or {}
+            if isinstance(metrics, str):
+                try:
+                    metrics = json.loads(metrics)
+                except Exception:
+                    metrics = {}
+            levels = row["levels"] or {}
+            if isinstance(levels, str):
+                try:
+                    levels = json.loads(levels)
+                except Exception:
+                    levels = {}
+            components = row["components"] or {}
+            if isinstance(components, str):
+                try:
+                    components = json.loads(components)
+                except Exception:
+                    components = {}
+            template_payload = row["contract_template"] or {}
+            if isinstance(template_payload, str):
+                try:
+                    template_payload = json.loads(template_payload)
+                except Exception:
+                    template_payload = {}
+            template = ContractTemplate.from_dict(template_payload)
+            missing_inputs = row.get("missing_live_inputs") or []
+            readiness = float(row["readiness_score"] or 0.0)
+            candidate = PlanningCandidate(
+                symbol=row["symbol"],
+                readiness_score=readiness,
+                components={str(k): float(v) if isinstance(v, (int, float)) else v for k, v in (components or {}).items()},
+                metrics={str(k): v for k, v in (metrics or {}).items()},
+                levels={str(k): v for k, v in (levels or {}).items()},
+                contract_template=template,
+                requires_live_confirmation=bool(row["requires_live_confirmation"]),
+                missing_live_inputs=[str(item) for item in missing_inputs],
+            )
+            candidates.append(candidate)
+        return PlanningScanResult(
+            as_of_utc=as_of,
+            run_id=run_record["id"],
+            universe=universe_snapshot,
+            indices_context=indices_context,
+            candidates=candidates,
+        )
 
 
 __all__ = ["PlanningScanEngine", "PlanningCandidate", "PlanningScanResult"]
