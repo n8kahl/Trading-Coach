@@ -1378,6 +1378,11 @@ class PlanResponse(BaseModel):
     rejected_contracts: List[RejectedContract] = Field(default_factory=list)
     layers_fetched: bool | None = None
     phase: str | None = None
+    runner_policy: Dict[str, Any] | None = None
+    snap_trace: List[str] | None = None
+    expected_move: float | None = None
+    remaining_atr: float | None = None
+    em_used: bool | None = None
 
 
 class AssistantExecRequest(BaseModel):
@@ -3686,6 +3691,14 @@ def _planning_scan_to_page(
             "requires_live_confirmation": candidate.requires_live_confirmation,
             "missing_live_inputs": list(candidate.missing_live_inputs),
         }
+        if metrics.get("runner_policy"):
+            planning_snapshot["runner_policy"] = metrics.get("runner_policy")
+        if metrics.get("snap_trace"):
+            planning_snapshot["snap_trace"] = metrics.get("snap_trace")
+        if metrics.get("expected_move") is not None:
+            planning_snapshot["expected_move"] = metrics.get("expected_move")
+        if metrics.get("remaining_atr") is not None:
+            planning_snapshot["remaining_atr"] = metrics.get("remaining_atr")
         reasons = [
             f"Readiness {candidate.readiness_score:.2f}",
             "Probability {:.0%}".format(probability),
@@ -6426,6 +6439,13 @@ async def _generate_fallback_plan(
                 rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
         else:
             options_payload = None
+    expected_move_value = None
+    if isinstance(expected_move_abs, (int, float)) and math.isfinite(expected_move_abs):
+        expected_move_value = round(float(expected_move_abs), 4)
+    remaining_atr_value = None
+    if isinstance(geometry.ratr, (int, float)) and math.isfinite(geometry.ratr):
+        remaining_atr_value = round(float(geometry.ratr), 4)
+
     plan_block = {
         "symbol": symbol.upper(),
         "style": style_token,
@@ -6435,16 +6455,34 @@ async def _generate_fallback_plan(
         "targets": targets,
         "target_meta": target_meta,
         "runner": runner,
+        "runner_policy": runner,
         "confidence": confidence,
         "notes": notes,
         "rr_to_t1": rr_to_t1,
-        "expected_move": expected_move_abs,
+        "expected_move": expected_move_value,
+        "remaining_atr": remaining_atr_value,
         "atr": atr_value,
         "interval": interval_token,
         "warnings": [],
         "strategy": "baseline_auto",
         "debug": {},
+        "snap_trace": geometry.snap_trace or [],
+        "em_used": bool(em_cap_used),
     }
+    logger.info(
+        "plan_geometry_metrics",
+        extra={
+            "symbol": symbol,
+            "style": style_token,
+            "strategy": None,
+            "entry": entry,
+            "stop": stop,
+            "targets": targets,
+            "expected_move": plan_block.get("expected_move"),
+            "remaining_atr": plan_block.get("remaining_atr"),
+            "em_used": plan_block.get("em_used"),
+        },
+    )
     plan_block["trade_detail"] = chart_url_with_ids
     plan_block["chart_timeframe"] = chart_timeframe_hint
     plan_block["chart_guidance"] = hint_guidance
@@ -6529,6 +6567,7 @@ async def _generate_fallback_plan(
     structured_plan["runner_policy"] = runner
     if geometry.snap_trace:
         structured_plan["snap_trace"] = geometry.snap_trace
+    structured_plan["remaining_atr"] = plan_block.get("remaining_atr")
     if include_options_contracts and options_contracts is not None:
         structured_plan["options_contracts"] = options_contracts
     if include_options_contracts and options_note:
@@ -6591,12 +6630,57 @@ async def _generate_fallback_plan(
         data_quality["minutes_to_event"] = minutes_to_event
     if event_window_blocked:
         data_quality["event_window_blocked"] = True
+    expected_move_output = plan_block.get("expected_move")
+    if isinstance(expected_move_output, (int, float)) and math.isfinite(expected_move_output):
+        data_quality["expected_move"] = round(float(expected_move_output), 4)
+    remaining_atr_output = plan_block.get("remaining_atr")
+    if isinstance(remaining_atr_output, (int, float)) and math.isfinite(remaining_atr_output):
+        data_quality["remaining_atr"] = round(float(remaining_atr_output), 4)
+    if plan_block.get("em_used") is not None:
+        data_quality["em_used"] = bool(plan_block["em_used"])
     confluence_payload = list(confluence_tags) if confluence_tags else []
     mtf_confluence_payload = list(mtf_confluence_tags) if mtf_confluence_tags else []
     tp_reasons_payload = list(tp_reasons) if tp_reasons else []
     options_contracts_payload: List[Dict[str, Any]] = (
         list(options_contracts) if include_options_contracts and options_contracts else []
     )
+    runner_policy_output = None
+    snap_trace_output: Optional[List[str]] = None
+    expected_move_output: Optional[float] = None
+    remaining_atr_output: Optional[float] = None
+    em_used_output: Optional[bool] = None
+    if isinstance(plan, Mapping):
+        runner_policy_output = plan.get("runner_policy")
+        trace_val = plan.get("snap_trace")
+        if isinstance(trace_val, (list, tuple)):
+            snap_trace_output = [str(item) for item in trace_val if item]
+        em_val = plan.get("expected_move")
+        if isinstance(em_val, (int, float)) and math.isfinite(em_val):
+            expected_move_output = float(em_val)
+        ra_val = plan.get("remaining_atr")
+        if isinstance(ra_val, (int, float)) and math.isfinite(ra_val):
+            remaining_atr_output = float(ra_val)
+        if plan.get("em_used") is not None:
+            em_used_output = bool(plan.get("em_used"))
+    if snap_trace_output is None and isinstance(structured_plan_payload, Mapping):
+        trace_val = structured_plan_payload.get("snap_trace")
+        if isinstance(trace_val, (list, tuple)):
+            snap_trace_output = [str(item) for item in trace_val if item]
+    if expected_move_output is None and isinstance(expected_move_abs, (int, float)) and math.isfinite(expected_move_abs):
+        expected_move_output = float(expected_move_abs)
+    if remaining_atr_output is None and isinstance(plan_block.get("remaining_atr"), (int, float)):
+        remaining_atr_output = float(plan_block["remaining_atr"])
+    if em_used_output is None and em_cap_used:
+        em_used_output = True
+    runner_output = None
+    if isinstance(plan, Mapping):
+        runner_output = plan.get("runner")
+    if runner_output is None and isinstance(structured_plan_payload, Mapping):
+        runner_output = structured_plan_payload.get("runner")
+    if runner_output is None:
+        runner_output = plan_block.get("runner")
+    if runner_policy_output is None:
+        runner_policy_output = runner_output
     plan_response = PlanResponse(
         plan_id=plan_id,
         version=1,
@@ -6714,8 +6798,18 @@ async def _generate_fallback_plan(
     meta_payload["within_event_window"] = within_event_window
     if minutes_to_event is not None:
         meta_payload["minutes_to_event"] = minutes_to_event
-    if em_cap_used:
+    if plan_response.em_used is not None:
+        meta_payload["em_used"] = bool(plan_response.em_used)
+    elif em_cap_used:
         meta_payload["em_used"] = True
+    if plan_response.expected_move is not None:
+        meta_payload["expected_move"] = plan_response.expected_move
+    if plan_response.remaining_atr is not None:
+        meta_payload["remaining_atr"] = plan_response.remaining_atr
+    if plan_response.runner_policy:
+        meta_payload["runner_policy"] = plan_response.runner_policy
+    if plan_response.snap_trace:
+        meta_payload["snap_trace"] = plan_response.snap_trace
     plan_response.meta = meta_payload or None
     return plan_response
 
@@ -7728,6 +7822,9 @@ async def gpt_plan(
             "chart_url_present": bool(chart_url_value),
             "targets": targets_list[:2],
             "sim_open": simulate_open,
+            "expected_move": expected_move_output,
+            "remaining_atr": remaining_atr_output,
+            "em_used": em_used_output,
         },
     )
 
@@ -7825,6 +7922,12 @@ async def gpt_plan(
             structured_plan_payload["execution_rules"] = execution_rules
         if mtf_confluence_tags:
             structured_plan_payload["mtf_confluence"] = mtf_confluence_tags
+        if plan_core.get("expected_move") is not None:
+            structured_plan_payload.setdefault("expected_move", plan_core.get("expected_move"))
+        if plan_core.get("remaining_atr") is not None:
+            structured_plan_payload.setdefault("remaining_atr", plan_core.get("remaining_atr"))
+        if plan_core.get("em_used") is not None:
+            structured_plan_payload.setdefault("em_used", plan_core.get("em_used"))
     if confluence_tags:
         plan_core["confluence_tags"] = confluence_tags
         plan.setdefault("confluence_tags", confluence_tags)
@@ -7841,6 +7944,12 @@ async def gpt_plan(
     if rejected_contracts:
         plan_core["rejected_contracts"] = rejected_contracts
         plan.setdefault("rejected_contracts", rejected_contracts)
+    if isinstance(plan, Mapping):
+        for key in ("runner_policy", "snap_trace", "expected_move", "remaining_atr", "em_used"):
+            val = plan.get(key)
+            if val is not None:
+                plan_core[key] = val
+                plan.setdefault(key, val)
     calc_notes_output = calc_notes or None
     if calc_notes_output is not None and not calc_notes_output:
         calc_notes_output = None
@@ -7988,7 +8097,12 @@ async def gpt_plan(
         decimals=decimals_value,
         data_quality=data_quality,
         debug=debug_payload or None,
-        runner=plan.get("runner") if plan else None,
+        runner=runner_output,
+        runner_policy=runner_policy_output,
+        snap_trace=snap_trace_output,
+        expected_move=expected_move_output,
+        remaining_atr=remaining_atr_output,
+        em_used=em_used_output,
         updated_from_version=updated_from_version,
         update_reason=update_reason,
         market=market_meta,
@@ -8008,8 +8122,18 @@ async def gpt_plan(
     meta_payload["within_event_window"] = within_event_window
     if minutes_to_event is not None:
         meta_payload["minutes_to_event"] = minutes_to_event
-    if em_cap_used:
+    if plan_response.em_used is not None:
+        meta_payload["em_used"] = bool(plan_response.em_used)
+    elif em_cap_used:
         meta_payload["em_used"] = True
+    if plan_response.expected_move is not None:
+        meta_payload["expected_move"] = plan_response.expected_move
+    if plan_response.remaining_atr is not None:
+        meta_payload["remaining_atr"] = plan_response.remaining_atr
+    if plan_response.runner_policy:
+        meta_payload["runner_policy"] = plan_response.runner_policy
+    if plan_response.snap_trace:
+        meta_payload["snap_trace"] = plan_response.snap_trace
     plan_response.meta = meta_payload or None
     return _finalize_plan_response(plan_response)
 
@@ -8132,6 +8256,16 @@ async def assistant_exec(
         meta_block["risk_block"] = plan_response.risk_block
     if plan_response.execution_rules:
         meta_block["execution_rules"] = plan_response.execution_rules
+    if plan_response.runner_policy:
+        meta_block["runner_policy"] = plan_response.runner_policy
+    if plan_response.expected_move is not None:
+        meta_block["expected_move"] = plan_response.expected_move
+    if plan_response.remaining_atr is not None:
+        meta_block["remaining_atr"] = plan_response.remaining_atr
+    if plan_response.snap_trace:
+        meta_block["snap_trace"] = plan_response.snap_trace
+    if plan_response.em_used is not None:
+        meta_block["em_used"] = plan_response.em_used
 
     return AssistantExecResponse(
         plan=plan_block,

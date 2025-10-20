@@ -119,9 +119,20 @@ _STYLE_DEFAULTS: Mapping[str, GeometryConfig] = {
     ),
 }
 
-_STRATEGY_MODIFIERS: Mapping[str, MutableMapping[str, float]] = {
-    "power_hour": {"tod_mult": 1.2, "k_stop": -0.1, "snap_window": -0.2, "runner_fraction": 0.1},
-    "gap_fill": {"tod_mult": 1.1, "snap_window": -0.1},
+_STRATEGY_MODIFIERS: Mapping[str, Mapping[str, float | int | bool]] = {
+    "power_hour": {
+        "tod_boost": 1.2,
+        "k_stop_scale": 0.9,
+        "snap_scale": 0.8,
+        "target_count": 2,
+        "runner_fraction_delta": 0.1,
+        "runner_trail_scale": 0.8,
+    },
+    "gap_fill": {
+        "tod_boost": 1.1,
+        "snap_scale": 0.9,
+        "prefer_gap_fill": True,
+    },
 }
 
 
@@ -130,6 +141,23 @@ def _style_key(style: Optional[str]) -> str:
     if token not in _STYLE_DEFAULTS:
         return "intraday"
     return token
+
+
+def _strategy_key(strategy: Optional[str]) -> Optional[str]:
+    token = (strategy or "").strip().lower()
+    if not token:
+        return None
+    for key in _STRATEGY_MODIFIERS:
+        if key in token:
+            return key
+    return None
+
+
+def _strategy_modifiers(strategy: Optional[str]) -> Mapping[str, float | int | bool]:
+    key = _strategy_key(strategy)
+    if key is None:
+        return {}
+    return _STRATEGY_MODIFIERS.get(key, {})
 
 
 def compute_expected_move(symbol_ctx: Mapping[str, float | None]) -> float:
@@ -217,11 +245,10 @@ def derive_stop(
     style_key = _style_key(style)
     config = _STYLE_DEFAULTS[style_key]
     base_k = config.k_stop
-    strategy_mod = (strategy or "").strip().lower()
-    if strategy_mod in _STRATEGY_MODIFIERS:
-        delta = _STRATEGY_MODIFIERS[strategy_mod].get("k_stop")
-        if delta:
-            base_k = max(0.2, base_k * (1 + delta))
+    modifiers = _strategy_modifiers(strategy)
+    scale = modifiers.get("k_stop_scale")
+    if isinstance(scale, (int, float)) and math.isfinite(scale) and scale > 0:
+        base_k = max(0.2, base_k * float(scale))
     atr_tf = max(atr_tf or 0.0, 0.01)
     vol_stop = entry - base_k * atr_tf if side == "long" else entry + base_k * atr_tf
     structural_candidate = None
@@ -253,6 +280,18 @@ def _probability_from_mfe_quantile(idx: int) -> float:
     return quantiles[min(idx, len(quantiles) - 1)]
 
 
+def _enforce_monotonic_targets(entry: float, side: str, targets: Sequence[TargetMeta]) -> None:
+    prev = entry
+    side_token = (side or "").lower()
+    for meta in targets:
+        if side_token == "long" and meta.price <= prev:
+            meta.price = round(prev + 0.01, 2)
+        elif side_token == "short" and meta.price >= prev:
+            meta.price = round(prev - 0.01, 2)
+        prev = meta.price
+        meta.distance = round(abs(meta.price - entry), 2)
+
+
 def build_targets(
     entry: float,
     side: str,
@@ -262,10 +301,15 @@ def build_targets(
     tod_mult: float,
     style: str,
     strategy: Optional[str],
+    levels: Optional[Mapping[str, float]],
 ) -> Tuple[List[TargetMeta], bool]:
     style_key = _style_key(style)
     config = _STYLE_DEFAULTS[style_key]
+    modifiers = _strategy_modifiers(strategy)
     multipliers = config.atr_ladder
+    target_count = modifiers.get("target_count")
+    if isinstance(target_count, int) and target_count > 0:
+        multipliers = multipliers[: target_count]
     em_cap = config.em_fraction_max * em_day if em_day > 0 else float("inf")
     ratr_cap = ratr * max(tod_mult, 0.5) if ratr > 0 else float("inf")
     far_cap = min(em_cap, ratr_cap)
@@ -287,18 +331,37 @@ def build_targets(
                 capped_price = max_price
                 em_used = True
         prob = _probability_from_mfe_quantile(idx)
-        rr_multiple = abs((capped_price - entry) / max(entry - (entry - 1 if side == "long" else entry + 1), 1e-6))
         targets.append(
             TargetMeta(
                 price=round(capped_price, 2),
                 distance=round(abs(capped_price - entry), 2),
-                rr_multiple=round(rr_multiple, 2),
+                rr_multiple=0.0,
                 prob_touch=round(prob, 2),
                 em_fraction=round(em_fraction, 2) if em_fraction is not None else None,
                 mfe_quantile=None,
                 em_capped=price != capped_price,
             )
         )
+    mod_key = _strategy_key(strategy)
+    if mod_key == "gap_fill" and levels:
+        gap_price = levels.get("gap_fill")
+        if isinstance(gap_price, (int, float)) and math.isfinite(gap_price) and targets:
+            gap_val = float(gap_price)
+            if (side == "long" and gap_val > entry) or (side == "short" and gap_val < entry):
+                first = targets[0]
+                first.price = round(gap_val, 2)
+                first.distance = round(abs(gap_val - entry), 2)
+                if em_day > 0:
+                    first.em_fraction = round(first.distance / em_day, 2)
+                first.reason = "gap_fill"
+                # ensure subsequent targets remain monotonic
+                for other in targets[1:]:
+                    if side == "long" and other.price <= first.price:
+                        other.price = round(first.price + max(0.1, atr_tf * 0.5), 2)
+                    if side == "short" and other.price >= first.price:
+                        other.price = round(first.price - max(0.1, atr_tf * 0.5), 2)
+                    other.distance = round(abs(other.price - entry), 2)
+    _enforce_monotonic_targets(entry, side, targets)
     return targets, em_used
 
 
@@ -307,16 +370,21 @@ def compute_runner_policy(style: str, strategy: Optional[str]) -> RunnerPolicy:
     config = _STYLE_DEFAULTS[style_key]
     fraction = sum(config.runner_fraction) / 2.0
     notes: List[str] = []
-    strategy_mod = (strategy or "").strip().lower()
-    if strategy_mod in _STRATEGY_MODIFIERS:
-        delta = _STRATEGY_MODIFIERS[strategy_mod].get("runner_fraction")
-        if delta:
-            fraction = min(0.5, fraction + delta)
-            notes.append(f"Runner fraction adjusted for {strategy_mod}")
+    modifiers = _strategy_modifiers(strategy)
+    delta = modifiers.get("runner_fraction_delta")
+    if isinstance(delta, (int, float)) and math.isfinite(delta):
+        fraction = min(0.6, max(0.05, fraction + float(delta)))
+        notes.append("Runner fraction adjusted")
+    trail_mult = config.runner_trail_mult
+    trail_step = config.runner_trail_step
+    trail_scale = modifiers.get("runner_trail_scale")
+    if isinstance(trail_scale, (int, float)) and math.isfinite(trail_scale) and trail_scale > 0:
+        trail_mult = max(0.1, trail_mult * float(trail_scale))
+        notes.append("Runner trail tightened")
     return RunnerPolicy(
         fraction=round(fraction, 3),
-        atr_trail_mult=config.runner_trail_mult,
-        atr_trail_step=config.runner_trail_step,
+        atr_trail_mult=round(trail_mult, 3),
+        atr_trail_step=round(trail_step, 3),
         em_fraction_cap=config.runner_em_fraction,
         notes=notes,
     )
@@ -368,19 +436,22 @@ def build_plan_geometry(
     }
     em_day = compute_expected_move(symbol_ctx)
     ratr = remaining_atr(em_day, realized_range)
+    modifiers = _strategy_modifiers(strategy)
     tod_mult = tod_multiplier(timestamp)
-    targets, em_used = build_targets(entry, side, atr_tf, em_day, ratr, tod_mult, style, strategy)
+    tod_boost = modifiers.get("tod_boost")
+    if isinstance(tod_boost, (int, float)) and math.isfinite(tod_boost) and tod_boost > 0:
+        tod_mult *= float(tod_boost)
     stop = derive_stop(entry, side, levels, atr_tf, style, strategy)
+    targets, em_used = build_targets(entry, side, atr_tf, em_day, ratr, tod_mult, style, strategy, levels)
     runner = compute_runner_policy(style, strategy)
     style_key = _style_key(style)
     config = _STYLE_DEFAULTS[style_key]
-    strategy_mod = (strategy or "").strip().lower()
     snap_window_atr = config.snap_window_atr_mult * atr_tf
     snap_window_pct = config.snap_window_pct
-    if strategy_mod in _STRATEGY_MODIFIERS:
-        window_factor = 1 + _STRATEGY_MODIFIERS[strategy_mod].get("snap_window", 0.0)
-        snap_window_atr *= max(window_factor, 0.2)
-        snap_window_pct *= max(window_factor, 0.2)
+    snap_scale = modifiers.get("snap_scale")
+    if isinstance(snap_scale, (int, float)) and math.isfinite(snap_scale) and snap_scale > 0:
+        snap_window_atr *= float(snap_scale)
+        snap_window_pct *= float(snap_scale)
     level_objs: List[Level] = collect_levels(levels)
     snap_ctx = SnapContext(
         side=side,
@@ -391,7 +462,9 @@ def build_plan_geometry(
         rr_min=stop.rr_min,
         entry=entry,
     )
-    target_prices = [target.price for target in targets]
+    original_stop_price = stop.price
+    original_target_prices = [target.price for target in targets]
+    target_prices = list(original_target_prices)
     snapped_stop, stop_reason, snapped_targets = snap_prices(
         entry,
         stop.price,
@@ -402,14 +475,45 @@ def build_plan_geometry(
     snap_trace: List[str] = []
     if stop_reason:
         stop.snapped = stop_reason
-        snap_trace.append(f"stop->{stop_reason}")
-    for meta, (snapped_price, reason) in zip(targets, snapped_targets):
+        snap_trace.append(f"stop:{original_stop_price:.2f}->{snapped_stop:.2f} via {stop_reason}")
+    for idx, (meta, original_price, (snapped_price, reason)) in enumerate(
+        zip(targets, original_target_prices, snapped_targets),
+        start=1,
+    ):
         if reason:
             meta.reason = reason
-            snap_trace.append(f"{meta.price}->{reason}")
+            snap_trace.append(f"tp{idx}:{original_price:.2f}->{snapped_price:.2f} via {reason}")
         meta.price = round(snapped_price, 2)
-        meta.distance = round(abs(meta.price - entry), 2)
     stop.price = round(snapped_stop, 2)
+    _enforce_monotonic_targets(entry, side, targets)
+    risk = entry - stop.price if side == "long" else stop.price - entry
+    if risk <= 0:
+        risk = 0.001
+    for meta in targets:
+        meta.distance = round(abs(meta.price - entry), 2)
+        reward = meta.price - entry if side == "long" else entry - meta.price
+        meta.rr_multiple = round(max(reward, 0.0) / risk, 2)
+        if em_day > 0:
+            meta.em_fraction = round(meta.distance / em_day, 2)
+    if targets and targets[0].rr_multiple < stop.rr_min:
+        required_reward = stop.rr_min * risk
+        if side == "long":
+            new_price = round(entry + required_reward, 2)
+            if len(targets) > 1:
+                new_price = min(new_price, targets[1].price - 0.01)
+            targets[0].price = max(targets[0].price, new_price)
+        else:
+            new_price = round(entry - required_reward, 2)
+            if len(targets) > 1:
+                new_price = max(new_price, targets[1].price + 0.01)
+            targets[0].price = min(targets[0].price, new_price)
+        _enforce_monotonic_targets(entry, side, targets)
+        for meta in targets:
+            meta.distance = round(abs(meta.price - entry), 2)
+            reward = meta.price - entry if side == "long" else entry - meta.price
+            meta.rr_multiple = round(max(reward, 0.0) / risk, 2)
+            if em_day > 0:
+                meta.em_fraction = round(meta.distance / em_day, 2)
     validate_invariants(entry, stop.price, targets, side, stop.rr_min)
     return PlanGeometry(
         entry=round(entry, 2),

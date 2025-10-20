@@ -17,7 +17,11 @@ async def test_planning_candidate_includes_actionability():
         symbol="AAPL",
         readiness_score=0.88,
         components={"probability": 0.85, "actionability": 0.92, "risk_reward": 0.65},
-        metrics={"entry_distance_pct": 0.5, "entry_distance_atr": 0.4},
+        metrics={
+            "entry_distance_pct": 0.5,
+            "entry_distance_atr": 0.4,
+            "runner_policy": {"fraction": 0.2, "atr_multiple": 1.0},
+        },
         levels={"entry": 250.0, "invalidation": 245.0, "targets": [262.0]},
         contract_template=template,
         requires_live_confirmation=True,
@@ -45,3 +49,5 @@ async def test_planning_candidate_includes_actionability():
     assert any("Actionability" in reason for reason in page.candidates[0].reasons)
     assert page.candidates[0].entry_distance_atr == pytest.approx(0.4)
     assert page.candidates[0].entry_distance_pct == pytest.approx(0.5)
+    assert page.candidates[0].planning_snapshot.get("runner_policy") is not None
+    assert page.candidates[0].planning_snapshot["runner_policy"]["fraction"] == pytest.approx(0.2)

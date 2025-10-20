@@ -251,6 +251,18 @@ class PlanningScanEngine:
             return None
         stop = geometry.stop.price
         target = geometry.targets[0].price if geometry.targets else last_close + atr_val * 2.0
+        logger.debug(
+            "planning_geometry",
+            extra={
+                "symbol": symbol,
+                "entry": round(last_close, 2),
+                "stop": round(stop, 2),
+                "targets": [round(meta.price, 2) for meta in geometry.targets],
+                "expected_move": round(geometry.em_day, 4) if geometry.em_day else None,
+                "remaining_atr": round(geometry.ratr, 4) if geometry.ratr else None,
+                "em_used": geometry.em_used,
+            },
+        )
         rr = (target - last_close) / (last_close - stop) if last_close != stop else 0.0
         risk_reward = max(0.0, min(rr / 3.0, 1.0))  # normalise assuming 3:1 as ideal
         probability = float(geometry.targets[0].prob_touch if geometry.targets else probability)
