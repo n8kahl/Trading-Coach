@@ -6536,7 +6536,7 @@ async def _generate_fallback_plan(
     targets = [meta.price for meta in geometry.targets]
     em_cap_used = geometry.em_used
     expected_move_abs = geometry.em_day
-    rr_to_t1 = _risk_reward(entry, stop, targets[0], direction)
+    rr_to_t1 = _risk_reward(entry_price, stop, targets[0], direction)
     if rr_to_t1 is not None:
         rr_to_t1 = float(rr_to_t1)
     trend_component = 0.8 if (direction == "long" and ema_trend_up) or (direction == "short" and ema_trend_down) else 0.6
@@ -6631,14 +6631,14 @@ async def _generate_fallback_plan(
             base_interval=chart_timeframe_hint or "5m",
             snapshot=snapshot,
             direction=direction,
-            entry=entry,
+            entry=entry_price,
             overlays=None,
         )
     except Exception:  # pragma: no cover - defensive
         mtf_confluence_tags = []
     stop_multiple_val = None
     if atr_value and atr_value > 0:
-        stop_multiple_val = abs(entry - stop) / atr_value
+        stop_multiple_val = abs(entry_price - stop) / atr_value
     risk_block = _build_risk_block(
         entry=entry_price,
         stop=stop,
@@ -6649,7 +6649,7 @@ async def _generate_fallback_plan(
         runner=runner,
     )
     execution_rules = _build_execution_rules(
-        entry=entry,
+        entry=entry_price,
         stop=stop,
         targets=targets,
         direction=direction,
@@ -6750,16 +6750,16 @@ async def _generate_fallback_plan(
         if isinstance(options_payload, Mapping):
             raw_rejections = options_payload.get("rejections") or []
             if isinstance(raw_rejections, Sequence):
-                for entry in raw_rejections:
-                    if not isinstance(entry, Mapping):
+                for rejection in raw_rejections:
+                    if not isinstance(rejection, Mapping):
                         continue
-                    symbol_token = str(entry.get("symbol") or symbol).upper()
-                    reason_token = str(entry.get("reason") or "").upper()
+                    symbol_token = str(rejection.get("symbol") or symbol).upper()
+                    reason_token = str(rejection.get("reason") or "").upper()
                     if not reason_token:
                         continue
                     rejection_entry: Dict[str, Any] = {"symbol": symbol_token, "reason": reason_token}
-                    if entry.get("message"):
-                        rejection_entry["message"] = str(entry["message"])
+                    if rejection.get("message"):
+                        rejection_entry["message"] = str(rejection["message"])
                     selector_rejections.append(rejection_entry)
         filtered_contracts, guardrail_rejections = _apply_option_guardrails(
             extracted_contracts,
@@ -6768,24 +6768,24 @@ async def _generate_fallback_plan(
         )
         accepted_symbols = {str(item.get("symbol") or "").upper() for item in filtered_contracts if isinstance(item, Mapping)}
         filtered_rejections: List[Dict[str, Any]] = []
-        for entry in [*selector_rejections, *guardrail_rejections]:
-            sym = str(entry.get("symbol") or "").upper()
+        for rejection in [*selector_rejections, *guardrail_rejections]:
+            sym = str(rejection.get("symbol") or "").upper()
             if sym and sym in accepted_symbols:
                 continue
-            filtered_rejections.append(entry)
+            filtered_rejections.append(rejection)
         if filtered_rejections:
             dedup: Dict[Tuple[str, str], Dict[str, Any]] = {}
-            for entry in filtered_rejections:
-                sym = str(entry.get("symbol") or symbol).upper()
-                reason = str(entry.get("reason") or "").upper()
+            for rejection in filtered_rejections:
+                sym = str(rejection.get("symbol") or symbol).upper()
+                reason = str(rejection.get("reason") or "").upper()
                 if not reason:
                     continue
                 key = (sym, reason)
                 existing = dedup.get(key)
                 if existing is None:
                     dedup[key] = {"symbol": sym, "reason": reason}
-                if entry.get("message"):
-                    dedup[key]["message"] = str(entry["message"])
+                if rejection.get("message"):
+                    dedup[key]["message"] = str(rejection["message"])
             rejection_list = list(dedup.values())
             rejected_contracts.extend(rejection_list)
             record_selector_rejections(rejection_list, source="live")
@@ -6974,7 +6974,7 @@ async def _generate_fallback_plan(
         plan_block["snap_trace"] = geometry.snap_trace
     plan_warnings: List[str] = list(event_warnings)
     target_profile = build_target_profile(
-        entry=entry,
+        entry=entry_price,
         stop=stop,
         targets=targets,
         target_meta=plan_block.get("target_meta"),
