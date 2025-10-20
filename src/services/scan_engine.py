@@ -199,7 +199,9 @@ class PlanningScanEngine:
 
         # Actionability based on pullback relative to ATR.
         pullback = abs(last_close - (ema21 or last_close))
-        actionability = max(0.0, 1.0 - min(pullback / atr_val, 3.0) / 3.0)
+        pullback_pct = (pullback / last_close) * 100.0 if last_close else None
+        pullback_atr = pullback / atr_val if atr_val else None
+        actionability = max(0.0, 1.0 - min((pullback_atr or 0.0), 3.0) / 3.0)
 
         # Risk/reward using simple ATR band targets.
         stop = max(last_close - atr_val, 0.01)
@@ -227,6 +229,8 @@ class PlanningScanEngine:
             "ema50": round(ema50, 4) if ema50 else None,
             "ema100": round(ema100, 4) if ema100 else None,
             "volume_avg": round(volume_series.tail(20).mean(), 2) if not volume_series.empty else None,
+            "entry_distance_pct": round(pullback_pct, 2) if pullback_pct is not None else None,
+            "entry_distance_atr": round(pullback_atr, 3) if pullback_atr is not None else None,
         }
         components = {
             "probability": round(probability, 3),

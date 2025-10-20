@@ -3629,6 +3629,25 @@ def _planning_scan_to_page(
 ) -> ScanPage:
     candidates: List[ScanCandidate] = []
     for idx, candidate in enumerate(result.candidates, start=1):
+        components = candidate.components or {}
+        metrics = candidate.metrics or {}
+        probability = float(components.get("probability") or 0.0)
+        actionability_component = components.get("actionability")
+        risk_reward_component = components.get("risk_reward")
+        entry_distance_pct = metrics.get("entry_distance_pct")
+        entry_distance_atr = metrics.get("entry_distance_atr")
+        bars_to_trigger = metrics.get("bars_to_trigger")
+        actionable_soon: bool | None = None
+        if any(value is not None for value in (entry_distance_pct, entry_distance_atr, bars_to_trigger, actionability_component)):
+            actionable_soon = False
+            if entry_distance_pct is not None and entry_distance_pct <= 1.0:
+                actionable_soon = True
+            if entry_distance_atr is not None and entry_distance_atr <= 0.7:
+                actionable_soon = True
+            if bars_to_trigger is not None and bars_to_trigger <= 3:
+                actionable_soon = True
+            if not actionable_soon and actionability_component is not None and actionability_component >= 0.8:
+                actionable_soon = True
         planning_snapshot = {
             "planning_mode": True,
             "readiness_score": candidate.readiness_score,
@@ -3640,8 +3659,12 @@ def _planning_scan_to_page(
         }
         reasons = [
             f"Readiness {candidate.readiness_score:.2f}",
-            "Probability {:.0%}".format(candidate.components.get("probability", 0.0)),
+            "Probability {:.0%}".format(probability),
         ]
+        if actionability_component is not None:
+            reasons.append(f"Actionability {actionability_component:.2f}")
+        if risk_reward_component is not None:
+            reasons.append(f"Risk/Reward {risk_reward_component:.2f}")
         sc = ScanCandidate(
             symbol=candidate.symbol,
             rank=idx,
@@ -3650,6 +3673,11 @@ def _planning_scan_to_page(
             entry=candidate.levels.get("entry"),
             stop=candidate.levels.get("invalidation"),
             tps=list(candidate.levels.get("targets") or []),
+            confidence=probability,
+            entry_distance_pct=entry_distance_pct,
+            entry_distance_atr=entry_distance_atr,
+            bars_to_trigger=bars_to_trigger,
+            actionable_soon=actionable_soon,
             source_paths={},
             planning_snapshot=planning_snapshot,
         )
