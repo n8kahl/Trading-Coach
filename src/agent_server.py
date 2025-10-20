@@ -1643,7 +1643,7 @@ def _fallback_scan_candidates(
     return ordered
 
 
-def _fallback_scan_page(
+async def _fallback_scan_page(
     request: ScanRequest,
     context: ScanContext,
     *,
@@ -1660,6 +1660,25 @@ def _fallback_scan_page(
     is_live = context.label == "live" and context.is_open
     max_items = 20 if is_live else 10
     primary_limit = max(1, min(limit, max_items))
+    planning_page: ScanPage | None = None
+    try:
+        runner = _get_planning_runner()
+        planning_output = await runner.run_direct(symbols=symbols, style=request.style, universe_name="fallback")
+        if planning_output.candidates:
+            planning_page = _planning_scan_to_page(
+                planning_output,
+                request,
+                base_banner=banner,
+                base_meta={"mode": mode, "label": label},
+                base_data_quality=dq,
+            )
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.debug("planning fallback generation failed: %s", exc)
+
+    if planning_page is not None and planning_page.candidates:
+        planning_page.meta.setdefault("fallback", True)
+        return planning_page
+
     candidates = _fallback_scan_candidates(symbols, market_data, limit=primary_limit)
     if not candidates:
         return None
@@ -3600,7 +3619,14 @@ def _get_planning_runner() -> PlanningScanRunner:
     return _PLANNING_RUNNER
 
 
-def _planning_scan_to_page(result: PlanningScanOutput, request_payload: ScanRequest) -> ScanPage:
+def _planning_scan_to_page(
+    result: PlanningScanOutput,
+    request_payload: ScanRequest,
+    *,
+    base_banner: str | None = None,
+    base_meta: Dict[str, Any] | None = None,
+    base_data_quality: Dict[str, Any] | None = None,
+) -> ScanPage:
     candidates: List[ScanCandidate] = []
     for idx, candidate in enumerate(result.candidates, start=1):
         planning_snapshot = {
@@ -3639,17 +3665,21 @@ def _planning_scan_to_page(result: PlanningScanOutput, request_payload: ScanRequ
             "count": len(result.universe.symbols),
         },
     }
+    if base_meta:
+        meta.update({k: v for k, v in base_meta.items() if v is not None})
     data_quality = {
         "planning_mode": True,
         "series_present": bool(candidates),
         "indices_present": bool(result.indices_context),
     }
+    if base_data_quality:
+        data_quality.update(base_data_quality)
     session_meta = {
         "planning_mode": True,
         "universe": result.universe.name,
         "symbols": result.universe.symbols,
     }
-    banner = "Planning mode — market closed" if not candidates else "Planning mode — dynamic universe"
+    banner = base_banner or ("Planning mode — market closed" if not candidates else "Planning mode — dynamic universe")
     return ScanPage(
         as_of=result.as_of_utc.isoformat(),
         planning_context="frozen",
@@ -4797,7 +4827,7 @@ async def gpt_scan_endpoint(
             except Exception:
                 planning_banner = "Planning mode — market closed"
 
-    def _fallback_or_empty(
+    async def _fallback_or_empty(
         *,
         symbols: Sequence[str],
         market_data: Dict[str, pd.DataFrame],
@@ -4813,7 +4843,7 @@ async def gpt_scan_endpoint(
             banner_override = planning_banner if not banner_override else banner_override
             empty_override = planning_banner
         if allow_fallback_trades:
-            fallback_page = _fallback_scan_page(
+            fallback_page = await _fallback_scan_page(
                 request_payload,
                 context,
                 symbols=symbols,
@@ -4849,7 +4879,7 @@ async def gpt_scan_endpoint(
         logger.warning("Universe expansion failed: %s", exc)
         # Present frozen leaders from default universe rather than empty
         return _finalize(
-            _fallback_or_empty(
+            await _fallback_or_empty(
                 symbols=_FROZEN_DEFAULT_UNIVERSE,
                 market_data={},
                 banner=None if context.is_open else (context_banner or "Universe unavailable — showing frozen leaders."),
@@ -4864,7 +4894,7 @@ async def gpt_scan_endpoint(
 
     if not tickers:
         return _finalize(
-            _fallback_or_empty(
+            await _fallback_or_empty(
                 symbols=_FROZEN_DEFAULT_UNIVERSE,
                 market_data={},
                 banner=None if context.is_open else (context_banner or "Empty universe — showing frozen leaders."),
@@ -4974,7 +5004,7 @@ async def gpt_scan_endpoint(
             logger.warning("Live scan: all symbols stale (>%d ms); continuing with best-effort data", tolerance_ms)
     if not available_symbols:
         return _finalize(
-            _fallback_or_empty(
+            await _fallback_or_empty(
                 symbols=tickers,
                 market_data=market_data,
                 banner=None if context.is_open else (banner or "Market closed — showing frozen leaders."),
@@ -4987,7 +5017,7 @@ async def gpt_scan_endpoint(
     filtered_symbols = _apply_scan_filters(available_symbols, market_data, effective_filters)
     if not filtered_symbols:
         return _finalize(
-            _fallback_or_empty(
+            await _fallback_or_empty(
                 symbols=available_symbols,
                 market_data=market_data,
                 banner=None if context.is_open else (banner or "Filters removed all symbols — showing frozen leaders."),
@@ -5068,7 +5098,7 @@ async def gpt_scan_endpoint(
 
     if not preps:
         return _finalize(
-            _fallback_or_empty(
+            await _fallback_or_empty(
                 symbols=available_symbols,
                 market_data=market_subset,
                 banner=None if context.is_open else (banner or "Scanner returned no signals — showing frozen leaders."),

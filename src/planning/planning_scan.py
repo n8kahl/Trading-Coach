@@ -55,5 +55,28 @@ class PlanningScanRunner:
     def persistence(self) -> PlanningPersistence:
         return self._persistence
 
+    async def run_direct(
+        self,
+        *,
+        symbols: Sequence[str],
+        style: str,
+        universe_name: str = "adhoc",
+    ) -> PlanningScanOutput:
+        snapshot = UniverseSnapshot(
+            name=universe_name,
+            source="adhoc",
+            as_of_utc=datetime.now(timezone.utc),
+            symbols=list(symbols),
+            metadata={"source": "fallback"},
+        )
+        result = await self._engine.run(snapshot, style=style)
+        return PlanningScanOutput(
+            as_of_utc=result.as_of_utc,
+            universe=snapshot,
+            run_id=result.run_id,
+            indices_context=result.indices_context,
+            candidates=result.candidates,
+        )
+
 
 __all__ = ["PlanningScanRunner", "PlanningScanOutput"]
