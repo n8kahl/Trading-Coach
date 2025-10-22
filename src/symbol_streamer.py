@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 # Data freshness SLAs (seconds)
 QUOTES_MAX_AGE_S: float = 5.0
 
+# Heartbeat thresholds so the UI does not flicker red/green on transient misses
+_FAILURE_NOTE_THRESHOLD = 3  # consecutive misses before raising outage
+_RECOVERY_NOTE_THRESHOLD = 2  # consecutive hits before clearing outage
+
 
 @dataclass
 class QuoteResult:
@@ -178,16 +182,20 @@ class SymbolStreamCoordinator:
         last_phase: Optional[str] = None
         last_note: Optional[str] = None
         failure_streak = 0
+        success_streak = 0
+        failure_announced = False
         try:
             while True:
                 phase = determine_market_phase()
                 note: Optional[str] = None
+                phase_note: Optional[str] = None
                 try:
                     quote = await fetch_live_quote(symbol)
                 except Exception as exc:
                     logger.exception("live quote fetch failed", extra={"symbol": symbol})
                     quote = QuoteResult(price=None, timestamp=None, source="unknown", error="exception")
                 if quote.price is not None:
+                    success_streak += 1
                     failure_streak = 0
                     event = {
                         "t": "tick",
@@ -196,16 +204,25 @@ class SymbolStreamCoordinator:
                         "source": quote.source,
                     }
                     await self._send_event(symbol, event)
-                    if last_note and "Live data unavailable" in last_note:
+                    if success_streak >= _RECOVERY_NOTE_THRESHOLD and failure_announced:
+                        recovery = "Live data connection restored."
+                        await self._send_event(symbol, {"t": "market_status", "phase": phase, "note": recovery})
+                        last_note = recovery
+                        failure_announced = False
+                    elif last_note and "Live data unavailable" in last_note and not failure_announced:
                         recovery = "Live data connection restored."
                         await self._send_event(symbol, {"t": "market_status", "phase": phase, "note": recovery})
                         last_note = recovery
                 else:
+                    success_streak = 0
                     failure_streak += 1
                     if quote.error == "missing_credentials":
                         note = "Live data unavailable: add Polygon or Finnhub API credentials."
-                    elif quote.error:
-                        note = f"Live data unavailable ({quote.error})."
+                        failure_announced = True
+                    elif not failure_announced and failure_streak >= _FAILURE_NOTE_THRESHOLD:
+                        detail = quote.error or "upstream_error"
+                        note = f"Live data unavailable ({detail})."
+                        failure_announced = True
 
                 if phase != "regular":
                     phase_note = f"Market {phase.replace('_', ' ')} — live updates may be limited."
@@ -214,7 +231,7 @@ class SymbolStreamCoordinator:
                 if note and note != last_note:
                     await self._send_event(symbol, {"t": "market_status", "phase": phase, "note": note})
                     last_note = note
-                elif phase != last_phase:
+                elif phase != last_phase and not failure_announced:
                     default_note = "Market open." if phase == "regular" else f"Market {phase.replace('_', ' ')} — live updates may be limited."
                     await self._send_event(symbol, {"t": "market_status", "phase": phase, "note": default_note})
                     last_note = default_note

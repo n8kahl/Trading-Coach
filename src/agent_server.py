@@ -144,7 +144,7 @@ from .levels import inject_style_levels
 from .levels.snapper import Level, SnapContext, collect_levels, snap_prices
 from .features.mtf import compute_mtf_bundle, MTFBundle
 from .features.htf_levels import compute_htf_levels, HTFLevels
-from .strategy.engine import infer_strategy
+from .strategy.engine import infer_strategy, mtf_amplifier
 
 logger = logging.getLogger(__name__)
 

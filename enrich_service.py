@@ -86,6 +86,7 @@ class EventsBlock(BaseModel):
     next_nfp_minutes: Optional[int] = None
     within_event_window: Optional[bool] = None
     label: Optional[str] = None
+    min_minutes_to_event: Optional[int] = None
 
 
 class EarningsBlock(BaseModel):
@@ -141,28 +142,46 @@ async def _build_sentiment(client: httpx.AsyncClient, symbol: str) -> SentimentB
 
 
 async def _build_events(client: httpx.AsyncClient) -> EventsBlock:
-    today = dt.date.today().isoformat()
-    params = {"from": today, "to": today, "token": FINNHUB_API_KEY}
+    today = dt.date.today()
+    params = {
+        "from": today.isoformat(),
+        "to": (today + dt.timedelta(days=7)).isoformat(),
+        "token": FINNHUB_API_KEY,
+    }
     data = await _get_json(client, f"{FINNHUB_BASE_URL}/calendar/economic", params)
     calendar = data.get("economicCalendar") or []
 
+    def _event_timestamp(item: Dict[str, Any]) -> Optional[dt.datetime]:
+        datetime_token = item.get("datetime")
+        if isinstance(datetime_token, str):
+            try:
+                return dt.datetime.fromisoformat(datetime_token.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        date_str = item.get("date")
+        time_str = item.get("time") or "00:00"
+        if not date_str:
+            return None
+        if time_str.upper() in {"", "TBD", "N/A"}:
+            time_str = "00:00"
+        try:
+            return dt.datetime.fromisoformat(f"{date_str}T{time_str}:00+00:00")
+        except ValueError:
+            return None
+
     def next_minutes(name_tokens: tuple[str, ...]) -> Optional[int]:
+        now_dt = dt.datetime.now(dt.timezone.utc)
         future: list[int] = []
         for item in calendar:
             title = (item.get("event") or "").lower()
             if not any(token in title for token in name_tokens):
                 continue
-            date_str = item.get("date")
-            time_str = item.get("time") or "00:00"
-            if not date_str:
+            timestamp = _event_timestamp(item)
+            if not timestamp:
                 continue
-            try:
-                timestamp = dt.datetime.fromisoformat(f"{date_str}T{time_str}:00+00:00")
-            except ValueError:
-                continue
-            minutes = _minutes_until(timestamp)
-            if minutes >= 0:
-                future.append(minutes)
+            minutes = int((timestamp - now_dt).total_seconds() // 60)
+            if minutes >= -30:
+                future.append(minutes if minutes >= 0 else 0)
         return min(future) if future else None
 
     next_cpi = next_minutes(("cpi", "consumer price"))
@@ -170,14 +189,22 @@ async def _build_events(client: httpx.AsyncClient) -> EventsBlock:
     next_nfp = next_minutes(("non-farm", "nonfarm", "payroll"))
 
     upcoming = [value for value in (next_cpi, next_fomc, next_nfp) if value is not None]
-    within_window = any(value <= 90 for value in upcoming) if upcoming else False
+    min_minutes = min(upcoming) if upcoming else None
+    within_window = bool(min_minutes is not None and min_minutes <= 120)
+    label = "none"
+    if min_minutes is not None:
+        if min_minutes <= 60:
+            label = "risk"
+        elif min_minutes <= 180:
+            label = "watch"
 
     return EventsBlock(
         next_fomc_minutes=next_fomc,
         next_cpi_minutes=next_cpi,
         next_nfp_minutes=next_nfp,
         within_event_window=within_window,
-        label="watch" if within_window else "none",
+        label=label,
+        min_minutes_to_event=min_minutes,
     )
 
 
