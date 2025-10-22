@@ -103,7 +103,7 @@ from .db import (
     fetch_idea_snapshot as db_fetch_idea_snapshot,
     store_idea_snapshot as db_store_idea_snapshot,
 )
-from .data_sources import fetch_polygon_ohlcv, fetch_yahoo_ohlcv
+from .data_sources import fetch_polygon_ohlcv
 from .symbol_streamer import SymbolStreamCoordinator, fetch_live_quote
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
@@ -2598,22 +2598,6 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
     if fresh_polygon is not None:
         return fresh_polygon
 
-    # Attempt Yahoo fallback before returning stale Polygon data
-    for candidate in candidates:
-        try:
-            yahoo = await fetch_yahoo_ohlcv(candidate, timeframe)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Yahoo fetch failed for %s: %s", candidate, exc)
-            continue
-        if yahoo is None or yahoo.empty:
-            continue
-        if _is_stale_frame(yahoo, timeframe):
-            continue
-        yahoo_copy = yahoo.copy()
-        yahoo_copy.attrs["source"] = "yahoo"
-        logger.info("using yahoo fallback for %s", symbol)
-        return yahoo_copy
-
     if stale_polygon is not None:
         logger.warning("Polygon data is stale for %s; returning last known data.", symbol)
         return stale_polygon
@@ -3805,6 +3789,15 @@ def _fallback_style_token(style: str | None) -> str:
     if token:
         return token
     return "intraday"
+
+
+def _max_entry_distance_pct(style: str | None) -> float:
+    token = _fallback_style_token(style)
+    if token in {"scalp", "intraday"}:
+        return 0.003
+    if token == "swing":
+        return 0.01
+    return 0.02
 
 
 def _fallback_levels_param(levels: Dict[str, float], limit: int = 6) -> str | None:
@@ -5303,7 +5296,7 @@ async def gpt_scan_endpoint(
     planning_mode = bool(getattr(request_payload, "planning_mode", False))
     session_payload = _session_payload_from_request(request)
     settings = get_settings()
-    allow_fallback_trades = not bool(getattr(settings, "ft_no_fallback_trades", True))
+    allow_fallback_trades = False
     no_setups_banner = "NO_ELIGIBLE_SETUPS"
     session_ticker = _session_tracking_id(session_payload)
     if session_ticker:
@@ -6988,26 +6981,35 @@ async def _generate_fallback_plan(
         )
     except Exception:
         entry_candidates = []
-    if entry_seed and (not entry_candidates or not any(abs(float(candidate["level"]) - entry_seed) < 1e-4 for candidate in entry_candidates)):
-        distance_pct = abs(entry_seed - close_price) / close_price if close_price else 0.0
-        actionable = distance_pct <= 0.003
-        score = 0.40 * (1 - distance_pct) + 0.20 * (1 if actionable else 0)
-        entry_candidates.insert(
-            0,
-            {
-                "level": round(entry_seed, 2),
-                "label": "STRUCTURAL",
-                "type": "STRUCTURAL",
-                "bars_to_trigger": max(int(round(distance_pct * 400, 0)), 0),
-                "entry_distance_pct": round(distance_pct, 4),
-                "score": round(score, 4),
-                "structure_quality": 0.75,
-            },
-        )
-    if entry_candidates:
-        entry_price = float(entry_candidates[0]["level"])
-    else:
-        entry_price = entry_seed if entry_seed else round(close_price, 2)
+    distance_limit = _max_entry_distance_pct(style_token)
+    if entry_seed:
+        distance_pct_seed = abs(entry_seed - close_price) / close_price if close_price else 0.0
+        if distance_pct_seed <= distance_limit:
+            score = 0.40 * (1 - distance_pct_seed) + 0.20
+            entry_candidates.insert(
+                0,
+                {
+                    "level": round(entry_seed, 2),
+                    "label": "STRUCTURAL",
+                    "type": "STRUCTURAL",
+                    "bars_to_trigger": max(int(round(distance_pct_seed * 400, 0)), 0),
+                    "entry_distance_pct": round(distance_pct_seed, 4),
+                    "score": round(score, 4),
+                    "structure_quality": 0.75,
+                },
+            )
+    filtered_candidates: List[Dict[str, Any]] = []
+    for candidate in entry_candidates:
+        distance = candidate.get("entry_distance_pct")
+        if not isinstance(distance, (int, float)):
+            continue
+        if distance <= distance_limit:
+            filtered_candidates.append(candidate)
+    entry_candidates = filtered_candidates
+    if not entry_candidates:
+        logger.warning("No actionable entry candidates for fallback plan %s (style=%s)", symbol, style_token)
+        return None
+    entry_price = float(entry_candidates[0]["level"])
 
     strategy_timestamp = plan_ts_utc.to_pydatetime() if isinstance(plan_ts_utc, pd.Timestamp) else plan_ts_utc
     strategy_ctx = {
@@ -7161,6 +7163,15 @@ async def _generate_fallback_plan(
         geometry.snap_trace.append(
             f"entry:{close_price:.2f}->{geometry.entry:.2f} via {selected_entry_candidate.tag.upper()}"
         )
+    distance_to_price = abs(entry_price - close_price) / close_price if close_price else 0.0
+    if distance_to_price > distance_limit:
+        logger.warning(
+            "Fallback entry for %s exceeds actionable threshold (distance=%.4f limit=%.4f)",
+            symbol,
+            distance_to_price,
+            distance_limit,
+        )
+        return None
     plan["entry_anchor"] = selected_entry_candidate.tag
     plan["entry_actionability"] = round(selected_entry_candidate.actionability, 3)
     for candidate_meta in entry_candidates:
@@ -8161,7 +8172,6 @@ async def gpt_plan(
         raise HTTPException(status_code=400, detail="Invalid symbol; use /gpt/scan for universe requests.")
     forced_plan_id = (request_payload.plan_id or "").strip()
     settings = get_settings()
-    allow_plan_fallback = not bool(getattr(settings, "ft_no_fallback_trades", True))
     fields_set = getattr(request_payload, "model_fields_set", set())
     simulate_open = _resolve_simulate_open(
         request,
@@ -8225,21 +8235,10 @@ async def gpt_plan(
     except TypeError:
         results = await gpt_scan(universe, request, user)
     if not results:
-        if allow_plan_fallback:
-            fallback_plan = await _generate_fallback_plan(
-                symbol,
-                request_payload.style,
-                request,
-                user,
-                simulate_open=simulate_open,
-            )
-            if fallback_plan is not None:
-                logger.info(
-                    "gpt_plan fallback_generated",
-                    extra={"symbol": symbol, "style": request_payload.style, "mode": "no_signals"},
-                )
-                return _finalize_plan_response(fallback_plan)
-        raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "UPSTREAM_UNAVAILABLE", "message": f"No live plan available for {symbol}"},
+        )
     first = next((item for item in results if (item.get("symbol") or "").upper() == symbol), results[0])
     logger.info(
         "gpt_plan raw result received",
@@ -8258,21 +8257,10 @@ async def gpt_plan(
     em_cap_used = False
     raw_plan = first.get("plan") or {}
     if not raw_plan:
-        if allow_plan_fallback:
-            fallback_plan = await _generate_fallback_plan(
-                symbol,
-                request_payload.style,
-                request,
-                user,
-                simulate_open=simulate_open,
-            )
-            if fallback_plan is not None:
-                logger.info(
-                    "gpt_plan fallback_generated",
-                    extra={"symbol": symbol, "style": request_payload.style, "mode": "empty_plan"},
-                )
-                return _finalize_plan_response(fallback_plan)
-        raise HTTPException(status_code=404, detail=f"No valid plan for {symbol}")
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "UPSTREAM_UNAVAILABLE", "message": f"No live plan available for {symbol}"},
+        )
     plan: Dict[str, Any] = dict(raw_plan)
     raw_plan_id = str(plan.get("plan_id") or "").strip()
     raw_version = plan.get("version")
@@ -8566,22 +8554,6 @@ async def gpt_plan(
                     "plan_id": plan_id,
                 },
             )
-            if allow_plan_fallback:
-                fallback_plan = await _generate_fallback_plan(
-                    symbol,
-                    request_payload.style,
-                    request,
-                    user,
-                    simulate_open=simulate_open,
-                )
-                if fallback_plan is not None:
-                    fallback_meta = dict(fallback_plan.meta or {}) if fallback_plan.meta else {}
-                    warnings_field = fallback_meta.setdefault("warnings", [])
-                    warning_msg = f"fallback_applied_due_to_invariant: {invariant_reason}" if invariant_reason else "fallback_applied_due_to_invariant"
-                    if warning_msg not in warnings_field:
-                        warnings_field.append(warning_msg)
-                    fallback_plan.meta = fallback_meta or None
-                    return _finalize_plan_response(fallback_plan)
             raise HTTPException(
                 status_code=422,
                 detail={"code": "INVARIANT_BROKEN", "message": invariant_reason or "invalid_levels"},
