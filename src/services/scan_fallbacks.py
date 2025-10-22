@@ -49,17 +49,25 @@ def _ensure_candidates_present(
     universe: Sequence[str],
     geometry: GeometryBundle | None,
 ) -> dict[str, Any]:
-    if page.get("banner"):
+    candidates = page.get("candidates")
+    has_candidates = isinstance(candidates, list) and len(candidates) > 0
+    if has_candidates:
         return page
-    candidates = page.get("candidates") or []
-    if candidates:
+
+    has_banner = bool(page.get("banner"))
+    if has_banner and len(universe) == 0:
+        placeholders = build_placeholder_candidates(universe, geometry)
+        page["candidates"] = placeholders
+        page["count_candidates"] = len(placeholders)
+        warnings = page.setdefault("warnings", [])
+        if "PLACEHOLDER" not in warnings:
+            warnings.append("PLACEHOLDER")
         return page
-    placeholders = build_placeholder_candidates(universe, geometry)
-    page["candidates"] = placeholders
-    page["count_candidates"] = len(placeholders)
-    warnings = page.setdefault("warnings", [])
-    if "PLACEHOLDER" not in warnings:
-        warnings.append("PLACEHOLDER")
+
+    # Preserve empty list without injecting placeholders.
+    if candidates is None:
+        page["candidates"] = []
+    page["count_candidates"] = len(page.get("candidates", []))
     return page
 
 
@@ -79,6 +87,7 @@ def ensure_scan_schema(
     page["planning_context"] = route.planning_context
     page.setdefault("warnings", [])
     page.setdefault("meta", {})
+    page["meta"].setdefault("route", route.mode)
     page["meta"].setdefault("snapshot", snapshot)
     page.setdefault("snap_trace", getattr(geometry, "snap_trace", None))
     page["data_quality"] = {
@@ -140,7 +149,6 @@ async def compute_scan_with_fallback(
         try:
             page, _, _ = await _attempt_scan(universe, style=style, limit=limit, route=route, mode_override="lkg")
             page.setdefault("warnings", []).append("LIVE_FALLBACK_TO_LKG")
-            page = _ensure_candidates_present(page, universe, None)
             return page
         except Exception:
             pass

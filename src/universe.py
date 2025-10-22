@@ -85,6 +85,15 @@ async def expand_universe(universe: str | List[str], *, style: str, limit: int) 
     if not token:
         return []
 
+    if token == "LAST_SNAPSHOT":
+        symbols = await load_universe(style=style, sector=None, limit=limit)
+        normalized = _normalize_symbols(symbols)
+        if not normalized:
+            normalized = _normalize_symbols(_settings_list("playbook_symbols", _DEFAULT_PLAYBOOK))
+        if not normalized:
+            normalized = _normalize_symbols(_DEFAULT_PLAYBOOK)
+        return normalized[:limit]
+
     specials = await _resolve_special_token(token, style=style, limit=limit)
     if specials:
         symbols = _normalize_symbols(specials)[:limit]

@@ -5579,6 +5579,7 @@ async def gpt_scan_endpoint(
                 "as_of": route.as_of.isoformat(),
                 "planning_context": route.planning_context,
                 "meta": {
+                    "route": route.mode,
                     "snapshot": snapshot,
                     "universe": {
                         "name": "adhoc",
@@ -5586,6 +5587,7 @@ async def gpt_scan_endpoint(
                         "count": len(universe_symbols),
                     },
                 },
+                "candidates": [],
                 "data_quality": {
                     "planning_mode": route.planning_context == "frozen",
                     "series_present": False,
@@ -5595,16 +5597,12 @@ async def gpt_scan_endpoint(
                     "snapshot": snapshot,
                 },
                 "phase": "scan",
+                "count_candidates": 0,
                 "next_cursor": None,
                 "warnings": [
                     "LKG_PARTIAL" if route.planning_context == "frozen" else "LIVE_PARTIAL"
                 ],
             }
-            placeholders = build_placeholder_candidates(universe_symbols, None)
-            page_payload["candidates"] = placeholders
-            page_payload["count_candidates"] = len(placeholders)
-            if "PLACEHOLDER" not in page_payload["warnings"]:
-                page_payload["warnings"].append("PLACEHOLDER")
         response.headers["X-No-Fabrication"] = "1"
         return ScanPage.model_validate(page_payload)
     allow_fallback_trades = False

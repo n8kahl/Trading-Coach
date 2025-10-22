@@ -11,6 +11,7 @@ from src.config import get_settings
 from src.lib.data_source import DataRoute
 import src.lib.data_source as data_source_module
 import src.services.scan_fallbacks as scan_fallbacks
+import src.universe as universe_module
 
 
 def _scan_payload(**overrides: object) -> dict[str, object]:
@@ -34,22 +35,30 @@ async def test_scan_tomorrow_sim_open_returns_live(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(agent_server, "pick_data_source", fake_pick)
 
+    async def fake_load_universe(*args, **kwargs) -> list[str]:
+        return ["AAPL", "MSFT", "NVDA"]
+
+    universe_module._UNIVERSE_CACHE.clear()
+    monkeypatch.setattr(universe_module, "load_universe", fake_load_universe)
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/gpt/scan",
-            json=_scan_payload(simulate_open=True),
+            json=_scan_payload(universe="LAST_SNAPSHOT", simulate_open=True),
         )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["planning_context"] == "live"
+    assert payload["meta"]["route"] == "live"
     assert len(payload["candidates"]) > 0
+    assert payload["candidates"][0]["symbol"] == "AAPL"
     assert payload["data_quality"]["expected_move"] == pytest.approx(1.5)
 
 
 @pytest.mark.asyncio()
-async def test_scan_closed_hours_non_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_scan_closed_hours_allows_empty_without_banner(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "gpt_market_routing_enabled", True, raising=False)
     saturday = datetime(2024, 6, 8, 16, 0, 0, tzinfo=timezone.utc)
@@ -74,12 +83,9 @@ async def test_scan_closed_hours_non_empty_list(monkeypatch: pytest.MonkeyPatch)
     assert response.status_code == 200
     payload = response.json()
     assert payload["planning_context"] == "frozen"
-    assert len(payload["candidates"]) == 2
-    assert payload["warnings"].count("PLACEHOLDER") == 1
-    candidate = payload["candidates"][0]
-    assert candidate["score"] == pytest.approx(0.1)
-    assert candidate["snap_trace"] == ["fallback: placeholder"]
-    assert candidate["actionable_soon"] is False
+    assert payload["candidates"] == []
+    assert payload["count_candidates"] == 0
+    assert "PLACEHOLDER" not in payload.get("warnings", [])
 
 
 @pytest.mark.asyncio()
@@ -102,12 +108,18 @@ async def test_banner_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(agent_server, "pick_data_source", fake_pick)
     monkeypatch.setattr(scan_fallbacks, "run_scan", banner_scan)
 
+    async def empty_expand(*args, **kwargs) -> list[str]:
+        return []
+
+    monkeypatch.setattr(agent_server, "expand_universe", empty_expand)
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/gpt/scan", json=_scan_payload())
+        response = await client.post("/gpt/scan", json=_scan_payload(universe="LAST_SNAPSHOT"))
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["banner"] == "MARKET_HOLIDAY"
-    assert payload["candidates"] == []
-    assert "PLACEHOLDER" not in payload.get("warnings", [])
+    assert payload["candidates"]
+    assert payload["candidates"][0]["symbol"] == "ADHOC"
+    assert "PLACEHOLDER" in payload.get("warnings", [])
