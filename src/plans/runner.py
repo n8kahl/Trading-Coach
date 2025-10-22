@@ -34,9 +34,12 @@ def compute_runner(
     start_after = tps[0] if tps else entry
     notes = [f"Runner starts after TP1 @ {round(start_after, 2)}"]
     if profile_nodes:
-        notes.append("Pinned behind profile nodes until acceptance")
+        structural_summary = ", ".join(sorted(profile_nodes))
+        notes.append(f"Tighten trail after TP1 on acceptance above {structural_summary}")
     else:
-        notes.append("ATR-only trail")
+        notes.append("Tighten trail after TP1 once structure confirms")
+    notes.append("Exit runner on VWAP flip against trade with ADX roll-over")
+    notes.append("If remaining ATR < 0.5×ATR near close, time-stop the runner")
 
     return {
         "fraction": round(fraction, 2),

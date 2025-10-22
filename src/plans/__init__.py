@@ -8,6 +8,7 @@ from .levels import STRUCTURAL_ORDER, directional_nodes, profile_nodes, populate
 from .snap import snap_targets, stop_from_structure, build_key_levels_used
 from .runner import compute_runner
 from .actionability import actionability_score, compute_entry_candidates
+from .entry_selection import EntryAnchor, EntryContext, build_entry_candidates as build_entry_plan_candidates, select_best_entry_plan
 from .invariants import assert_invariants, GeometryInvariantError
 from .pipeline import StructuredGeometry, build_structured_geometry
 
@@ -32,6 +33,10 @@ __all__ = [
     "compute_runner",
     "actionability_score",
     "compute_entry_candidates",
+    "EntryContext",
+    "EntryAnchor",
+    "build_entry_plan_candidates",
+    "select_best_entry_plan",
     "assert_invariants",
     "GeometryInvariantError",
     "StructuredGeometry",

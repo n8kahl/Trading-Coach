@@ -17,6 +17,11 @@ STRUCTURE_WEIGHTS = {
     "VAH": 0.85,
     "VAL": 0.85,
     "POC": 0.8,
+    "SWING_LOW": 0.9,
+    "SWING_HIGH": 0.9,
+    "EMA9": 0.7,
+    "EMA21": 0.65,
+    "EMA50": 0.6,
 }
 
 LEVEL_SEQUENCE = [
@@ -31,6 +36,11 @@ LEVEL_SEQUENCE = [
     ("VAL", "val"),
     ("POC", "poc"),
     ("VWAP", "vwap"),
+    ("SWING_LOW", "swing_low"),
+    ("SWING_HIGH", "swing_high"),
+    ("EMA9", "ema9"),
+    ("EMA21", "ema21"),
+    ("EMA50", "ema50"),
 ]
 
 
@@ -99,8 +109,8 @@ def compute_entry_candidates(
         if label_upper in seen:
             continue
         level_price = levels.get(key)
-        if level_price is None and key == "vwap":
-            level_price = prices.get("vwap")
+        if level_price is None:
+            level_price = prices.get(key)
         if level_price is None:
             continue
         try:

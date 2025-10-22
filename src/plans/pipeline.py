@@ -95,6 +95,20 @@ def build_structured_geometry(
         snap_tags=snap_tags,
         style=style_token,
     )
+    if atr_val > 0:
+        prefer_threshold = atr_val * 0.25
+    else:
+        prefer_threshold = 0.0
+    if prefer_threshold > 0:
+        preferred: List[float] = []
+        for idx, clamped in enumerate(clamped_tps):
+            original = snapped_tps[idx] if idx < len(snapped_tps) else clamped
+            reason = tp_reasons[idx] if idx < len(tp_reasons) else {}
+            if reason.get("snap_tag") and abs(clamped - original) <= prefer_threshold + 1e-9:
+                preferred.append(round(original, 2))
+            else:
+                preferred.append(clamped)
+        clamped_tps = preferred
     clamp_applied = any(abs(a - b) > 1e-6 for a, b in zip(clamped_tps, snapped_tps))
     if clamp_applied:
         warnings.append("EM clamp applied")

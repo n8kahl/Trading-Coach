@@ -26,6 +26,7 @@ class StrategyProfile:
     waiting_for: str
     mtf: Optional[Dict[str, object]]
     matched_rules: List[MatchedRule]
+    mtf_confluence: List[str]
 
 
 def mtf_amplifier(direction: str, mtf: Optional[MTFBundle]) -> float:
@@ -74,6 +75,33 @@ def _baseline_rule() -> RuleResult:
     )
 
 
+def _mtf_confluence_notes(bundle: Optional[MTFBundle]) -> List[str]:
+    notes: List[str] = []
+    if not bundle or not bundle.by_tf:
+        return notes
+    order = ["D", "60m", "15m", "5m"]
+    for tf in order:
+        state = bundle.by_tf.get(tf)
+        if not state:
+            continue
+        if state.ema_up:
+            notes.append(f"{tf} trend ↑")
+        elif state.ema_down:
+            notes.append(f"{tf} trend ↓")
+        else:
+            notes.append(f"{tf} trend ≈")
+        if len(notes) >= 4:
+            break
+    state_5m = bundle.by_tf.get("5m")
+    if state_5m and state_5m.vwap_rel in {"above", "below"}:
+        notes.append(f"VWAP {state_5m.vwap_rel}")
+    if bundle.bias_htf and bundle.bias_htf != "neutral":
+        notes.append(f"HTF bias {bundle.bias_htf}")
+    agreement_tag = f"MTF agreement {round(bundle.agreement, 2)}"
+    notes.append(agreement_tag)
+    return notes[:6]
+
+
 def infer_strategy(direction: str, ctx: Dict[str, object]) -> Tuple[str, StrategyProfile]:
     """Infer strategy metadata and best-fitting rule for the current context."""
 
@@ -82,6 +110,7 @@ def infer_strategy(direction: str, ctx: Dict[str, object]) -> Tuple[str, Strateg
         _update_agreement(direction, bundle)
     else:
         bundle = None
+    mtf_confluence_notes = _mtf_confluence_notes(bundle)
     htf_levels = ctx.get("htf_levels")
     if not isinstance(htf_levels, HTFLevels):
         htf_levels = None
@@ -125,9 +154,16 @@ def infer_strategy(direction: str, ctx: Dict[str, object]) -> Tuple[str, Strateg
     selected_id = "baseline_auto"
     selected_result = scored_rules["baseline_auto"][0]
     best_score = baseline_score
+    mtf_supports_direction = True
+    if bundle:
+        bias = bundle.bias_htf
+        if bias not in {direction, "neutral"}:
+            mtf_supports_direction = False
 
     for rule_id, (result, score) in scored_rules.items():
         if rule_id == "baseline_auto":
+            continue
+        if not mtf_supports_direction:
             continue
         if score >= baseline_score + 0.03 and score >= best_score:
             selected_id = rule_id
@@ -148,6 +184,7 @@ def infer_strategy(direction: str, ctx: Dict[str, object]) -> Tuple[str, Strateg
         waiting_for=selected_result.waiting_for,
         mtf=mtf_payload,
         matched_rules=matched,
+        mtf_confluence=mtf_confluence_notes,
     )
 
     return selected_id, profile

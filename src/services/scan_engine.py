@@ -15,7 +15,15 @@ import pandas as pd
 
 from ..calculations import atr, ema
 from ..levels import inject_style_levels
-from ..plans import build_plan_geometry, build_structured_geometry, compute_entry_candidates, populate_recent_extrema
+from ..plans import (
+    EntryAnchor,
+    EntryContext,
+    build_plan_geometry,
+    build_structured_geometry,
+    compute_entry_candidates,
+    populate_recent_extrema,
+    select_best_entry_plan,
+)
 from ..plans.entry import select_structural_entry
 from .contract_rules import ContractRuleBook, ContractTemplate
 from .polygon_client import AggregatesResult, PolygonAggregatesClient
@@ -28,6 +36,13 @@ from .persist import (
 )
 
 logger = logging.getLogger(__name__)
+
+_STYLE_STOP_MULT = {
+    "scalp": 1.2,
+    "intraday": 2.0,
+    "swing": 2.5,
+    "leaps": 3.0,
+}
 
 
 def _nativeify(value: Any) -> Any:
@@ -196,6 +211,7 @@ class PlanningScanEngine:
         if last_close is None or last_close <= 0:
             return None
 
+        ema9 = _latest(ema(close_series, 9))
         ema21 = _latest(ema(close_series, 21))
         ema50 = _latest(ema(close_series, 50))
         ema100 = _latest(ema(close_series, 100))
@@ -303,6 +319,12 @@ class PlanningScanEngine:
         )
         indicators_payload = {"rvol": trend_component, "liquidity_rank": None}
         prices_payload = {"close": float(last_close)}
+        if ema9:
+            prices_payload["ema9"] = float(ema9)
+        if ema21:
+            prices_payload["ema21"] = float(ema21)
+        if ema50:
+            prices_payload["ema50"] = float(ema50)
         try:
             entry_candidates = compute_entry_candidates(symbol, style, levels_map, indicators_payload, prices_payload)
         except Exception:
@@ -324,7 +346,6 @@ class PlanningScanEngine:
                 },
             )
         entry_candidates = _nativeify(entry_candidates)
-        entry_price = float(entry_candidates[0]["level"]) if entry_candidates else entry_seed or float(last_close)
         index_payload = getattr(daily, "index", None)
         if index_payload is not None and len(index_payload) > 0:
             ts = index_payload[-1]
@@ -335,25 +356,49 @@ class PlanningScanEngine:
                     timestamp = datetime.fromisoformat(str(ts))
                 except Exception:
                     timestamp = None
-        try:
-            geometry = build_plan_geometry(
-                entry=entry_price,
-                side="long",
-                style=style,
-                strategy=None,
-                atr_tf=float(atr_val),
-                atr_daily=float(atr_daily_val or atr_val),
-                iv_expected_move=None,
-                realized_range=realized_range,
-                levels=levels_map,
-                timestamp=timestamp,
+        entry_context_scan = EntryContext(
+            direction="long",
+            style=style,
+            last_price=float(last_close),
+            atr=float(atr_val),
+            levels=levels_map,
+            timestamp=timestamp,
+            mtf_bias=None,
+            session_phase=None,
+            preferred_entries=[EntryAnchor(entry_seed, "structural")] if entry_seed else None,
+        )
+        plan_timestamp_scan = timestamp.to_pydatetime() if isinstance(timestamp, pd.Timestamp) else timestamp
+        plan_kwargs_scan = {
+            "side": "long",
+            "style": style,
+            "strategy": None,
+            "atr_tf": float(atr_val),
+            "atr_daily": float(atr_daily_val or atr_val),
+            "iv_expected_move": None,
+            "realized_range": realized_range,
+            "levels": dict(levels_map),
+            "timestamp": plan_timestamp_scan,
+            "em_points": None,
+        }
+        geometry, selected_entry = select_best_entry_plan(entry_context_scan, plan_kwargs_scan, builder=build_plan_geometry)
+        entry_price = geometry.entry
+        selected_tag = selected_entry.tag
+        if selected_entry.tag != "reference":
+            geometry.snap_trace.append(
+                f"entry:{last_close:.2f}->{geometry.entry:.2f} via {selected_entry.tag.upper()}"
             )
-        except ValueError as exc:
-            logger.debug("geometry build failed for %s: %s", symbol, exc)
-            if str(exc) != "rr_too_low":
-                return None
-            fallback_geometry = True
-
+        for candidate_meta in entry_candidates:
+            evaluation = candidate_meta.setdefault("evaluation", {})
+            try:
+                level_val = float(candidate_meta.get("level"))
+            except (TypeError, ValueError):
+                evaluation["status"] = "invalid_level"
+                continue
+            if abs(level_val - selected_entry.entry) < 1e-4:
+                evaluation["status"] = "selected"
+                evaluation["actionability"] = round(selected_entry.actionability, 3)
+            else:
+                evaluation.setdefault("status", "considered")
         structured_warnings: List[str] = []
         if fallback_geometry or geometry is None:
             stop = float(entry_price - max(atr_val, 1e-6))
@@ -568,6 +613,8 @@ class PlanningScanEngine:
             "remaining_atr": round(geometry.ratr, 4) if geometry and geometry.ratr else None,
             "em_used": em_used_flag,
             "snap_trace": snap_trace_payload,
+            "entry_anchor": selected_tag,
+            "entry_actionability": round(selected_entry.actionability, 3) if selected_entry else None,
             "stop_detail": {
                 "structural": geometry.stop.structural if geometry else stop - last_close,
                 "volatility": geometry.stop.volatility if geometry else 0.0,

@@ -135,6 +135,9 @@ from .plans import (
     compute_entry_candidates,
     build_structured_geometry,
     populate_recent_extrema,
+    EntryContext,
+    EntryAnchor,
+    select_best_entry_plan,
 )
 from .plans.entry import select_structural_entry
 from .levels import inject_style_levels
@@ -5509,16 +5512,20 @@ async def gpt_scan_endpoint(
                 timeframe=context.data_timeframe,
                 as_of=context.as_of,
             )
+            prior_context = context
             context = ScanContext(
-                as_of=context.as_of,
-                label="frozen",
-                is_open=False,
-                simulate_open=context.simulate_open,
-                data_timeframe=context.data_timeframe,
-                market_meta=context.market_meta,
+                as_of=prior_context.as_of,
+                label=prior_context.label if prior_context.is_open else "frozen",
+                is_open=prior_context.is_open,
+                simulate_open=prior_context.simulate_open,
+                data_timeframe=prior_context.data_timeframe,
+                market_meta=prior_context.market_meta,
                 data_meta=dq,
             )
-            banner_override = "Live feed unavailable — using frozen context."
+            if prior_context.is_open:
+                banner_override = "Live feed unavailable — using frozen context (last known good data)."
+            else:
+                banner_override = "Live feed unavailable — using frozen context."
         except HTTPException:
             # Absolute outage: still present leaders list instead of empty
             return _finalize(
@@ -5699,6 +5706,86 @@ async def gpt_scan_endpoint(
     diversified = diversify_ranked(ranked_rollup, limit=rank_limit)
     prep_lookup = {prep.candidate.symbol: prep for prep in preps}
 
+    async def _evaluate_missing_live_inputs(symbols: Sequence[str]) -> Dict[str, List[str]]:
+        results: Dict[str, List[str]] = {}
+        if not symbols:
+            return results
+        semaphore = asyncio.Semaphore(4)
+
+        async def _probe(symbol_token: str) -> None:
+            prep = prep_lookup.get(symbol_token)
+            if not prep:
+                return
+            candidate = prep.candidate
+            entry = candidate.entry
+            stop = candidate.stop
+            targets = candidate.tps or []
+            if entry is None or stop is None or not targets:
+                return
+            direction = "long"
+            try:
+                if targets[0] < entry:
+                    direction = "short"
+            except (TypeError, IndexError):
+                pass
+            side_hint = _infer_contract_side(None, direction)
+            style_token = (request_payload.style or "").strip().lower() or "intraday"
+            plan_anchor = {
+                "underlying_entry": entry,
+                "stop": stop,
+                "targets": targets[:2],
+            }
+            contract_request = ContractsRequest(
+                symbol=symbol_token,
+                side=side_hint,
+                style=style_token,
+                selection_mode="scan_validation",
+                plan_anchor=plan_anchor,
+                bias=direction,
+            )
+            async with semaphore:
+                try:
+                    payload = await gpt_contracts(contract_request, user)
+                except HTTPException:
+                    results[symbol_token] = ["iv", "spread", "oi"]
+                    return
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug(
+                        "live_input_probe_failed",
+                        extra={"symbol": symbol_token, "reason": str(exc)},
+                    )
+                    return
+            contracts = _extract_options_contracts(payload)
+            if not contracts:
+                results[symbol_token] = ["iv", "spread", "oi"]
+                return
+            best = contracts[0]
+            missing: List[str] = []
+            if best.get("iv") is None:
+                missing.append("iv")
+            spread_val = best.get("spread_pct")
+            if spread_val is None:
+                missing.append("spread")
+            if best.get("open_interest") is None:
+                missing.append("oi")
+            if missing:
+                results[symbol_token] = missing
+
+        await asyncio.gather(*(_probe(symbol) for symbol in symbols))
+        return results
+
+    missing_live_inputs: Dict[str, List[str]] = {}
+    if context.is_open and context.label == "live" and diversified:
+        symbols_to_probe = [scored.symbol for scored in diversified[: min(10, len(diversified))]]
+        missing_live_inputs = await _evaluate_missing_live_inputs(symbols_to_probe)
+        if missing_live_inputs:
+            dq.setdefault("notes", [])
+            if isinstance(dq["notes"], list):
+                dq["notes"].append({"live_inputs_missing": dict(missing_live_inputs)})
+            for scored in diversified:
+                if scored.symbol in missing_live_inputs:
+                    scored.score = round(scored.score * 0.85, 6)
+
     ordered_candidates: List[ScanCandidate] = []
     if diversified:
         for scored in diversified:
@@ -5711,6 +5798,16 @@ async def gpt_scan_endpoint(
                     "confidence": float(scored.confidence),
                 }
             )
+            missing_inputs = missing_live_inputs.get(candidate.symbol)
+            if missing_inputs:
+                reasons = list(candidate.reasons or [])
+                missing_label = ", ".join(token.upper() for token in missing_inputs)
+                reasons.append(f"Live inputs missing: {missing_label}")
+                candidate = candidate.model_copy(update={"reasons": reasons})
+                snapshot_payload = dict(candidate.planning_snapshot or {})
+                snapshot_payload["missing_live_inputs"] = missing_inputs
+                snapshot_payload["dq_multiplier_applied"] = 0.85
+                candidate = candidate.model_copy(update={"planning_snapshot": snapshot_payload})
             ordered_candidates.append(candidate)
     else:
         fallback = sorted(
@@ -5744,6 +5841,19 @@ async def gpt_scan_endpoint(
     else:
         page_candidates = []
         next_cursor = None
+
+    if missing_live_inputs:
+        union_labels = sorted({token.upper() for tokens in missing_live_inputs.values() for token in tokens})
+        if union_labels:
+            missing_banner = (
+                f"Live options inputs unavailable ({', '.join(union_labels)}) — applied 0.85 score multiplier "
+                f"to {len(missing_live_inputs)} setup(s)."
+            )
+        else:
+            missing_banner = (
+                f"Live options inputs unavailable — applied 0.85 score multiplier to {len(missing_live_inputs)} setup(s)."
+            )
+        banner = f"{banner} • {missing_banner}" if banner else missing_banner
 
     meta = {
         "style": request_payload.style,
@@ -6289,6 +6399,8 @@ async def _legacy_scan(
                 htf_bias_token = mtf_payload_internal.get("bias")
             else:
                 mtf_payload_internal = None
+            if strategy_profile_internal.mtf_confluence:
+                mtf_notes = _unique_tags(list(mtf_notes) + list(strategy_profile_internal.mtf_confluence))
         else:
             mtf_payload_internal = None
 
@@ -6318,6 +6430,8 @@ async def _legacy_scan(
                 merged_profile["matched_rules"] = matched_rules_payload
             if mtf_payload_internal:
                 merged_profile["mtf"] = mtf_payload_internal
+            if strategy_profile_internal.mtf_confluence:
+                merged_profile["mtf_confluence"] = list(strategy_profile_internal.mtf_confluence)
 
         if mtf_bundle and "mtf" not in merged_profile:
             merged_profile["mtf"] = {
@@ -6325,6 +6439,8 @@ async def _legacy_scan(
                 "agreement": round(mtf_bundle.agreement, 2),
                 "notes": mtf_notes,
             }
+        if mtf_notes:
+            merged_profile["mtf_confluence"] = _unique_tags(list(mtf_notes))
 
         if plan_payload is not None:
             plan_payload["strategy"] = signal.strategy_id
@@ -6934,6 +7050,9 @@ async def _generate_fallback_plan(
             strategy_profile_payload["badges"] = base_badges
         if strategy_profile_internal.mtf:
             strategy_profile_payload["mtf"] = dict(strategy_profile_internal.mtf)
+        if strategy_profile_internal.mtf_confluence:
+            mtf_notes = _unique_tags(list(mtf_notes) + list(strategy_profile_internal.mtf_confluence))
+            strategy_profile_payload["mtf_confluence"] = list(strategy_profile_internal.mtf_confluence)
 
     if mtf_bundle and "mtf" not in strategy_profile_payload:
         strategy_profile_payload["mtf"] = {
@@ -6957,6 +7076,8 @@ async def _generate_fallback_plan(
         mtf_notes = list(mtf_bundle.notes)
     if not htf_bias_token and mtf_bundle:
         htf_bias_token = mtf_bundle.bias_htf
+    if mtf_notes:
+        strategy_profile_payload["mtf_confluence"] = _unique_tags(list(mtf_notes))
 
     if waiting_for_text:
         strategy_profile_payload["waiting_for"] = waiting_for_text
@@ -7011,19 +7132,49 @@ async def _generate_fallback_plan(
             realized_range = float(max(high, low) - min(high, low))
     except Exception:
         realized_range = 0.0
-    geometry = build_plan_geometry(
-        entry=entry_price,
-        side=direction,
+    entry_context = EntryContext(
+        direction=direction,
         style=style_token,
-        strategy=None,
-        atr_tf=atr_value,
-        atr_daily=atr_daily or atr_value,
-        iv_expected_move=iv_move,
-        realized_range=realized_range,
+        last_price=close_price,
+        atr=float(atr_value),
         levels=levels_map,
-        timestamp=plan_ts_utc,
-        em_points=float(expected_move_abs) if isinstance(expected_move_abs, (int, float)) else None,
+        timestamp=plan_ts_utc.to_pydatetime() if isinstance(plan_ts_utc, pd.Timestamp) else plan_ts_utc,
+        mtf_bias=mtf_bundle.bias_htf if mtf_bundle else None,
+        session_phase=(snapshot.get("session") or {}).get("phase"),
+        preferred_entries=[EntryAnchor(entry_seed, "structural")] if entry_seed else None,
     )
+    plan_kwargs = {
+        "side": direction,
+        "style": style_token,
+        "strategy": None,
+        "atr_tf": float(atr_value),
+        "atr_daily": float(atr_daily or atr_value),
+        "iv_expected_move": iv_move,
+        "realized_range": realized_range,
+        "levels": dict(levels_map),
+        "timestamp": plan_ts_utc.to_pydatetime() if isinstance(plan_ts_utc, pd.Timestamp) else plan_ts_utc,
+        "em_points": float(expected_move_abs) if isinstance(expected_move_abs, (int, float)) else None,
+    }
+    geometry, selected_entry_candidate = select_best_entry_plan(entry_context, plan_kwargs, builder=build_plan_geometry)
+    entry_price = geometry.entry
+    if selected_entry_candidate.tag != "reference":
+        geometry.snap_trace.append(
+            f"entry:{close_price:.2f}->{geometry.entry:.2f} via {selected_entry_candidate.tag.upper()}"
+        )
+    plan["entry_anchor"] = selected_entry_candidate.tag
+    plan["entry_actionability"] = round(selected_entry_candidate.actionability, 3)
+    for candidate_meta in entry_candidates:
+        evaluation = candidate_meta.setdefault("evaluation", {})
+        try:
+            level_val = float(candidate_meta.get("level"))
+        except (TypeError, ValueError):
+            evaluation["status"] = "invalid_level"
+            continue
+        if abs(level_val - selected_entry_candidate.entry) < 1e-4:
+            evaluation["selected"] = True
+            evaluation["actionability"] = round(selected_entry_candidate.actionability, 3)
+        else:
+            evaluation.setdefault("status", "considered")
     calibration_enabled = _CALIBRATION_SOURCE is not None
     plan_time_dt = plan_ts_utc.to_pydatetime() if isinstance(plan_ts_utc, pd.Timestamp) else plan_ts_utc
     raw_targets = [float(meta.price) for meta in geometry.targets] or [
