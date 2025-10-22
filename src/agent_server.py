@@ -37,7 +37,12 @@ from urllib.parse import urlencode, quote, urlsplit, urlunsplit, parse_qsl
 from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .config import get_settings
+from .config import (
+    SNAPSHOT_INTERVAL,
+    SNAPSHOT_LOOKBACK,
+    UNIFIED_SNAPSHOT_ENABLED,
+    get_settings,
+)
 from .schemas import (
     ScanRequest,
     ScanPage,
@@ -104,6 +109,7 @@ from .db import (
     store_idea_snapshot as db_store_idea_snapshot,
 )
 from .data_sources import fetch_polygon_ohlcv
+from .core.unified_snapshot import UnifiedSnapshot, get_unified_snapshot
 from .symbol_streamer import SymbolStreamCoordinator, fetch_live_quote
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
@@ -2776,7 +2782,7 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
     return None
 
 
-async def _collect_market_data(
+async def _collect_market_data_legacy(
     tickers: List[str],
     timeframe: str = "5",
     *,
@@ -2843,6 +2849,74 @@ async def _collect_market_data(
         market_data[ticker] = frame
 
     return market_data, source_map
+
+
+def _normalize_snapshot_timeframe(token: str) -> str:
+    raw = (token or "").strip().lower()
+    if raw.endswith("m"):
+        raw = raw[:-1]
+    if raw in {"1", "1m"}:
+        return "1m"
+    if raw in {"5", "5m"}:
+        return "5m"
+    return raw or "1m"
+
+
+async def _collect_market_data(
+    tickers: List[str],
+    timeframe: str = "5",
+    *,
+    as_of: datetime | None = None,
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, str], UnifiedSnapshot | None]:
+    snapshot: UnifiedSnapshot | None = None
+    tf_key = _normalize_snapshot_timeframe(timeframe)
+    use_snapshot = UNIFIED_SNAPSHOT_ENABLED and tf_key in {"1m", "5m"}
+    live_mode = as_of is None
+    if use_snapshot and tickers:
+        try:
+            snapshot = await get_unified_snapshot(
+                tickers,
+                interval=SNAPSHOT_INTERVAL,
+                lookback=SNAPSHOT_LOOKBACK,
+                live=live_mode,
+            )
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("unified_snapshot_failed", extra={"error": str(exc)})
+            snapshot = None
+        else:
+            market_data: Dict[str, pd.DataFrame] = {}
+            source_map: Dict[str, str] = {}
+            missing: List[str] = []
+            for symbol in tickers:
+                snap = snapshot.get_symbol(symbol)
+                if snap is None:
+                    source_map[symbol] = "snapshot_missing"
+                    missing.append(symbol)
+                    continue
+                frame = snap.get_bars(tf_key)
+                if frame is None or frame.empty:
+                    source_map[symbol] = "snapshot_empty"
+                    missing.append(symbol)
+                    continue
+                market_data[symbol] = frame
+                source_map[symbol] = "unified_snapshot"
+            if not missing or len(market_data) >= max(1, len(tickers) // 2):
+                if missing:
+                    legacy_data, legacy_sources = await _collect_market_data_legacy(
+                        missing,
+                        timeframe=timeframe,
+                        as_of=as_of,
+                    )
+                    market_data.update(legacy_data)
+                    source_map.update(legacy_sources)
+                return market_data, source_map, snapshot
+
+    legacy_data, legacy_sources = await _collect_market_data_legacy(
+        tickers,
+        timeframe=timeframe,
+        as_of=as_of,
+    )
+    return legacy_data, legacy_sources, snapshot
 
 
 def _resample_ohlcv(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
@@ -5657,8 +5731,9 @@ async def gpt_scan_endpoint(
 
     data_as_of = None if context.label == "live" and context.is_open else context.as_of
     banner_override: str | None = None
+    snapshot: UnifiedSnapshot | None = None
     try:
-        market_data, data_source_map = await _collect_market_data(
+        market_data, data_source_map, snapshot = await _collect_market_data(
             tickers,
             timeframe=context.data_timeframe,
             as_of=data_as_of,
@@ -5670,7 +5745,7 @@ async def gpt_scan_endpoint(
         dq["mode"] = "degraded"
         dq["error"] = "market_data_unavailable"
         try:
-            market_data, data_source_map = await _collect_market_data(
+            market_data, data_source_map, snapshot = await _collect_market_data(
                 tickers,
                 timeframe=context.data_timeframe,
                 as_of=context.as_of,
@@ -5703,6 +5778,36 @@ async def gpt_scan_endpoint(
 
     dq = dict(dq)
     dq["sources"] = data_source_map
+    if snapshot:
+        dq["snapshot"] = snapshot.summary()
+        indices_ctx = snapshot.indices
+        volatility_ctx = snapshot.volatility
+        snapshot_symbols_meta: Dict[str, Dict[str, float | None]] = {}
+        for sym, snap in snapshot.symbols.items():
+            snapshot_symbols_meta[sym] = {
+                "last_price": snap.last_price,
+                "atr14": snap.atr14,
+                "expected_move": snap.expected_move,
+                "session_high": snap.session_high,
+                "session_low": snap.session_low,
+                "prev_close": snap.prev_close,
+            }
+        market_meta_enriched = dict(context.market_meta)
+        if indices_ctx:
+            market_meta_enriched["indices_context"] = indices_ctx
+        if volatility_ctx:
+            market_meta_enriched["volatility_proxy"] = volatility_ctx
+        if snapshot_symbols_meta:
+            market_meta_enriched["snapshot_symbols"] = snapshot_symbols_meta
+        context = ScanContext(
+            as_of=context.as_of,
+            label=context.label,
+            is_open=context.is_open,
+            simulate_open=context.simulate_open,
+            data_timeframe=context.data_timeframe,
+            market_meta=market_meta_enriched,
+            data_meta=context.data_meta,
+        )
     banner = banner_override or context_banner
 
     index_mode = _get_index_mode()
@@ -6135,7 +6240,7 @@ async def _legacy_scan(
     index_mode = _get_index_mode()
     index_symbols = {symbol for symbol in resolved_tickers if index_mode and index_mode.applies(symbol)}
     index_counters = {"success": 0, "fallback": 0}
-    market_data, data_source_map = await _collect_market_data(
+    market_data, data_source_map, snapshot = await _collect_market_data(
         resolved_tickers,
         timeframe=data_timeframe,
         as_of=None if is_open else as_of_dt,
@@ -6160,6 +6265,26 @@ async def _legacy_scan(
             data_meta.setdefault("mode", "degraded")
             data_meta.setdefault("banners", []).append("Index bars unavailable — translating via ETF proxy.")
     data_meta["sources"] = data_source_map
+    if snapshot:
+        data_meta.setdefault("snapshot", snapshot.summary())
+        if snapshot.indices:
+            market_meta = dict(market_meta)
+            market_meta["indices_context"] = snapshot.indices
+        vol_value = snapshot.volatility.get("value") if snapshot.volatility else None
+        if vol_value is not None:
+            market_meta = dict(market_meta)
+            market_meta.setdefault("volatility_proxy", snapshot.volatility)
+        symbol_meta = {
+            sym: {
+                "last_price": snap.last_price,
+                "atr14": snap.atr14,
+                "expected_move": snap.expected_move,
+            }
+            for sym, snap in snapshot.symbols.items()
+        }
+        if symbol_meta:
+            market_meta = dict(market_meta)
+            market_meta.setdefault("snapshot_symbols", symbol_meta)
     missing_symbols = [
         symbol
         for symbol, src in data_source_map.items()
@@ -7000,7 +7125,7 @@ async def _generate_fallback_plan(
     timeframe_map = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}
     timeframe = timeframe_map.get(style_token, "5")
     try:
-        market_data, data_sources = await _collect_market_data(
+        market_data, data_sources, snapshot = await _collect_market_data(
             [symbol],
             timeframe=timeframe,
             as_of=None if is_open else as_of_dt,
@@ -7008,6 +7133,15 @@ async def _generate_fallback_plan(
     except HTTPException:
         return None
     data_meta["sources"] = data_sources
+    if snapshot:
+        data_meta.setdefault("snapshot", snapshot.summary())
+        if snapshot.indices:
+            market_meta = dict(market_meta)
+            market_meta["indices_context"] = snapshot.indices
+        vol_value = snapshot.volatility.get("value") if snapshot.volatility else None
+        if vol_value is not None:
+            market_meta = dict(market_meta)
+            market_meta.setdefault("volatility_proxy", snapshot.volatility)
     index_mode = _get_index_mode()
     if index_mode and index_mode.applies(symbol):
         frame = market_data.get(symbol)
