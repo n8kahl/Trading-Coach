@@ -79,3 +79,20 @@ def get_settings() -> Settings:
     """
 
     return Settings()
+
+
+UNIFIED_SNAPSHOT_ENABLED: bool = True
+SNAPSHOT_MAX_CONCURRENCY: int = 8
+SNAPSHOT_INTERVAL: str = "1m"
+SNAPSHOT_LOOKBACK: int = 300
+
+STYLE_GATES: dict[str, dict[str, float]] = {
+    "scalp": {"hard_atr_cap": 0.45, "hard_bars_cap": 2, "pref_atr": 0.30, "pref_bars": 1},
+    "intraday": {"hard_atr_cap": 0.70, "hard_bars_cap": 4, "pref_atr": 0.50, "pref_bars": 3},
+    "swing": {"hard_atr_cap": 1.00, "hard_bars_cap": 7, "pref_atr": 0.80, "pref_bars": 5},
+    "leaps": {"hard_atr_cap": 1.40, "hard_bars_cap": 10, "pref_atr": 1.20, "pref_bars": 8},
+}
+
+LENIENT_GATES_DEFAULT: bool = True
+LENIENCY_PENALTY_SCALE: float = 0.25
+VOLATILITY_RELAX_VIX: float = 25.0

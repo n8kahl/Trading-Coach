@@ -1912,6 +1912,22 @@ def _metrics_to_features(metrics: Metrics, style: RankingStyle) -> RankingFeatur
     rr2_norm = min(metrics.rr_t2, 3.5) / 3.5 if metrics.rr_t2 > 0 else 0.0
     rr_multi_norm = min(metrics.rr_multi, 3.0) / 3.0 if metrics.rr_multi > 0 else 0.0
     penalties = metrics.penalties
+
+    def _finite_or_none(value: float | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            value_f = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(value_f) or math.isinf(value_f):
+            return None
+        return value_f
+
+    entry_distance_atr = _finite_or_none(metrics.entry_distance_atr)
+    bars_to_trigger = _finite_or_none(metrics.bars_to_trigger)
+    vol_proxy = _finite_or_none(metrics.vol_proxy)
+
     return RankingFeatures(
         symbol=metrics.symbol.upper(),
         style=style,
@@ -1940,6 +1956,9 @@ def _metrics_to_features(metrics: Metrics, style: RankingStyle) -> RankingFeatur
         pen_spread=_clamp01(penalties.pen_spread),
         pen_chop=_clamp01(penalties.pen_chop),
         pen_cluster=_clamp01(penalties.pen_cluster),
+        entry_distance_atr=entry_distance_atr,
+        bars_to_trigger=bars_to_trigger,
+        vol_proxy=vol_proxy,
     )
 
 
@@ -5942,6 +5961,16 @@ async def gpt_scan_endpoint(
                     "confidence": float(scored.confidence),
                 }
             )
+            current_sources = dict(candidate.source_paths or {})
+            gate_reason = getattr(scored.features, "gate_reject_reason", None)
+            gate_penalty = getattr(scored, "gate_penalty", 0.0)
+            updated_sources = dict(current_sources)
+            if gate_reason:
+                updated_sources["gating"] = f"reject:{gate_reason}"
+            elif gate_penalty and gate_penalty > 0:
+                updated_sources["gating"] = f"lenient:{gate_penalty:.3f}"
+            if updated_sources != current_sources:
+                candidate = candidate.model_copy(update={"source_paths": updated_sources})
             missing_inputs = missing_live_inputs.get(candidate.symbol)
             if missing_inputs:
                 reasons = list(candidate.reasons or [])

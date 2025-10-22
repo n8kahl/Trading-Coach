@@ -55,6 +55,7 @@ class Metrics:
     entry_distance_pct: float
     entry_distance_atr: float
     bars_to_trigger: float
+    vol_proxy: float
 
 
 @dataclass(slots=True)
@@ -129,6 +130,16 @@ def compute_metrics_fast(symbol: str, style: Style, context: MetricsContext) -> 
         avg_range = float("nan")
     bars_to_trigger = _safe_ratio(distance_points, avg_range)
     actionability = _actionability_score(entry_distance_pct, entry_distance_atr, bars_to_trigger)
+    vol_proxy_raw = None
+    if isinstance(context.market_meta, dict):
+        for key in ("vol_proxy", "vix_proxy", "vix", "vix_value"):
+            if key in context.market_meta:
+                vol_proxy_raw = context.market_meta.get(key)
+                break
+    try:
+        vol_proxy = float(vol_proxy_raw) if vol_proxy_raw is not None else 0.0
+    except (TypeError, ValueError):
+        vol_proxy = 0.0
 
     return Metrics(
         symbol=symbol,
@@ -156,6 +167,7 @@ def compute_metrics_fast(symbol: str, style: Style, context: MetricsContext) -> 
         entry_distance_pct=entry_distance_pct if math.isfinite(entry_distance_pct) else float("nan"),
         entry_distance_atr=entry_distance_atr if math.isfinite(entry_distance_atr) else float("nan"),
         bars_to_trigger=bars_to_trigger if math.isfinite(bars_to_trigger) else float("nan"),
+        vol_proxy=vol_proxy,
     )
 
 

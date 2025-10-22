@@ -7,6 +7,9 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Literal, Sequence
 
+from .config import LENIENCY_PENALTY_SCALE, LENIENT_GATES_DEFAULT, STYLE_GATES
+from .core.selection_gates import apply_lenient_gate
+
 Style = Literal["scalp", "intraday", "swing", "leaps"]
 
 logger = logging.getLogger(__name__)
@@ -160,6 +163,11 @@ class Features:
     pen_spread: float
     pen_chop: float
     pen_cluster: float
+    entry_distance_atr: float | None = None
+    bars_to_trigger: float | None = None
+    vol_proxy: float | None = None
+    gate_penalty: float = 0.0
+    gate_reject_reason: str | None = None
 
     def quality(self) -> float:
         baseline = (
@@ -179,6 +187,7 @@ class Scored:
     confidence: float
     sector: str | None
     features: Features
+    gate_penalty: float = 0.0
 
 
 def rank(features: Sequence[Features], style: Style) -> List[Scored]:
@@ -191,20 +200,46 @@ def rank(features: Sequence[Features], style: Style) -> List[Scored]:
     for bundle in features:
         if bundle.quality() < quality_min:
             continue
+        gate_payload = {
+            "entry_distance_atr": bundle.entry_distance_atr,
+            "bars_to_trigger": bundle.bars_to_trigger,
+            "vol_proxy": bundle.vol_proxy,
+        }
+        gating_state = dict(gate_payload)
+        ok, penalty = apply_lenient_gate(
+            gating_state,
+            style,
+            STYLE_GATES,
+            lenient=LENIENT_GATES_DEFAULT,
+            penalty_scale=LENIENCY_PENALTY_SCALE,
+        )
+        if not ok:
+            bundle.gate_penalty = 0.0
+            bundle.gate_reject_reason = gating_state.get("_gate_reject_reason")
+            logger.debug(
+                "rank_gate_reject",
+                extra={
+                    "symbol": bundle.symbol,
+                    "style": style,
+                    "reason": bundle.gate_reject_reason,
+                    "entry_distance_atr": bundle.entry_distance_atr,
+                    "bars_to_trigger": bundle.bars_to_trigger,
+                },
+            )
+            continue
+
+        actionability_component = _clamp(bundle.actionability)
+        penalty_total = penalty
+        if style in {"scalp", "intraday"} and actionability_component < gate_threshold:
+            shortfall = gate_threshold - actionability_component
+            penalty_total += min(LENIENCY_PENALTY_SCALE, shortfall * LENIENCY_PENALTY_SCALE)
+
+        bundle.gate_penalty = penalty_total
+        bundle.gate_reject_reason = None
+
         if style in {"scalp", "intraday"}:
-            if _clamp(bundle.actionability) < gate_threshold:
-                logger.debug(
-                    "rank_actionability_gated",
-                    extra={
-                        "symbol": bundle.symbol,
-                        "style": style,
-                        "actionability": float(_clamp(bundle.actionability)),
-                        "threshold": gate_threshold,
-                    },
-                )
-                continue
             trend_score, rr_score, base_score = _trend_actionability_score(bundle, weights)
-            score = base_score
+            score = max(base_score - penalty_total, 0.0)
             logger.debug(
                 "rank_candidate_score",
                 extra={
@@ -213,11 +248,23 @@ def rank(features: Sequence[Features], style: Style) -> List[Scored]:
                     "score": round(score, 4),
                     "trend_component": round(trend_score, 4),
                     "rr_component": round(rr_score, 4),
-                    "actionability": round(_clamp(bundle.actionability), 4),
+                    "actionability": round(actionability_component, 4),
+                    "gate_penalty": round(penalty_total, 4),
                 },
             )
         else:
-            score = _weighted_score(bundle, weights)
+            base_score = _weighted_score(bundle, weights)
+            score = max(base_score - penalty_total, 0.0)
+            logger.debug(
+                "rank_candidate_score",
+                extra={
+                    "symbol": bundle.symbol,
+                    "style": style,
+                    "score": round(score, 4),
+                    "actionability": round(actionability_component, 4),
+                    "gate_penalty": round(penalty_total, 4),
+                },
+            )
         if score <= 0:
             continue
         scored.append(
@@ -227,6 +274,7 @@ def rank(features: Sequence[Features], style: Style) -> List[Scored]:
                 confidence=_clamp(bundle.confidence),
                 sector=bundle.sector,
                 features=bundle,
+                gate_penalty=bundle.gate_penalty,
             )
         )
 
