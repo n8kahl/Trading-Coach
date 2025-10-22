@@ -64,11 +64,17 @@ async def test_plan_route_open_uses_live(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio()
-async def test_plan_route_emits_stub_when_planner_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_plan_no_coupling_200(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "gpt_market_routing_enabled", True, raising=False)
     friday_close = datetime(2024, 6, 7, 20, 0, 0, tzinfo=timezone.utc)  # Friday 16:00 ET
     route = DataRoute(mode="lkg", as_of=friday_close, planning_context="frozen")
+    monkeypatch.setattr(
+        agent_server,
+        "_SCAN_SYMBOL_REGISTRY",
+        {("anonymous", "session-token", "intraday"): ["AAPL"]},
+        raising=False,
+    )
 
     def fake_pick() -> DataRoute:
         return route
@@ -90,3 +96,5 @@ async def test_plan_route_emits_stub_when_planner_fails(monkeypatch: pytest.Monk
     assert any("fallback" in trace for trace in payload.get("snap_trace", []))
     assert "LKG_PARTIAL" in payload["warnings"]
     assert payload["data_quality"]["snapshot"]["generated_at"] == friday_close.isoformat()
+    assert payload["data_quality"]["snapshot"]["symbol_count"] == 1
+    assert payload["key_levels_used"]

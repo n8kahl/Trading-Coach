@@ -8,22 +8,23 @@ from httpx import ASGITransport, AsyncClient
 import src.agent_server as agent_server
 from src.agent_server import app
 from src.config import get_settings
-from src.lib import data_source as data_source_module
 from src.lib.data_source import DataRoute
-from src.lib.market_clock import most_recent_regular_close
+import src.lib.data_source as data_source_module
 import src.services.scan_fallbacks as scan_fallbacks
 
 
-def _scan_payload() -> dict[str, object]:
-    return {
+def _scan_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
         "universe": ["AAPL", "MSFT"],
         "style": "intraday",
         "limit": 5,
     }
+    payload.update(overrides)
+    return payload
 
 
 @pytest.mark.asyncio()
-async def test_scan_route_closed_uses_lkg(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_scan_tomorrow_sim_open_returns_live(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "gpt_market_routing_enabled", True, raising=False)
     sunday = datetime(2024, 6, 9, 14, 0, 0, tzinfo=timezone.utc)
@@ -35,57 +36,36 @@ async def test_scan_route_closed_uses_lkg(monkeypatch: pytest.MonkeyPatch) -> No
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/gpt/scan", json=_scan_payload())
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["planning_context"] == "frozen"
-    snapshot = payload["meta"]["snapshot"]
-    assert snapshot["generated_at"] == most_recent_regular_close(sunday).isoformat()
-    assert snapshot["symbol_count"] == 2
-    dq = payload["data_quality"]
-    assert dq["snapshot"]["generated_at"] == snapshot["generated_at"]
-    assert dq["expected_move"] is not None
-    assert dq["remaining_atr"] is not None
-
-
-@pytest.mark.asyncio()
-async def test_scan_route_open_uses_live(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = get_settings()
-    monkeypatch.setattr(settings, "gpt_market_routing_enabled", True, raising=False)
-    tuesday = datetime(2024, 6, 11, 14, 15, 0, tzinfo=timezone.utc)
-
-    def fake_pick() -> DataRoute:
-        return data_source_module.pick_data_source(now=tuesday)
-
-    monkeypatch.setattr(agent_server, "pick_data_source", fake_pick)
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/gpt/scan", json=_scan_payload())
+        response = await client.post(
+            "/gpt/scan",
+            json=_scan_payload(simulate_open=True),
+        )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["planning_context"] == "live"
-    assert payload["data_quality"]["snapshot"]["generated_at"] == tuesday.isoformat()
-    assert payload["warnings"] == []
+    assert len(payload["candidates"]) > 0
+    assert payload["data_quality"]["expected_move"] == pytest.approx(1.5)
 
 
 @pytest.mark.asyncio()
-async def test_scan_route_emits_stub_when_series_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_scan_closed_hours_non_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "gpt_market_routing_enabled", True, raising=False)
-    friday_close = datetime(2024, 6, 7, 20, 0, 0, tzinfo=timezone.utc)
-    route = DataRoute(mode="lkg", as_of=friday_close, planning_context="frozen")
+    saturday = datetime(2024, 6, 8, 16, 0, 0, tzinfo=timezone.utc)
 
     def fake_pick() -> DataRoute:
-        return route
+        return data_source_module.pick_data_source(now=saturday)
 
-    async def boom(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("series unavailable")
+    async def empty_run_scan(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "candidates": [],
+            "meta": {},
+            "data_quality": {},
+        }
 
     monkeypatch.setattr(agent_server, "pick_data_source", fake_pick)
-    monkeypatch.setattr(scan_fallbacks, "fetch_series", boom)
+    monkeypatch.setattr(scan_fallbacks, "run_scan", empty_run_scan)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -94,7 +74,40 @@ async def test_scan_route_emits_stub_when_series_missing(monkeypatch: pytest.Mon
     assert response.status_code == 200
     payload = response.json()
     assert payload["planning_context"] == "frozen"
+    assert len(payload["candidates"]) == 2
+    assert payload["warnings"].count("PLACEHOLDER") == 1
+    candidate = payload["candidates"][0]
+    assert candidate["score"] == pytest.approx(0.1)
+    assert candidate["snap_trace"] == ["fallback: placeholder"]
+    assert candidate["actionable_soon"] is False
+
+
+@pytest.mark.asyncio()
+async def test_banner_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "gpt_market_routing_enabled", True, raising=False)
+    friday = datetime(2024, 6, 7, 20, 0, 0, tzinfo=timezone.utc)
+
+    def fake_pick() -> DataRoute:
+        return data_source_module.pick_data_source(now=friday)
+
+    async def banner_scan(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "banner": "MARKET_HOLIDAY",
+            "candidates": [],
+            "meta": {},
+            "data_quality": {},
+        }
+
+    monkeypatch.setattr(agent_server, "pick_data_source", fake_pick)
+    monkeypatch.setattr(scan_fallbacks, "run_scan", banner_scan)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/gpt/scan", json=_scan_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["banner"] == "MARKET_HOLIDAY"
     assert payload["candidates"] == []
-    assert "fallback" in payload.get("snap_trace", [])[0]
-    assert "LKG_PARTIAL" in payload["warnings"]
-    assert payload["data_quality"]["series_present"] is False
+    assert "PLACEHOLDER" not in payload.get("warnings", [])

@@ -8,6 +8,61 @@ from ..providers.series import SeriesBundle, fetch_series
 from ..providers.scanner import scan as run_scan
 
 
+def build_placeholder_candidates(
+    universe: Sequence[str],
+    geometry: GeometryBundle | None,
+) -> list[dict[str, Any]]:
+    symbols = [symbol for symbol in universe if symbol] or ["ADHOC"]
+    expected_move = getattr(geometry, "expected_move", None) if geometry else None
+    remaining_atr = getattr(geometry, "remaining_atr", None) if geometry else None
+    em_used = getattr(geometry, "em_used", None) if geometry else None
+    key_levels = getattr(geometry, "key_levels", None)
+    if not isinstance(key_levels, dict):
+        key_levels = {"session": [], "structural": []}
+
+    placeholders: list[dict[str, Any]] = []
+    for index, symbol in enumerate(symbols, start=1):
+        placeholders.append(
+            {
+                "symbol": symbol,
+                "rank": index,
+                "score": 0.1,
+                "reasons": ["placeholder"],
+                "plan_id": f"{symbol}-PLACEHOLDER",
+                "entry_candidates": [],
+                "snap_trace": ["fallback: placeholder"],
+                "confluence": [],
+                "accuracy_levels": [],
+                "actionable_soon": False,
+                "expected_move": expected_move,
+                "remaining_atr": remaining_atr,
+                "em_used": em_used,
+                "key_levels_used": key_levels,
+                "source_paths": {},
+            }
+        )
+    return placeholders
+
+
+def _ensure_candidates_present(
+    page: dict[str, Any],
+    universe: Sequence[str],
+    geometry: GeometryBundle | None,
+) -> dict[str, Any]:
+    if page.get("banner"):
+        return page
+    candidates = page.get("candidates") or []
+    if candidates:
+        return page
+    placeholders = build_placeholder_candidates(universe, geometry)
+    page["candidates"] = placeholders
+    page["count_candidates"] = len(placeholders)
+    warnings = page.setdefault("warnings", [])
+    if "PLACEHOLDER" not in warnings:
+        warnings.append("PLACEHOLDER")
+    return page
+
+
 def ensure_scan_schema(
     page: dict[str, Any],
     *,
@@ -64,6 +119,7 @@ async def _attempt_scan(
         route=attempt_route,
     )
     page = ensure_scan_schema(page, route=attempt_route, symbols=universe, geometry=geometry)
+    page = _ensure_candidates_present(page, universe, geometry)
     return page, series, geometry
 
 
@@ -84,6 +140,7 @@ async def compute_scan_with_fallback(
         try:
             page, _, _ = await _attempt_scan(universe, style=style, limit=limit, route=route, mode_override="lkg")
             page.setdefault("warnings", []).append("LIVE_FALLBACK_TO_LKG")
+            page = _ensure_candidates_present(page, universe, None)
             return page
         except Exception:
             pass
@@ -99,9 +156,7 @@ async def compute_scan_with_fallback(
             "snapshot": snapshot,
             "universe": {"name": "adhoc", "source": "planner", "count": len(universe)},
         },
-        "candidates": [],
         "phase": "scan",
-        "count_candidates": 0,
         "next_cursor": None,
         "snap_trace": ["fallback: scan_stub"],
         "warnings": [
@@ -116,4 +171,5 @@ async def compute_scan_with_fallback(
             "snapshot": snapshot,
         },
     }
+    stub = _ensure_candidates_present(stub, universe, None)
     return stub

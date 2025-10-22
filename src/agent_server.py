@@ -111,6 +111,7 @@ from .db import (
 from .data_sources import fetch_polygon_ohlcv
 from .core.unified_snapshot import UnifiedSnapshot, get_unified_snapshot
 from .lib.data_source import DataRoute, pick_data_source
+from .lib.market_clock import apply_simulate_open
 from .symbol_streamer import SymbolStreamCoordinator, fetch_live_quote
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
@@ -155,7 +156,7 @@ from .features.mtf import compute_mtf_bundle, MTFBundle
 from .features.htf_levels import compute_htf_levels, HTFLevels
 from .strategy.engine import infer_strategy, mtf_amplifier
 from .services.fallbacks import compute_plan_with_fallback
-from .services.scan_fallbacks import compute_scan_with_fallback
+from .services.scan_fallbacks import build_placeholder_candidates, compute_scan_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -5546,10 +5547,9 @@ async def gpt_scan_endpoint(
     settings = get_settings()
     use_market_routing = bool(getattr(settings, "gpt_market_routing_enabled", True))
     if use_market_routing and not planning_mode:
+        route = pick_data_source()
         if simulate_open:
-            route = DataRoute(mode="live", as_of=datetime.now(timezone.utc), planning_context="live")
-        else:
-            route = pick_data_source()
+            route = apply_simulate_open(route, now=datetime.now(timezone.utc))
         if isinstance(request_payload.universe, list):
             universe_symbols = [
                 symbol.strip().upper()
@@ -5586,7 +5586,6 @@ async def gpt_scan_endpoint(
                         "count": len(universe_symbols),
                     },
                 },
-                "candidates": [],
                 "data_quality": {
                     "planning_mode": route.planning_context == "frozen",
                     "series_present": False,
@@ -5596,12 +5595,16 @@ async def gpt_scan_endpoint(
                     "snapshot": snapshot,
                 },
                 "phase": "scan",
-                "count_candidates": 0,
                 "next_cursor": None,
                 "warnings": [
                     "LKG_PARTIAL" if route.planning_context == "frozen" else "LIVE_PARTIAL"
                 ],
             }
+            placeholders = build_placeholder_candidates(universe_symbols, None)
+            page_payload["candidates"] = placeholders
+            page_payload["count_candidates"] = len(placeholders)
+            if "PLACEHOLDER" not in page_payload["warnings"]:
+                page_payload["warnings"].append("PLACEHOLDER")
         response.headers["X-No-Fabrication"] = "1"
         return ScanPage.model_validate(page_payload)
     allow_fallback_trades = False
@@ -8800,10 +8803,9 @@ async def gpt_plan(
     )
     use_market_routing = bool(getattr(settings, "gpt_market_routing_enabled", True))
     if use_market_routing:
+        route = pick_data_source()
         if simulate_open:
-            route = DataRoute(mode="live", as_of=datetime.now(timezone.utc), planning_context="live")
-        else:
-            route = pick_data_source()
+            route = apply_simulate_open(route, now=datetime.now(timezone.utc))
         try:
             plan_payload = await compute_plan_with_fallback(symbol, route)
         except Exception:  # pragma: no cover - defensive

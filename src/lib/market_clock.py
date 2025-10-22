@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal
 import zoneinfo
 
 NY = zoneinfo.ZoneInfo("America/New_York")
 MarketState = Literal["open", "closed"]
+
+if TYPE_CHECKING:  # pragma: no cover - import guard for typing only
+    from .data_source import DataRoute
 
 
 def _ensure_aware(dt: datetime) -> datetime:
@@ -49,3 +52,11 @@ def most_recent_regular_close(
     if fallback > reference:
         fallback -= timedelta(days=1)
     return fallback
+
+
+def apply_simulate_open(route: "DataRoute", *, now: datetime | None = None) -> "DataRoute":
+    """Force a DataRoute into live mode for simulate_open requests."""
+    from .data_source import DataRoute as _DataRoute
+
+    as_of = _ensure_aware(now or datetime.now(timezone.utc))
+    return _DataRoute(mode="live", as_of=as_of, planning_context="live")
