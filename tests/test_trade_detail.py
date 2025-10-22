@@ -25,6 +25,9 @@ async def _run_fallback_plan(
     options_payload: dict | None = None,
     user_id: str = "fallback-tester",
     ema_bias: str | None = None,
+    min_actionability: float | None = None,
+    must_be_actionable: bool = False,
+    plan_request: agent_server.PlanRequest | None = None,
 ):
     async def fake_scan(universe, request, user):  # noqa: ARG001
         return []
@@ -166,7 +169,20 @@ async def _run_fallback_plan(
     request = Request(scope)
     user = agent_server.AuthedUser(user_id=user_id)
 
-    return await agent_server._generate_fallback_plan(symbol, "intraday", request, user)
+    plan_request = plan_request or agent_server.PlanRequest(
+        symbol=symbol,
+        style="intraday",
+        min_actionability=min_actionability,
+        must_be_actionable=must_be_actionable,
+    )
+
+    return await agent_server._generate_fallback_plan(
+        symbol,
+        "intraday",
+        request,
+        user,
+        plan_request=plan_request,
+    )
 
 
 @pytest.mark.asyncio

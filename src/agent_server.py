@@ -18,7 +18,7 @@ import time
 import uuid
 import re
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Set, Tuple, cast
@@ -137,7 +137,9 @@ from .plans import (
     populate_recent_extrema,
     EntryContext,
     EntryAnchor,
+    EntryCandidate,
     select_best_entry_plan,
+    is_actionable_soon,
 )
 from .plans.entry import select_structural_entry
 from .levels import inject_style_levels
@@ -147,6 +149,110 @@ from .features.htf_levels import compute_htf_levels, HTFLevels
 from .strategy.engine import infer_strategy, mtf_amplifier
 
 logger = logging.getLogger(__name__)
+
+
+def _infer_tick_size(price: float) -> float:
+    if price >= 500:
+        return 0.1
+    if price >= 200:
+        return 0.05
+    if price >= 50:
+        return 0.02
+    if price >= 10:
+        return 0.01
+    if price >= 1:
+        return 0.005
+    return 0.001
+
+
+def _is_behind_tape(candidate: EntryCandidate, last_price: float, direction: str) -> bool:
+    try:
+        level = float(candidate.entry)
+        last = float(last_price)
+    except (TypeError, ValueError):
+        return False
+    direction = (direction or "").lower()
+    if direction == "long":
+        return last > level + 1e-6
+    if direction == "short":
+        return last < level - 1e-6
+    return False
+
+
+def _nearest_retest_or_reclaim(levels: Mapping[str, float], last_price: float, direction: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(last_price, (int, float)) or not math.isfinite(last_price):
+        return None
+    last = float(last_price)
+    direction = (direction or "").lower()
+    priority_order: Tuple[Tuple[str, str, str], ...] = (
+        ("ORL", "opening_range_low", "session"),
+        ("ORH", "opening_range_high", "session"),
+        ("VWAP", "vwap", "intra"),
+        ("VAH", "vah", "profile"),
+        ("VAL", "val", "profile"),
+        ("POC", "poc", "profile"),
+        ("SESSION_LOW", "session_low", "session"),
+        ("SESSION_HIGH", "session_high", "session"),
+        ("PREV_LOW", "prev_low", "previous"),
+        ("PREV_HIGH", "prev_high", "previous"),
+        ("SWING_LOW", "swing_low", "swing"),
+        ("SWING_HIGH", "swing_high", "swing"),
+    )
+    best: Optional[Dict[str, Any]] = None
+    for order, (label, key, kind) in enumerate(priority_order):
+        raw_value = levels.get(key)
+        if raw_value is None:
+            raw_value = levels.get(key.upper())
+        if raw_value is None:
+            continue
+        try:
+            price = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(price):
+            continue
+        if direction == "long":
+            if price >= last:
+                continue
+            distance = last - price
+        elif direction == "short":
+            if price <= last:
+                continue
+            distance = price - last
+        else:
+            continue
+        if distance <= 0:
+            continue
+        candidate = {
+            "label": label.upper(),
+            "level": round(price, 2),
+            "kind": kind,
+            "distance": distance,
+            "order": order,
+        }
+        if best is None:
+            best = candidate
+            continue
+        if candidate["order"] < best["order"]:
+            best = candidate
+            continue
+        if candidate["order"] == best["order"] and distance < best["distance"] - 1e-6:
+            best = candidate
+    if best is None:
+        return None
+    return {k: best[k] for k in ("label", "level", "kind")}
+
+
+def _format_waiting_for(label: str, level: float, direction: str) -> str:
+    label_token = (label or "level").upper()
+    try:
+        price_text = f"{float(level):.2f}"
+    except (TypeError, ValueError):
+        price_text = str(level)
+    direction = (direction or "").lower()
+    if direction == "short":
+        return f"Retest and reject {label_token} @ {price_text} on 1m close + confirming volume"
+    return f"Reclaim {label_token} @ {price_text} on 1m close + confirming volume"
 
 ALLOWED_CHART_KEYS = {
     "symbol",
@@ -242,6 +348,42 @@ def _hydrate_secondary_fields(payload: "PlanResponse") -> "PlanResponse":
         candidate = _first_non_empty("runner_policy") or _first_non_empty("runner")
         if candidate not in (None, {}, []):
             payload.runner_policy = candidate
+
+    if payload.entry_anchor is None:
+        candidate = _first_non_empty("entry_anchor")
+        if candidate is not None:
+            payload.entry_anchor = candidate
+
+    if payload.entry_actionability is None:
+        candidate = _first_non_empty("entry_actionability")
+        if candidate is not None:
+            try:
+                payload.entry_actionability = float(candidate)
+            except (TypeError, ValueError):
+                payload.entry_actionability = candidate
+
+    if payload.waiting_for is None:
+        candidate = _first_non_empty("waiting_for")
+        if candidate:
+            payload.waiting_for = candidate
+
+    if payload.actionable_now is None:
+        candidate = _first_non_empty("actionable_now")
+        if candidate is not None:
+            payload.actionable_now = bool(candidate)
+
+    if payload.actionable_soon is None:
+        candidate = _first_non_empty("actionable_soon")
+        if candidate is not None:
+            payload.actionable_soon = bool(candidate)
+
+    if payload.actionability_gate is None:
+        candidate = _first_non_empty("actionability_gate")
+        if candidate is not None:
+            try:
+                payload.actionability_gate = float(candidate)
+            except (TypeError, ValueError):
+                payload.actionability_gate = None
 
     if not payload.snap_trace:
         candidate = _first_non_empty("snap_trace")
@@ -1024,8 +1166,9 @@ async def _build_scan_stub_candidate(
         entry_distance_atr_val = _safe_number(metrics.entry_distance_atr)
         bars_to_trigger_val = _safe_number(metrics.bars_to_trigger)
         actionability_score = _clamp01(metrics.actionability)
+        gate_threshold = ACTIONABILITY_GATE.get(style_token, ACTIONABILITY_GATE["intraday"])
         should_gate = (
-            actionability_score < ACTIONABILITY_GATE
+            actionability_score < gate_threshold
             and (
                 (entry_distance_pct_val is not None and entry_distance_pct_val > 2.0)
                 or (entry_distance_atr_val is not None and entry_distance_atr_val > 1.2)
@@ -1473,6 +1616,8 @@ class PlanRequest(BaseModel):
     style: str | None = None
     plan_id: str | None = None
     simulate_open: bool = False
+    min_actionability: float | None = Field(default=None, ge=0.0, le=1.0)
+    must_be_actionable: bool = False
 
 
 class RejectedContract(BaseModel):
@@ -1495,6 +1640,12 @@ class PlanResponse(BaseModel):
     style: str | None = None
     bias: str | None = None
     setup: str | None = None
+    entry_anchor: str | None = None
+    entry_actionability: float | None = None
+    actionable_now: bool | None = None
+    actionable_soon: bool | None = None
+    waiting_for: str | None = None
+    actionability_gate: float | None = None
     entry: float | None = None
     stop: float | None = None
     targets: List[float] | None = None
@@ -6789,6 +6940,7 @@ async def _generate_fallback_plan(
     user: AuthedUser,
     *,
     simulate_open: bool = False,
+    plan_request: "PlanRequest" | None = None,
 ) -> PlanResponse | None:
     start_time = time.perf_counter()
     settings = get_settings()
@@ -6841,6 +6993,23 @@ async def _generate_fallback_plan(
                 data_sources[symbol] = synthetic.attrs.get("source", "proxy_gamma")
                 data_meta.setdefault("mode", "degraded")
                 data_meta.setdefault("banners", []).append("Index bars unavailable — translating via ETF proxy.")
+    request_payload_local: PlanRequest = (
+        plan_request
+        if plan_request is not None
+        else PlanRequest(symbol=symbol, style=style_token)
+    )
+    base_actionability_gate = ACTIONABILITY_GATE.get(style_token, ACTIONABILITY_GATE["intraday"])
+    min_actionability_override: float | None = None
+    if isinstance(request_payload_local.min_actionability, (int, float)):
+        try:
+            min_actionability_override = float(request_payload_local.min_actionability)
+        except (TypeError, ValueError):
+            min_actionability_override = None
+    actionability_gate = base_actionability_gate
+    if min_actionability_override is not None:
+        actionability_gate = max(0.0, min(1.0, min_actionability_override))
+    must_be_actionable = bool(getattr(request_payload_local, "must_be_actionable", False))
+
     frame = market_data.get(symbol)
     if frame is None or frame.empty:
         return None
@@ -7134,6 +7303,7 @@ async def _generate_fallback_plan(
             realized_range = float(max(high, low) - min(high, low))
     except Exception:
         realized_range = 0.0
+    tick_size = _infer_tick_size(close_price)
     entry_context = EntryContext(
         direction=direction,
         style=style_token,
@@ -7144,6 +7314,7 @@ async def _generate_fallback_plan(
         mtf_bias=mtf_bundle.bias_htf if mtf_bundle else None,
         session_phase=(snapshot.get("session") or {}).get("phase"),
         preferred_entries=[EntryAnchor(entry_seed, "structural")] if entry_seed else None,
+        tick=tick_size,
     )
     plan_kwargs = {
         "side": direction,
@@ -7157,14 +7328,123 @@ async def _generate_fallback_plan(
         "timestamp": plan_ts_utc.to_pydatetime() if isinstance(plan_ts_utc, pd.Timestamp) else plan_ts_utc,
         "em_points": float(expected_move_abs) if isinstance(expected_move_abs, (int, float)) else None,
     }
-    geometry, selected_entry_candidate = select_best_entry_plan(entry_context, plan_kwargs, builder=build_plan_geometry)
+    plan_actionable_now = False
+    plan_actionable_soon = False
+    entry_waiting_for: Optional[str] = None
+    selection_gate = actionability_gate if (must_be_actionable or min_actionability_override is not None) else None
+    geometry, selected_entry_candidate = select_best_entry_plan(
+        entry_context,
+        plan_kwargs,
+        builder=build_plan_geometry,
+        min_actionability=selection_gate,
+    )
     entry_price = geometry.entry
+    if _is_behind_tape(selected_entry_candidate, close_price, direction):
+        alt_anchor = _nearest_retest_or_reclaim(levels_map, close_price, direction)
+        if alt_anchor:
+            alt_entry_level = float(alt_anchor.get("level"))
+            alt_kwargs = dict(plan_kwargs)
+            alt_kwargs["entry"] = alt_entry_level
+            try:
+                geometry = build_plan_geometry(**alt_kwargs)
+                entry_price = geometry.entry
+                boosted_actionability = max(0.9, selected_entry_candidate.actionability)
+                selected_entry_candidate = EntryCandidate(
+                    entry=round(entry_price, 4),
+                    stop=round(geometry.stop.price, 4),
+                    tag=str(alt_anchor.get("label", "reclaim")).lower(),
+                    actionability=boosted_actionability,
+                    actionable_soon=False,
+                    entry_distance_pct=0.0,
+                    entry_distance_atr=0.0,
+                    bars_to_trigger=0,
+                )
+                entry_waiting_for = _format_waiting_for(str(alt_anchor.get("label", "level")), entry_price, direction)
+                injected_label = str(alt_anchor.get("label", "RETEST")).upper()
+                already_present = False
+                for candidate in entry_candidates:
+                    if not isinstance(candidate, Mapping):
+                        continue
+                    level_candidate = candidate.get("level")
+                    try:
+                        level_float = float(level_candidate)
+                    except (TypeError, ValueError):
+                        continue
+                    if abs(level_float - entry_price) < 1e-4:
+                        already_present = True
+                        break
+                if not already_present:
+                    entry_candidates.insert(
+                        0,
+                        {
+                            "level": round(entry_price, 2),
+                            "label": injected_label,
+                            "type": injected_label,
+                            "bars_to_trigger": None,
+                            "entry_distance_pct": None,
+                            "entry_distance_atr": None,
+                            "actionable_soon": None,
+                            "score": round(boosted_actionability, 4),
+                            "structure_quality": None,
+                            "evaluation": {"actionability": round(boosted_actionability, 4)},
+                        },
+                    )
+            except ValueError:
+                entry_waiting_for = _format_waiting_for(
+                    selected_entry_candidate.tag, selected_entry_candidate.entry, direction
+                )
+        else:
+            entry_waiting_for = _format_waiting_for(
+                selected_entry_candidate.tag, selected_entry_candidate.entry, direction
+            )
+
+    entry_price = geometry.entry
+    atr_for_distance = float(atr_value) if isinstance(atr_value, (int, float)) and atr_value and atr_value > 0 else tick_size
+    if atr_for_distance <= 0:
+        atr_for_distance = tick_size or 0.01
+    distance_pct_raw = abs(entry_price - close_price) / close_price if close_price else float("inf")
+    distance_atr_raw = abs(entry_price - close_price) / atr_for_distance if atr_for_distance else float("inf")
+    if math.isfinite(distance_pct_raw):
+        distance_pct_val = round(distance_pct_raw, 4)
+    else:
+        distance_pct_val = None
+    if math.isfinite(distance_atr_raw):
+        distance_atr_val = round(distance_atr_raw, 3)
+        bars_to_trigger = max(int(round(distance_atr_raw * 2.0)), 0)
+    else:
+        distance_atr_val = None
+        bars_to_trigger = 99
+    actionable_soon_flag = is_actionable_soon(entry_price, close_price, atr_value, tick_size, style_token)
+    actionable_now_flag = actionable_soon_flag and math.isfinite(distance_atr_raw) and distance_atr_raw <= 0.5 and bars_to_trigger <= 1
+    selected_entry_candidate = replace(
+        selected_entry_candidate,
+        entry=round(entry_price, 4),
+        stop=round(geometry.stop.price, 4),
+        entry_distance_pct=distance_pct_raw if distance_pct_raw is not None else float("inf"),
+        entry_distance_atr=distance_atr_raw if distance_atr_raw is not None else float("inf"),
+        bars_to_trigger=bars_to_trigger,
+        actionable_soon=actionable_soon_flag,
+    )
     if selected_entry_candidate.tag != "reference":
         geometry.snap_trace.append(
             f"entry:{close_price:.2f}->{geometry.entry:.2f} via {selected_entry_candidate.tag.upper()}"
         )
-    distance_to_price = abs(entry_price - close_price) / close_price if close_price else 0.0
-    if distance_to_price > distance_limit:
+    candidate_actionability = float(selected_entry_candidate.actionability or 0.0)
+    plan_actionable_now = actionable_now_flag
+    plan_actionable_soon = actionable_soon_flag
+    force_wait_plan = False
+    if must_be_actionable and candidate_actionability < actionability_gate:
+        force_wait_plan = True
+        plan_actionable_now = False
+        plan_actionable_soon = False
+        if entry_waiting_for is None:
+            entry_waiting_for = _format_waiting_for(selected_entry_candidate.tag, entry_price, direction)
+    if not actionable_now_flag and entry_waiting_for is None and actionable_soon_flag:
+        entry_waiting_for = _format_waiting_for(selected_entry_candidate.tag, entry_price, direction)
+    if not actionable_soon_flag and entry_waiting_for is None:
+        entry_waiting_for = _format_waiting_for(selected_entry_candidate.tag, entry_price, direction)
+    distance_to_price = distance_pct_raw if math.isfinite(distance_pct_raw) else float("inf")
+    if plan_actionable_soon and distance_to_price > distance_limit:
         logger.warning(
             "Fallback entry for %s exceeds actionable threshold (distance=%.4f limit=%.4f)",
             symbol,
@@ -7174,6 +7454,18 @@ async def _generate_fallback_plan(
         return None
     plan["entry_anchor"] = selected_entry_candidate.tag
     plan["entry_actionability"] = round(selected_entry_candidate.actionability, 3)
+    plan_meta_block = plan.setdefault("meta", {})
+    if isinstance(plan_meta_block, dict):
+        plan_meta_block["actionable_now"] = plan_actionable_now
+        plan_meta_block["actionable_soon"] = plan_actionable_soon
+        plan_meta_block["actionability_gate"] = actionability_gate
+        if entry_waiting_for:
+            plan_meta_block.setdefault("waiting_for", entry_waiting_for)
+    if entry_waiting_for:
+        plan["waiting_for"] = entry_waiting_for
+    else:
+        plan.pop("waiting_for", None)
+    wait_plan = (not plan_actionable_soon) or force_wait_plan
     for candidate_meta in entry_candidates:
         evaluation = candidate_meta.setdefault("evaluation", {})
         try:
@@ -7184,6 +7476,14 @@ async def _generate_fallback_plan(
         if abs(level_val - selected_entry_candidate.entry) < 1e-4:
             evaluation["selected"] = True
             evaluation["actionability"] = round(selected_entry_candidate.actionability, 3)
+            if distance_pct_val is not None:
+                evaluation["distance_pct"] = distance_pct_val
+            if distance_atr_val is not None:
+                evaluation["distance_atr"] = distance_atr_val
+            candidate_meta["bars_to_trigger"] = bars_to_trigger
+            candidate_meta["entry_distance_pct"] = distance_pct_val
+            candidate_meta["entry_distance_atr"] = distance_atr_val
+            candidate_meta["actionable_soon"] = actionable_soon_flag
         else:
             evaluation.setdefault("status", "considered")
     calibration_enabled = _CALIBRATION_SOURCE is not None
@@ -7261,6 +7561,8 @@ async def _generate_fallback_plan(
     rr_to_t1 = _risk_reward(entry_price, stop, targets[0], direction)
     if rr_to_t1 is not None:
         rr_to_t1 = float(rr_to_t1)
+    if wait_plan:
+        rr_to_t1 = None
 
     tp_reasons = _nativeify(_ensure_tp_reasons(structured_tp_reasons_raw, len(targets)))
     for idx, meta in enumerate(geometry.targets, start=1):
@@ -7421,6 +7723,8 @@ async def _generate_fallback_plan(
         expected_move=expected_move_abs,
         runner=runner,
     )
+    if wait_plan:
+        risk_block = None
     execution_rules = _build_execution_rules(
         entry=entry_price,
         stop=stop,
@@ -7430,6 +7734,9 @@ async def _generate_fallback_plan(
         key_levels_used=key_levels_used,
         runner=runner,
     )
+    if entry_waiting_for and isinstance(execution_rules, dict):
+        execution_rules = dict(execution_rules)
+        execution_rules["trigger"] = entry_waiting_for
     plan_id = f"{symbol.upper()}-{plan_ts_utc.strftime('%Y%m%dT%H%M%S')}-{style_token}-auto"
     view_token = _view_for_style(style_token)
     range_token = _range_for_style(style_token)
@@ -7648,6 +7955,8 @@ async def _generate_fallback_plan(
 
     entry_candidates_payload = _nativeify([dict(candidate) for candidate in entry_candidates]) if entry_candidates else []
     plan_block = dict(plan)
+    target_meta_output = target_meta if not wait_plan else []
+
     plan_block.update(
         {
             "plan_id": plan_id,
@@ -7658,7 +7967,7 @@ async def _generate_fallback_plan(
             "entry": entry_price,
             "stop": stop,
             "targets": targets,
-            "target_meta": target_meta,
+            "target_meta": target_meta_output,
             "runner": runner,
             "runner_policy": runner,
             "confidence": confidence,
@@ -7676,8 +7985,43 @@ async def _generate_fallback_plan(
             "key_levels_used": key_levels_used,
             "tp_reasons": tp_reasons,
             "entry_candidates": entry_candidates_payload,
+            "actionability_gate": actionability_gate,
+            "actionable_now": plan_actionable_now,
+            "actionable_soon": plan_actionable_soon,
         }
     )
+    plan_block["entry_anchor"] = plan.get("entry_anchor")
+    plan_block["entry_actionability"] = plan.get("entry_actionability")
+    if entry_waiting_for:
+        plan_block["waiting_for"] = entry_waiting_for
+    meta_block = plan_block.setdefault("meta", {}) if isinstance(plan_block.get("meta"), dict) else dict(plan_block.get("meta") or {})
+    meta_block["actionable_now"] = plan_actionable_now
+    meta_block["actionable_soon"] = plan_actionable_soon
+    meta_block["actionability_gate"] = actionability_gate
+    if plan_block.get("entry_anchor"):
+        meta_block.setdefault("entry_anchor", plan_block.get("entry_anchor"))
+    if plan_block.get("entry_actionability") is not None:
+        meta_block.setdefault("entry_actionability", plan_block.get("entry_actionability"))
+    if entry_waiting_for:
+        meta_block.setdefault("waiting_for", entry_waiting_for)
+    plan_block["meta"] = meta_block
+    if wait_plan:
+        plan_block["plan_state"] = "WAIT"
+        plan_block["entry"] = None
+        plan_block["stop"] = None
+        plan_block["targets"] = []
+        plan_block["target_meta"] = []
+    if entry_waiting_for:
+        existing_wait = strategy_profile_payload.get("waiting_for") if isinstance(strategy_profile_payload, Mapping) else None
+        if isinstance(strategy_profile_payload, Mapping):
+            strategy_profile_payload = dict(strategy_profile_payload)
+        else:
+            strategy_profile_payload = {}
+        if existing_wait and existing_wait != entry_waiting_for:
+            combined_wait = f"{existing_wait}; {entry_waiting_for}"
+            strategy_profile_payload["waiting_for"] = combined_wait
+        else:
+            strategy_profile_payload["waiting_for"] = entry_waiting_for
     plan_block["strategy_profile"] = strategy_profile_payload
     if structured_geometry.warnings:
         current_warnings = list(plan_block.get("warnings") or [])
@@ -7788,6 +8132,12 @@ async def _generate_fallback_plan(
     target_profile_dict["expected_move"] = round(expected_move_abs, 4) if expected_move_abs else None
     target_profile_dict["em_used"] = bool(em_cap_used)
     target_profile_dict["runner_fraction"] = runner.get("fraction")
+    target_profile_dict["entry_anchor"] = plan_block.get("entry_anchor")
+    target_profile_dict["entry_actionability"] = plan_block.get("entry_actionability")
+    target_profile_dict["actionable_now"] = plan_actionable_now
+    target_profile_dict["actionable_soon"] = plan_actionable_soon
+    target_profile_dict["waiting_for"] = entry_waiting_for
+    target_profile_dict["actionability_gate"] = actionability_gate
     if geometry.snap_trace:
         target_profile_dict["snap_trace"] = geometry.snap_trace
     if key_levels_used:
@@ -7797,6 +8147,11 @@ async def _generate_fallback_plan(
     if tp_reasons:
         target_profile_dict["tp_reasons"] = tp_reasons
     target_profile_dict.setdefault("runner_policy", runner)
+    if wait_plan:
+        target_profile_dict["probabilities"] = {}
+        target_profile_dict["entry"] = None
+        target_profile_dict["stop"] = None
+        target_profile_dict["targets"] = []
     structured_plan = build_structured_plan(
         plan_id=plan_id,
         symbol=symbol.upper(),
@@ -7810,6 +8165,22 @@ async def _generate_fallback_plan(
         session=session_state_payload,
         confluence=confluence_tags or None,
     )
+    structured_plan["entry_anchor"] = plan_block.get("entry_anchor")
+    structured_plan["entry_actionability"] = plan_block.get("entry_actionability")
+    structured_plan["actionable_now"] = plan_actionable_now
+    structured_plan["actionable_soon"] = plan_actionable_soon
+    structured_plan["waiting_for"] = entry_waiting_for
+    structured_plan["actionability_gate"] = actionability_gate
+    if wait_plan:
+        entry_level_for_wait = None
+        structured_plan["entry"] = {
+            "type": "wait",
+            "level": entry_level_for_wait,
+            "trigger": entry_waiting_for,
+        }
+        structured_plan["stop"] = None
+        structured_plan["targets"] = []
+        structured_plan["probabilities"] = {}
     if confidence_visual:
         structured_plan["confidence_visual"] = confidence_visual
     structured_plan["trade_detail"] = chart_url_with_ids
@@ -7834,7 +8205,7 @@ async def _generate_fallback_plan(
         structured_plan["options_note"] = options_note
     if rejected_contracts:
         structured_plan["rejected_contracts"] = rejected_contracts
-    structured_plan["target_meta"] = target_meta
+    structured_plan["target_meta"] = target_meta_output
     structured_plan["target_profile"] = target_profile_dict
     if key_levels_used:
         structured_plan["key_levels_used"] = key_levels_used
@@ -7979,6 +8350,18 @@ async def _generate_fallback_plan(
         htf_payload_final = {"bias": direction}
     htf_payload_final.setdefault("snapped_targets", [])
 
+    response_entry = entry_price if not wait_plan else None
+    response_stop = stop if not wait_plan else None
+    response_targets = targets if not wait_plan else []
+    response_target_meta = target_meta_output
+    calc_notes_payload = None
+    if not wait_plan and targets:
+        calc_notes_payload = {
+            "atr14": round(float(atr_value), 4),
+            "rr_inputs": {"entry": entry_price, "stop": stop, "tp1": targets[0]},
+        }
+    waiting_for_payload = entry_waiting_for if entry_waiting_for else None
+
     plan_response = PlanResponse(
         plan_id=plan_id,
         version=1,
@@ -7989,11 +8372,11 @@ async def _generate_fallback_plan(
         style=style_token,
         bias=direction,
         setup=strategy_id_value or "baseline_auto",
-        entry=entry_price,
-        stop=stop,
-        targets=targets,
-        target_meta=target_meta,
-        targets_meta=target_meta,
+        entry=response_entry,
+        stop=response_stop,
+        targets=response_targets,
+        target_meta=response_target_meta,
+        targets_meta=response_target_meta,
         entry_candidates=entry_candidates_payload,
         rr_to_t1=rr_to_t1,
         confidence=confidence,
@@ -8026,10 +8409,7 @@ async def _generate_fallback_plan(
         options=options_payload if isinstance(options_payload, dict) else None,
         options_contracts=options_contracts_payload,
         options_note=options_note if include_options_contracts else None,
-        calc_notes={
-            "atr14": round(float(atr_value), 4),
-            "rr_inputs": {"entry": entry_price, "stop": stop, "tp1": targets[0]},
-        },
+        calc_notes=calc_notes_payload,
         htf=htf_payload_final,
         decimals=2,
         data_quality=data_quality,
@@ -8053,6 +8433,12 @@ async def _generate_fallback_plan(
         calibration_meta=calibration_meta_payload,
         strategy_profile=strategy_profile_payload,
         badges=plan_badges,
+        entry_anchor=plan_block.get("entry_anchor"),
+        entry_actionability=plan_block.get("entry_actionability"),
+        actionable_now=plan_actionable_now,
+        actionable_soon=plan_actionable_soon,
+        waiting_for=waiting_for_payload,
+        actionability_gate=actionability_gate,
     )
     plan_response = _hydrate_secondary_fields(plan_response)
     if simulate_open:
@@ -8101,6 +8487,13 @@ async def _generate_fallback_plan(
     plan_response.phase = "hydrate"
     plan_response.layers_fetched = bool(plan_response.plan_layers)
     meta_payload = dict(plan_response.meta or {})
+    meta_payload["actionable_now"] = plan_actionable_now
+    meta_payload["actionable_soon"] = plan_actionable_soon
+    if entry_waiting_for:
+        meta_payload["waiting_for"] = entry_waiting_for
+    meta_payload["entry_anchor"] = plan_block.get("entry_anchor")
+    meta_payload["entry_actionability"] = plan_block.get("entry_actionability")
+    meta_payload["actionability_gate"] = actionability_gate
     meta_payload["within_event_window"] = within_event_window
     if minutes_to_event is not None:
         meta_payload["minutes_to_event"] = minutes_to_event
@@ -9492,6 +9885,12 @@ async def gpt_plan(
         style=first.get("style"),
         bias=bias_output,
         setup=strategy_id_value,
+        entry_anchor=plan_block.get("entry_anchor"),
+        entry_actionability=plan_block.get("entry_actionability"),
+        actionable_now=plan_block.get("actionable_now"),
+        actionable_soon=plan_block.get("actionable_soon"),
+        waiting_for=plan_block.get("waiting_for"),
+        actionability_gate=plan_block.get("actionability_gate"),
         entry=entry_output,
         stop=stop_output,
         targets=targets_output,
@@ -9557,6 +9956,16 @@ async def gpt_plan(
     plan_response.phase = "hydrate"
     plan_response.layers_fetched = bool(plan_response.plan_layers)
     meta_payload = dict(plan_response.meta or {})
+    meta_payload["actionable_now"] = plan_block.get("actionable_now")
+    meta_payload["actionable_soon"] = plan_block.get("actionable_soon")
+    if plan_block.get("waiting_for"):
+        meta_payload["waiting_for"] = plan_block.get("waiting_for")
+    if plan_block.get("entry_anchor"):
+        meta_payload["entry_anchor"] = plan_block.get("entry_anchor")
+    if plan_block.get("entry_actionability") is not None:
+        meta_payload["entry_actionability"] = plan_block.get("entry_actionability")
+    if plan_block.get("actionability_gate") is not None:
+        meta_payload["actionability_gate"] = plan_block.get("actionability_gate")
     meta_payload["within_event_window"] = within_event_window
     if minutes_to_event is not None:
         meta_payload["minutes_to_event"] = minutes_to_event

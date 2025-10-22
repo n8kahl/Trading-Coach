@@ -11,7 +11,12 @@ Style = Literal["scalp", "intraday", "swing", "leaps"]
 
 logger = logging.getLogger(__name__)
 
-ACTIONABILITY_GATE = 0.25
+ACTIONABILITY_GATE: Dict[Style, float] = {
+    "scalp": 0.50,
+    "intraday": 0.40,
+    "swing": 0.30,
+    "leaps": 0.25,
+}
 
 WEIGHTS: Dict[Style, Dict[str, float]] = {
     "scalp": {
@@ -180,19 +185,21 @@ def rank(features: Sequence[Features], style: Style) -> List[Scored]:
     """Rank a list of feature bundles for the requested style."""
     weights = WEIGHTS.get(style, WEIGHTS["intraday"])
     quality_min = MIN_QUALITY.get(style, 0.4)
+    gate_threshold = ACTIONABILITY_GATE.get(style, ACTIONABILITY_GATE["intraday"])
     scored: List[Scored] = []
 
     for bundle in features:
         if bundle.quality() < quality_min:
             continue
         if style in {"scalp", "intraday"}:
-            if _clamp(bundle.actionability) < ACTIONABILITY_GATE:
+            if _clamp(bundle.actionability) < gate_threshold:
                 logger.debug(
                     "rank_actionability_gated",
                     extra={
                         "symbol": bundle.symbol,
                         "style": style,
                         "actionability": float(_clamp(bundle.actionability)),
+                        "threshold": gate_threshold,
                     },
                 )
                 continue

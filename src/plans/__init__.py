@@ -5,10 +5,10 @@ from .entry import select_structural_entry
 from .expected_move import session_expected_move
 from .clamp import clamp_targets_to_em, ensure_monotonic
 from .levels import STRUCTURAL_ORDER, directional_nodes, profile_nodes, populate_recent_extrema
-from .snap import snap_targets, stop_from_structure, build_key_levels_used
+from .snap import snap_targets, stop_from_structure, build_key_levels_used, compute_adaptive_wick_buffer, apply_atr_floor
 from .runner import compute_runner
-from .actionability import actionability_score, compute_entry_candidates
-from .entry_selection import EntryAnchor, EntryContext, build_entry_candidates as build_entry_plan_candidates, select_best_entry_plan
+from .actionability import actionability_score, compute_entry_candidates, is_actionable_soon
+from .entry_selection import EntryAnchor, EntryCandidate, EntryContext, build_entry_candidates as build_entry_plan_candidates, select_best_entry_plan
 from .invariants import assert_invariants, GeometryInvariantError
 from .pipeline import StructuredGeometry, build_structured_geometry
 
@@ -30,11 +30,15 @@ __all__ = [
     "snap_targets",
     "stop_from_structure",
     "build_key_levels_used",
+    "compute_adaptive_wick_buffer",
+    "apply_atr_floor",
     "compute_runner",
     "actionability_score",
     "compute_entry_candidates",
+    "is_actionable_soon",
     "EntryContext",
     "EntryAnchor",
+    "EntryCandidate",
     "build_entry_plan_candidates",
     "select_best_entry_plan",
     "assert_invariants",

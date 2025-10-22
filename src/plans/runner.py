@@ -41,6 +41,9 @@ def compute_runner(
     notes.append("Exit runner on VWAP flip against trade with ADX roll-over")
     notes.append("If remaining ATR < 0.5×ATR near close, time-stop the runner")
 
+    tighten_threshold = 0.60
+    tighten_trail_mult = round(trail_mult * 0.75, 2)
+
     return {
         "fraction": round(fraction, 2),
         "atr_trail_mult": round(trail_mult, 2),
@@ -48,6 +51,12 @@ def compute_runner(
         "em_fraction_cap": 0.60 if style_token in {"intraday", "scalp"} else 0.75,
         "notes": notes,
         "trail": f"Trail with ATR x{trail_mult:.2f}",
+        "tighten_threshold": tighten_threshold,
+        "tighten_trail_mult": tighten_trail_mult,
+        "time_stop": {
+            "remaining_atr_fraction": 0.5,
+            "condition": "Flatten remaining runner near close when range spent",
+        },
     }
 
 

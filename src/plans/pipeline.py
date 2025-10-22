@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from .clamp import clamp_targets_to_em
 from .expected_move import session_expected_move
 from .levels import profile_nodes
+from .snap import ensure_monotonic
 from .snap import snap_targets, stop_from_structure, build_key_levels_used
 from .runner import compute_runner
 from .invariants import assert_invariants, GeometryInvariantError
@@ -117,13 +118,21 @@ def build_structured_geometry(
             if abs(clamped - original) > 1e-6:
                 reason["reason"] = f"{reason['reason']} · EM clamp"
 
+    clamped_tps = _respaced_targets_after_clamp(
+        entry=entry_val,
+        direction=direction,
+        targets=[float(tp) for tp in clamped_tps],
+        atr_value=atr_val,
+        style=style_token,
+        em_points=em_points,
+    )
+
     stop_price, stop_label = stop_from_structure(
         entry=entry_val,
         direction=direction,
         levels=levels,
         atr_value=atr_val,
         style=style_token,
-        wick_buffer=0.15,
     )
 
     key_levels_used = build_key_levels_used(
@@ -161,6 +170,91 @@ def build_structured_geometry(
         clamp_applied=clamp_applied,
         warnings=warnings,
     )
+
+
+def _infer_tick_size(price: float) -> float:
+    if price >= 500:
+        return 0.1
+    if price >= 200:
+        return 0.05
+    if price >= 50:
+        return 0.02
+    if price >= 10:
+        return 0.01
+    if price >= 1:
+        return 0.005
+    return 0.001
+
+
+def _respaced_targets_after_clamp(
+    entry: float,
+    direction: str,
+    targets: List[float],
+    atr_value: float,
+    style: str,
+    em_points: float,
+) -> List[float]:
+    if not targets:
+        return []
+    direction = (direction or "").lower()
+    entry_val = float(entry)
+    tick = _infer_tick_size(entry_val)
+    atr_val = max(float(atr_value or 0.0), 0.0)
+    style_token = (style or "intraday").strip().lower()
+    if style_token == "leap":
+        style_token = "leaps"
+    base_spacing = atr_val * 0.35 if atr_val > 0 else tick * 3
+    min_spacing = max(base_spacing, tick * 3)
+    cap_offset = float(em_points or 0.0)
+
+    respaced: List[float] = []
+    for price in targets:
+        try:
+            candidate = float(price)
+        except (TypeError, ValueError):
+            continue
+        prev = respaced[-1] if respaced else entry_val
+        if direction == "long":
+            lower_bound = prev + min_spacing
+            candidate = max(candidate, lower_bound)
+            if cap_offset > 0:
+                candidate = min(candidate, entry_val + cap_offset)
+            if candidate <= prev:
+                continue
+        elif direction == "short":
+            upper_bound = prev - min_spacing
+            candidate = min(candidate, upper_bound)
+            if cap_offset > 0:
+                candidate = max(candidate, entry_val - cap_offset)
+            if candidate >= prev:
+                continue
+        candidate = round(candidate, 2)
+        if respaced and abs(candidate - respaced[-1]) < tick:
+            continue
+        respaced.append(candidate)
+    if not respaced:
+        return []
+    target_count = len(targets)
+    if target_count > len(respaced):
+        direction_factor = 1.0 if direction == "long" else -1.0
+        step = direction_factor * max(min_spacing, tick * 3)
+        cap_bound = entry_val + direction_factor * cap_offset if cap_offset > 0 else None
+        while len(respaced) < target_count:
+            prev = respaced[-1] if respaced else entry_val
+            candidate = prev + step
+            if cap_bound is not None:
+                if direction == "long":
+                    candidate = min(candidate, cap_bound)
+                else:
+                    candidate = max(candidate, cap_bound)
+            candidate = round(candidate, 2)
+            if respaced and (
+                (direction == "long" and candidate <= respaced[-1])
+                or (direction == "short" and candidate >= respaced[-1])
+            ):
+                break
+            respaced.append(candidate)
+    return ensure_monotonic(respaced, direction)
 
 
 __all__ = ["StructuredGeometry", "build_structured_geometry"]

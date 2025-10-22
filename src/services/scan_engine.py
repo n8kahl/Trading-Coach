@@ -21,6 +21,7 @@ from ..plans import (
     build_plan_geometry,
     build_structured_geometry,
     compute_entry_candidates,
+    is_actionable_soon,
     populate_recent_extrema,
     select_best_entry_plan,
 )
@@ -82,6 +83,29 @@ def _index_summary(frame: pd.DataFrame) -> Dict[str, float]:
         "close": close_val,
         "change_pct": change_pct,
     }
+
+
+def _infer_tick_size(price: float) -> float:
+    if price >= 500:
+        return 0.1
+    if price >= 200:
+        return 0.05
+    if price >= 50:
+        return 0.02
+    if price >= 10:
+        return 0.01
+    if price >= 1:
+        return 0.005
+    return 0.001
+
+
+def _max_entry_distance_pct(style: str | None) -> float:
+    token = (style or "intraday").strip().lower()
+    if token in {"scalp", "intraday"}:
+        return 0.003
+    if token == "swing":
+        return 0.01
+    return 0.02
 
 
 @dataclass
@@ -330,21 +354,33 @@ class PlanningScanEngine:
         except Exception:
             entry_candidates = []
         if entry_seed and (not entry_candidates or not any(abs(float(candidate["level"]) - entry_seed) < 1e-4 for candidate in entry_candidates)):
-            distance_pct = abs(entry_seed - last_close) / last_close if last_close else 0.0
-            actionable = distance_pct <= 0.003
-            score = 0.40 * (1 - distance_pct) + 0.20 * (1 if actionable else 0)
-            entry_candidates.insert(
-                0,
-                {
-                    "level": round(entry_seed, 2),
-                    "label": "STRUCTURAL",
-                    "type": "STRUCTURAL",
-                    "bars_to_trigger": max(int(round(distance_pct * 400, 0)), 0),
-                    "entry_distance_pct": round(distance_pct, 4),
-                    "score": round(score, 4),
-                    "structure_quality": 0.75,
-                },
-            )
+            tick_size = _infer_tick_size(float(last_close))
+            distance_pct = abs(entry_seed - last_close) / last_close if last_close else float("inf")
+            distance_limit = _max_entry_distance_pct(style)
+            if distance_pct <= distance_limit:
+                distance_atr = abs(entry_seed - last_close) / atr_for_entry if atr_for_entry > 0 else float("inf")
+                actionable = is_actionable_soon(entry_seed, last_close, atr_for_entry, tick_size, style)
+                score = 0.40 * (1 - distance_pct) + 0.20 * (1 if actionable else 0)
+                bars_to_trigger = max(int(round(distance_atr * 2.0)), 0)
+                entry_candidates.insert(
+                    0,
+                    {
+                        "level": round(entry_seed, 2),
+                        "label": "STRUCTURAL",
+                        "type": "STRUCTURAL",
+                        "bars_to_trigger": bars_to_trigger,
+                        "entry_distance_pct": round(distance_pct, 4),
+                        "entry_distance_atr": round(distance_atr, 3) if math.isfinite(distance_atr) else None,
+                        "actionable_soon": actionable,
+                        "score": round(score, 4),
+                        "structure_quality": 0.75,
+                        "evaluation": {
+                            "actionability": round(score, 4),
+                            "distance_pct": round(distance_pct, 4),
+                            "distance_atr": round(distance_atr, 3) if math.isfinite(distance_atr) else None,
+                        },
+                    },
+                )
         entry_candidates = _nativeify(entry_candidates)
         index_payload = getattr(daily, "index", None)
         if index_payload is not None and len(index_payload) > 0:
@@ -366,6 +402,7 @@ class PlanningScanEngine:
             mtf_bias=None,
             session_phase=None,
             preferred_entries=[EntryAnchor(entry_seed, "structural")] if entry_seed else None,
+            tick=_infer_tick_size(float(last_close)),
         )
         plan_timestamp_scan = timestamp.to_pydatetime() if isinstance(timestamp, pd.Timestamp) else timestamp
         plan_kwargs_scan = {

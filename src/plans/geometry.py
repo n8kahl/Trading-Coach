@@ -9,6 +9,7 @@ from datetime import datetime, time
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from .levels import last_higher_low, last_lower_high
+from .snap import apply_atr_floor, compute_adaptive_wick_buffer
 
 MIN_STOP_ATR: Mapping[str, float] = {
     "scalp": 0.6,
@@ -349,24 +350,29 @@ def derive_stop(
         base_k = max(0.2, base_k * float(scale))
     atr_tf = max(atr_tf or 0.0, 0.01)
     vol_stop = entry - base_k * atr_tf if side == "long" else entry + base_k * atr_tf
-    structural_candidate = None
-    for key, level in _level_by_priority(levels, side):
+    tick_size = _infer_tick_size(entry)
+    wick = compute_adaptive_wick_buffer(atr_tf, tick_size)
+    structural_stop: Optional[float] = None
+    for _, level in _level_by_priority(levels, side):
         if side == "long" and level < entry:
-            structural_candidate = level
+            structural_stop = float(level) - wick
             break
         if side == "short" and level > entry:
-            structural_candidate = level
+            structural_stop = float(level) + wick
             break
-    if structural_candidate is None:
-        structural_candidate = vol_stop
+    if structural_stop is None:
+        structural_stop = vol_stop
+    structural_stop = _clamp_stop_price(side, entry, structural_stop)
+    atr_guard = apply_atr_floor(entry, structural_stop, atr_tf, side, style)
+    atr_guard = _clamp_stop_price(side, entry, atr_guard)
     if side == "long":
-        wider = min(structural_candidate, vol_stop)
+        wider = min(atr_guard, vol_stop)
     else:
-        wider = max(structural_candidate, vol_stop)
+        wider = max(atr_guard, vol_stop)
     snapped = None
     return StopResult(
         price=round(wider, 2),
-        structural=round(structural_candidate, 2),
+        structural=round(structural_stop, 2),
         volatility=round(vol_stop, 2),
         snapped=snapped,
         rr_min=config.rr_min,
@@ -982,3 +988,15 @@ def build_plan_geometry(
         snap_trace=snap_trace,
         ratr=ratr,
     )
+def _infer_tick_size(price: float) -> float:
+    if price >= 500:
+        return 0.1
+    if price >= 200:
+        return 0.05
+    if price >= 50:
+        return 0.02
+    if price >= 10:
+        return 0.01
+    if price >= 1:
+        return 0.005
+    return 0.001

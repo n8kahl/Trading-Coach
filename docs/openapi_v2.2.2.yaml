@@ -153,6 +153,21 @@ components:
           description: >-
             When true, treats closed sessions as simulated-live for strategy evaluation.
             Also accepts the `X-Simulate-Open: 1` header.
+        min_actionability:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          nullable: true
+          description: >-
+            Optional per-request gate for entry selection. When provided, plans with
+            entry actionability below this threshold will fall back to a WAIT response.
+        must_be_actionable:
+          type: boolean
+          default: false
+          description: >-
+            When true, the planner will emit a WAIT plan instead of returning a stale
+            entry if no candidate meets `min_actionability` or the style default gate.
 
     ScanFilters:
       type: object
@@ -647,6 +662,17 @@ components:
         style: { type: string, nullable: true }
         bias: { type: string, nullable: true }
         setup: { type: string, nullable: true }
+        entry_anchor: { type: string, nullable: true }
+        entry_actionability: { type: number, format: double, nullable: true }
+        actionable_now: { type: boolean, nullable: true }
+        actionable_soon: { type: boolean, nullable: true }
+        waiting_for:
+          type: string
+          nullable: true
+          description: >-
+            Human-readable trigger when the plan is in a WAIT state. When present the
+            response omits fixed entry/stop values and relies on this condition.
+        actionability_gate: { type: number, format: double, nullable: true }
         entry: { type: number, format: double, nullable: true }
         stop: { type: number, format: double, nullable: true }
         targets:
@@ -768,6 +794,15 @@ components:
           type: object
           nullable: true
           description: Additional metadata flags (e.g., `simulated_open`).
+        waiting_for:
+          type: string
+          nullable: true
+          description: "Conditional trigger mirrored from the top-level WAIT plan response."
+        actionable_now: { type: boolean, nullable: true }
+        actionable_soon: { type: boolean, nullable: true }
+        entry_anchor: { type: string, nullable: true }
+        entry_actionability: { type: number, format: double, nullable: true }
+        actionability_gate: { type: number, format: double, nullable: true }
         strategy_profile:
           type: object
           nullable: true
@@ -802,6 +837,12 @@ components:
         entry: 188.42
         stop: 185.9
         targets: [189.8, 191.2, 192.4]
+        entry_anchor: ORL
+        entry_actionability: 0.91
+        actionable_now: false
+        actionable_soon: true
+        waiting_for: "Reclaim ORL @ 188.42 on 1m close + confirming volume"
+        actionability_gate: 0.4
         target_meta:
           - label: TP1
             prob_touch: 0.62
@@ -906,6 +947,12 @@ components:
           stop: 185.9
           targets: [189.8, 191.2, 192.4]
           probabilities: { tp1: 0.62, tp2: 0.48, tp3: 0.31 }
+          entry_anchor: ORL
+          entry_actionability: 0.91
+          actionable_now: false
+          actionable_soon: true
+          waiting_for: "Reclaim ORL @ 188.42 on 1m close + confirming volume"
+          actionability_gate: 0.4
           expected_move: 4.5
           em_used: 1.0
           atr_used: 1.32
@@ -925,12 +972,24 @@ components:
           required: [type, level]
           properties:
             type: { type: string }
-            level: { type: number, format: double }
+            level:
+              type: number
+              format: double
+              nullable: true
         invalid: { type: boolean }
         stop: { type: number, format: double }
         targets:
           type: array
           items: { type: number, format: double }
+        entry_anchor: { type: string, nullable: true }
+        entry_actionability: { type: number, format: double, nullable: true }
+        actionable_now: { type: boolean, nullable: true }
+        actionable_soon: { type: boolean, nullable: true }
+        waiting_for:
+          type: string
+          nullable: true
+          description: "Conditional trigger that must be satisfied before the WAIT plan becomes actionable."
+        actionability_gate: { type: number, format: double, nullable: true }
         probabilities:
           type: object
           additionalProperties: { type: number, format: double }
@@ -979,14 +1038,31 @@ components:
       type: object
       required: [entry, stop, targets, probabilities, snap_trace, meta, warnings]
       properties:
-        entry: { type: number, format: double }
-        stop: { type: number, format: double }
+        entry:
+          type: number
+          format: double
+          nullable: true
+        stop:
+          type: number
+          format: double
+          nullable: true
         targets:
           type: array
           items: { type: number, format: double }
         probabilities:
           type: object
           additionalProperties: { type: number, format: double }
+        entry_anchor: { type: string, nullable: true }
+        entry_actionability: { type: number, format: double, nullable: true }
+        actionable_now: { type: boolean, nullable: true }
+        actionable_soon: { type: boolean, nullable: true }
+        waiting_for:
+          type: string
+          nullable: true
+          description: >-
+            Conditional trigger text for WAIT plans. When present the response omits
+            fixed entry/stop values and relies on this instruction.
+        actionability_gate: { type: number, format: double, nullable: true }
         expected_move: { type: number, format: double, nullable: true }
         em_used: { type: boolean, nullable: true }
         atr_used: { type: number, format: double, nullable: true }

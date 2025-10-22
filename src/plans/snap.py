@@ -13,6 +13,46 @@ TP2_MIN_MULT = 1.5
 MAJOR_NODES = {"vah", "val", "poc", "gap_top", "gap_bottom", "gap", "pwh", "pwl", "pwc", "pdh", "pdl", "pdc"}
 
 
+def _infer_tick_size(price: float) -> float:
+    if price >= 500:
+        return 0.1
+    if price >= 200:
+        return 0.05
+    if price >= 50:
+        return 0.02
+    if price >= 10:
+        return 0.01
+    if price >= 1:
+        return 0.005
+    return 0.001
+
+
+def compute_adaptive_wick_buffer(atr: float, tick: float) -> float:
+    tick = max(float(tick or 0.01), 1e-4)
+    atr = max(float(atr or 0.0), 0.0)
+    base_ticks = 0.15 * (atr / tick)
+    buffer = base_ticks * tick
+    return max(0.05, min(0.35, buffer))
+
+
+def apply_atr_floor(entry: float, structural_stop: float, atr: float, direction: str, style: str) -> float:
+    k_map = {"scalp": 0.6, "intraday": 0.9, "swing": 1.2, "leaps": 1.5}
+    style_token = _style_token(style)
+    k = k_map.get(style_token, 0.9)
+    atr = max(float(atr or 0.0), 0.0)
+    entry = float(entry)
+    structural = float(structural_stop)
+    if atr <= 0:
+        return structural
+    if direction == "short":
+        floor = entry + k * atr
+        return max(structural, floor)
+    if direction == "long":
+        floor = entry - k * atr
+        return min(structural, floor)
+    return structural
+
+
 def _style_token(style: str) -> str:
     token = (style or "").strip().lower()
     if token == "leap":
@@ -153,7 +193,8 @@ def stop_from_structure(
     levels: Dict[str, float],
     atr_value: float,
     style: str,
-    wick_buffer: float = 0.15,
+    wick_buffer: float | None = None,
+    tick: float | None = None,
 ) -> Tuple[float, str]:
     """
     Structure-first stop with ATR floor.
@@ -163,6 +204,12 @@ def stop_from_structure(
     style = _style_token(style)
     entry_val = float(entry)
     atr_value = abs(float(atr_value or 0.0))
+    tick_size = float(tick) if isinstance(tick, (int, float)) and tick and tick > 0 else _infer_tick_size(entry_val)
+    wick = (
+        float(wick_buffer)
+        if isinstance(wick_buffer, (int, float)) and wick_buffer and wick_buffer > 0
+        else compute_adaptive_wick_buffer(atr_value, tick_size)
+    )
 
     fallback_mult = {
         "scalp": 1.2,
@@ -171,6 +218,11 @@ def stop_from_structure(
         "leaps": 2.5,
     }.get(style, 1.8)
 
+    def _clamp(price: float) -> float:
+        if direction == "long":
+            return min(price, entry_val - tick_size)
+        return max(price, entry_val + tick_size)
+
     if direction == "short":
         base = levels.get("orh")
         label = "ORH"
@@ -178,12 +230,12 @@ def stop_from_structure(
             base = last_lower_high(levels)
             label = "SWING_HIGH"
         if isinstance(base, (int, float)):
-            stop_price = float(base) + wick_buffer
+            stop_structural = float(base) + wick
         else:
-            stop_price = entry_val + fallback_mult * atr_value
+            stop_structural = entry_val + fallback_mult * atr_value
             label = "ATR_FALLBACK"
-        stop_floor = entry_val + max(0.6 * atr_value, 0.1)
-        stop_price = max(stop_price, stop_floor)
+        stop_price = apply_atr_floor(entry_val, stop_structural, atr_value, direction, style)
+        stop_price = _clamp(stop_price)
     else:
         base = levels.get("orl")
         label = "ORL"
@@ -191,12 +243,12 @@ def stop_from_structure(
             base = last_higher_low(levels)
             label = "SWING_LOW"
         if isinstance(base, (int, float)):
-            stop_price = float(base) - wick_buffer
+            stop_structural = float(base) - wick
         else:
-            stop_price = entry_val - fallback_mult * atr_value
+            stop_structural = entry_val - fallback_mult * atr_value
             label = "ATR_FALLBACK"
-        stop_floor = entry_val - max(0.6 * atr_value, 0.1)
-        stop_price = min(stop_price, stop_floor)
+        stop_price = apply_atr_floor(entry_val, stop_structural, atr_value, direction, style)
+        stop_price = _clamp(stop_price)
 
     return round(stop_price, 2), label
 
@@ -227,4 +279,11 @@ def build_key_levels_used(
     }
 
 
-__all__ = ["snap_targets", "stop_from_structure", "build_key_levels_used", "MIN_ATR_MULT_TP1"]
+__all__ = [
+    "snap_targets",
+    "stop_from_structure",
+    "build_key_levels_used",
+    "MIN_ATR_MULT_TP1",
+    "compute_adaptive_wick_buffer",
+    "apply_atr_floor",
+]
