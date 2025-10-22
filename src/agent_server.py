@@ -8807,6 +8807,10 @@ async def gpt_plan(
         },
     )
 
+    geometry_metrics_raw = first.get("metrics") or {}
+    geometry_metrics = _nativeify(geometry_metrics_raw) if geometry_metrics_raw else {}
+    key_levels_from_metrics = geometry_metrics.get("key_levels_used") if geometry_metrics else None
+
     snapshot = first.get("market_snapshot") or {}
     indicators = (snapshot.get("indicators") or {})
     volatility = (snapshot.get("volatility") or {})
@@ -8845,6 +8849,18 @@ async def gpt_plan(
     runner_output = None
     runner_policy_output = None
     snap_trace_output = None
+
+    metric_expected_move = geometry_metrics.get("expected_move") if geometry_metrics else None
+    if isinstance(metric_expected_move, (int, float)) and math.isfinite(metric_expected_move):
+        expected_move_output = float(metric_expected_move)
+    metric_remaining_atr = geometry_metrics.get("remaining_atr") if geometry_metrics else None
+    if isinstance(metric_remaining_atr, (int, float)) and math.isfinite(metric_remaining_atr):
+        remaining_atr_output = float(metric_remaining_atr)
+    if geometry_metrics.get("em_used") is not None:
+        em_used_output = bool(geometry_metrics.get("em_used"))
+    metric_snap_trace = geometry_metrics.get("snap_trace") if geometry_metrics else None
+    if isinstance(metric_snap_trace, (list, tuple)):
+        snap_trace_output = [str(item) for item in metric_snap_trace if item]
 
     strategy_id_value = (plan.get("strategy") or first.get("strategy_id") or "baseline_auto")
     plan["strategy"] = strategy_id_value
@@ -9429,6 +9445,17 @@ async def gpt_plan(
         snapped_names = []
         key_level_matches = []
 
+    if not key_level_matches and isinstance(key_levels_from_metrics, Mapping):
+        for bucket, entries in key_levels_from_metrics.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                match = dict(entry)
+                match.setdefault("category", bucket)
+                key_level_matches.append(match)
+
     if isinstance(htf_payload, Mapping):
         htf = dict(htf_payload)
     else:
@@ -9441,6 +9468,12 @@ async def gpt_plan(
         "events_present": bool(events_block),
         "earnings_present": bool(earnings_block),
     }
+    if isinstance(expected_move_output, (int, float)):
+        data_quality["expected_move"] = round(float(expected_move_output), 4)
+    if isinstance(remaining_atr_output, (int, float)):
+        data_quality["remaining_atr"] = round(float(remaining_atr_output), 4)
+    if em_used_output is not None:
+        data_quality["em_used"] = bool(em_used_output)
     data_quality["within_event_window"] = within_event_window
     if minutes_to_event is not None:
         data_quality["minutes_to_event"] = minutes_to_event
@@ -9673,6 +9706,8 @@ async def gpt_plan(
                 entry_payload["source"] = source
             formatted[bucket].append(entry_payload)
         key_levels_used = _nativeify({bucket: items for bucket, items in formatted.items() if items})
+    elif isinstance(key_levels_from_metrics, Mapping):
+        key_levels_used = _nativeify(key_levels_from_metrics)
 
     execution_rules = _build_execution_rules(
         entry=entry_val,

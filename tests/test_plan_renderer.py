@@ -82,7 +82,7 @@ async def test_plan_renderer_adds_index_fallback_metadata(monkeypatch):
             },
             index=pd.date_range("2024-01-01 14:30", periods=2, freq="5T", tz="UTC"),
         )
-        return {"SPX": frame}, {"SPX": "polygon"}
+        return {"SPX": frame}, {"SPX": "polygon"}, None
 
     plan = Plan(
         direction="long",
