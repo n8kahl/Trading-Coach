@@ -21,6 +21,7 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
+!src/lib/
 !idea-page/lib/
 !trade-coach-ui/src/lib/
 

@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     ff_chart_canonical_v1: bool = Field(False, env="FF_CHART_CANONICAL_V1")
     ff_layers_endpoint: bool = Field(False, env="FF_LAYERS_ENDPOINT")
     ff_options_always: bool = Field(False, env="FF_OPTIONS_ALWAYS")
+    gpt_market_routing_enabled: bool = Field(True, env="GPT_MARKET_ROUTING_ENABLED")
     ft_no_fallback_trades: bool = Field(False, env="FT_NO_FALLBACK_TRADES")
     ft_max_spread_pct: float = Field(8.0, env="FT_MAX_SPREAD_PCT")
     ft_min_oi: int = Field(300, env="FT_MIN_OI")

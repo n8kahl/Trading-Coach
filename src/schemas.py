@@ -92,6 +92,8 @@ class ScanPage(BaseModel):
     phase: Literal["scan"] | None = None
     count_candidates: int | None = None
     next_cursor: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    snap_trace: list[str] | None = None
 
 
 class FinalizeRequest(BaseModel):

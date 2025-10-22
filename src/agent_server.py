@@ -110,6 +110,7 @@ from .db import (
 )
 from .data_sources import fetch_polygon_ohlcv
 from .core.unified_snapshot import UnifiedSnapshot, get_unified_snapshot
+from .lib.data_source import DataRoute, pick_data_source
 from .symbol_streamer import SymbolStreamCoordinator, fetch_live_quote
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
@@ -153,6 +154,8 @@ from .levels.snapper import Level, SnapContext, collect_levels, snap_prices
 from .features.mtf import compute_mtf_bundle, MTFBundle
 from .features.htf_levels import compute_htf_levels, HTFLevels
 from .strategy.engine import infer_strategy, mtf_amplifier
+from .services.fallbacks import compute_plan_with_fallback
+from .services.scan_fallbacks import compute_scan_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -1717,6 +1720,7 @@ class PlanResponse(BaseModel):
     remaining_atr: float | None = None
     em_used: bool | None = None
     calibration_meta: Dict[str, Any] | None = None
+    planning_snapshot: Dict[str, Any] | None = None
 
 
 class AssistantExecRequest(BaseModel):
@@ -5540,6 +5544,66 @@ async def gpt_scan_endpoint(
     planning_mode = bool(getattr(request_payload, "planning_mode", False))
     session_payload = _session_payload_from_request(request)
     settings = get_settings()
+    use_market_routing = bool(getattr(settings, "gpt_market_routing_enabled", True))
+    if use_market_routing and not planning_mode:
+        if simulate_open:
+            route = DataRoute(mode="live", as_of=datetime.now(timezone.utc), planning_context="live")
+        else:
+            route = pick_data_source()
+        if isinstance(request_payload.universe, list):
+            universe_symbols = [
+                symbol.strip().upper()
+                for symbol in request_payload.universe
+                if isinstance(symbol, str) and symbol.strip()
+            ]
+        else:
+            universe_symbols = await expand_universe(
+                request_payload.universe,
+                style=request_payload.style,
+                limit=request_payload.limit,
+            )
+        try:
+            page_payload = await compute_scan_with_fallback(
+                universe_symbols,
+                style=request_payload.style,
+                limit=request_payload.limit,
+                route=route,
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("compute_scan_with_fallback failed; emitting stub response")
+            snapshot = {
+                "generated_at": route.as_of.isoformat(),
+                "symbol_count": len(universe_symbols),
+            }
+            page_payload = {
+                "as_of": route.as_of.isoformat(),
+                "planning_context": route.planning_context,
+                "meta": {
+                    "snapshot": snapshot,
+                    "universe": {
+                        "name": "adhoc",
+                        "source": "planner",
+                        "count": len(universe_symbols),
+                    },
+                },
+                "candidates": [],
+                "data_quality": {
+                    "planning_mode": route.planning_context == "frozen",
+                    "series_present": False,
+                    "expected_move": None,
+                    "remaining_atr": None,
+                    "em_used": None,
+                    "snapshot": snapshot,
+                },
+                "phase": "scan",
+                "count_candidates": 0,
+                "next_cursor": None,
+                "warnings": [
+                    "LKG_PARTIAL" if route.planning_context == "frozen" else "LIVE_PARTIAL"
+                ],
+            }
+        response.headers["X-No-Fabrication"] = "1"
+        return ScanPage.model_validate(page_payload)
     allow_fallback_trades = False
     no_setups_banner = "NO_ELIGIBLE_SETUPS"
     session_ticker = _session_tracking_id(session_payload)
@@ -8734,6 +8798,49 @@ async def gpt_plan(
         explicit_value=request_payload.simulate_open,
         explicit_field_set="simulate_open" in fields_set,
     )
+    use_market_routing = bool(getattr(settings, "gpt_market_routing_enabled", True))
+    if use_market_routing:
+        if simulate_open:
+            route = DataRoute(mode="live", as_of=datetime.now(timezone.utc), planning_context="live")
+        else:
+            route = pick_data_source()
+        try:
+            plan_payload = await compute_plan_with_fallback(symbol, route)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("compute_plan_with_fallback failed; emitting stub response")
+            plan_payload = {
+                "plan_id": f"{symbol}-STUB-{route.mode.upper()}",
+                "version": 1,
+                "trade_detail": "",
+                "planning_context": route.planning_context,
+                "symbol": symbol,
+                "targets": [],
+                "target_meta": [],
+                "targets_meta": [],
+                "entry_candidates": [],
+                "key_levels_used": {"session": [], "structural": []},
+                "meta": {"key_levels_used": {"session": [], "structural": []}},
+                "data_quality": {
+                    "series_present": False,
+                    "expected_move": None,
+                    "remaining_atr": None,
+                    "em_used": None,
+                    "snapshot": {
+                        "generated_at": route.as_of.isoformat(),
+                        "symbol_count": 1,
+                    },
+                },
+                "snap_trace": ["fallback: emergency_stub"],
+                "warnings": ["LKG_PARTIAL" if route.planning_context == "frozen" else "LIVE_PARTIAL"],
+                "planning_snapshot": {
+                    "entry_anchor": None,
+                    "entry_actionability": None,
+                    "entry_candidates": [],
+                },
+            }
+        plan_payload.setdefault("symbol", symbol)
+        response.headers["X-No-Fabrication"] = "1"
+        return PlanResponse.model_validate(plan_payload)
     session_payload = _session_payload_from_request(request)
     session_token = _session_tracking_id(session_payload)
     user_id = getattr(user, "user_id", "anonymous")
@@ -8765,12 +8872,8 @@ async def gpt_plan(
         if allowed_symbols is None and style_lookup_key != _SCAN_STYLE_ANY:
             allowed_symbols = _SCAN_SYMBOL_REGISTRY.get((user_id, session_token, _SCAN_STYLE_ANY))
         if allowed_symbols is not None and symbol not in allowed_symbols:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "PLAN_NOT_IN_LAST_SCAN",
-                    "message": f"{symbol} not present in most recent scan",
-                },
+            logger.info(
+                "skipping legacy PLAN_NOT_IN_LAST_SCAN gate for %s", symbol, extra={"user": user_id}
             )
     include_plan_layers = bool(
         getattr(settings, "ff_chart_canonical_v1", False) or getattr(settings, "ff_layers_endpoint", False)
