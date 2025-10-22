@@ -127,6 +127,16 @@ class PolygonRealtimeBarStreamer:
                         await self._handle_message(raw)
             except asyncio.CancelledError:
                 break
+            except websockets.exceptions.ConnectionClosedError as exc:
+                # 1008 == policy violation (often bad auth / missing entitlement). Disable stream.
+                if int(getattr(exc, "code", 0) or 0) == 1008:  # pragma: no branch - specific shutdown path
+                    logger.error(
+                        "Polygon realtime bar stream disabled after policy violation (code=%s). "
+                        "Check websocket entitlements and API key configuration.",
+                        getattr(exc, "code", None),
+                    )
+                    return
+                logger.warning("Polygon realtime bar stream closed unexpectedly: %s", exc, exc_info=True)
             except Exception as exc:  # pragma: no cover - network resilience
                 logger.warning("Polygon realtime bar stream error: %s", exc, exc_info=True)
             if self._stop_requested.is_set():
