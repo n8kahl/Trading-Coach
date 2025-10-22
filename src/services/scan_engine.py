@@ -26,6 +26,7 @@ from ..plans import (
     select_best_entry_plan,
 )
 from ..plans.entry import select_structural_entry
+from ..core.geometry_engine import GeometrySummary, summarize_plan_geometry
 from .contract_rules import ContractRuleBook, ContractTemplate
 from .polygon_client import AggregatesResult, PolygonAggregatesClient
 from .universe import UniverseSnapshot
@@ -437,6 +438,7 @@ class PlanningScanEngine:
             else:
                 evaluation.setdefault("status", "considered")
         structured_warnings: List[str] = []
+        geometry_summary: GeometrySummary | None = None
         if fallback_geometry or geometry is None:
             stop = float(entry_price - max(atr_val, 1e-6))
             target = float(entry_price + max(atr_val * 2.0, 1e-6))
@@ -465,6 +467,18 @@ class PlanningScanEngine:
             snap_trace_payload = ["fallback_rr"]
             structured_tp_reasons = [{"label": "TP1", "reason": "Fallback RR"}]
             key_levels_used_payload = {"session": [], "structural": []}
+            geometry_summary = GeometrySummary(
+                entry=round(entry_price, 2),
+                stop=round(stop, 2),
+                targets=[dict(item) for item in target_entries],
+                rr_t1=round(rr, 3) if math.isfinite(rr) else None,
+                atr_used=float(atr_val) if atr_val is not None else None,
+                expected_move=None,
+                remaining_atr=None,
+                em_used=False,
+                snap_trace=snap_trace_payload,
+                key_levels_used={"session": [], "structural": []},
+            )
         else:
             plan_time_dt = timestamp or datetime.now(timezone.utc)
             raw_targets = [float(meta.price) for meta in geometry.targets] or [entry_price + atr_val, entry_price + atr_val * 2, entry_price + atr_val * 3]
@@ -607,6 +621,13 @@ class PlanningScanEngine:
             key_levels_used_payload = _nativeify({
                 bucket: [dict(entry) for entry in entries] for bucket, entries in (key_levels_used or {}).items() if isinstance(entries, list)
             })
+            geometry_summary = summarize_plan_geometry(
+                geometry,
+                entry=entry_price,
+                atr_value=atr_val,
+                expected_move=structured_geometry.em_points or geometry.em_day,
+                key_levels_used=key_levels_used,
+            )
         logger.debug(
             "planning_geometry",
             extra={
@@ -646,10 +667,11 @@ class PlanningScanEngine:
             "entry_distance_atr": round(pullback_atr, 3) if pullback_atr is not None else None,
             "target_meta": target_meta_payload,
             "runner_policy": runner_payload,
-            "expected_move": round(geometry.em_day, 4) if geometry and geometry.em_day else None,
-            "remaining_atr": round(geometry.ratr, 4) if geometry and geometry.ratr else None,
-            "em_used": em_used_flag,
-            "snap_trace": snap_trace_payload,
+            "atr_used": geometry_summary.atr_used if geometry_summary else (float(atr_val) if atr_val is not None else None),
+            "expected_move": geometry_summary.expected_move if geometry_summary else (round(geometry.em_day, 4) if geometry and geometry.em_day else None),
+            "remaining_atr": geometry_summary.remaining_atr if geometry_summary else (round(geometry.ratr, 4) if geometry and geometry.ratr else None),
+            "em_used": geometry_summary.em_used if geometry_summary else em_used_flag,
+            "snap_trace": geometry_summary.snap_trace if geometry_summary else snap_trace_payload,
             "entry_anchor": selected_tag,
             "entry_actionability": round(selected_entry.actionability, 3) if selected_entry else None,
             "stop_detail": {
@@ -657,7 +679,7 @@ class PlanningScanEngine:
                 "volatility": geometry.stop.volatility if geometry else 0.0,
                 "snapped": geometry.stop.snapped if geometry else "fallback_rr",
             },
-            "key_levels_used": key_levels_used_payload,
+            "key_levels_used": geometry_summary.key_levels_used if geometry_summary else key_levels_used_payload,
             "tp_reasons": structured_tp_reasons,
             "entry_candidates": entry_candidates,
             "geometry_warnings": structured_warnings,
