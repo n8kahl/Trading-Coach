@@ -1,6 +1,6 @@
 import pytest
 
-from tests.test_trade_detail import _run_fallback_plan
+from test_trade_detail import _run_fallback_plan
 
 
 @pytest.mark.asyncio

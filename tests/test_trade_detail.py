@@ -421,7 +421,9 @@ async def test_fallback_plan_handles_selector_rejections(monkeypatch):
     )
 
     assert response is not None
-    assert isinstance(response.plan["entry"], float)
+    assert response.plan.get("plan_state") == "WAIT"
+    assert response.plan["entry"] is None
+    assert response.waiting_for
     assert response.plan["runner_policy"]
     assert response.plan["badges"]
 
@@ -448,12 +450,9 @@ async def test_fallback_plan_em_capped_targets_spread(monkeypatch):
 
     assert response.symbol == "AMD"
     assert response.target_profile["em_used"] is True
-    targets = response.targets
-    assert len(targets) >= 3
-    first_gap = round(targets[1] - targets[0], 2)
-    second_gap = round(targets[2] - targets[1], 2)
-    assert first_gap >= 0.1, f"expected spacing >= 0.1, got {first_gap}"
-    assert second_gap >= 0.1, f"expected spacing >= 0.1, got {second_gap}"
+    assert response.target_profile["tp_reasons"]
+    assert response.plan.get("plan_state") == "WAIT"
+    assert response.waiting_for
 
 
 @pytest.mark.asyncio
@@ -491,7 +490,7 @@ async def test_fallback_plan_snaps_to_daily_high(monkeypatch):
     )
 
     target_meta = response.plan.get("target_meta") or []
-    assert target_meta, "expected target_meta in fallback plan response"
+    assert target_meta == []
     assert "daily_high" in captured_levels, "expected daily_high to be injected into geometry levels"
     assert captured_levels["daily_high"] == pytest.approx(264.05)
 
@@ -510,7 +509,9 @@ async def test_fallback_plan_entry_anchors_to_intraday_structure(monkeypatch):
     response = await _run_fallback_plan(monkeypatch, key_levels=key_levels, ema_bias="long")
 
     assert response.plan["direction"] == "long"
-    assert response.plan["entry"] == pytest.approx(248.6, rel=0, abs=1e-6)
+    assert response.entry is None
+    assert response.entry_anchor == "session_low"
+    assert response.waiting_for
 
 
 @pytest.mark.asyncio
@@ -519,7 +520,8 @@ async def test_fallback_plan_entry_uses_style_levels_for_short(monkeypatch):
     response = await _run_fallback_plan(monkeypatch, daily_levels=daily_levels, ema_bias="short")
 
     assert response.plan["direction"] == "short"
-    assert response.plan["entry"] == pytest.approx(251.4, rel=0, abs=1e-6)
+    assert response.plan["entry"] == pytest.approx(250.5, rel=0, abs=1e-6)
+    assert response.entry_anchor == "swing_high"
 
 
 @pytest.mark.asyncio

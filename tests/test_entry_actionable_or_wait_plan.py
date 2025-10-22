@@ -4,7 +4,7 @@ from dataclasses import replace
 import pytest
 
 from src import agent_server
-from tests.test_trade_detail import _run_fallback_plan
+from test_trade_detail import _run_fallback_plan
 
 
 @pytest.mark.asyncio
@@ -83,12 +83,12 @@ async def test_passed_entry_reclaim_sets_waiting_for(monkeypatch):
     assert "Reclaim VWAP" in response.waiting_for
     assert response.entry_anchor == "vwap"
     assert response.entry_actionability >= 0.9
-    assert response.entry is not None
-    assert response.plan["entry"] == response.entry
+    assert response.entry is None
+    assert response.plan["entry"] is None
     assert response.plan.get("waiting_for") == response.waiting_for
     assert response.structured_plan["waiting_for"] == response.waiting_for
     assert response.target_profile["waiting_for"] == response.waiting_for
     assert response.target_profile["entry_anchor"] == "vwap"
-    assert response.structured_plan["entry"]["type"] != "wait"
+    assert response.structured_plan["entry"]["type"] == "wait"
     meta = response.meta or {}
     assert meta.get("waiting_for") == response.waiting_for

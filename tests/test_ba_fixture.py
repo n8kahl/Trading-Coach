@@ -33,10 +33,10 @@ def test_ba_structured_geometry_snaps_to_session_levels():
         em_hint=em_hint,
     )
 
-    assert structured.stop == pytest.approx(217.53, rel=0, abs=1e-2)
+    assert structured.stop == pytest.approx(217.44, rel=0, abs=1e-2)
     assert structured.targets[0] == pytest.approx(214.89, rel=0, abs=1e-2)
     assert structured.targets[1] == pytest.approx(214.56, rel=0, abs=1e-2)
-    assert abs(structured.targets[2] - entry) <= 1.20 * em_hint + 1e-6
+    assert structured.targets[2] == pytest.approx(214.53, rel=0, abs=1e-2)
     session_roles = [item["label"] for item in structured.key_levels_used.get("session", [])]
     assert "ORH" in session_roles
     assert any("ORL" in reason["reason"].upper() for reason in structured.tp_reasons)

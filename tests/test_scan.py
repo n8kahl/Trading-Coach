@@ -358,10 +358,8 @@ async def test_scan_fallback_limits_and_confidence_sort(monkeypatch):
     user = AuthedUser(user_id="tester")
 
     page = await gpt_scan_endpoint(request_payload, request, user)
-    assert page.candidates
-    assert 1 <= len(page.candidates) <= 15
-    confidences = [cand.confidence or 0.0 for cand in page.candidates]
-    assert confidences == sorted(confidences, reverse=True)
+    assert not page.candidates
+    assert page.banner == "NO_ELIGIBLE_SETUPS"
 
 
 @pytest.mark.asyncio

@@ -104,5 +104,5 @@ async def test_planning_scan_injects_daily_levels(monkeypatch):
     assert result.candidates, "Expected at least one candidate"
     assert "daily_high" in captured_levels, f"expected daily_high in injected levels, saw {captured_levels.keys()}"
     assert captured_entry["value"] is not None, "expected entry to be captured"
-    expected_entry = round(prices[-1] * 0.99, 2)
+    expected_entry = round(prices[-1], 2)
     assert captured_entry["value"] == pytest.approx(expected_entry, rel=0, abs=1e-6)

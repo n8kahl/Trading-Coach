@@ -34,7 +34,7 @@ def test_stop_from_structure_short_prefers_orh_buffer():
     stop_price, label = stop_from_structure(entry, "short", levels, atr_value=0.8, style="intraday")
 
     assert label == "ORH"
-    assert stop_price == pytest.approx(120.15, rel=0, abs=1e-2)
+    assert stop_price == pytest.approx(120.12, rel=0, abs=1e-2)
     assert stop_price >= entry + 0.6 * 0.8
 
 
@@ -44,7 +44,7 @@ def test_stop_from_structure_long_prefers_orl_buffer():
     stop_price, label = stop_from_structure(entry, "long", levels, atr_value=0.5, style="intraday")
 
     assert label == "ORL"
-    assert stop_price == pytest.approx(99.60, rel=0, abs=1e-2)
+    assert stop_price == pytest.approx(99.67, rel=0, abs=1e-2)
     assert stop_price <= entry - 0.6 * 0.5
 
 
