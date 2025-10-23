@@ -7,11 +7,12 @@ import httpx
 from fastapi import FastAPI
 
 from ..lib.data_route import DataRoute
-from ..providers.geometry import build_geometry
+from ..providers.geometry import GeometryDetail, build_geometry
 from ..providers.options import select_contracts
 from ..providers.planner import plan as run_plan
 from ..providers.scanner import scan as run_scan
 from ..providers.series import fetch_series
+from .scan_confidence import compute_scan_confidence
 from .chart_utils import sanitize_chart_params
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,7 @@ async def generate_scan(
     candidates: List[Dict[str, Any]] = page.get("candidates", [])
     enriched: List[Dict[str, Any]] = []
     chart_payloads: List[Dict[str, Any] | None] = []
+    plan_payloads: List[Dict[str, Any]] = []
 
     for candidate in candidates:
         symbol = candidate.get("symbol")
@@ -117,12 +119,38 @@ async def generate_scan(
         if chart_params:
             charts_container["params"] = chart_params
         chart_payloads.append(chart_params)
+        plan_payloads.append(plan_obj)
         enriched.append(candidate)
 
     chart_urls = await _chart_urls(app, chart_payloads)
-    for candidate, chart_url in zip(enriched, chart_urls):
+    planning_context = route.planning_context
+    page_data_quality = page.get("data_quality") if isinstance(page.get("data_quality"), dict) else {}
+    banner = page.get("banner")
+    for candidate, chart_url, plan_obj in zip(enriched, chart_urls, plan_payloads):
         if chart_url:
             candidate["chart_url"] = chart_url
+        symbol = candidate.get("symbol")
+        detail: GeometryDetail | None = geometry.get(symbol) if symbol else None
+        plan_data_quality = plan_obj.get("data_quality") if isinstance(plan_obj.get("data_quality"), dict) else {}
+        combined_quality = {**page_data_quality, **plan_data_quality}
+        confidence = None
+        if detail is not None:
+            warnings = plan_obj.get("warnings")
+            if not warnings:
+                confidence = compute_scan_confidence(
+                    detail=detail,
+                    plan_obj=plan_obj,
+                    data_quality=combined_quality,
+                    planning_context=planning_context,
+                    banner=banner,
+                )
+        if confidence is not None:
+            candidate["confidence"] = round(confidence, 2)
+            source_paths = candidate.get("source_paths")
+            if not isinstance(source_paths, dict):
+                source_paths = {}
+            source_paths["confidence"] = "scan_confidence_engine"
+            candidate["source_paths"] = source_paths
 
     if not enriched:
         page.setdefault("banner", "SCAN_NO_CANDIDATES")

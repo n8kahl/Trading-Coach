@@ -15,6 +15,14 @@
 5. Profit-first. Enforce R:R floors, expected-move caps, volatility guardrails.  
 6. Historical stats: include only if sourced from a real DB/backtest; otherwise omit `historical_stats`.
 
+### Invariants
+
+- Confidence is optional; when present, it comes from server scan confidence engine—no client math.
+
+### Market Scan — Table
+
+- If confidence exists, render it; do not compute client-side.
+
 ## 📈 Session Handling
 
 The server provides:
