@@ -32,5 +32,6 @@ Planned steps:
 4. **Runner give-back telemetry ✅** – Runner policies include telemetry (ADX slope, MTF score, event window), ensuring plan consumers can track momentum switches and give-back limits.
 5. **Scan alignment ✅** – `/gpt/scan` now reuses the Phase 3 stop/TP/runner pipeline (probabilities, telemetry, composite scoring, guardrails) so candidates and plans emit matching metadata.
 6. **Testing & docs ✅** – Added unit coverage for validator guardrails and runner telemetry, and refreshed the roadmap/README to note scan parity.
+7. **Plan fallback parity ✅** – The `/gpt/plan` market-routing fallback path now executes the same refit geometry, so snapshot/LKG responses include target metadata, runner policy, probabilities, and strategy profile identical to scan-derived plans.
 
 Deliverables: fully featured planner + scanner with strategy-aware outputs, robust guardrails, and parity across endpoints.

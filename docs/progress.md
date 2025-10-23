@@ -1,6 +1,6 @@
 # Progress Log – Trading Coach Charts + GPT
 
-**Last updated:** 2025‑10‑10  
+**Last updated:** 2025‑10‑22  
 Primary maintainer: _handoff to new developer_
 
 This document captures what is live, where the sharp edges are, and the near-term roadmap. Treat it as the onboarding cheat sheet before diving into the code.
@@ -43,6 +43,8 @@ This document captures what is live, where the sharp edges are, and the near-ter
 - Documentation overhaul for onboarding, GPT wiring, and roadmap tracking.
 - Refreshed the `/tv` viewer: multi-timeframe buttons, plan metadata banner, responsive drawer,
   and deduplicated level labels so toggling frames no longer stacks annotations.
+- **Stop/TP parity (Phase 3)** – Structured plans now build stops using defended structure + ATR floors with adaptive wick buffers, enforce style-aware TP spacing, and emit per-target metadata (`prob_touch`, `rr_multiple`, `em_fraction`, reasons) across both planner and scan flows.
+- **Structured plan fallback** – The `/gpt/plan` market-routing branch reuses the refit pipeline so “fallback” plans carry the same metadata (runner policy, strategy profile, target ladder, probabilities) as primary scan-generated plans.
 
 ---
 
@@ -50,6 +52,8 @@ This document captures what is live, where the sharp edges are, and the near-ter
 
 - **Polygon snapshots (HTTP 400)**  
   Log spam such as `Polygon option snapshot failed ... 400 Bad Request` occurs when the Polygon account lacks the options snapshot entitlement. The failure is safe; Tradier data fills the gap. Consider adding a feature flag (`DISABLE_POLYGON_OPTIONS`) if logs become noisy.
+- **Plan fallbacks**  
+  `/gpt/plan` always runs the structured refit pipeline even when routed through the “market fallback” branch, so responses include the full metadata surface (target ladder, runner policy, strategy profile, probabilities). Expect warnings such as `LKG_PARTIAL` when the underlying data came from last-known-good snapshots.
 
 - **Caching**  
   - Multi-context cache: 30 s per `(symbol, interval, lookback)`.

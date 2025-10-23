@@ -47,10 +47,13 @@ What’s included
   - Returns: `plan`, `charts`, `key_levels`, `market_snapshot`, `features`, `options`, `trade_detail`
   - Provenance: `calc_notes` (atr14, rr_inputs, em_cap_applied), `htf` (bias, snapped_targets), `debug.tp1` (when structural TP1 is used)
   - Targets carry `plan.target_meta` (per-TP `price`, `distance`, `rr`, `em_fraction`, `mfe_quantile`, `prob_touch`, `prob_touch_raw`, `prob_touch_calibrated`, `source`, `snap_tag`, `optional`) and `plan.runner` (trailing-stop settings: `type`, `timeframe`, `length`, `multiplier`, `anchor`, `initial_stop`, `note`, `bias`).
+  - Stop metadata now includes `stop_meta.structural_anchor`, `stop_meta.atr_floor`, and `stop_meta.wick_buffer`, reflecting the “structure first, ATR floor second” construction (with adaptive wick padding).
+  - Style-aware TP spacing enforces minimum tick/ATR gaps; if targets are re-spaced or capped you’ll see `tp_adjust:*` entries inside `snap_trace` and the final ladder in `target_meta`.
   - `strategy_profile` attaches the normalized `{name, trigger[], invalidation, management, reload, runner}` block for the active setup along with `badges[]` (max 5, deterministic order) so the UI renders without re-sorting.
   - `calibration_meta` echoes the active reliability table (ECE, Brier score, bins) when `CALIBRATION_DATA_PATH` is provided; clients can map raw→calibrated probabilities without recomputing offline.
   - When `FF_OPTIONS_ALWAYS=1`, responses also include `confluence_tags` (deduped from confidence factors and snapped levels), `tp_reasons` (per-target rationale strings), and `options_contracts` (server-picked contracts with enriched P/L blocks). If no eligible contracts are found, `options_note` communicates why.
   - `rejected_contracts[]` now carries explicit `reason` codes plus human-readable `message` strings (e.g. `DELTA_OUT_OF_RANGE`, `SPREAD_TOO_WIDE`) so UI copy can mirror server guardrails.
+  - The market-routing fallback path reuses the same refit pipeline, so even “LAST_SNAPSHOT” / LKG plans contain the full metadata surface (targets, runner policy, probabilities, strategy profile). Expect `warnings` to include `LIVE_FALLBACK_TO_LKG` when data came from frozen snapshots.
 - `/gpt/multi-context`
   - Request: `include_series` (default false), `intervals` (aka `frames`)
   - Response: `contexts` (series trimmed when gated), `summary` (frames_used, confluence_score, trend_notes, volatility_regime+label, expected_move_horizon, nearby_levels), `decimals`, `data_quality`
@@ -76,8 +79,9 @@ What’s included
   - Returns persisted `levels`, `zones`, `annotations`, `meta`, and `as_of` for a plan. When the plan session timestamp disagrees with overlay freshness the endpoint yields `409` with `{plan_id, plan_as_of, layers_as_of, message}` so the UI can display a warning without re-ordering data.
 
 Planner internals
+- Structural stop selection now prefers defended structure (swing highs/lows, OR levels, VA boundaries, VWAP bands) with an adaptive wick buffer, then enforces an ATR floor so the final stop is never inside normal noise (`stop_meta` surfaces both the structural anchor and ATR floor used).
 - Structural TP1 selector (both long and short): candidate generation (ORB/prior H/L, VWAP/EMAs, VAH/VAL/POC, Fib projections), style‑aware scoring, EM/ATR/ratio/R:R constraints, with graceful fallback to HTF snapper.
-- EM capping is applied during target snapping using expected_move_horizon.
+- EM capping is applied during target snapping using expected_move_horizon, and spacing rules respect style-specific tick/ATR gaps.
 - Geometry guardrail ensures ordered targets and appends a warning note when adjustments were required.
 
 Client guidance
