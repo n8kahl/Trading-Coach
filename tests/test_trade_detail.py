@@ -450,7 +450,10 @@ async def test_fallback_plan_handles_selector_rejections(monkeypatch):
     assert response.plan["badges"]
     assert response.options_contracts, "Expected fallback contracts even when guardrails reject defaults"
     assert response.options_contracts[0].get("guardrail_flags"), "Contracts should surface guardrail flags"
-    assert "guardrails" in (response.options_note or "").lower()
+    note_upper = (response.options_note or "").upper()
+    assert "GUARDRAIL_FLAGS" in note_upper
+    assert "WIDE_SPREAD" in note_upper
+    assert "LOW_OI" in note_upper
 
 
 @pytest.mark.asyncio

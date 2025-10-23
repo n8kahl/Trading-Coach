@@ -4906,7 +4906,7 @@ def _extract_options_contracts(options_payload: Mapping[str, Any] | None) -> Lis
 
 def _fallback_guardrail_contracts(
     contracts: Sequence[Dict[str, Any]],
-    guardrail_rejections: Sequence[Mapping[str, Any]],
+    rejections: Sequence[Mapping[str, Any]],
     *,
     symbol: str,
     limit: int = 3,
@@ -4914,7 +4914,7 @@ def _fallback_guardrail_contracts(
     if not contracts:
         return []
     symbol_reasons: Dict[str, Set[str]] = {}
-    for rejection in guardrail_rejections:
+    for rejection in rejections:
         sym_token = str(rejection.get("symbol") or symbol).upper()
         reason_token = str(rejection.get("reason") or "").upper()
         if not reason_token:
@@ -9543,6 +9543,7 @@ async def _generate_fallback_plan(
         )
         accepted_symbols = {str(item.get("symbol") or "").upper() for item in filtered_contracts if isinstance(item, Mapping)}
         filtered_rejections: List[Dict[str, Any]] = []
+        rejection_list: List[Dict[str, Any]] = []
         for rejection in [*selector_rejections, *guardrail_rejections]:
             sym = str(rejection.get("symbol") or "").upper()
             if sym and sym in accepted_symbols:
@@ -9556,8 +9557,7 @@ async def _generate_fallback_plan(
                 if not reason:
                     continue
                 key = (sym, reason)
-                existing = dedup.get(key)
-                if existing is None:
+                if key not in dedup:
                     dedup[key] = {"symbol": sym, "reason": reason}
                 if rejection.get("message"):
                     dedup[key]["message"] = str(rejection["message"])
@@ -9567,11 +9567,16 @@ async def _generate_fallback_plan(
         if filtered_contracts:
             options_contracts = filtered_contracts
         else:
-            fallback_contracts = _fallback_guardrail_contracts(extracted_contracts, guardrail_rejections, symbol=symbol)
+            reason_list = rejection_list if rejection_list else filtered_rejections
+            fallback_contracts = _fallback_guardrail_contracts(extracted_contracts, reason_list, symbol=symbol)
             if fallback_contracts:
                 options_contracts = fallback_contracts
                 if not options_note:
-                    options_note = "Contracts failed guardrails; review guardrail_flags."
+                    reason_labels = sorted({entry.get("reason") for entry in reason_list if entry.get("reason")})
+                    if reason_labels:
+                        options_note = f"Contracts unavailable ({', '.join(reason_labels)}); review guardrail_flags."
+                    else:
+                        options_note = "Contracts unavailable; review guardrail_flags."
             else:
                 options_contracts = []
                 if filtered_rejections and not options_note:
@@ -11235,42 +11240,70 @@ async def gpt_plan(
     options_note: str | None = None
     if include_options_contracts:
         extracted_contracts = _extract_options_contracts(options_payload)
+        selector_rejections: List[Dict[str, Any]] = []
+        if isinstance(options_payload, Mapping):
+            raw_rejections = options_payload.get("rejections") or []
+            if isinstance(raw_rejections, Sequence):
+                for rejection in raw_rejections:
+                    if not isinstance(rejection, Mapping):
+                        continue
+                    symbol_token = str(rejection.get("symbol") or symbol).upper()
+                    reason_token = str(rejection.get("reason") or "").upper()
+                    if not reason_token:
+                        continue
+                    entry = {"symbol": symbol_token, "reason": reason_token}
+                    if rejection.get("message"):
+                        entry["message"] = str(rejection["message"])
+                    selector_rejections.append(entry)
         filtered_contracts, guardrail_rejections = _apply_option_guardrails(
             extracted_contracts,
             max_spread_pct=float(getattr(settings, "ft_max_spread_pct", 8.0)),
             min_open_interest=int(getattr(settings, "ft_min_oi", 300)),
         )
-        filtered_rejections: List[Dict[str, Any]] = []
-        if guardrail_rejections:
-            filtered_rejections.extend(guardrail_rejections)
-        if filtered_rejections:
+        combined_rejections: List[Dict[str, Any]] = []
+        for rejection in [*selector_rejections, *guardrail_rejections]:
+            sym = str(rejection.get("symbol") or symbol).upper()
+            reason = str(rejection.get("reason") or "").upper()
+            if not reason:
+                continue
+            combined_rejections.append(
+                {"symbol": sym, "reason": reason} | ({"message": str(rejection["message"])} if rejection.get("message") else {})
+            )
+        rejection_list: List[Dict[str, Any]] = []
+        if combined_rejections:
             dedup: Dict[Tuple[str, str], Dict[str, Any]] = {}
-            for rejection in filtered_rejections:
-                sym = str(rejection.get("symbol") or symbol).upper()
-                reason = str(rejection.get("reason") or "").upper()
-                if not reason:
-                    continue
+            for rejection in combined_rejections:
+                sym = rejection["symbol"]
+                reason = rejection["reason"]
                 key = (sym, reason)
                 if key not in dedup:
                     dedup[key] = {"symbol": sym, "reason": reason}
                 if rejection.get("message"):
-                    dedup[key]["message"] = str(rejection["message"])
-            guardrail_list = list(dedup.values())
-            if guardrail_list:
-                rejected_contracts.extend(guardrail_list)
-                record_selector_rejections(guardrail_list, source="live")
+                    dedup[key]["message"] = rejection["message"]
+            rejection_list = list(dedup.values())
+            if rejection_list:
+                rejected_contracts.extend(rejection_list)
+                record_selector_rejections(rejection_list, source="live")
         if filtered_contracts:
             options_contracts = filtered_contracts
         else:
-            fallback_contracts = _fallback_guardrail_contracts(extracted_contracts, guardrail_rejections, symbol=symbol)
+            fallback_contracts = _fallback_guardrail_contracts(
+                extracted_contracts,
+                rejection_list if rejection_list else combined_rejections,
+                symbol=symbol,
+            )
             if fallback_contracts:
                 options_contracts = fallback_contracts
                 if not options_note:
-                    options_note = "Contracts failed guardrails; review guardrail_flags."
+                    reason_labels = sorted({entry.get("reason") for entry in (rejection_list or combined_rejections) if entry.get("reason")})
+                    if reason_labels:
+                        options_note = f"Contracts unavailable ({', '.join(reason_labels)}); review guardrail_flags."
+                    else:
+                        options_note = "Contracts unavailable; review guardrail_flags."
             else:
                 options_contracts = []
-                if filtered_rejections and not options_note:
-                    reason_labels = sorted({entry.get("reason") for entry in filtered_rejections if entry.get("reason")})
+                if (rejection_list or combined_rejections) and not options_note:
+                    reason_labels = sorted({entry.get("reason") for entry in (rejection_list or combined_rejections) if entry.get("reason")})
                     if reason_labels:
                         options_note = f"Contracts rejected ({', '.join(reason_labels)})"
                     else:
