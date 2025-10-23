@@ -36,7 +36,7 @@ def validate_plan(
     min_stop_atr: Mapping[str, float],
     max_stop_atr: Mapping[str, float],
     tp1_rr_min: Mapping[str, float],
-    spacing_min_atr: float,
+    spacing_min_price: float,
 ) -> Tuple[bool, str]:
     """Validate key invariants for the upgraded plan logic."""
 
@@ -56,7 +56,7 @@ def validate_plan(
     rr_tp1 = _risk_reward(entry, stop, targets[0], direction)
     if rr_tp1 < rr_floor - 1e-6:
         return False, "rr_below_min"
-    spacing = spacing_min_atr * atr
+    spacing = float(spacing_min_price)
     for prev, current in zip(targets, targets[1:]):
         if abs(current - prev) < spacing - 1e-6:
             return False, "tp_spacing"

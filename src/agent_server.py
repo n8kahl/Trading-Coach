@@ -169,10 +169,11 @@ from .logic.validators import validate_plan as validate_plan_guardrails
 
 logger = logging.getLogger(__name__)
 
-MIN_STOP_ATR = {"scalp": 0.6, "intraday": 0.9, "swing": 1.2, "leaps": 1.6}
+MIN_STOP_ATR = {"scalp": 0.6, "intraday": 0.9, "swing": 1.2, "leaps": 1.5}
 MAX_STOP_ATR = {"scalp": 1.6, "intraday": 2.0, "swing": 2.5, "leaps": 3.0}
 TP1_RR_MIN = {"scalp": 1.0, "intraday": 1.3, "swing": 1.6, "leaps": 2.0}
-MIN_TP_SPACING_ATR = 0.40
+TP_SPACING_TICKS = {"scalp": 3, "intraday": 4, "swing": 6, "leaps": 10}
+TP_SPACING_ATR = {"scalp": 0.15, "intraday": 0.20, "swing": 0.30, "leaps": 0.40}
 NEAR_STRUCT_TOL = 0.25
 RUNNER_K = {"scalp": 0.8, "intraday": 1.0, "swing": 1.2, "leaps": 1.5}
 GIVEBACK = {"scalp": 0.40, "intraday": 0.50, "swing": 0.55, "leaps": 0.60}
@@ -190,6 +191,15 @@ def _infer_tick_size(price: float) -> float:
     if price >= 1:
         return 0.005
     return 0.001
+
+
+def _target_spacing(style: str, atr: float, tick_size: float) -> float:
+    style_token = _normalize_style_token(style)
+    tick_multiplier = TP_SPACING_TICKS.get(style_token, TP_SPACING_TICKS["intraday"])
+    atr_multiplier = TP_SPACING_ATR.get(style_token, TP_SPACING_ATR["intraday"])
+    min_tick_gap = max(tick_multiplier, 1) * max(tick_size, 1e-4)
+    min_atr_gap = atr_multiplier * max(atr, 1e-6)
+    return max(min_tick_gap, min_atr_gap)
 
 
 def _normalize_style_token(style: str | None) -> str:
@@ -440,53 +450,80 @@ def build_stop(entry: float, direction: str, atr: float, levels: Mapping[str, fl
 
     stop_price: Optional[float] = None
     stop_source: Optional[str] = None
+    structural_pick: Optional[Tuple[str, float]] = None
+
+    tick_floor = max(tick_size, 1e-4)
+    ratio = atr / max(tick_floor, 1e-6)
+    wick_fraction = max(0.05, min(0.35, 0.15 * ratio))
+    wick_buffer = max(tick_floor, wick_fraction * atr)
 
     for level in ordered:
-        candidate = logic_snap_price(level.price, direction=invalidation_dir, atr=atr, pad_mult=0.1, precision=precision_val)
-        if direction_norm == "long" and candidate >= entry - tick_size * 0.5:
-            candidate = entry - tick_size
-        if direction_norm == "short" and candidate <= entry + tick_size * 0.5:
-            candidate = entry + tick_size
+        base = float(level.price)
+        if direction_norm == "long":
+            candidate = base - wick_buffer
+            candidate = min(candidate, entry - tick_floor)
+        else:
+            candidate = base + wick_buffer
+            candidate = max(candidate, entry + tick_floor)
         multiple = abs(entry - candidate) / atr
-        snap_trace.append(f"stop_candidate:{level.name}:{candidate:.4f}:{multiple:.2f}R")
-        if multiple < min_bound - 1e-6:
-            continue
+        snap_trace.append(f"stop_structural:{level.name}:{candidate:.4f}:{multiple:.2f}R")
+        structural_pick = (level.name, candidate)
         if multiple > max_bound + 1e-6:
             continue
-        stop_price = candidate
         stop_source = level.name
+        stop_price = candidate
         break
 
     if stop_price is None and ordered:
         fallback_level = ordered[-1]
-        candidate = logic_snap_price(fallback_level.price, direction=invalidation_dir, atr=atr, pad_mult=0.1, precision=precision_val)
-        if direction_norm == "long" and candidate >= entry - tick_size * 0.5:
-            candidate = entry - tick_size
-        if direction_norm == "short" and candidate <= entry + tick_size * 0.5:
-            candidate = entry + tick_size
+        base = float(fallback_level.price)
+        if direction_norm == "long":
+            candidate = base - wick_buffer
+            candidate = min(candidate, entry - tick_floor)
+        else:
+            candidate = base + wick_buffer
+            candidate = max(candidate, entry + tick_floor)
         multiple = abs(entry - candidate) / atr
-        snap_trace.append(f"stop_fallback:{fallback_level.name}:{candidate:.4f}:{multiple:.2f}R")
+        snap_trace.append(f"stop_structural_fallback:{fallback_level.name}:{candidate:.4f}:{multiple:.2f}R")
+        structural_pick = (fallback_level.name, candidate)
         if multiple <= max_bound + 1e-6:
             stop_price = candidate
             stop_source = fallback_level.name
 
+    atr_floor = entry - atr * min_bound if direction_norm == "long" else entry + atr * min_bound
+    if direction_norm == "long":
+        atr_floor = min(atr_floor, entry - tick_floor)
+    else:
+        atr_floor = max(atr_floor, entry + tick_floor)
+    atr_multiple = abs(entry - atr_floor) / atr
+    snap_trace.append(f"stop_atr_floor:{atr_floor:.4f}:{atr_multiple:.2f}R")
+
     if stop_price is None:
-        fallback = entry - atr * min_bound if direction_norm == "long" else entry + atr * min_bound
-        if direction_norm == "long" and fallback >= entry - tick_size * 0.5:
-            fallback = entry - tick_size
-        if direction_norm == "short" and fallback <= entry + tick_size * 0.5:
-            fallback = entry + tick_size
-        multiple = abs(entry - fallback) / atr
-        snap_trace.append(f"stop_fallback:atr_floor:{fallback:.4f}:{multiple:.2f}R")
-        if multiple > max_bound + 1e-6:
-            return None
-        stop_price = fallback
+        stop_price = atr_floor
         stop_source = "atr_floor"
+    else:
+        if direction_norm == "long":
+            if atr_floor < stop_price - 1e-9:
+                stop_price = atr_floor
+                stop_source = "atr_floor"
+        else:
+            if atr_floor > stop_price + 1e-9:
+                stop_price = atr_floor
+                stop_source = "atr_floor"
 
     if stop_price is None:
         return None
 
-    distance_atr = abs(entry - stop_price) / atr
+    multiple_final = abs(entry - stop_price) / atr
+    if multiple_final > max_bound + 1e-6:
+        return None
+    if multiple_final < min_bound - 1e-6:
+        stop_price = atr_floor
+        multiple_final = abs(entry - stop_price) / atr
+        if multiple_final < min_bound - 1e-6:
+            return None
+
+    distance_atr = multiple_final
     meta = {
         "source": stop_source or "structural",
         "snap_trace": snap_trace,
@@ -497,6 +534,13 @@ def build_stop(entry: float, direction: str, atr: float, levels: Mapping[str, fl
             "price": round(float(stop_price), precision_val) if precision_val is not None else float(stop_price),
         },
     }
+    if structural_pick:
+        meta["structural_anchor"] = {
+            "label": structural_pick[0],
+            "price": round(structural_pick[1], precision_val) if precision_val is not None else structural_pick[1],
+        }
+    meta["atr_floor"] = round(atr_floor, precision_val) if precision_val is not None else atr_floor
+    meta["wick_buffer"] = round(wick_buffer, precision_val) if precision_val is not None else wick_buffer
     return float(stop_price), meta
 
 
@@ -527,7 +571,8 @@ def build_targets(
     risk = abs(entry - stop)
     if risk <= 0:
         return [], [], [], [], [], [], False
-    min_spacing = MIN_TP_SPACING_ATR * atr
+    tick_size = float(ctx.get("tick_size") or 0.01)
+    min_spacing = float(ctx.get("spacing_min_price") or _target_spacing(style_token, atr, tick_size))
     tp1_floor = float(ctx.get("tp1_rr_floor") or TP1_RR_MIN.get(style_token, 1.3))
     later_floor = tp1_floor - 0.1
     calibration_ctx = {
@@ -591,15 +636,35 @@ def build_targets(
     raw_probabilities: List[float] = []
     em_capped = False
 
-    for label, price in candidates:
+    for label, raw_price in candidates:
+        price = float(raw_price)
+        if targets:
+            prev_price = targets[-1]
+            desired = prev_price + sign * min_spacing
+            if direction_norm == "long" and price < desired - 1e-6:
+                price = desired
+                snap_trace.append(f"tp_adjust:{label}:spacing->{price:.4f}")
+            elif direction_norm == "short" and price > desired + 1e-6:
+                price = desired
+                snap_trace.append(f"tp_adjust:{label}:spacing->{price:.4f}")
+        if cap_abs is not None:
+            cap_price = entry + sign * cap_abs
+            if (direction_norm == "long" and price > cap_price + 1e-6) or (direction_norm == "short" and price < cap_price - 1e-6):
+                price = cap_price
+                snap_trace.append(f"tp_adjust:{label}:cap->{price:.4f}")
+                em_capped = True
+        if (direction_norm == "long" and price <= entry + 1e-6) or (direction_norm == "short" and price >= entry - 1e-6):
+            snap_trace.append(f"tp_skip:{label}:invalid_order")
+            continue
+        if targets:
+            if abs(price - targets[-1]) < min_spacing - 1e-6:
+                snap_trace.append(f"tp_skip:{label}:spacing")
+                continue
         distance = abs(price - entry)
         if distance <= 1e-6:
             continue
         if cap_abs is not None and distance > cap_abs + 1e-6:
             snap_trace.append(f"tp_skip:{label}:cap")
-            continue
-        if targets and abs(price - targets[-1]) < min_spacing - 1e-6:
-            snap_trace.append(f"tp_skip:{label}:spacing")
             continue
         rr_multiple = distance / risk
         floor = tp1_floor if not targets else later_floor
@@ -728,12 +793,15 @@ def _refit_plan_phase2(
     stop_price, stop_meta = stop_result
 
     tp_rr_floor = TP1_RR_MIN.get(style_token, 1.3) + (0.2 if mtf_disagreement else 0.0)
+    spacing_abs = _target_spacing(style_token, atr_value, tick_size)
     target_ctx = {
         "tp1_rr_floor": tp_rr_floor,
         "precision": precision,
         "calibration_store": calibration_store,
         "calibration_cohort": symbol.upper(),
         "symbol": symbol,
+        "tick_size": tick_size,
+        "spacing_min_price": spacing_abs,
     }
     targets_tuple = build_targets(
         entry,
@@ -763,7 +831,7 @@ def _refit_plan_phase2(
         min_stop_atr=MIN_STOP_ATR,
         max_stop_atr=MAX_STOP_ATR,
         tp1_rr_min=TP1_RR_MIN,
-        spacing_min_atr=MIN_TP_SPACING_ATR,
+        spacing_min_price=spacing_abs,
     )
     if not is_valid:
         return None
