@@ -156,8 +156,6 @@ from .levels.snapper import Level, SnapContext, collect_levels, snap_prices
 from .features.mtf import compute_mtf_bundle, MTFBundle
 from .features.htf_levels import compute_htf_levels, HTFLevels
 from .strategy.engine import infer_strategy, mtf_amplifier
-from .services.fallbacks import compute_plan_with_fallback
-from .services.plan_service import generate_plan as generate_plan_v2
 from .services.scan_fallbacks import build_placeholder_candidates, compute_scan_with_fallback
 from .services.scan_service import generate_scan as generate_scan_v2
 from .services.universe import resolve_universe
@@ -10193,58 +10191,6 @@ async def gpt_plan(
         explicit_value=request_payload.simulate_open,
         explicit_field_set="simulate_open" in fields_set,
     )
-    if getattr(settings, "gpt_backend_v2_enabled", False):
-        route_v2 = route_for_request(simulate_open, now=datetime.now(timezone.utc))
-        plan_payload_v2 = await generate_plan_v2(
-            symbol,
-            style=request_payload.style,
-            route=route_v2,
-            app=request.app,
-        )
-        response.headers["X-No-Fabrication"] = "1"
-        return PlanResponse.model_validate(plan_payload_v2)
-    use_market_routing = bool(getattr(settings, "gpt_market_routing_enabled", True))
-    if use_market_routing:
-        route = pick_data_source()
-        if simulate_open:
-            route = apply_simulate_open(route, now=datetime.now(timezone.utc))
-        try:
-            plan_payload = await compute_plan_with_fallback(symbol, route)
-        except Exception:  # pragma: no cover - defensive
-            logger.exception("compute_plan_with_fallback failed; emitting stub response")
-            plan_payload = {
-                "plan_id": f"{symbol}-STUB-{route.mode.upper()}",
-                "version": 1,
-                "trade_detail": "",
-                "planning_context": route.planning_context,
-                "symbol": symbol,
-                "targets": [],
-                "target_meta": [],
-                "targets_meta": [],
-                "entry_candidates": [],
-                "key_levels_used": {"session": [], "structural": []},
-                "meta": {"key_levels_used": {"session": [], "structural": []}},
-                "data_quality": {
-                    "series_present": False,
-                    "expected_move": None,
-                    "remaining_atr": None,
-                    "em_used": None,
-                    "snapshot": {
-                        "generated_at": route.as_of.isoformat(),
-                        "symbol_count": 1,
-                    },
-                },
-                "snap_trace": ["fallback: emergency_stub"],
-                "warnings": ["LKG_PARTIAL" if route.planning_context == "frozen" else "LIVE_PARTIAL"],
-                "planning_snapshot": {
-                    "entry_anchor": None,
-                    "entry_actionability": None,
-                    "entry_candidates": [],
-                },
-            }
-        plan_payload.setdefault("symbol", symbol)
-        response.headers["X-No-Fabrication"] = "1"
-        return PlanResponse.model_validate(plan_payload)
     session_payload = _session_payload_from_request(request)
     session_token = _session_tracking_id(session_payload)
     user_id = getattr(user, "user_id", "anonymous")
