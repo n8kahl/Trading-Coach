@@ -74,6 +74,42 @@ _CATALOG: Dict[str, StrategyProfile] = {
         runner="Trail with 1.0× ATR behind intraday swings.",
         badges=("Gap Fill",),
     ),
+    "vwap_reclaim": StrategyProfile(
+        name="VWAP Reclaim/Reject",
+        trigger=[
+            "VWAP reclaimed/rejected with 2-3 bar confirmation",
+            "Confluence with opening range boundary",
+        ],
+        invalidation="Lose VWAP on closing basis or re-enter opening range.",
+        management="Trim into prior structure (OR / PDH / PDL), trail per runner guidance.",
+        reload="Single reload permitted on subsequent VWAP test with confirmation.",
+        runner="Trail 0.8× ATR while VWAP holds in trade direction.",
+        badges=("VWAP", "Structure"),
+    ),
+    "range_break_retest": StrategyProfile(
+        name="Range Break & Retest",
+        trigger=[
+            "Session or prior day range breaks",
+            "Price retests and holds the breakout level",
+        ],
+        invalidation="Close back inside the broken range.",
+        management="Scale at first structural target, trail stop below reclaimed level.",
+        reload="Allowed on second retest if volume confirms acceptance.",
+        runner="Trail 1.0× ATR beneath reclaimed structure.",
+        badges=("Range Break",),
+    ),
+    "ema_pullback_trend": StrategyProfile(
+        name="EMA Pullback Trend",
+        trigger=[
+            "EMA stack aligned with trade bias",
+            "Price pulls back to EMA cluster with rejection wick",
+        ],
+        invalidation="Close through 20 EMA or breakdown of swing structure.",
+        management="Scale at TP1, trail remaining position with adaptive EMA runner.",
+        reload="Reload permitted on next EMA tag if ADX remains rising.",
+        runner="Trail 0.9× ATR under higher lows (or above lower highs).",
+        badges=("Trend",),
+    ),
     "midday_mean_revert": StrategyProfile(
         name="Midday VWAP Reversion",
         trigger=[
@@ -173,4 +209,3 @@ def compose_strategy_badges(
 
 
 __all__ = ["StrategyProfile", "get_strategy_profile", "compose_strategy_badges"]
-
