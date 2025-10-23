@@ -10193,6 +10193,25 @@ async def gpt_plan(
         explicit_value=request_payload.simulate_open,
         explicit_field_set="simulate_open" in fields_set,
     )
+    fallback_plan_response: PlanResponse | None = None
+    if getattr(settings, "gpt_market_routing_enabled", True):
+        try:
+            fallback_plan_response = await _generate_fallback_plan(
+                symbol,
+                request_payload.style,
+                request,
+                user,
+                simulate_open=simulate_open,
+                plan_request=request_payload,
+            )
+        except HTTPException as exc:
+            if exc.status_code not in (400, 404):
+                logger.debug("structured fallback plan unavailable for %s: %s", symbol, exc)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("structured fallback plan generation failed for %s", symbol)
+        if fallback_plan_response is not None:
+            response.headers["X-No-Fabrication"] = "1"
+            return fallback_plan_response
     if getattr(settings, "gpt_backend_v2_enabled", False):
         route_v2 = route_for_request(simulate_open, now=datetime.now(timezone.utc))
         plan_payload_v2 = await generate_plan_v2(
