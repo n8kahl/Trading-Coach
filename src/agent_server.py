@@ -2876,6 +2876,54 @@ class PlanResponse(BaseModel):
     planning_snapshot: Dict[str, Any] | None = None
 
 
+def _prune_plan_payload(plan_payload: "PlanResponse") -> None:
+    """Strip bulky debug fields so responses stay under transport limits."""
+    plan_payload.snap_trace = None
+    plan_payload.rejected_contracts = []
+    plan_payload.plan_layers = {}
+    plan_block = plan_payload.plan if isinstance(plan_payload.plan, dict) else None
+    structured_block = plan_payload.structured_plan if isinstance(plan_payload.structured_plan, dict) else None
+    if plan_block:
+        plan_block.pop("snap_trace", None)
+        plan_block.pop("rejected_contracts", None)
+        for key in ("meta", "entry_candidates", "key_levels_used", "tp_reasons"):
+            plan_block.pop(key, None)
+    if structured_block:
+        structured_block.pop("snap_trace", None)
+        structured_block.pop("rejected_contracts", None)
+        for key in (
+            "entry_candidates",
+            "key_levels_used",
+            "tp_reasons",
+            "runner_policy",
+            "risk_block",
+            "execution_rules",
+            "options_contracts",
+            "options_note",
+            "target_meta",
+            "target_profile",
+            "calibration_meta",
+        ):
+            structured_block.pop(key, None)
+    if isinstance(plan_payload.target_profile, dict):
+        plan_payload.target_profile.pop("snap_trace", None)
+    if isinstance(plan_payload.meta, dict):
+        meta_block = plan_payload.meta
+        meta_block.pop("snap_trace", None)
+        meta_block.pop("rejected_contracts", None)
+        for key in (
+            "targets_meta",
+            "key_levels_used",
+            "entry_candidates",
+            "tp_reasons",
+            "strategy_profile",
+            "runner_policy",
+            "mtf_confluence",
+            "badges",
+        ):
+            meta_block.pop(key, None)
+
+
 class AssistantExecRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -10156,6 +10204,7 @@ async def _generate_fallback_plan(
     mode_label = "live" if is_plan_live else "frozen"
     record_plan_duration(mode_label, elapsed_ms)
     record_candidate_count(mode_label, 0)
+    _prune_plan_payload(plan_response)
     return plan_response
 
 
@@ -10269,22 +10318,6 @@ async def gpt_plan(
     user_id = getattr(user, "user_id", "anonymous")
     style_norm_req = (request_payload.style or "").strip().lower()
     style_lookup_key = style_norm_req or _SCAN_STYLE_ANY
-
-    def _prune_plan_payload(plan_payload: PlanResponse) -> None:
-        plan_payload.snap_trace = None
-        plan_payload.rejected_contracts = []
-        plan_payload.plan_layers = {}
-        if isinstance(plan_payload.plan, dict):
-            plan_payload.plan.pop("snap_trace", None)
-            plan_payload.plan.pop("rejected_contracts", None)
-        if isinstance(plan_payload.structured_plan, dict):
-            plan_payload.structured_plan.pop("snap_trace", None)
-            plan_payload.structured_plan.pop("rejected_contracts", None)
-        if isinstance(plan_payload.target_profile, dict):
-            plan_payload.target_profile.pop("snap_trace", None)
-        if isinstance(plan_payload.meta, dict):
-            plan_payload.meta.pop("snap_trace", None)
-            plan_payload.meta.pop("rejected_contracts", None)
 
     def _finalize_plan_response(plan_payload: PlanResponse) -> PlanResponse:
         _prune_plan_payload(plan_payload)
