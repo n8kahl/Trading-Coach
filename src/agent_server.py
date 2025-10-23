@@ -111,7 +111,7 @@ from .db import (
 from .data_sources import fetch_polygon_ohlcv
 from .core.unified_snapshot import UnifiedSnapshot, get_unified_snapshot
 from .lib.data_source import DataRoute, pick_data_source
-from .lib.market_clock import apply_simulate_open
+from .lib.market_clock import apply_simulate_open, route_for_request
 from .symbol_streamer import SymbolStreamCoordinator, fetch_live_quote
 from .live_plan_engine import LivePlanEngine
 from .statistics import get_style_stats
@@ -156,7 +156,10 @@ from .features.mtf import compute_mtf_bundle, MTFBundle
 from .features.htf_levels import compute_htf_levels, HTFLevels
 from .strategy.engine import infer_strategy, mtf_amplifier
 from .services.fallbacks import compute_plan_with_fallback
+from .services.plan_service import generate_plan as generate_plan_v2
 from .services.scan_fallbacks import build_placeholder_candidates, compute_scan_with_fallback
+from .services.scan_service import generate_scan as generate_scan_v2
+from .services.universe import resolve_universe
 
 logger = logging.getLogger(__name__)
 
@@ -5545,6 +5548,29 @@ async def gpt_scan_endpoint(
     planning_mode = bool(getattr(request_payload, "planning_mode", False))
     session_payload = _session_payload_from_request(request)
     settings = get_settings()
+    if getattr(settings, "gpt_backend_v2_enabled", False):
+        route_v2 = route_for_request(simulate_open, now=datetime.now(timezone.utc))
+        try:
+            resolved_symbols = await resolve_universe(request_payload.universe, request_payload.style)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "UNIVERSE_UNAVAILABLE", "message": str(exc)},
+            ) from exc
+        if not resolved_symbols:
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "UNIVERSE_EMPTY", "message": "Universe resolution returned no symbols"},
+            )
+        page_payload_v2 = await generate_scan_v2(
+            symbols=resolved_symbols,
+            style=request_payload.style,
+            limit=request_payload.limit,
+            route=route_v2,
+            app=request.app,
+        )
+        response.headers["X-No-Fabrication"] = "1"
+        return ScanPage.model_validate(page_payload_v2)
     use_market_routing = bool(getattr(settings, "gpt_market_routing_enabled", True))
     if use_market_routing and not planning_mode:
         route = pick_data_source()
@@ -5798,11 +5824,16 @@ async def gpt_scan_endpoint(
     banner_override: str | None = None
     snapshot: UnifiedSnapshot | None = None
     try:
-        market_data, data_source_map, snapshot = await _collect_market_data(
+        _market_result = await _collect_market_data(
             tickers,
             timeframe=context.data_timeframe,
             as_of=data_as_of,
         )
+        if isinstance(_market_result, tuple) and len(_market_result) == 2:
+            market_data, data_source_map = _market_result
+            snapshot = None
+        else:
+            market_data, data_source_map, snapshot = _market_result
     except HTTPException as exc:
         logger.warning("Market data collection failed live: %s", exc)
         dq = dict(dq)
@@ -5810,11 +5841,16 @@ async def gpt_scan_endpoint(
         dq["mode"] = "degraded"
         dq["error"] = "market_data_unavailable"
         try:
-            market_data, data_source_map, snapshot = await _collect_market_data(
+            _market_result = await _collect_market_data(
                 tickers,
                 timeframe=context.data_timeframe,
                 as_of=context.as_of,
             )
+            if isinstance(_market_result, tuple) and len(_market_result) == 2:
+                market_data, data_source_map = _market_result
+                snapshot = None
+            else:
+                market_data, data_source_map, snapshot = _market_result
             prior_context = context
             context = ScanContext(
                 as_of=prior_context.as_of,
@@ -6305,11 +6341,16 @@ async def _legacy_scan(
     index_mode = _get_index_mode()
     index_symbols = {symbol for symbol in resolved_tickers if index_mode and index_mode.applies(symbol)}
     index_counters = {"success": 0, "fallback": 0}
-    market_data, data_source_map, snapshot = await _collect_market_data(
+    _market_result = await _collect_market_data(
         resolved_tickers,
         timeframe=data_timeframe,
         as_of=None if is_open else as_of_dt,
     )
+    if isinstance(_market_result, tuple) and len(_market_result) == 2:
+        market_data, data_source_map = _market_result
+        snapshot = None
+    else:
+        market_data, data_source_map, snapshot = _market_result
     if index_mode and index_symbols:
         synthetic_count = 0
         for index_symbol in list(index_symbols):
@@ -7190,11 +7231,16 @@ async def _generate_fallback_plan(
     timeframe_map = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}
     timeframe = timeframe_map.get(style_token, "5")
     try:
-        market_data, data_sources, snapshot = await _collect_market_data(
+        _market_result = await _collect_market_data(
             [symbol],
             timeframe=timeframe,
             as_of=None if is_open else as_of_dt,
         )
+        if isinstance(_market_result, tuple) and len(_market_result) == 2:
+            market_data, data_sources = _market_result
+            snapshot = None
+        else:
+            market_data, data_sources, snapshot = _market_result
     except HTTPException:
         return None
     data_meta["sources"] = data_sources
@@ -8799,6 +8845,16 @@ async def gpt_plan(
         explicit_value=request_payload.simulate_open,
         explicit_field_set="simulate_open" in fields_set,
     )
+    if getattr(settings, "gpt_backend_v2_enabled", False):
+        route_v2 = route_for_request(simulate_open, now=datetime.now(timezone.utc))
+        plan_payload_v2 = await generate_plan_v2(
+            symbol,
+            style=request_payload.style,
+            route=route_v2,
+            app=request.app,
+        )
+        response.headers["X-No-Fabrication"] = "1"
+        return PlanResponse.model_validate(plan_payload_v2)
     use_market_routing = bool(getattr(settings, "gpt_market_routing_enabled", True))
     if use_market_routing:
         route = pick_data_source()

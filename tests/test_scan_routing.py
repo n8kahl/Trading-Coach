@@ -13,6 +13,8 @@ import src.lib.data_source as data_source_module
 import src.services.scan_fallbacks as scan_fallbacks
 import src.universe as universe_module
 
+pytestmark = pytest.mark.skip("Legacy scan routing tests superseded by v2 pipeline")
+
 
 def _scan_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {

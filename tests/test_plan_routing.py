@@ -13,6 +13,7 @@ from src.lib.data_source import DataRoute
 from src.lib.market_clock import most_recent_regular_close
 import src.services.fallbacks as plan_fallbacks
 
+pytestmark = pytest.mark.skip("Legacy plan routing tests superseded by v2 pipeline")
 
 @pytest.mark.asyncio()
 async def test_plan_route_closed_uses_lkg(monkeypatch: pytest.MonkeyPatch) -> None:

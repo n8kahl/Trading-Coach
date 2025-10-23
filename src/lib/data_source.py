@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Literal
 
-from .market_clock import get_market_state, most_recent_regular_close
+from .data_route import DataRoute
+from .market_clock import route_for_request
 
 DataMode = Literal["live", "lkg"]
-
-
-@dataclass(frozen=True)
-class DataRoute:
-    mode: DataMode
-    as_of: datetime
-    planning_context: Literal["live", "frozen"]
 
 
 def _ensure_now(now: datetime | None) -> datetime:
@@ -30,8 +23,7 @@ def pick_data_source(
     is_holiday: Callable[[datetime], bool] | None = None,
 ) -> DataRoute:
     current = _ensure_now(now)
-    state = get_market_state(current, is_holiday=is_holiday)
-    if state == "open":
-        return DataRoute(mode="live", as_of=current, planning_context="live")
-    close_dt = most_recent_regular_close(current, is_holiday=is_holiday)
-    return DataRoute(mode="lkg", as_of=close_dt, planning_context="frozen")
+    return route_for_request(False, now=current, is_holiday=is_holiday)
+
+
+__all__ = ["DataRoute", "DataMode", "pick_data_source"]

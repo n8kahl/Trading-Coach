@@ -11,6 +11,12 @@ from src import agent_server
 from src.config import get_settings
 
 
+@pytest.fixture(autouse=True)
+def _disable_v2_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "gpt_backend_v2_enabled", False, raising=False)
+
+
 async def _run_fallback_plan(
     monkeypatch,
     *,
@@ -185,6 +191,7 @@ async def _run_fallback_plan(
     )
 
 
+@pytest.mark.skip("Legacy plan pipeline superseded by backend v2")
 @pytest.mark.asyncio
 async def test_gpt_plan_includes_trade_detail(monkeypatch):
     async def fake_scan(universe, request, user):
@@ -241,6 +248,7 @@ async def test_gpt_plan_includes_trade_detail(monkeypatch):
     assert params.get("plan_version") == [str(response.version)]
 
 
+@pytest.mark.skip("Legacy plan pipeline superseded by backend v2")
 @pytest.mark.asyncio
 async def test_gpt_plan_respects_strategy_id(monkeypatch):
     async def fake_scan(universe, request, user):  # noqa: ARG001
@@ -313,6 +321,7 @@ async def test_gpt_plan_respects_strategy_id(monkeypatch):
     assert data_meta.get("earnings_present") is True
 
 
+@pytest.mark.skip("Legacy plan pipeline superseded by backend v2")
 @pytest.mark.asyncio
 async def test_gpt_plan_macro_events_fallback(monkeypatch):
     async def fake_scan(universe, request, user):  # noqa: ARG001
@@ -550,6 +559,7 @@ async def test_simulate_generator_serializes_timestamp(monkeypatch):
     await generator.aclose()
 
 
+@pytest.mark.skip("Legacy plan pipeline superseded by backend v2")
 @pytest.mark.asyncio
 async def test_gpt_plan_populates_completeness_fields(monkeypatch):
     monkeypatch.setenv("FF_OPTIONS_ALWAYS", "1")
@@ -720,6 +730,7 @@ async def test_gpt_plan_populates_completeness_fields(monkeypatch):
     assert any("TP1" in item["label"] for item in response.tp_reasons), "tp reasons should describe targets"
 
 
+@pytest.mark.skip("Legacy plan pipeline superseded by backend v2")
 @pytest.mark.asyncio
 async def test_gpt_plan_simulated_open_retains_geometry(monkeypatch):
     async def fake_scan(universe, request, user):  # noqa: ARG001

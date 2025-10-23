@@ -4,7 +4,14 @@ from dataclasses import replace
 import pytest
 
 from src import agent_server
+from src.config import get_settings
 from test_trade_detail import _run_fallback_plan
+
+
+@pytest.fixture(autouse=True)
+def _disable_v2_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "gpt_backend_v2_enabled", False, raising=False)
 
 
 @pytest.mark.asyncio

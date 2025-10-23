@@ -162,6 +162,48 @@ class UniverseProvider:
         return snapshot
 
 
+_STATIC_FALLBACK = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
+
+
+async def _expand_with_guard(token: str, *, style: str) -> List[str]:
+    try:
+        symbols = await legacy_universe.expand_universe(token, style=style, limit=250)
+    except Exception:
+        logger.exception("expand_universe failed for %s", token)
+        return []
+    return _normalize(symbols)
+
+
+async def resolve_universe(universe: str | Sequence[str], style: str) -> List[str]:
+    """Resolve a universe token or explicit list into concrete symbols."""
+
+    if isinstance(universe, (list, tuple, set)):
+        normalized = _normalize(universe)
+        if normalized:
+            return normalized
+
+    token = (universe or "").strip().upper() if isinstance(universe, str) else ""
+    candidates: List[str] = []
+
+    if token:
+        candidates = await _expand_with_guard(token, style=style)
+
+    if token == "LAST_SNAPSHOT" and not candidates:
+        candidates = await _expand_with_guard("FT-TOPLIQUIDITY", style=style)
+
+    if not candidates:
+        settings_fallback = _settings_list("planning_watchlist_symbols") or _settings_list("watchlist_symbols")
+        candidates = _normalize(settings_fallback)
+
+    if not candidates:
+        candidates = list(_STATIC_FALLBACK)
+
+    if not candidates:
+        raise RuntimeError("Universe resolution produced no symbols")
+
+    return candidates
+
+
 from .persist import PlanningPersistence  # noqa: E402
 
-__all__ = ["UniverseProvider", "UniverseSnapshot"]
+__all__ = ["UniverseProvider", "UniverseSnapshot", "resolve_universe"]

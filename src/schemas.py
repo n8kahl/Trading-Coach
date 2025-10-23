@@ -71,6 +71,7 @@ class ScanCandidate(BaseModel):
     options: Dict[str, Any] | None = None
     options_contracts: list[Dict[str, Any]] = Field(default_factory=list)
     options_note: str | None = None
+    rejected_contracts: list[Dict[str, Any]] = Field(default_factory=list)
     entry_distance_pct: float | None = None
     entry_distance_atr: float | None = None
     bars_to_trigger: float | None = None

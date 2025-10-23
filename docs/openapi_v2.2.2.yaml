@@ -43,7 +43,7 @@ paths:
               $ref: '#/components/schemas/ScanRequest'
       responses:
         '200':
-          description: Ranked scan candidates (paged 50 per request)
+          description: Ranked scan candidates (limit honoured per request)
           content:
             application/json:
               schema:
@@ -368,6 +368,14 @@ components:
           type: array
           items: { $ref: '#/components/schemas/Contract' }
         options_note: { type: string, nullable: true }
+        rejected_contracts:
+          type: array
+          items:
+            type: object
+            properties:
+              symbol: { type: string }
+              reason: { type: string }
+              message: { type: string, nullable: true }
         entry_distance_pct: { type: number, format: double, nullable: true }
         entry_distance_atr: { type: number, format: double, nullable: true }
         bars_to_trigger: { type: number, format: double, nullable: true }
@@ -449,6 +457,9 @@ components:
         meta:
           planning_mode: true
           run_id: 4123
+          snapshot:
+            generated_at: "2025-10-20T01:00:00Z"
+            symbol_count: 3
           indices_context:
             I:SPX: { close: 4710.5, change_pct: 0.45 }
           universe:
@@ -475,6 +486,7 @@ components:
             tp_reasons:
               - label: TP1
                 reason: "Snapped to VAH"
+            chart_url: "https://trading-coach-production.up.railway.app/tv?...&symbol=AAPL"
             runner_policy:
               fraction: 0.2
               atr_multiple: 0.8
@@ -499,6 +511,9 @@ components:
               entry: 188.42
               stop: 185.9
               targets: [189.8, 191.2, 192.4]
+            options_contracts: []
+            options_note: null
+            rejected_contracts: []
             source_paths:
               entry: geometry_engine
               stop: geometry_engine
@@ -521,6 +536,9 @@ components:
           planning_mode: true
           series_present: true
           indices_present: true
+          snapshot:
+            generated_at: "2025-10-20T01:00:00Z"
+            symbol_count: 3
         session:
           planning_mode: true
           universe: FT-TopLiquidity
