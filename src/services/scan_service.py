@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List
 
 import httpx
@@ -11,20 +12,36 @@ from ..providers.options import select_contracts
 from ..providers.planner import plan as run_plan
 from ..providers.scanner import scan as run_scan
 from ..providers.series import fetch_series
+from .chart_utils import sanitize_chart_params
+
+logger = logging.getLogger(__name__)
 
 
-async def _chart_urls(app: FastAPI, payloads: List[Dict[str, Any]]) -> List[str | None]:
+async def _chart_urls(app: FastAPI, payloads: List[Dict[str, Any] | None]) -> List[str | None]:
     if not payloads:
         return []
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://app.local") as client:
         results: List[str | None] = []
         for params in payloads:
-            if params is None:
+            sanitized = sanitize_chart_params(params if isinstance(params, dict) else None)
+            if not sanitized:
                 results.append(None)
                 continue
-            response = await client.post("/gpt/chart-url", json=params)
-            response.raise_for_status()
+            try:
+                response = await client.post("/gpt/chart-url", json=sanitized)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                logger.warning(
+                    "chart-url endpoint rejected payload during scan enrichment",
+                    extra={"status": exc.response.status_code, "detail": exc.response.text},
+                )
+                results.append(None)
+                continue
+            except httpx.RequestError as exc:
+                logger.warning("chart-url request failed during scan enrichment", extra={"error": str(exc)})
+                results.append(None)
+                continue
             results.append(response.json().get("interactive"))
         return results
 
@@ -90,9 +107,16 @@ async def generate_scan(
         candidate["options_contracts"] = contracts.get("options_contracts", [])
         candidate["rejected_contracts"] = contracts.get("rejected_contracts", [])
         candidate["options_note"] = contracts.get("options_note")
-        charts = plan_obj.get("charts") or {}
-        params = charts.get("params") if isinstance(charts, dict) else None
-        chart_payloads.append(params if isinstance(params, dict) else None)
+        charts_container = plan_obj.get("charts")
+        if not isinstance(charts_container, dict):
+            charts_container = {}
+            plan_obj["charts"] = charts_container
+
+        params = charts_container.get("params") if isinstance(charts_container, dict) else None
+        chart_params = sanitize_chart_params(params if isinstance(params, dict) else None)
+        if chart_params:
+            charts_container["params"] = chart_params
+        chart_payloads.append(chart_params)
         enriched.append(candidate)
 
     chart_urls = await _chart_urls(app, chart_payloads)

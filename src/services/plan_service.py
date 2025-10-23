@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -11,13 +12,32 @@ from ..providers.geometry import build_geometry
 from ..providers.options import select_contracts
 from ..providers.planner import plan as run_plan
 from ..providers.series import fetch_series
+from .chart_utils import sanitize_chart_params
+
+logger = logging.getLogger(__name__)
 
 
 async def _resolve_chart_url(app: FastAPI, params: Dict[str, Any]) -> Optional[str]:
+    sanitized = sanitize_chart_params(params)
+    if not sanitized:
+        params_keys = sorted(params.keys()) if isinstance(params, dict) else None
+        logger.debug("chart params invalid or incomplete; skipping chart-url resolution", extra={"params_keys": params_keys})
+        return None
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://app.local") as client:
-        response = await client.post("/gpt/chart-url", json=params)
-        response.raise_for_status()
+        try:
+            response = await client.post("/gpt/chart-url", json=sanitized)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "chart-url endpoint rejected payload",
+                extra={"status": exc.response.status_code, "detail": exc.response.text},
+            )
+            return None
+        except httpx.RequestError as exc:
+            logger.warning("chart-url request failed", extra={"error": str(exc)})
+            return None
         payload = response.json()
         return payload.get("interactive")
 
@@ -61,11 +81,18 @@ async def generate_plan(
     plan_obj["rejected_contracts"] = contracts.get("rejected_contracts", [])
     plan_obj["options_note"] = contracts.get("options_note")
 
-    charts = plan_obj.get("charts") or {}
-    params = charts.get("params")
-    if isinstance(params, dict):
-        chart_url = await _resolve_chart_url(app, params)
-        plan_obj["chart_url"] = chart_url
+    charts_container = plan_obj.get("charts")
+    if not isinstance(charts_container, dict):
+        charts_container = {}
+        plan_obj["charts"] = charts_container
+
+    params = charts_container.get("params") if isinstance(charts_container, dict) else None
+    chart_params = sanitize_chart_params(params if isinstance(params, dict) else None)
+    if chart_params:
+        charts_container["params"] = chart_params
+        chart_url = await _resolve_chart_url(app, chart_params)
+        if chart_url:
+            plan_obj["chart_url"] = chart_url
 
     plan_obj.setdefault("style", style)
     plan_obj.setdefault("warnings", [])
