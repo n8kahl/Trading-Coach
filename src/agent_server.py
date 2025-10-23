@@ -4904,6 +4904,38 @@ def _extract_options_contracts(options_payload: Mapping[str, Any] | None) -> Lis
     return contracts[:3]
 
 
+def _fallback_guardrail_contracts(
+    contracts: Sequence[Dict[str, Any]],
+    guardrail_rejections: Sequence[Mapping[str, Any]],
+    *,
+    symbol: str,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    if not contracts:
+        return []
+    symbol_reasons: Dict[str, Set[str]] = {}
+    for rejection in guardrail_rejections:
+        sym_token = str(rejection.get("symbol") or symbol).upper()
+        reason_token = str(rejection.get("reason") or "").upper()
+        if not reason_token:
+            continue
+        symbol_reasons.setdefault(sym_token, set()).add(reason_token)
+    fallback: List[Dict[str, Any]] = []
+    for contract in contracts:
+        if not isinstance(contract, Mapping):
+            continue
+        entry = dict(contract)
+        sym = str(entry.get("symbol") or symbol).upper()
+        flags = sorted(symbol_reasons.get(sym, ()))
+        if flags:
+            entry["guardrail_flags"] = flags
+            entry.setdefault("status", "guardrail_violation")
+        fallback.append(entry)
+        if len(fallback) >= limit:
+            break
+    return fallback
+
+
 def _apply_option_guardrails(
     contracts: Sequence[Dict[str, Any]],
     *,
@@ -9535,19 +9567,25 @@ async def _generate_fallback_plan(
         if filtered_contracts:
             options_contracts = filtered_contracts
         else:
-            options_contracts = []
-            if filtered_rejections and not options_note:
-                reason_labels = sorted({entry.get("reason") for entry in filtered_rejections if entry.get("reason")})
-                if reason_labels:
-                    options_note = f"Contracts rejected ({', '.join(reason_labels)})"
-                else:
-                    options_note = "Contracts filtered by liquidity guardrails"
-            elif isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
-                options_note = str(options_payload["quotes_notice"])
-            elif not side_hint:
-                options_note = "Options side unavailable for this plan"
+            fallback_contracts = _fallback_guardrail_contracts(extracted_contracts, guardrail_rejections, symbol=symbol)
+            if fallback_contracts:
+                options_contracts = fallback_contracts
+                if not options_note:
+                    options_note = "Contracts failed guardrails; review guardrail_flags."
             else:
-                options_note = "No tradeable contracts met filters"
+                options_contracts = []
+                if filtered_rejections and not options_note:
+                    reason_labels = sorted({entry.get("reason") for entry in filtered_rejections if entry.get("reason")})
+                    if reason_labels:
+                        options_note = f"Contracts rejected ({', '.join(reason_labels)})"
+                    else:
+                        options_note = "Contracts filtered by liquidity guardrails"
+                elif isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
+                    options_note = str(options_payload["quotes_notice"])
+                elif not side_hint:
+                    options_note = "Options side unavailable for this plan"
+                else:
+                    options_note = "No tradeable contracts met filters"
         if event_window_blocked:
             options_contracts = []
             options_note = "Blocked by event window"
@@ -11202,20 +11240,47 @@ async def gpt_plan(
             max_spread_pct=float(getattr(settings, "ft_max_spread_pct", 8.0)),
             min_open_interest=int(getattr(settings, "ft_min_oi", 300)),
         )
+        filtered_rejections: List[Dict[str, Any]] = []
         if guardrail_rejections:
-            rejected_contracts.extend(guardrail_rejections)
+            filtered_rejections.extend(guardrail_rejections)
+        if filtered_rejections:
+            dedup: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            for rejection in filtered_rejections:
+                sym = str(rejection.get("symbol") or symbol).upper()
+                reason = str(rejection.get("reason") or "").upper()
+                if not reason:
+                    continue
+                key = (sym, reason)
+                if key not in dedup:
+                    dedup[key] = {"symbol": sym, "reason": reason}
+                if rejection.get("message"):
+                    dedup[key]["message"] = str(rejection["message"])
+            guardrail_list = list(dedup.values())
+            if guardrail_list:
+                rejected_contracts.extend(guardrail_list)
+                record_selector_rejections(guardrail_list, source="live")
         if filtered_contracts:
             options_contracts = filtered_contracts
         else:
-            options_contracts = []
-            if guardrail_rejections and not options_note:
-                options_note = "Contracts filtered by liquidity guardrails"
-            elif isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
-                options_note = str(options_payload["quotes_notice"])
-            elif not side_hint:
-                options_note = "Options side unavailable for this plan"
+            fallback_contracts = _fallback_guardrail_contracts(extracted_contracts, guardrail_rejections, symbol=symbol)
+            if fallback_contracts:
+                options_contracts = fallback_contracts
+                if not options_note:
+                    options_note = "Contracts failed guardrails; review guardrail_flags."
             else:
-                options_note = "No tradeable contracts met filters"
+                options_contracts = []
+                if filtered_rejections and not options_note:
+                    reason_labels = sorted({entry.get("reason") for entry in filtered_rejections if entry.get("reason")})
+                    if reason_labels:
+                        options_note = f"Contracts rejected ({', '.join(reason_labels)})"
+                    else:
+                        options_note = "Contracts filtered by liquidity guardrails"
+                elif isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
+                    options_note = str(options_payload["quotes_notice"])
+                elif not side_hint:
+                    options_note = "Options side unavailable for this plan"
+                else:
+                    options_note = "No tradeable contracts met filters"
         if event_window_blocked:
             options_contracts = []
             options_note = "Blocked by event window"

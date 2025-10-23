@@ -419,6 +419,18 @@ async def test_fallback_plan_handles_missing_strategy_profile(monkeypatch):
 @pytest.mark.asyncio
 async def test_fallback_plan_handles_selector_rejections(monkeypatch):
     options_payload = {
+        "best": [
+            {
+                "symbol": "TSLA 20251025C450",
+                "label": "TSLA 10/25 450C",
+                "option_type": "call",
+                "strike": 450.0,
+                "bid": 0.45,
+                "ask": 1.35,
+                "open_interest": 50,
+                "spread_pct": 20.0,
+            }
+        ],
         "rejections": [
             {"symbol": "TSLA", "reason": "WIDE_SPREAD", "message": "Spread too wide"},
             {"symbol": "TSLA", "reason": "LOW_OI"},
@@ -436,6 +448,9 @@ async def test_fallback_plan_handles_selector_rejections(monkeypatch):
     assert response.waiting_for
     assert response.plan["runner_policy"]
     assert response.plan["badges"]
+    assert response.options_contracts, "Expected fallback contracts even when guardrails reject defaults"
+    assert response.options_contracts[0].get("guardrail_flags"), "Contracts should surface guardrail flags"
+    assert "guardrails" in (response.options_note or "").lower()
 
 
 @pytest.mark.asyncio
