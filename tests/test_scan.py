@@ -13,6 +13,7 @@ from src.agent_server import (
     ScanRequest,
     ScanUniverse,
     _legacy_scan,
+    _phase3_scan_alignment,
     gpt_plan,
     gpt_scan_endpoint,
 )
@@ -472,3 +473,146 @@ async def test_sector_cap_and_min_quality(monkeypatch):
     assert page.next_cursor is None
     assert {cand.symbol for cand in page.candidates}.issubset(set(tickers))
     assert all(c.reasons for c in page.candidates)
+
+
+@pytest.mark.asyncio
+async def test_phase3_alignment_respects_guardrails(monkeypatch: pytest.MonkeyPatch):
+    history = _make_history()
+    bundle = {
+        "key_levels": {
+            "prev_high": 101.0,
+            "prev_low": 99.0,
+            "prev_close": 100.0,
+            "opening_range_high": 100.5,
+            "opening_range_low": 99.5,
+            "session_high": 101.0,
+            "session_low": 99.0,
+        },
+        "snapshot": {
+            "indicators": {"atr14": 0.5, "vwap": 100.1},
+            "volatility": {"expected_move_horizon": 1.0},
+        },
+        "indicators": {"atr14": 0.5, "vwap": 100.1},
+    }
+    scan_context = ScanContext(
+        as_of=datetime(2025, 10, 14, 14, 0),
+        label="live",
+        is_open=True,
+        data_timeframe="5",
+        market_meta={"session_state": {"status": "open"}},
+        data_meta={"ok": True},
+    )
+
+    monkeypatch.setattr(
+        "src.agent_server._build_context",
+        lambda prepared, simulate_open=False: {
+            "atr": 0.5,
+            "price": 100.0,
+            "expected_move_horizon": 1.0,
+            "key": bundle["key_levels"],
+            "vol_profile": {"vah": 101.2, "val": 99.2, "poc": 100.3},
+            "anchored_vwaps_intraday": {},
+            "vwap": 100.1,
+            "htf_levels": {},
+            "session_phase": "morning",
+        },
+    )
+
+    async def _fake_hydrate(symbol: str, vwap_hint=None):  # noqa: ARG001
+        return None, None, {}
+
+    monkeypatch.setattr("src.agent_server._hydrate_mtf_context", _fake_hydrate)
+    monkeypatch.setattr("src.agent_server._macro_event_block", lambda symbol, session_state: None)  # noqa: ARG005
+    monkeypatch.setattr("src.agent_server.get_precision", lambda symbol: 2)  # noqa: ARG005
+
+    result = await _phase3_scan_alignment(
+        symbol="TEST",
+        style="intraday",
+        direction="long",
+        entry=100.0,
+        stop=99.9,
+        targets=[101.0, 102.0],
+        history=history,
+        indicator_bundle=bundle,
+        scan_context=scan_context,
+    )
+    assert result is not None
+    adjusted_stop = float(result["stop"])
+    assert adjusted_stop < 99.9, "stop should be widened by guardrails"
+    risk_multiple = (100.0 - adjusted_stop) / 0.5
+    assert risk_multiple >= 0.6, "risk multiple should be lifted to guardrail floor"
+
+
+@pytest.mark.asyncio
+async def test_phase3_alignment_includes_runner_telemetry(monkeypatch: pytest.MonkeyPatch):
+    history = _make_history()
+    bundle = {
+        "key_levels": {
+            "prev_high": 101.0,
+            "prev_low": 99.0,
+            "prev_close": 100.0,
+            "opening_range_high": 100.5,
+            "opening_range_low": 99.5,
+            "session_high": 101.0,
+            "session_low": 99.0,
+        },
+        "snapshot": {
+            "indicators": {"atr14": 0.6, "vwap": 100.1},
+            "volatility": {"expected_move_horizon": 1.2},
+        },
+        "indicators": {"atr14": 0.6, "vwap": 100.1},
+    }
+    scan_context = ScanContext(
+        as_of=datetime(2025, 10, 14, 14, 0),
+        label="live",
+        is_open=True,
+        data_timeframe="5",
+        market_meta={"session_state": {"status": "open"}},
+        data_meta={"ok": True},
+    )
+
+    monkeypatch.setattr(
+        "src.agent_server._build_context",
+        lambda prepared, simulate_open=False: {
+            "atr": 0.6,
+            "price": 100.0,
+            "expected_move_horizon": 1.2,
+            "key": bundle["key_levels"],
+            "vol_profile": {"vah": 101.2, "val": 99.2, "poc": 100.3},
+            "anchored_vwaps_intraday": {},
+            "vwap": 100.1,
+            "htf_levels": {},
+            "session_phase": "morning",
+        },
+    )
+
+    async def _fake_hydrate(symbol: str, vwap_hint=None):  # noqa: ARG001
+        return None, None, {}
+
+    monkeypatch.setattr("src.agent_server._hydrate_mtf_context", _fake_hydrate)
+    monkeypatch.setattr(
+        "src.agent_server._macro_event_block",
+        lambda symbol, session_state: {"within_event_window": True},  # noqa: ARG001,ARG002
+    )
+    monkeypatch.setattr("src.agent_server.get_precision", lambda symbol: 2)  # noqa: ARG005
+
+    result = await _phase3_scan_alignment(
+        symbol="TEST",
+        style="intraday",
+        direction="long",
+        entry=100.0,
+        stop=99.4,
+        targets=[101.2, 102.4],
+        history=history,
+        indicator_bundle=bundle,
+        scan_context=scan_context,
+    )
+
+    assert result is not None
+    telemetry = result.get("telemetry") or {}
+    assert bool(telemetry.get("event_window"))
+    runner_policy = result.get("runner_policy") or {}
+    notes = runner_policy.get("notes") or []
+    assert any("Event window" in str(note) for note in notes), "runner policy should surface event window guidance"
+    assert bool(runner_policy.get("telemetry", {}).get("event_window"))
+    assert result.get("probabilities"), "probability ladder should be present"

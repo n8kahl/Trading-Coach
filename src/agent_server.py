@@ -140,6 +140,7 @@ from .telemetry import (
 from .plans import (
     build_plan_geometry,
     RunnerPolicy,
+    TargetMeta,
     compute_entry_candidates,
     build_structured_geometry,
     populate_recent_extrema,
@@ -160,9 +161,22 @@ from .services.plan_service import generate_plan as generate_plan_v2
 from .services.scan_fallbacks import build_placeholder_candidates, compute_scan_with_fallback
 from .services.scan_service import generate_scan as generate_scan_v2
 from .services.universe import resolve_universe
+from .logic.levels import collect_levels as logic_collect_levels, structural_sequence as logic_structural_sequence, snap_price as logic_snap_price
+from .logic.mtf import mtf_bias
+from .logic.prob_calibration import calibrate_touch_prob, enforce_monotone
+from .logic.runner import build_runner_policy as build_runner_policy_logic
+from .logic.validators import validate_plan as validate_plan_guardrails
 
 logger = logging.getLogger(__name__)
 
+MIN_STOP_ATR = {"scalp": 0.6, "intraday": 0.9, "swing": 1.2, "leaps": 1.6}
+MAX_STOP_ATR = {"scalp": 1.6, "intraday": 2.0, "swing": 2.5, "leaps": 3.0}
+TP1_RR_MIN = {"scalp": 1.0, "intraday": 1.3, "swing": 1.6, "leaps": 2.0}
+MIN_TP_SPACING_ATR = 0.40
+NEAR_STRUCT_TOL = 0.25
+RUNNER_K = {"scalp": 0.8, "intraday": 1.0, "swing": 1.2, "leaps": 1.5}
+GIVEBACK = {"scalp": 0.40, "intraday": 0.50, "swing": 0.55, "leaps": 0.60}
+MTF_W = {"d": 0.50, "h60": 0.30, "m15": 0.15, "m5": 0.05}
 
 def _infer_tick_size(price: float) -> float:
     if price >= 500:
@@ -176,6 +190,912 @@ def _infer_tick_size(price: float) -> float:
     if price >= 1:
         return 0.005
     return 0.001
+
+
+def _normalize_style_token(style: str | None) -> str:
+    token = (style or "intraday").strip().lower()
+    if token == "leap":
+        token = "leaps"
+    if token not in MIN_STOP_ATR:
+        return "intraday"
+    return token
+
+
+def _level_priority(name: str, direction: str) -> int:
+    token = (name or "").lower()
+    if direction == "long":
+        order = (
+            "swing_high",
+            "opening_range_high",
+            "session_high",
+            "pdh",
+            "vah",
+            "gap",
+            "round",
+        )
+    else:
+        order = (
+            "swing_low",
+            "opening_range_low",
+            "session_low",
+            "pdl",
+            "val",
+            "gap",
+            "round",
+        )
+    for idx, key in enumerate(order):
+        if key in token:
+            return idx
+    return len(order) + 1
+
+
+def _nyc_time(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    try:
+        return value.astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        return value
+
+
+def _adx_slope(prepared: pd.DataFrame) -> float | None:
+    if "adx14" not in prepared.columns or prepared["adx14"].empty:
+        return None
+    series = prepared["adx14"].dropna()
+    if len(series) < 5:
+        return None
+    try:
+        recent = series.iloc[-5:]
+        return float(recent.iloc[-1] - recent.iloc[0]) / max(len(recent) - 1, 1)
+    except Exception:
+        return None
+
+
+def _strategy_rule_candidates(
+    *,
+    timestamp: datetime | None,
+    direction: str,
+    entry_price: float,
+    close_price: float,
+    context: Mapping[str, Any],
+    levels: Mapping[str, Any],
+    atr_value: float,
+    mtf_view: Mapping[str, Any] | None,
+    prepared: pd.DataFrame,
+    expected_move: float | None,
+) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    nyc_time = _nyc_time(timestamp)
+    hour = nyc_time.hour if nyc_time else None
+    minute = nyc_time.minute if nyc_time else None
+    session_phase = context.get("session_phase")
+    vwap_val = _safe_number(context.get("vwap"))
+    ema9 = _safe_number(context.get("ema9"))
+    ema20 = _safe_number(context.get("ema20"))
+    ema50 = _safe_number(context.get("ema50"))
+    adx_now = _safe_number(context.get("adx"))
+    if vwap_val is None:
+        vwap_val = float("nan")
+    if ema9 is None:
+        ema9 = float("nan")
+    if ema20 is None:
+        ema20 = float("nan")
+    if ema50 is None:
+        ema50 = float("nan")
+    if adx_now is None:
+        adx_now = float("nan")
+    slope = _adx_slope(prepared)
+    atr_val = abs(float(atr_value or 0.0)) or 1.0
+    tolerance = atr_val * 0.35
+    mtf_score = float((mtf_view or {}).get("score", 0.0)) if isinstance(mtf_view, Mapping) else 0.0
+    rules: List[Tuple[float, str, Dict[str, Any]]] = []
+
+    def _add(rule_id: str, score: float, *, reasons: List[str], badges: Optional[List[str]] = None, waiting_for: Optional[str] = None) -> None:
+        rules.append(
+            (
+                score,
+                rule_id,
+                {
+                    "id": rule_id,
+                    "score": round(score, 3),
+                    "reasons": reasons,
+                    "badges": badges or [],
+                    "waiting_for": waiting_for,
+                },
+            )
+        )
+
+    ema_stack_long = ema9 > ema20 > ema50
+    ema_stack_short = ema9 < ema20 < ema50
+    price_above_vwap = close_price > vwap_val and not math.isnan(vwap_val)
+    price_below_vwap = close_price < vwap_val and not math.isnan(vwap_val)
+    adx_trending = slope is not None and slope > 0.03
+    adx_fading = slope is not None and slope < -0.03
+
+    # Power Hour Continuation
+    if hour is not None and 15 <= hour <= 15:
+        if direction == "long" and price_above_vwap and ema_stack_long and adx_trending:
+            _add(
+                "power_hour_trend",
+                1.0 + mtf_score,
+                reasons=["Power hour window", "Above VWAP", "EMA stack", "ADX rising"],
+                badges=["Power Hour"],
+            )
+        if direction == "short" and price_below_vwap and ema_stack_short and adx_trending:
+            _add(
+                "power_hour_trend",
+                1.0 + mtf_score,
+                reasons=["Power hour window", "Below VWAP", "EMA stack", "ADX rising"],
+                badges=["Power Hour"],
+            )
+
+    # VWAP Reclaim / Reject
+    recent_closes = prepared["close"].tail(3) if "close" in prepared.columns else pd.Series(dtype=float)
+    sustained_side = False
+    if not recent_closes.empty and not math.isnan(vwap_val):
+        if direction == "long":
+            sustained_side = bool((recent_closes > vwap_val - 0.02 * atr_val).all())
+        else:
+            sustained_side = bool((recent_closes < vwap_val + 0.02 * atr_val).all())
+    or_level = levels.get("orh") if direction == "long" else levels.get("orl")
+    if sustained_side and or_level is not None:
+        if direction == "long" and close_price > or_level - 0.15 * atr_val:
+            _add(
+                "vwap_reclaim",
+                0.8 + mtf_score,
+                reasons=["VWAP reclaimed", "Holding ORH", "Momentum alignment"],
+                badges=["VWAP"],
+            )
+        if direction == "short" and close_price < or_level + 0.15 * atr_val:
+            _add(
+                "vwap_reclaim",
+                0.8 + mtf_score,
+                reasons=["VWAP reject", "Holding ORL", "Momentum alignment"],
+                badges=["VWAP"],
+            )
+
+    # Range Break & Retest
+    session_level = levels.get("session_high") if direction == "long" else levels.get("session_low")
+    prev_level = levels.get("pdh") if direction == "long" else levels.get("pdl")
+    structural_level = session_level or prev_level
+    if structural_level is not None:
+        broke = (direction == "long" and close_price >= structural_level) or (direction == "short" and close_price <= structural_level)
+        retest = abs(entry_price - structural_level) <= tolerance
+        if broke and retest:
+            _add(
+                "range_break_retest",
+                0.75 + mtf_score,
+                reasons=["Accepted beyond prior range", "Retest at structure"],
+                badges=["Range Break"],
+            )
+
+    # EMA Pullback Trend
+    if direction == "long" and ema_stack_long and not math.isnan(ema20):
+        if abs(entry_price - ema20) <= 0.35 * atr_val and adx_trending:
+            _add(
+                "ema_pullback_trend",
+                0.7 + mtf_score,
+                reasons=["EMA pullback", "ADX rising"],
+                badges=["Trend"],
+            )
+    if direction == "short" and ema_stack_short and not math.isnan(ema20):
+        if abs(entry_price - ema20) <= 0.35 * atr_val and adx_trending:
+            _add(
+                "ema_pullback_trend",
+                0.7 + mtf_score,
+                reasons=["EMA pullback", "ADX rising"],
+                badges=["Trend"],
+            )
+
+    # Gap Fill Magnet
+    prev_close = levels.get("pdc")
+    if prev_close is not None and not math.isnan(prev_close):
+        distance_to_fill = abs(prev_close - entry_price)
+        gap_size = abs(prev_close - close_price)
+        avwap_session = levels.get("avwap")
+        if gap_size > 0.5 * atr_val and distance_to_fill <= max(expected_move or atr_val, atr_val * 1.2):
+            if avwap_session is None or abs(avwap_session - prev_close) <= tolerance:
+                _add(
+                    "gap_fill_open",
+                    0.65 + mtf_score,
+                    reasons=["Gap present", "AVWAP alignment"],
+                    badges=["Gap"],
+                )
+
+    if not rules:
+        return None, []
+
+    rules.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_id, best_payload = rules[0]
+    matched = [payload for (_, _, payload) in rules]
+    return best_id, matched
+def build_stop(entry: float, direction: str, atr: float, levels: Mapping[str, float], ctx: Mapping[str, object]) -> Tuple[float, Dict[str, Any]] | None:
+    if atr is None or atr <= 0:
+        return None
+    direction_norm = (direction or "long").lower()
+    invalidation_dir = "short" if direction_norm == "long" else "long"
+    style_token = _normalize_style_token(str(ctx.get("style")))
+    precision = ctx.get("precision")
+    try:
+        precision_val = int(precision) if precision is not None else None
+    except (TypeError, ValueError):
+        precision_val = None
+    tick_size = float(ctx.get("tick_size") or 0.01)
+    min_map = ctx.get("min_stop_atr") or MIN_STOP_ATR
+    max_map = ctx.get("max_stop_atr") or MAX_STOP_ATR
+    min_bound = float(min_map.get(style_token, MIN_STOP_ATR["intraday"]))
+    max_bound = float(max_map.get(style_token, MAX_STOP_ATR["intraday"]))
+    min_bound += float(ctx.get("additional_min_atr") or 0.0)
+    snap_trace: List[str] = []
+
+    structural = logic_structural_sequence(levels, entry, invalidation_dir)
+    ordered = sorted(
+        structural,
+        key=lambda item: (
+            _level_priority(item.name, direction_norm),
+            abs(entry - item.price),
+        ),
+    )
+
+    stop_price: Optional[float] = None
+    stop_source: Optional[str] = None
+
+    for level in ordered:
+        candidate = logic_snap_price(level.price, direction=invalidation_dir, atr=atr, pad_mult=0.1, precision=precision_val)
+        if direction_norm == "long" and candidate >= entry - tick_size * 0.5:
+            candidate = entry - tick_size
+        if direction_norm == "short" and candidate <= entry + tick_size * 0.5:
+            candidate = entry + tick_size
+        multiple = abs(entry - candidate) / atr
+        snap_trace.append(f"stop_candidate:{level.name}:{candidate:.4f}:{multiple:.2f}R")
+        if multiple < min_bound - 1e-6:
+            continue
+        if multiple > max_bound + 1e-6:
+            continue
+        stop_price = candidate
+        stop_source = level.name
+        break
+
+    if stop_price is None and ordered:
+        fallback_level = ordered[-1]
+        candidate = logic_snap_price(fallback_level.price, direction=invalidation_dir, atr=atr, pad_mult=0.1, precision=precision_val)
+        if direction_norm == "long" and candidate >= entry - tick_size * 0.5:
+            candidate = entry - tick_size
+        if direction_norm == "short" and candidate <= entry + tick_size * 0.5:
+            candidate = entry + tick_size
+        multiple = abs(entry - candidate) / atr
+        snap_trace.append(f"stop_fallback:{fallback_level.name}:{candidate:.4f}:{multiple:.2f}R")
+        if multiple <= max_bound + 1e-6:
+            stop_price = candidate
+            stop_source = fallback_level.name
+
+    if stop_price is None:
+        fallback = entry - atr * min_bound if direction_norm == "long" else entry + atr * min_bound
+        if direction_norm == "long" and fallback >= entry - tick_size * 0.5:
+            fallback = entry - tick_size
+        if direction_norm == "short" and fallback <= entry + tick_size * 0.5:
+            fallback = entry + tick_size
+        multiple = abs(entry - fallback) / atr
+        snap_trace.append(f"stop_fallback:atr_floor:{fallback:.4f}:{multiple:.2f}R")
+        if multiple > max_bound + 1e-6:
+            return None
+        stop_price = fallback
+        stop_source = "atr_floor"
+
+    if stop_price is None:
+        return None
+
+    distance_atr = abs(entry - stop_price) / atr
+    meta = {
+        "source": stop_source or "structural",
+        "snap_trace": snap_trace,
+        "d_atr": round(distance_atr, 3),
+        "key_level": {
+            "role": "stop",
+            "label": (stop_source or "structural").upper(),
+            "price": round(float(stop_price), precision_val) if precision_val is not None else float(stop_price),
+        },
+    }
+    return float(stop_price), meta
+
+
+def build_targets(
+    entry: float,
+    stop: float,
+    direction: str,
+    atr: float,
+    expected_move_abs: float | None,
+    remaining_atr_abs: float | None,
+    levels: Mapping[str, float],
+    style: str,
+    ctx: Mapping[str, object],
+) -> Tuple[List[float], List[Dict[str, Any]], List[Dict[str, Any]], List[str], List[Dict[str, Any]], List[float], bool]:
+    if atr is None or atr <= 0:
+        return [], [], [], [], [], [], False
+    if remaining_atr_abs is not None and remaining_atr_abs <= 0:
+        return [], [], [], [], [], [], False
+    style_token = _normalize_style_token(style)
+    precision = ctx.get("precision")
+    try:
+        precision_val = int(precision) if precision is not None else None
+    except (TypeError, ValueError):
+        precision_val = None
+    cap_candidates = [value for value in (expected_move_abs, remaining_atr_abs) if isinstance(value, (int, float)) and value > 0]
+    cap_abs = min(cap_candidates) if cap_candidates else None
+    direction_norm = (direction or "long").lower()
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return [], [], [], [], [], [], False
+    min_spacing = MIN_TP_SPACING_ATR * atr
+    tp1_floor = float(ctx.get("tp1_rr_floor") or TP1_RR_MIN.get(style_token, 1.3))
+    later_floor = tp1_floor - 0.1
+    calibration_ctx = {
+        "calibration_store": ctx.get("calibration_store"),
+        "calibration_cohort": ctx.get("calibration_cohort"),
+    }
+    sign = 1.0 if direction_norm == "long" else -1.0
+
+    def _round_price(value: float) -> float:
+        return round(float(value), precision_val) if precision_val is not None else float(value)
+
+    def _prob_from_distance(distance_atr: float) -> float:
+        base = 0.78 - 0.20 * distance_atr
+        tweak = 0.04 if style_token in {"scalp", "intraday"} else -0.05
+        return max(0.1, min(0.9, base + tweak))
+
+    structural = logic_structural_sequence(levels, entry, direction_norm)
+    ordered_levels = sorted(
+        structural,
+        key=lambda item: (
+            _level_priority(item.name, direction_norm),
+            abs(item.price - entry),
+        ),
+    )
+
+    candidates: List[Tuple[str, float]] = []
+    seen_prices: Set[float] = set()
+
+    for level in ordered_levels:
+        price = float(level.price)
+        if (direction_norm == "long" and price <= entry) or (direction_norm == "short" and price >= entry):
+            continue
+        rounded = round(price, 4)
+        if rounded in seen_prices:
+            continue
+        seen_prices.add(rounded)
+        candidates.append((level.name, price))
+
+    em_ladder = ctx.get("fallback_ladder") or (0.8, 1.2, 1.8, 2.4)
+    for mult in em_ladder:
+        candidate = entry + sign * float(mult) * atr
+        rounded = round(candidate, 4)
+        if rounded in seen_prices:
+            continue
+        snap_level = logic_structural_sequence(levels, candidate, direction_norm, include_equal=True)
+        snapped = candidate
+        snap_label = None
+        if snap_level:
+            nearest = min(snap_level, key=lambda item: abs(item.price - candidate))
+            if abs(nearest.price - candidate) <= NEAR_STRUCT_TOL * atr:
+                snapped = nearest.price
+                snap_label = nearest.name
+        seen_prices.add(round(snapped, 4))
+        candidates.append((snap_label or f"atr_{mult:.1f}", snapped))
+
+    targets: List[float] = []
+    target_meta: List[Dict[str, Any]] = []
+    tp_reasons: List[Dict[str, Any]] = []
+    snap_trace: List[str] = []
+    key_levels: List[Dict[str, Any]] = []
+    raw_probabilities: List[float] = []
+    em_capped = False
+
+    for label, price in candidates:
+        distance = abs(price - entry)
+        if distance <= 1e-6:
+            continue
+        if cap_abs is not None and distance > cap_abs + 1e-6:
+            snap_trace.append(f"tp_skip:{label}:cap")
+            continue
+        if targets and abs(price - targets[-1]) < min_spacing - 1e-6:
+            snap_trace.append(f"tp_skip:{label}:spacing")
+            continue
+        rr_multiple = distance / risk
+        floor = tp1_floor if not targets else later_floor
+        if rr_multiple < floor - 1e-6:
+            snap_trace.append(f"tp_skip:{label}:rr")
+            continue
+        distance_atr = distance / atr
+        raw_probability = _prob_from_distance(distance_atr)
+        calibrated, _ = calibrate_touch_prob(str(ctx.get("symbol") or ""), style_token, raw_probability, calibration_ctx)
+        raw_probabilities.append(float(calibrated))
+        rounded_price = _round_price(price)
+        targets.append(rounded_price)
+        tp_index = len(targets)
+        reason_text = f"TP{tp_index}: {entry:.2f}->{rounded_price:.2f} snapped to {label.upper()}"
+        tp_reasons.append(
+            {
+                "label": f"TP{tp_index}",
+                "reason": reason_text,
+                "snap_tag": label.upper(),
+            }
+        )
+        key_levels.append(
+            {
+                "role": f"tp{tp_index}",
+                "label": label.upper(),
+                "price": rounded_price,
+            }
+        )
+        target_meta.append(
+            {
+                "label": f"TP{tp_index}",
+                "price": rounded_price,
+                "rr_multiple": round(rr_multiple, 2),
+                "distance": round(distance, 4),
+                "em_fraction": round(distance / expected_move_abs, 3) if expected_move_abs else None,
+                "prob_touch_raw": round(raw_probability, 3),
+                "prob_touch_calibrated": round(calibrated, 3),
+                "prob_touch": round(calibrated, 3),
+                "snap_tag": label.upper(),
+            }
+        )
+        snap_trace.append(f"tp_accept:{label}:{rounded_price:.4f}:{rr_multiple:.2f}R")
+        if cap_abs is not None and abs(distance - cap_abs) <= 1e-6:
+            em_capped = True
+        if len(targets) >= 3:
+            break
+
+    if not targets:
+        return [], [], [], [], [], [], False
+
+    monotone = enforce_monotone(raw_probabilities)
+    for idx, value in enumerate(monotone):
+        target_meta[idx]["prob_touch"] = round(value, 3)
+        target_meta[idx]["prob_touch_calibrated"] = round(value, 3)
+
+    return targets, target_meta, tp_reasons, snap_trace, key_levels, monotone, em_capped
+
+
+def _merge_key_levels(
+    key_levels_used: Dict[str, List[Dict[str, Any]]] | None,
+    stop_entry: Dict[str, Any],
+    target_entries: Sequence[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    payload = key_levels_used or {"session": [], "structural": []}
+    if "session" not in payload:
+        payload["session"] = []
+    if "structural" not in payload:
+        payload["structural"] = []
+
+    def _upsert(entry: Dict[str, Any]) -> None:
+        role = entry.get("role")
+        if not role:
+            return
+        for bucket in payload.values():
+            for item in bucket:
+                if item.get("role") == role:
+                    item.update(entry)
+                    return
+        payload["structural"].append(dict(entry))
+
+    if stop_entry:
+        _upsert(stop_entry)
+    for entry in target_entries:
+        _upsert(entry)
+    return {bucket: list(items) for bucket, items in payload.items()}
+
+
+def _refit_plan_phase2(
+    *,
+    symbol: str,
+    entry: float,
+    direction: str,
+    style: str,
+    atr_value: float,
+    expected_move_abs: float | None,
+    remaining_atr: float | None,
+    levels_map: Mapping[str, float],
+    mtf_view: Mapping[str, Any] | None,
+    precision: int | None,
+    tick_size: float,
+    calibration_store: CalibrationStore,
+    closes: Sequence[float],
+    event_window: bool,
+    adx_slope: float | None,
+) -> Dict[str, Any] | None:
+    style_token = _normalize_style_token(style)
+    mtf_dir = (mtf_view or {}).get("dir") if isinstance(mtf_view, Mapping) else None
+    mtf_score = float((mtf_view or {}).get("score", 0.0)) if isinstance((mtf_view or {}).get("score"), (int, float)) else 0.0
+    mtf_disagreement = bool(mtf_dir in {"long", "short"} and mtf_dir != direction)
+    additional_min = 0.2 if event_window else 0.0
+    if mtf_disagreement:
+        additional_min += 0.2
+
+    logic_levels = logic_collect_levels(levels_map, anchor=entry, atr=atr_value, precision=precision)
+    stop_ctx = {
+        "style": style_token,
+        "precision": precision,
+        "tick_size": tick_size,
+        "min_stop_atr": MIN_STOP_ATR,
+        "max_stop_atr": MAX_STOP_ATR,
+        "additional_min_atr": additional_min,
+    }
+    stop_result = build_stop(entry, direction, atr_value, logic_levels, stop_ctx)
+    if stop_result is None:
+        return None
+    stop_price, stop_meta = stop_result
+
+    tp_rr_floor = TP1_RR_MIN.get(style_token, 1.3) + (0.2 if mtf_disagreement else 0.0)
+    target_ctx = {
+        "tp1_rr_floor": tp_rr_floor,
+        "precision": precision,
+        "calibration_store": calibration_store,
+        "calibration_cohort": symbol.upper(),
+        "symbol": symbol,
+    }
+    targets_tuple = build_targets(
+        entry,
+        stop_price,
+        direction,
+        atr_value,
+        expected_move_abs,
+        remaining_atr,
+        logic_levels,
+        style_token,
+        target_ctx,
+    )
+    targets, target_meta, tp_reasons, snap_trace_targets, key_level_targets, probabilities, em_capped = targets_tuple
+    if not targets:
+        return None
+
+    is_valid, _ = validate_plan_guardrails(
+        entry=entry,
+        stop=stop_price,
+        targets=targets,
+        direction=direction,
+        atr=atr_value,
+        style=style_token,
+        expected_move=expected_move_abs,
+        remaining_atr=remaining_atr,
+        probabilities=probabilities,
+        min_stop_atr=MIN_STOP_ATR,
+        max_stop_atr=MAX_STOP_ATR,
+        tp1_rr_min=TP1_RR_MIN,
+        spacing_min_atr=MIN_TP_SPACING_ATR,
+    )
+    if not is_valid:
+        return None
+
+    geometry_targets: List[TargetMeta] = []
+    for idx, meta in enumerate(target_meta, start=1):
+        geometry_targets.append(
+            TargetMeta(
+                price=float(meta["price"]),
+                distance=float(meta.get("distance") or abs(meta["price"] - entry)),
+                rr_multiple=float(meta.get("rr_multiple") or 0.0),
+                prob_touch=float(meta.get("prob_touch") or 0.0),
+                em_fraction=float(meta.get("em_fraction")) if meta.get("em_fraction") is not None else None,
+                mfe_quantile=None,
+                reason=meta.get("snap_tag"),
+                em_capped=em_capped,
+            )
+        )
+
+    structure_levels = {
+        "reclaim_orh": levels_map.get("orh"),
+        "reject_orl": levels_map.get("orl"),
+        "swing": levels_map.get("swing_high" if direction == "long" else "swing_low"),
+    }
+    runner_ctx = {
+        "closes": closes,
+        "structure_levels": structure_levels,
+        "momentum_debug": f"mtf_score={mtf_score:.2f}",
+        "adx_slope": adx_slope,
+    }
+    runner_policy = build_runner_policy_logic(
+        entry=entry,
+        targets=targets,
+        direction=direction,
+        style=style_token,
+        atr=atr_value,
+        ctx=runner_ctx,
+        run_constants=RUNNER_K,
+        giveback_constants=GIVEBACK,
+    )
+
+    rr_to_t1 = (targets[0] - entry) / (entry - stop_price) if direction == "long" else (entry - targets[0]) / (stop_price - entry)
+
+    snap_trace = list(stop_meta.get("snap_trace", [])) + snap_trace_targets
+    merged_key_levels = _merge_key_levels(key_levels_used=None, stop_entry=stop_meta.get("key_level", {}), target_entries=key_level_targets)
+
+    return {
+        "stop": float(stop_price),
+        "stop_meta": stop_meta,
+        "targets": targets,
+        "target_meta": target_meta,
+        "tp_reasons": tp_reasons,
+        "runner_policy": runner_policy,
+        "geometry_targets": geometry_targets,
+        "snap_trace": snap_trace,
+        "probabilities": probabilities,
+        "key_levels": merged_key_levels,
+        "rr_to_t1": float(round(rr_to_t1, 2)),
+        "em_capped": em_capped,
+        "telemetry": {
+            "adx_slope": adx_slope,
+            "mtf_score": mtf_score,
+            "event_window": bool(event_window),
+        },
+    }
+
+
+async def _phase3_scan_alignment(
+    *,
+    symbol: str,
+    style: str,
+    direction: str,
+    entry: float,
+    stop: float,
+    targets: Sequence[float],
+    history: pd.DataFrame,
+    indicator_bundle: Mapping[str, Any],
+    scan_context: "ScanContext",
+) -> Dict[str, Any] | None:
+    """Recompute scan candidate geometry using the upgraded plan logic."""
+
+    if entry is None or stop is None or not targets:
+        return None
+
+    try:
+        entry_price = float(entry)
+        stop_price = float(stop)
+        target_prices = [float(tp) for tp in targets if isinstance(tp, (int, float))]
+    except (TypeError, ValueError):
+        return None
+
+    if not target_prices:
+        return None
+
+    prepared = _prepare_symbol_frame(history)
+    if prepared is None or prepared.empty:
+        return None
+
+    simulate_open = getattr(scan_context, "simulate_open", False)
+    structure_context = _build_context(prepared, simulate_open=simulate_open)
+    price_snapshot = structure_context.get("price")
+    try:
+        close_price = float(price_snapshot)
+    except (TypeError, ValueError):
+        try:
+            close_price = float(prepared["close"].iloc[-1])
+        except Exception:
+            close_price = entry_price
+
+    atr_value = structure_context.get("atr")
+    if not isinstance(atr_value, (int, float)) or not math.isfinite(atr_value) or atr_value <= 0:
+        indicators_block = indicator_bundle.get("indicators") if isinstance(indicator_bundle, Mapping) else {}
+        atr_candidate = (indicators_block or {}).get("atr14")
+        try:
+            atr_value = float(atr_candidate)
+        except (TypeError, ValueError):
+            atr_value = None
+    if atr_value is None or not math.isfinite(float(atr_value)) or float(atr_value) <= 0:
+        return None
+    atr_value = float(atr_value)
+
+    expected_move_abs = structure_context.get("expected_move_horizon")
+    if expected_move_abs is None:
+        snapshot = indicator_bundle.get("snapshot") if isinstance(indicator_bundle, Mapping) else {}
+        volatility = snapshot.get("volatility") if isinstance(snapshot, Mapping) else {}
+        expected_move_abs = volatility.get("expected_move_horizon")
+    try:
+        expected_move_abs = float(expected_move_abs) if expected_move_abs is not None else None
+    except (TypeError, ValueError):
+        expected_move_abs = None
+
+    remaining_atr = structure_context.get("atr_1d")
+    try:
+        remaining_atr = float(remaining_atr) if remaining_atr is not None else None
+    except (TypeError, ValueError):
+        remaining_atr = None
+
+    levels_map: Dict[str, float] = {}
+    key_levels = structure_context.get("key") if isinstance(structure_context.get("key"), Mapping) else {}
+    for src_key, dst_key in (
+        ("prev_high", "pdh"),
+        ("prev_low", "pdl"),
+        ("prev_close", "pdc"),
+        ("opening_range_high", "orh"),
+        ("opening_range_low", "orl"),
+        ("session_high", "session_high"),
+        ("session_low", "session_low"),
+        ("gap_fill", "gap_fill"),
+    ):
+        value = key_levels.get(src_key)
+        if isinstance(value, (int, float)) and math.isfinite(value):
+            levels_map[dst_key] = float(value)
+
+    vol_profile = structure_context.get("vol_profile") if isinstance(structure_context.get("vol_profile"), Mapping) else {}
+    for src_key, dst_key in (("vah", "vah"), ("val", "val"), ("poc", "poc")):
+        value = vol_profile.get(src_key)
+        if isinstance(value, (int, float)) and math.isfinite(value):
+            levels_map[dst_key] = float(value)
+
+    anchored = structure_context.get("anchored_vwaps_intraday")
+    if isinstance(anchored, Mapping):
+        for key, value in anchored.items():
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                levels_map[key.lower()] = float(value)
+
+    indicators_block = indicator_bundle.get("indicators") if isinstance(indicator_bundle, Mapping) else {}
+    vwap_value = indicators_block.get("vwap")
+    if isinstance(vwap_value, (int, float)) and math.isfinite(vwap_value):
+        levels_map["vwap"] = float(vwap_value)
+
+    inject_style_levels(levels_map, structure_context, style)
+    try:
+        populate_recent_extrema(
+            levels_map,
+            prepared["high"].tolist(),
+            prepared["low"].tolist(),
+            window=6,
+        )
+    except Exception:
+        pass
+
+    vwap_hint = structure_context.get("vwap")
+    try:
+        vwap_hint = float(vwap_hint) if vwap_hint is not None else None
+    except (TypeError, ValueError):
+        vwap_hint = None
+    try:
+        mtf_bundle, _, mtf_frames = await _hydrate_mtf_context(symbol, vwap_hint=vwap_hint)
+    except Exception:
+        mtf_bundle, mtf_frames = None, {}
+
+    mtf_view: Optional[Dict[str, Any]] = None
+    if mtf_bundle:
+        mtf_view = mtf_bias(
+            {
+                "bundle": mtf_bundle,
+                "price": close_price,
+                "swing_high": levels_map.get("swing_high"),
+                "swing_low": levels_map.get("swing_low"),
+                "weights": MTF_W,
+            }
+        )
+
+    session_state = scan_context.market_meta.get("session_state") if isinstance(scan_context.market_meta, Mapping) else None
+    event_block = _macro_event_block(symbol, session_state)
+    event_window = bool((event_block or {}).get("within_event_window"))
+
+    adx_slope = _adx_slope(prepared)
+    precision_hint = get_precision(symbol)
+    tick_size = _infer_tick_size(close_price)
+    closes = [
+        float(val)
+        for val in prepared["close"].tail(200).tolist()
+        if isinstance(val, (int, float)) and math.isfinite(val)
+    ]
+
+    phase2_override = _refit_plan_phase2(
+        symbol=symbol,
+        entry=entry_price,
+        direction=direction,
+        style=style,
+        atr_value=atr_value,
+        expected_move_abs=expected_move_abs,
+        remaining_atr=remaining_atr,
+        levels_map=levels_map,
+        mtf_view=mtf_view,
+        precision=precision_hint,
+        tick_size=tick_size,
+        calibration_store=_CALIBRATION_STORE,
+        closes=closes,
+        event_window=event_window,
+        adx_slope=adx_slope,
+    )
+    if not phase2_override:
+        return None
+
+    runner_policy = dict(phase2_override.get("runner_policy") or {})
+    telemetry_meta = phase2_override.get("telemetry") or {}
+    cleaned_telemetry: Dict[str, Any] = {}
+    for key, value in telemetry_meta.items():
+        if isinstance(value, (int, float)):
+            if math.isfinite(float(value)):
+                cleaned_telemetry[key] = float(value)
+        elif value is not None:
+            cleaned_telemetry[key] = value
+    if cleaned_telemetry:
+        runner_policy.setdefault("telemetry", {}).update(cleaned_telemetry)
+        adx_note = cleaned_telemetry.get("adx_slope")
+        if isinstance(adx_note, (int, float)) and math.isfinite(adx_note):
+            runner_policy.setdefault("notes", []).append(f"Momentum slope {adx_note:+.2f} (ADX)")
+        if cleaned_telemetry.get("event_window"):
+            runner_policy.setdefault("notes", []).append("Event window: tighten stops and monitor catalysts")
+    trail_mult = runner_policy.get("atr_trail_mult")
+    try:
+        trail_mult_float = float(trail_mult)
+    except (TypeError, ValueError):
+        trail_mult_float = None
+    if trail_mult_float is not None and math.isfinite(trail_mult_float):
+        runner_policy.setdefault("trail", f"ATR trail x {trail_mult_float:.2f}")
+        runner_policy.setdefault("trail_multiple", round(trail_mult_float, 3))
+    step_value = runner_policy.get("atr_trail_step")
+    try:
+        step_value_float = float(step_value)
+    except (TypeError, ValueError):
+        step_value_float = None
+    if step_value_float is not None and math.isfinite(step_value_float):
+        runner_policy.setdefault("trail_step", round(step_value_float, 3))
+    fraction_value = runner_policy.get("fraction")
+    try:
+        fraction_value_float = float(fraction_value)
+    except (TypeError, ValueError):
+        fraction_value_float = None
+    if fraction_value_float is not None and math.isfinite(fraction_value_float):
+        runner_policy["fraction"] = round(fraction_value_float, 3)
+
+    target_meta_raw = phase2_override.get("target_meta") or []
+    target_meta: List[Dict[str, Any]] = []
+    for meta in target_meta_raw:
+        if not isinstance(meta, Mapping):
+            continue
+        item: Dict[str, Any] = {}
+        for key, value in meta.items():
+            if isinstance(value, (int, float)):
+                item[key] = float(value)
+            else:
+                item[key] = value
+        target_meta.append(item)
+
+    tp_reasons = [
+        dict(reason) if isinstance(reason, Mapping) else {"label": f"TP{idx + 1}", "reason": str(reason)}
+        for idx, reason in enumerate(phase2_override.get("tp_reasons") or [])
+    ]
+    snap_trace = list(phase2_override.get("snap_trace") or [])
+    key_levels_used = phase2_override.get("key_levels") or {}
+    if isinstance(key_levels_used, Mapping):
+        key_levels_used = {str(k): v for k, v in key_levels_used.items()}
+
+    probabilities = [
+        float(prob)
+        for prob in phase2_override.get("probabilities") or []
+        if isinstance(prob, (int, float)) and math.isfinite(float(prob))
+    ]
+
+    rr_to_t1 = phase2_override.get("rr_to_t1")
+    try:
+        rr_to_t1 = float(rr_to_t1) if rr_to_t1 is not None else None
+    except (TypeError, ValueError):
+        rr_to_t1 = None
+
+    expected_move_value = None
+    if expected_move_abs is not None and math.isfinite(expected_move_abs):
+        expected_move_value = round(float(expected_move_abs), 4)
+
+    remaining_atr_value = None
+    if remaining_atr is not None and math.isfinite(remaining_atr):
+        remaining_atr_value = round(float(remaining_atr), 4)
+
+    return {
+        "stop": float(phase2_override["stop"]),
+        "targets": [float(tp) for tp in phase2_override["targets"]],
+        "target_meta": target_meta,
+        "tp_reasons": tp_reasons,
+        "runner_policy": runner_policy,
+        "snap_trace": snap_trace,
+        "key_levels": key_levels_used,
+        "probabilities": probabilities,
+        "rr_to_t1": rr_to_t1,
+        "em_capped": bool(phase2_override.get("em_capped")),
+        "telemetry": cleaned_telemetry,
+        "expected_move": expected_move_value,
+        "remaining_atr": remaining_atr_value,
+    }
 
 
 def _is_behind_tape(candidate: EntryCandidate, last_price: float, direction: str) -> bool:
@@ -1106,8 +2026,60 @@ async def _build_scan_stub_candidate(
         rr_t1 = float(plan.risk_reward) if plan and plan.risk_reward is not None else None
         confidence = float(plan.confidence) if plan and plan.confidence is not None else None
         direction_hint = plan.direction if plan and plan.direction else (signal.features or {}).get("direction_bias")
+        style_internal = _style_for_strategy(signal.strategy_id)
+        style_token_alignment = _normalize_style_token(style_internal)
+        direction_token = direction_hint
+        if plan and plan.direction:
+            direction_token = plan.direction
+        if direction_token is None and entry is not None and targets:
+            direction_token = "long" if targets[0] >= entry else "short"
+        direction_token = (direction_token or "long").lower()
 
         bundle = _indicator_bundle(signal.symbol, history)
+
+        phase3_alignment: Dict[str, Any] | None = None
+        if entry is not None and stop is not None and targets:
+            try:
+                phase3_alignment = await _phase3_scan_alignment(
+                    symbol=signal.symbol,
+                    style=style_token_alignment,
+                    direction=direction_token,
+                    entry=entry,
+                    stop=stop,
+                    targets=targets,
+                    history=history,
+                    indicator_bundle=bundle,
+                    scan_context=context,
+                )
+            except Exception:
+                logger.debug(
+                    "scan_phase3_alignment_failed",
+                    extra={"symbol": signal.symbol},
+                    exc_info=True,
+                )
+                phase3_alignment = None
+        if phase3_alignment:
+            stop = float(phase3_alignment["stop"])
+            targets = [float(tp) for tp in phase3_alignment["targets"]]
+            rr_override = phase3_alignment.get("rr_to_t1")
+            if rr_override is not None:
+                try:
+                    rr_t1 = float(rr_override)
+                except (TypeError, ValueError):
+                    pass
+            if plan is not None:
+                plan.stop = stop
+                plan.targets = list(targets)
+                if rr_t1 is not None:
+                    plan.risk_reward = rr_t1
+                plan.target_meta = list(phase3_alignment.get("target_meta") or [])
+                runner_override = phase3_alignment.get("runner_policy")
+                if runner_override is not None:
+                    plan.runner = dict(runner_override)
+            direction_token = direction_token or "long"
+        keyed_direction = direction_token or direction_hint or "long"
+        direction_hint = keyed_direction
+
         key_levels = bundle["key_levels"]
         snapshot = bundle["snapshot"]
         level_labels = [f"{label}|{value:.2f}" for label, value in key_levels.items() if math.isfinite(value)]
@@ -1116,12 +2088,12 @@ async def _build_scan_stub_candidate(
         if plan is not None:
             plan_id = _generate_plan_slug(
                 signal.symbol,
-                _style_for_strategy(signal.strategy_id),
+                style_internal,
                 direction_hint or "long",
                 snapshot,
             )
 
-        interval_hint, _ = _chart_hint(signal.strategy_id, _style_for_strategy(signal.strategy_id))
+        interval_hint, _ = _chart_hint(signal.strategy_id, style_internal)
         chart_url = _build_stub_chart_url(
             request,
             symbol=signal.symbol,
@@ -1159,7 +2131,7 @@ async def _build_scan_stub_candidate(
         fast_indicators = await _indicator_metrics(signal.symbol, history)
         combined_indicators: Dict[str, Any] = dict(fast_indicators)
         combined_indicators.update(bundle.get("snapshot", {}).get("indicators") or {})
-        style_token = _ranking_style(_style_for_strategy(signal.strategy_id))
+        style_token = _ranking_style(style_internal)
         metrics_context = MetricsContext(
             symbol=signal.symbol.upper(),
             style=style_token,
@@ -1207,7 +2179,9 @@ async def _build_scan_stub_candidate(
         if bars_to_trigger_val is not None and bars_to_trigger_val <= 3:
             actionable_soon = True
 
-        key_levels_used_payload: Dict[str, List[Dict[str, Any]]] = {"session": [], "structural": []}
+        key_levels_used_payload: Dict[str, Any] = {"session": [], "structural": []}
+        if phase3_alignment and isinstance(phase3_alignment.get("key_levels"), Mapping):
+            key_levels_used_payload = dict(phase3_alignment["key_levels"])
         entry_candidates_payload: List[Dict[str, Any]] = []
 
         candidate = ScanCandidate(
@@ -1231,6 +2205,113 @@ async def _build_scan_stub_candidate(
             key_levels_used=key_levels_used_payload,
             entry_candidates=entry_candidates_payload,
         )
+
+        composite_score = None
+        if phase3_alignment:
+            candidate_updates: Dict[str, Any] = {
+                "stop": float(phase3_alignment["stop"]),
+                "tps": [float(tp) for tp in phase3_alignment["targets"]],
+                "rr_t1": rr_t1,
+                "target_meta": list(phase3_alignment.get("target_meta") or []),
+                "targets_meta": list(phase3_alignment.get("target_meta") or []),
+                "tp_reasons": list(phase3_alignment.get("tp_reasons") or []),
+                "runner_policy": dict(phase3_alignment.get("runner_policy") or {}),
+                "snap_trace": list(phase3_alignment.get("snap_trace") or []),
+                "expected_move": phase3_alignment.get("expected_move"),
+                "remaining_atr": phase3_alignment.get("remaining_atr"),
+                "em_used": phase3_alignment.get("em_capped"),
+            }
+            key_levels_update = phase3_alignment.get("key_levels")
+            if isinstance(key_levels_update, Mapping):
+                candidate_updates["key_levels_used"] = dict(key_levels_update)
+            candidate = candidate.model_copy(update=candidate_updates)
+
+            telemetry_meta = phase3_alignment.get("telemetry") or {}
+            probabilities = phase3_alignment.get("probabilities") or []
+            primary_probability: Optional[float] = None
+            for value in probabilities:
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    primary_probability = float(value)
+                    break
+            if primary_probability is None:
+                meta_candidates = candidate.target_meta or []
+                if meta_candidates:
+                    first_meta = meta_candidates[0]
+                    if isinstance(first_meta, Mapping):
+                        for key in ("prob_touch", "prob_touch_calibrated", "prob_touch_raw"):
+                            value = first_meta.get(key)
+                            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                                primary_probability = float(value)
+                                break
+            rr_component = rr_t1 if isinstance(rr_t1, (int, float)) else phase3_alignment.get("rr_to_t1")
+            try:
+                rr_component = float(rr_component) if rr_component is not None else None
+            except (TypeError, ValueError):
+                rr_component = None
+            mtf_score = telemetry_meta.get("mtf_score")
+            try:
+                mtf_score = float(mtf_score) if mtf_score is not None else 0.0
+            except (TypeError, ValueError):
+                mtf_score = 0.0
+            mtf_multiplier = max(0.2, 1.0 + mtf_score)
+            candidate_actionability = actionability_score if actionability_score is not None else None
+
+            composite_components = {
+                "probability": primary_probability,
+                "risk_reward": rr_component,
+                "actionability": candidate_actionability,
+                "mtf_multiplier": mtf_multiplier,
+                "mtf_score": mtf_score,
+            }
+            composite_components_serializable: Dict[str, Any] = {}
+            for key, val in composite_components.items():
+                if isinstance(val, (int, float)):
+                    try:
+                        numeric = float(val)
+                    except (TypeError, ValueError):
+                        composite_components_serializable[key] = val
+                    else:
+                        composite_components_serializable[key] = round(numeric, 3) if math.isfinite(numeric) else numeric
+                else:
+                    composite_components_serializable[key] = val
+
+            if (
+                primary_probability is not None
+                and rr_component is not None
+                and candidate_actionability is not None
+            ):
+                composite_score = (
+                    max(primary_probability, 0.0)
+                    * max(rr_component, 0.0)
+                    * max(candidate_actionability, 0.0)
+                    * mtf_multiplier
+                )
+                candidate = candidate.model_copy(update={"score": round(composite_score, 4)})
+
+            snapshot_payload = dict(candidate.planning_snapshot or {})
+            if probabilities:
+                snapshot_payload["probabilities"] = [
+                    round(float(p), 4) for p in probabilities if isinstance(p, (int, float))
+                ]
+            if telemetry_meta:
+                telemetry_snapshot = dict(snapshot_payload.get("telemetry") or {})
+                for key, value in telemetry_meta.items():
+                    if value is not None:
+                        telemetry_snapshot[key] = value
+                if telemetry_snapshot:
+                    snapshot_payload["telemetry"] = telemetry_snapshot
+            if composite_components_serializable:
+                snapshot_payload["composite_components"] = composite_components_serializable
+            candidate = candidate.model_copy(update={"planning_snapshot": snapshot_payload})
+
+            source_paths = dict(candidate.source_paths or {})
+            source_paths.setdefault("phase", "refit_v2")
+            if composite_score is not None:
+                source_paths["composite_score"] = f"{composite_score:.3f}"
+            if telemetry_meta.get("event_window"):
+                source_paths["event_window"] = "1"
+            candidate = candidate.model_copy(update={"source_paths": source_paths})
+
         features = _metrics_to_features(metrics, style_token)
         logger.debug(
             "scan_candidate_metrics",
@@ -7401,6 +8482,32 @@ async def _generate_fallback_plan(
         )
     except Exception:
         pass
+
+    mtf_view: Optional[Dict[str, Any]] = None
+    if mtf_bundle:
+        mtf_view = mtf_bias(
+            {
+                "bundle": mtf_bundle,
+                "price": close_price,
+                "swing_high": levels_map.get("swing_high"),
+                "swing_low": levels_map.get("swing_low"),
+                "weights": MTF_W,
+            }
+        )
+        components = (mtf_view or {}).get("components") or {}
+        for component in components.values():
+            if not isinstance(component, Mapping):
+                continue
+            tf_label = component.get("tf")
+            score_val = component.get("score")
+            try:
+                score_val_f = float(score_val)
+            except (TypeError, ValueError):
+                continue
+            arrow = "↑" if score_val_f > 0.05 else "↓" if score_val_f < -0.05 else "≈"
+            mtf_notes.append(f"{tf_label} {arrow} ({score_val_f:.2f})")
+        if mtf_view.get("dir") and mtf_view.get("dir") != "mixed":
+            htf_bias_token = str(mtf_view.get("dir"))
     entry_seed = select_structural_entry(
         direction=direction,
         style=style_token,
@@ -7536,6 +8643,38 @@ async def _generate_fallback_plan(
         waiting_for_text = None
         mtf_notes = list(mtf_bundle.notes) if mtf_bundle else []
 
+    rule_strategy_id, rule_matches = _strategy_rule_candidates(
+        timestamp=plan_ts_utc.to_pydatetime() if isinstance(plan_ts_utc, pd.Timestamp) else plan_ts_utc,
+        direction=direction,
+        entry_price=entry_price,
+        close_price=close_price,
+        context=context,
+        levels=levels_map,
+        atr_value=float(atr_value),
+        mtf_view=mtf_view,
+        prepared=prepared,
+        expected_move=float(expected_move_abs) if isinstance(expected_move_abs, (int, float)) else None,
+    )
+    if rule_matches:
+        matched_rules_payload = rule_matches
+    if rule_strategy_id:
+        strategy_id_value = rule_strategy_id
+        strategy_profile_payload = dict(get_strategy_profile(strategy_id_value, style_token))
+        primary_match = rule_matches[0] if rule_matches else None
+        if primary_match:
+            badges_override = primary_match.get("badges") or []
+            if badges_override:
+                base_badges = list(strategy_profile_payload.get("badges") or [])
+                for badge in badges_override:
+                    if badge not in base_badges:
+                        base_badges.append(badge)
+                strategy_profile_payload["badges"] = base_badges
+            waiting_from_rule = primary_match.get("waiting_for")
+            if waiting_from_rule and not waiting_for_text:
+                waiting_for_text = waiting_from_rule
+    if matched_rules_payload:
+        strategy_profile_payload["matched_rules"] = matched_rules_payload
+
     plan["strategy"] = strategy_id_value
     plan["strategy_profile"] = strategy_profile_payload
     if waiting_for_text:
@@ -7578,6 +8717,7 @@ async def _generate_fallback_plan(
     except Exception:
         realized_range = 0.0
     tick_size = _infer_tick_size(close_price)
+    precision_hint = get_precision(symbol)
     entry_context = EntryContext(
         direction=direction,
         style=style_token,
@@ -7704,6 +8844,11 @@ async def _generate_fallback_plan(
             f"entry:{close_price:.2f}->{geometry.entry:.2f} via {selected_entry_candidate.tag.upper()}"
         )
     candidate_actionability = float(selected_entry_candidate.actionability or 0.0)
+    if mtf_view and isinstance(mtf_view, Mapping):
+        bias_dir = str(mtf_view.get("dir") or "")
+        if bias_dir in {"long", "short"} and bias_dir != direction:
+            candidate_actionability = max(0.0, candidate_actionability * 0.9)
+            selected_entry_candidate = replace(selected_entry_candidate, actionability=candidate_actionability)
     plan_actionable_now = actionable_now_flag
     plan_actionable_soon = actionable_soon_flag
     force_wait_plan = False
@@ -7785,6 +8930,37 @@ async def _generate_fallback_plan(
     structured_runner = _nativeify(dict(structured_geometry.runner_policy or {}))
     structured_tp_reasons_raw = list(structured_geometry.tp_reasons or [])
     stop_label = structured_geometry.stop_label
+    target_meta_override: Optional[List[Dict[str, Any]]] = None
+    tp_reasons_override: Optional[List[Dict[str, Any]]] = None
+    runner_override_dict: Optional[Dict[str, Any]] = None
+
+    event_context = context.get("events") if isinstance(context, Mapping) else None
+    event_window_hint = bool((event_context or {}).get("within_event_window")) if isinstance(event_context, Mapping) else False
+    closes_sample = prepared["close"].tail(200).tolist() if "close" in prepared.columns else []
+    adx_slope_value = _adx_slope(prepared)
+    if event_window_hint:
+        geometry.snap_trace.append("event_window:+0.2ATR stop floor / RR uplift")
+    phase2_override: Optional[Dict[str, Any]] = None
+    if not wait_plan:
+        expected_move_value = float(expected_move_abs) if isinstance(expected_move_abs, (int, float)) else None
+        remaining_atr_value = getattr(geometry, "ratr", None)
+        phase2_override = _refit_plan_phase2(
+            symbol=symbol,
+            entry=entry_price,
+            direction=direction,
+            style=style_token,
+            atr_value=float(atr_value),
+            expected_move_abs=expected_move_value,
+            remaining_atr=remaining_atr_value,
+            levels_map=levels_map,
+            mtf_view=mtf_view,
+            precision=precision_hint,
+            tick_size=tick_size,
+            calibration_store=_CALIBRATION_STORE,
+            closes=[float(val) for val in closes_sample if isinstance(val, (int, float))],
+            event_window=event_window_hint,
+            adx_slope=adx_slope_value,
+        )
 
     def _ensure_tp_reasons(reasons: List[Dict[str, Any]], count: int) -> List[Dict[str, Any]]:
         aligned: List[Dict[str, Any]] = []
@@ -7832,6 +9008,43 @@ async def _generate_fallback_plan(
         if len(geometry.targets) < len(targets):
             missing = len(targets) - len(geometry.targets)
             geometry.targets.extend(geometry.targets[-1:] * missing)
+
+    if phase2_override:
+        stop = round(float(phase2_override["stop"]), 4)
+        targets = [round(float(tp), 4) for tp in phase2_override["targets"]]
+        target_meta_override = phase2_override.get("target_meta")
+        tp_reasons_override = phase2_override.get("tp_reasons")
+        runner_override_dict = phase2_override.get("runner_policy")
+        geometry.stop.price = float(phase2_override["stop"])
+        geometry.stop.structural = float(phase2_override["stop"])
+        geometry.stop.snapped = str(phase2_override.get("stop_meta", {}).get("source") or stop_label)
+        stop_label = geometry.stop.snapped
+        geometry.targets = list(phase2_override.get("geometry_targets", geometry.targets))
+        geometry.snap_trace.extend(item for item in phase2_override.get("snap_trace", []) if item)
+        if runner_override_dict:
+            try:
+                geometry.runner.fraction = float(runner_override_dict.get("fraction", geometry.runner.fraction))
+                geometry.runner.atr_trail_mult = float(runner_override_dict.get("atr_trail_mult", geometry.runner.atr_trail_mult))
+                geometry.runner.atr_trail_step = float(runner_override_dict.get("atr_trail_step", geometry.runner.atr_trail_step))
+                geometry.runner.notes = list(runner_override_dict.get("notes", geometry.runner.notes))
+            except Exception:
+                geometry.runner.notes = list(runner_override_dict.get("notes", geometry.runner.notes))
+        structured_geometry.stop = float(phase2_override["stop"])
+        structured_geometry.targets = list(phase2_override["targets"])
+        structured_tp_reasons_raw = tp_reasons_override or structured_tp_reasons_raw
+        if runner_override_dict:
+            structured_runner = dict(runner_override_dict)
+            structured_geometry.runner_policy = dict(runner_override_dict)
+        structured_geometry.stop_label = stop_label
+        merged_levels = _merge_key_levels(
+            key_levels_used,
+            phase2_override.get("stop_meta", {}).get("key_level", {}),
+            phase2_override.get("key_levels", {}).get("structural", []),
+        )
+        key_levels_used = _nativeify(merged_levels)
+        structured_geometry.key_levels_used = key_levels_used
+        if phase2_override.get("em_capped"):
+            em_cap_used = True
     rr_to_t1 = _risk_reward(entry_price, stop, targets[0], direction)
     if rr_to_t1 is not None:
         rr_to_t1 = float(rr_to_t1)
@@ -7879,23 +9092,68 @@ async def _generate_fallback_plan(
         expected_move_pct = (expected_move_abs / close_price) * 100 if close_price else 0.0
         expected_move_basis = f"EM ≈ {expected_move_abs:.2f} ({expected_move_pct:.1f}%)"
     confidence_visual = _confidence_visual(confidence)
-    target_meta = []
-    for idx, meta in enumerate(geometry.targets, start=1):
-        reason_payload = tp_reasons[idx - 1] if idx - 1 < len(tp_reasons) else {}
-        snap_tag = reason_payload.get("snap_tag")
-        item = {
-            "label": f"TP{idx}",
-            "prob_touch": meta.prob_touch,
-            "distance": meta.distance,
-            "em_fraction": meta.em_fraction,
-            "rr_multiple": meta.rr_multiple,
-        }
-        if snap_tag:
-            item["snap_tag"] = snap_tag
-        if reason_payload.get("reason"):
-            item["reason"] = reason_payload["reason"]
-        target_meta.append(item)
-    target_meta = _nativeify(target_meta)
+    if target_meta_override is not None:
+        target_meta = _nativeify(target_meta_override)
+    else:
+        target_meta = []
+        for idx, meta in enumerate(geometry.targets, start=1):
+            reason_payload = tp_reasons[idx - 1] if idx - 1 < len(tp_reasons) else {}
+            snap_tag = reason_payload.get("snap_tag")
+            item = {
+                "label": f"TP{idx}",
+                "prob_touch": meta.prob_touch,
+                "distance": meta.distance,
+                "em_fraction": meta.em_fraction,
+                "rr_multiple": meta.rr_multiple,
+            }
+            if snap_tag:
+                item["snap_tag"] = snap_tag
+            if reason_payload.get("reason"):
+                item["reason"] = reason_payload["reason"]
+            target_meta.append(item)
+        target_meta = _nativeify(target_meta)
+
+    primary_probability = None
+    if target_meta and not wait_plan:
+        first_meta = target_meta[0]
+        for key in ("prob_touch", "prob_touch_calibrated", "prob_touch_raw"):
+            value = first_meta.get(key)
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                primary_probability = float(value)
+                break
+    mtf_score_val = float((mtf_view or {}).get("score", 0.0)) if isinstance(mtf_view, Mapping) else 0.0
+    mtf_multiplier = max(0.2, 1.0 + mtf_score_val)
+    composite_score = None
+    composite_components = {
+        "probability": primary_probability,
+        "risk_reward": rr_to_t1,
+        "actionability": candidate_actionability,
+        "mtf_multiplier": mtf_multiplier,
+        "mtf_score": mtf_score_val,
+    }
+    composite_components_serializable: Dict[str, Any] = {}
+    for key, val in composite_components.items():
+        if isinstance(val, (int, float)):
+            try:
+                numeric = float(val)
+            except (TypeError, ValueError):
+                composite_components_serializable[key] = val
+            else:
+                composite_components_serializable[key] = round(numeric, 3) if math.isfinite(numeric) else numeric
+        else:
+            composite_components_serializable[key] = val
+    if (
+        primary_probability is not None
+        and rr_to_t1 is not None
+        and candidate_actionability is not None
+        and not wait_plan
+    ):
+        composite_score = (
+            max(primary_probability, 0.0)
+            * max(rr_to_t1, 0.0)
+            * max(candidate_actionability, 0.0)
+            * mtf_multiplier
+        )
     try:
         geometry.runner.fraction = float(structured_runner.get("fraction", geometry.runner.fraction))
         geometry.runner.atr_trail_mult = float(
@@ -7932,6 +9190,21 @@ async def _generate_fallback_plan(
             "em_cap_fraction": geometry.runner.em_fraction_cap,
         }
     )
+    telemetry_meta = {}
+    if phase2_override and isinstance(phase2_override.get("telemetry"), Mapping):
+        telemetry_raw = phase2_override.get("telemetry") or {}
+        telemetry_meta = {
+            key: value
+            for key, value in telemetry_raw.items()
+            if value is not None and not (isinstance(value, float) and not math.isfinite(value))
+        }
+    if telemetry_meta:
+        runner.setdefault("telemetry", {}).update(telemetry_meta)
+        adx_slope_note = telemetry_meta.get("adx_slope")
+        if isinstance(adx_slope_note, (int, float)) and math.isfinite(adx_slope_note):
+            runner.setdefault("notes", []).append(f"Momentum slope {adx_slope_note:+.2f} (ADX)")
+    if event_window_hint:
+        runner.setdefault("notes", []).append("Event window: tighten stops and monitor catalysts")
     runner = _nativeify(runner)
     direction_label = "Long" if direction == "long" else "Short"
     notes = (
@@ -8175,6 +9448,8 @@ async def _generate_fallback_plan(
     runner_existing = dict(plan.get("runner")) if isinstance(plan, Mapping) and isinstance(plan.get("runner"), Mapping) else {}
     runner_geometry = _runner_policy_to_dict(geometry.runner)
     runner = {**runner_existing, **runner_geometry}
+    if runner_override_dict:
+        runner.update({key: value for key, value in runner_override_dict.items() if value is not None})
     if isinstance(structured_runner.get("trail"), str):
         runner["trail"] = structured_runner["trail"]
     else:
@@ -8184,7 +9459,7 @@ async def _generate_fallback_plan(
     runner_policy_geometry = dict(runner)
 
     calibration_meta_payload: Dict[str, Any] | None = None
-    if calibration_enabled and geometry.targets:
+    if calibration_enabled and geometry.targets and not phase2_override:
         session_status_token = str(
             session_state_payload.get("status")
             or session_state_payload.get("session_status")
@@ -8216,7 +9491,7 @@ async def _generate_fallback_plan(
                 )
             if calibration_meta_payload is None and payload:
                 calibration_meta_payload = payload
-    else:
+    elif not phase2_override:
         for idx, meta in enumerate(geometry.targets):
             if idx < len(target_meta):
                 target_meta[idx]["prob_touch_raw"] = float(meta.prob_touch)
@@ -8262,6 +9537,7 @@ async def _generate_fallback_plan(
             "actionability_gate": actionability_gate,
             "actionable_now": plan_actionable_now,
             "actionable_soon": plan_actionable_soon,
+            "score": round(composite_score, 3) if composite_score is not None else plan.get("score"),
         }
     )
     plan_block["entry_anchor"] = plan.get("entry_anchor")
@@ -8278,6 +9554,8 @@ async def _generate_fallback_plan(
         meta_block.setdefault("entry_actionability", plan_block.get("entry_actionability"))
     if entry_waiting_for:
         meta_block.setdefault("waiting_for", entry_waiting_for)
+    if any(value is not None for value in composite_components_serializable.values()):
+        meta_block["composite_components"] = composite_components_serializable
     plan_block["meta"] = meta_block
     if wait_plan:
         plan_block["plan_state"] = "WAIT"
@@ -8311,6 +9589,8 @@ async def _generate_fallback_plan(
     accuracy_levels: List[str] = list(plan_block.get("accuracy_levels") or [])
     if em_cap_used and "EM cap" not in accuracy_levels:
         accuracy_levels.append("EM cap")
+    if event_window_hint and "Event window buffer" not in accuracy_levels:
+        accuracy_levels.append("Event window buffer")
     plan_block["accuracy_levels"] = accuracy_levels
     if entry_candidates_payload:
         meta_block = plan_block.get("meta")
