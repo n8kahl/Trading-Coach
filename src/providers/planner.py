@@ -7,6 +7,13 @@ from typing import Any, Dict, List
 import pandas as pd
 
 from ..lib.data_route import DataRoute
+from ..services.chart_levels import extract_supporting_levels
+from ..services.chart_utils import (
+    build_ui_state,
+    infer_session_label,
+    normalize_confidence,
+    normalize_style_token,
+)
 from .geometry import GeometryBundle, GeometryDetail
 from .series import SeriesBundle
 
@@ -190,7 +197,9 @@ async def plan(
     if status == "stale":
         warnings.append("ENTRY_STALE")
 
-    return {
+    confidence_token = max(0.0, min(entry_actionability, 1.0))
+
+    plan_payload = {
         "plan_id": f"{symbol}-{route.mode}-{route.as_of.strftime('%Y%m%d%H%M')}",
         "version": 1,
         "trade_detail": f"{direction.capitalize()} setup derived from ATR geometry",
@@ -208,14 +217,31 @@ async def plan(
             "em_used": em_used,
         },
         "warnings": warnings,
-        "charts": {"params": charts_params},
-        "charts_params": charts_params,
         "entry_candidates": entry_candidates,
         "entry_actionability": round(entry_actionability, 2),
         "actionable_soon": selected_candidate,
         "waiting_for": None if selected_candidate else "fresh_print",
         "use_extended_hours": route.extended,
+        "style": "intraday",
+        "confidence": round(confidence_token, 3),
+        "charts": {"params": charts_params},
+        "charts_params": charts_params,
     }
+
+    levels_token = extract_supporting_levels(plan_payload)
+    if levels_token:
+        charts_params["levels"] = levels_token
+        charts_params["supportingLevels"] = "1"
+    session_label = infer_session_label(route.as_of)
+    style_token = normalize_style_token(plan_payload.get("style"))
+    confidence_value = normalize_confidence(plan_payload.get("confidence"))
+    charts_params["ui_state"] = build_ui_state(
+        session=session_label,
+        confidence=confidence_value,
+        style=style_token,
+    )
+
+    return plan_payload
 
 
 __all__ = ["plan"]

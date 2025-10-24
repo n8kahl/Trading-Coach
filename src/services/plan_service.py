@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Mapping
 
 import httpx
 from fastapi import FastAPI
@@ -13,9 +13,26 @@ from ..providers.options import select_contracts
 from ..providers.planner import plan as run_plan
 from ..providers.series import fetch_series
 from .chart_levels import extract_supporting_levels
-from .chart_utils import sanitize_chart_params
+from .chart_utils import (
+    sanitize_chart_params,
+    infer_session_label,
+    normalize_confidence,
+    normalize_style_token,
+    build_ui_state,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_levels_for_chart(plan: Mapping[str, Any]) -> Optional[str]:
+    if not isinstance(plan, Mapping):
+        return None
+    extras: list[Mapping[str, Any]] = []
+    for key in ("key_levels_used", "structured_plan", "plan_layers"):
+        value = plan.get(key)
+        if isinstance(value, Mapping):
+            extras.append(value)
+    return extract_supporting_levels(plan, *extras)
 
 
 async def _resolve_chart_url(app: FastAPI, params: Dict[str, Any]) -> Optional[str]:
@@ -90,13 +107,17 @@ async def generate_plan(
 
     params = charts_container.get("params") if isinstance(charts_container, dict) else None
     raw_params = dict(params) if isinstance(params, dict) else {}
-    levels_token = extract_supporting_levels(plan_obj)
+    levels_token = _extract_levels_for_chart(plan_obj)
     if levels_token:
         raw_params["levels"] = levels_token
         raw_params["supportingLevels"] = "1"
     if route.extended:
         raw_params.setdefault("range", "1d")
         raw_params["session"] = "extended"
+    style_token = normalize_style_token(plan_obj.get("style") or style)
+    confidence_value = normalize_confidence(plan_obj.get("confidence"))
+    session_label = infer_session_label(route.as_of)
+    raw_params["ui_state"] = build_ui_state(session=session_label, confidence=confidence_value, style=style_token)
     chart_params = sanitize_chart_params(raw_params if raw_params else None)
     if chart_params:
         charts_container["params"] = chart_params
@@ -104,8 +125,9 @@ async def generate_plan(
         chart_url = await _resolve_chart_url(app, chart_params)
         if chart_url:
             plan_obj["chart_url"] = chart_url
+            charts_container["interactive"] = chart_url
 
-    plan_obj.setdefault("style", style)
+    plan_obj.setdefault("style", style or style_token)
     plan_obj.setdefault("warnings", [])
 
     return plan_obj

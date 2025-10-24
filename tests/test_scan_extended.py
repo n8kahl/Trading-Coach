@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 
 import pandas as pd
 import pytest
@@ -121,3 +122,9 @@ async def test_generate_scan_extended_threads_session(monkeypatch: pytest.Monkey
     assert any(params and params.get("session") == "extended" for params in captured_params)
     assert any(params and params.get("levels") for params in captured_params)
     assert all(params.get("supportingLevels") == "1" for params in captured_params if params)
+    assert all("ui_state" in params for params in captured_params if params)
+    for params in (payload for payload in captured_params if payload):
+        parsed_state = json.loads(params["ui_state"])
+        assert parsed_state["session"] == "after"
+        assert parsed_state["style"] in {"intraday", "scalp", "swing"}
+        assert 0.0 <= parsed_state["confidence"] <= 1.0

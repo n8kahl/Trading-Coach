@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Optional
 
 import httpx
 from fastapi import FastAPI
@@ -14,9 +14,26 @@ from ..providers.scanner import scan as run_scan
 from ..providers.series import fetch_series
 from .chart_levels import extract_supporting_levels
 from .scan_confidence import compute_scan_confidence
-from .chart_utils import sanitize_chart_params
+from .chart_utils import (
+    sanitize_chart_params,
+    infer_session_label,
+    normalize_confidence,
+    normalize_style_token,
+    build_ui_state,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_levels_for_chart(plan: Mapping[str, Any]) -> Optional[str]:
+    if not isinstance(plan, Mapping):
+        return None
+    extras: list[Mapping[str, Any]] = []
+    for key in ("key_levels_used", "structured_plan", "plan_layers"):
+        value = plan.get(key)
+        if isinstance(value, Mapping):
+            extras.append(value)
+    return extract_supporting_levels(plan, *extras)
 
 
 async def _chart_urls(app: FastAPI, payloads: List[Dict[str, Any] | None]) -> List[str | None]:
@@ -86,6 +103,7 @@ async def generate_scan(
     enriched: List[Dict[str, Any]] = []
     chart_payloads: List[Dict[str, Any] | None] = []
     plan_payloads: List[Dict[str, Any]] = []
+    session_label = infer_session_label(route.as_of)
 
     for candidate in candidates:
         symbol = candidate.get("symbol")
@@ -120,13 +138,16 @@ async def generate_scan(
 
         params = charts_container.get("params") if isinstance(charts_container, dict) else None
         raw_params = dict(params) if isinstance(params, dict) else {}
-        levels_token = extract_supporting_levels(plan_obj)
+        levels_token = _extract_levels_for_chart(plan_obj)
         if levels_token:
             raw_params["levels"] = levels_token
             raw_params["supportingLevels"] = "1"
         if route.extended:
             raw_params.setdefault("range", "1d")
             raw_params["session"] = "extended"
+        style_token = normalize_style_token(plan_obj.get("style") or style)
+        confidence_value = normalize_confidence(plan_obj.get("confidence"))
+        raw_params["ui_state"] = build_ui_state(session=session_label, confidence=confidence_value, style=style_token)
         chart_params = sanitize_chart_params(raw_params if raw_params else None)
         if chart_params:
             charts_container["params"] = chart_params
@@ -142,6 +163,10 @@ async def generate_scan(
     for candidate, chart_url, plan_obj in zip(enriched, chart_urls, plan_payloads):
         if chart_url:
             candidate["chart_url"] = chart_url
+            charts_container = plan_obj.get("charts")
+            if isinstance(charts_container, dict):
+                charts_container["interactive"] = chart_url
+            plan_obj["chart_url"] = chart_url
         symbol = candidate.get("symbol")
         detail: GeometryDetail | None = geometry.get(symbol) if symbol else None
         plan_data_quality = plan_obj.get("data_quality") if isinstance(plan_obj.get("data_quality"), dict) else {}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from typing import Iterable
 
 import pandas as pd
@@ -88,3 +89,8 @@ async def test_plan_no_coupling_and_chart_required(monkeypatch: pytest.MonkeyPat
     assert payload["snap_trace"]
     assert payload["data_quality"]["snapshot"]["symbol_count"] == 1
     assert payload["chart_url"]
+    assert payload["charts"]["interactive"] == payload["chart_url"]
+    ui_state_raw = payload["charts"]["params"]["ui_state"]
+    parsed_state = json.loads(ui_state_raw)
+    assert parsed_state["style"] == "intraday"
+    assert 0.0 <= parsed_state["confidence"] <= 1.0

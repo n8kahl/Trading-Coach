@@ -2572,6 +2572,7 @@ class ChartParams(BaseModel):
     ema: str | None = None
     session: str | None = None
     supportingLevels: str | None = None
+    ui_state: str | None = None
 
 
 class ChartLinks(BaseModel):

@@ -26,6 +26,7 @@ ALLOWED_KEYS: frozenset[str] = frozenset(
         "plan_version",
         "levels",
         "supportingLevels",
+        "ui_state",
     }
 )
 

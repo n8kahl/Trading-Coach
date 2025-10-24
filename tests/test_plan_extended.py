@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -113,6 +114,13 @@ async def test_generate_plan_extended_adds_session(monkeypatch: pytest.MonkeyPat
     assert plan["charts"]["params"]["range"] == "5d"
     assert plan["charts"]["params"]["supportingLevels"] == "1"
     assert isinstance(plan["charts"]["params"].get("levels"), str) and plan["charts"]["params"]["levels"]
+    assert plan["charts"]["interactive"] == plan["chart_url"]
+    ui_state_raw = plan["charts"]["params"]["ui_state"]
+    parsed_state = json.loads(ui_state_raw)
+    assert parsed_state["session"] == "after"
+    assert parsed_state["style"] == "intraday"
+    assert 0.0 <= parsed_state["confidence"] <= 1.0
+    assert plan["charts_params"]["ui_state"] == ui_state_raw
     assert plan["entry_actionability"] == pytest.approx(1.0)
     assert "ENTRY_STALE" not in plan.get("warnings", [])
     assert plan["chart_url"] == "https://chart.test/extended"

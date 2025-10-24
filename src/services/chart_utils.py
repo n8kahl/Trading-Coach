@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime
 from typing import Any, Dict, Optional, Set
+from zoneinfo import ZoneInfo
 
 
 ALLOWED_CHART_PARAM_KEYS: Set[str] = {
@@ -31,6 +34,7 @@ ALLOWED_CHART_PARAM_KEYS: Set[str] = {
     "ema",
     "session",
     "supportingLevels",
+    "ui_state",
 }
 
 REQUIRED_CHART_PARAM_KEYS: Set[str] = {
@@ -43,6 +47,64 @@ REQUIRED_CHART_PARAM_KEYS: Set[str] = {
 }
 
 _STRINGY_EMPTY = {"", " ", "\n", "\t"}
+
+_ET = ZoneInfo("America/New_York")
+_SUPPORTED_STYLES = ("scalp", "intraday", "swing")
+
+
+def infer_session_label(as_of: datetime | None) -> str:
+    """Return session token ('premkt'|'live'|'after') inferred from an as_of timestamp."""
+    if as_of is None:
+        return "live"
+    if as_of.tzinfo is None:
+        aware = as_of.replace(tzinfo=_ET)
+    else:
+        aware = as_of.astimezone(_ET)
+    total_minutes = aware.hour * 60 + aware.minute
+    if 4 * 60 <= total_minutes < 9 * 60 + 30:
+        return "premkt"
+    if 9 * 60 + 30 <= total_minutes < 16 * 60:
+        return "live"
+    return "after"
+
+
+def normalize_style_token(style: Any) -> str:
+    """Map arbitrary style descriptors into canonical tokens."""
+    if isinstance(style, str):
+        token = style.strip().lower()
+    else:
+        token = ""
+    if not token:
+        return "intraday"
+    for candidate in _SUPPORTED_STYLES:
+        if token == candidate or candidate in token:
+            return candidate
+    return "intraday"
+
+
+def normalize_confidence(value: Any) -> float:
+    """Clamp confidence into [0,1], accommodating percentage inputs."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not 0.0 <= numeric <= 1.0 and 1.0 < numeric <= 100.0:
+        numeric /= 100.0
+    if numeric < 0.0:
+        return 0.0
+    if numeric > 1.0:
+        return 1.0
+    return numeric
+
+
+def build_ui_state(*, session: str, confidence: float, style: str) -> str:
+    """Return a JSON payload describing the chart UI state."""
+    payload = {
+        "session": session or "live",
+        "confidence": round(confidence, 3),
+        "style": style or "intraday",
+    }
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
 def sanitize_chart_params(raw: Dict[str, Any] | None) -> Optional[Dict[str, Any]]:
@@ -113,4 +175,12 @@ def sanitize_chart_params(raw: Dict[str, Any] | None) -> Optional[Dict[str, Any]
     return sanitized
 
 
-__all__ = ["sanitize_chart_params", "ALLOWED_CHART_PARAM_KEYS", "REQUIRED_CHART_PARAM_KEYS"]
+__all__ = [
+    "sanitize_chart_params",
+    "ALLOWED_CHART_PARAM_KEYS",
+    "REQUIRED_CHART_PARAM_KEYS",
+    "infer_session_label",
+    "normalize_style_token",
+    "normalize_confidence",
+    "build_ui_state",
+]

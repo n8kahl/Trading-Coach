@@ -1,3 +1,5 @@
+from urllib.parse import parse_qs, urlsplit
+
 from src.app.services.chart_url import make_chart_url
 from src.app.services.instrument_precision import get_precision
 
@@ -54,3 +56,21 @@ def test_get_precision_resolves_aliases():
     assert get_precision("I:SPX", precision_map=mapping) == 1
     assert get_precision("spx", precision_map=mapping) == 1
     assert get_precision("UNKNOWN", precision_map=mapping) == 3
+
+
+def test_make_chart_url_includes_ui_state_token():
+    params = {
+        "symbol": "AAPL",
+        "interval": "5m",
+        "direction": "long",
+        "entry": 195.12,
+        "stop": 193.5,
+        "tp": [198.4],
+        "ui_state": '{"session":"live","confidence":0.82,"style":"intraday"}',
+    }
+
+    url = make_chart_url(params, base_url="https://example.com/tv", precision_map={"AAPL": 2})
+
+    parsed = urlsplit(url)
+    query = parse_qs(parsed.query)
+    assert query["ui_state"] == ['{"session":"live","confidence":0.82,"style":"intraday"}']
