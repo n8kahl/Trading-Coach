@@ -11503,6 +11503,23 @@ async def gpt_plan(
         notes_output = ""
     elif "watch plan" in notes_output.lower():
         notes_output = ""
+    live_webview_url = None
+    try:
+        base_url = _resolved_base_url(request)
+        if base_url:
+            live_webview_url = f"{base_url}/plan/{quote(str(plan_id), safe='')}"
+    except Exception:
+        live_webview_url = None
+    if live_webview_url and "Live Webview:" not in notes_output:
+        link_lines = [f"Live Webview: {live_webview_url}"]
+        if chart_url_value:
+            link_lines.append(f"Legacy /tv: {chart_url_value}")
+        links_section = "\n".join(link_lines)
+        notes_output = f"{notes_output.rstrip()}\n\n{links_section}" if notes_output else links_section
+    elif chart_url_value and "Legacy /tv:" not in notes_output and live_webview_url:
+        notes_output = f"{notes_output.rstrip()}\nLegacy /tv: {chart_url_value}" if notes_output else f"Legacy /tv: {chart_url_value}"
+    if plan is not None:
+        plan["notes"] = notes_output or None
     bias_output = plan.get("direction") or ((snapshot.get("trend") or {}).get("direction_hint"))
     relevant_levels = first.get("key_levels") or {}
     expected_move_basis = None
