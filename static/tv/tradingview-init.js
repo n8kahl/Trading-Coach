@@ -1359,13 +1359,13 @@ levelsToggleEl = document.getElementById('levels_toggle');
     window.history.replaceState({}, '', newUrl);
   };
 
-  const setOrDeleteParam = (key, value) => {
+  function setOrDeleteParam(key, value) {
     if (value === null || value === undefined || value === '') {
       params.delete(key);
       return;
     }
     params.set(key, String(value));
-  };
+  }
 
   const numericArray = (value) => {
     if (!Array.isArray(value)) return [];
