@@ -168,6 +168,12 @@ components:
           description: >-
             When true, the planner will emit a WAIT plan instead of returning a stale
             entry if no candidate meets `min_actionability` or the style default gate.
+        use_extended_hours:
+          type: boolean
+          default: false
+          description: >-
+            When true, fetches pre-market and after-hours bars and focuses actionability
+            on extended-session recency rather than volume.
 
     ScanFilters:
       type: object
@@ -221,6 +227,11 @@ components:
           description: >-
             When true, evaluates the scan as if the market were open even if the
             current session is closed. Also accepts the `X-Simulate-Open: 1` header.
+        use_extended_hours:
+          type: boolean
+          default: false
+          description: >-
+            When true, routes series and planning via extended session bars (pre/post).
 
     ChartUrlRequest:
       type: object
@@ -253,6 +264,11 @@ components:
           type: array
           description: Target prices in display order
           items: { type: number, format: double }
+        session:
+          type: string
+          enum: [extended]
+          nullable: true
+          description: Optional hint for chart builders to highlight extended hours.
 
     FinalizeRequest:
       type: object
@@ -450,6 +466,10 @@ components:
         phase: { type: string, enum: [scan], nullable: true }
         count_candidates: { type: integer, nullable: true }
         next_cursor: { type: string, nullable: true }
+        use_extended_hours:
+          type: boolean
+          nullable: true
+          description: Indicates the scan used extended-session candles.
       example:
         as_of: "2025-10-20T01:00:00Z"
         planning_context: frozen
@@ -812,6 +832,10 @@ components:
           type: object
           nullable: true
           description: Additional metadata flags (e.g., `simulated_open`).
+        use_extended_hours:
+          type: boolean
+          nullable: true
+          description: Present when the plan was generated with extended-session bars.
         waiting_for:
           type: string
           nullable: true

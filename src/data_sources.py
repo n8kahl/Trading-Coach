@@ -55,7 +55,13 @@ async def _get_polygon_client() -> httpx.AsyncClient:
     return _POLYGON_CLIENT
 
 
-async def fetch_polygon_ohlcv(symbol: str, timeframe: str, *, max_days: Optional[int] = None) -> pd.DataFrame | None:
+async def fetch_polygon_ohlcv(
+    symbol: str,
+    timeframe: str,
+    *,
+    max_days: Optional[int] = None,
+    include_extended: bool = False,
+) -> pd.DataFrame | None:
     """Fetch OHLCV candles from Polygon."""
     settings = get_settings()
     api_key = settings.polygon_api_key
@@ -78,6 +84,8 @@ async def fetch_polygon_ohlcv(symbol: str, timeframe: str, *, max_days: Optional
         "limit": 5000,
         "apiKey": api_key,
     }
+    if include_extended:
+        params["include_extended"] = "true"
     client = await _get_polygon_client()
     try:
         resp = await client.get(url, params=params)

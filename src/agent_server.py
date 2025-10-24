@@ -2569,6 +2569,7 @@ class ChartParams(BaseModel):
     view: str | None = None
     levels: str | None = None
     ema: str | None = None
+    session: str | None = None
 
 
 class ChartLinks(BaseModel):
@@ -2780,6 +2781,7 @@ class PlanRequest(BaseModel):
     simulate_open: bool = False
     min_actionability: float | None = Field(default=None, ge=0.0, le=1.0)
     must_be_actionable: bool = False
+    use_extended_hours: bool = False
 
 
 class RejectedContract(BaseModel):
@@ -2798,6 +2800,7 @@ class PlanResponse(BaseModel):
     trade_detail: str | None = None
     warnings: List[str] = Field(default_factory=list)
     planning_context: str | None = None
+    use_extended_hours: bool | None = None
     symbol: str
     style: str | None = None
     bias: str | None = None
@@ -6774,11 +6777,16 @@ async def gpt_scan_endpoint(
         explicit_value=request_payload.simulate_open,
         explicit_field_set="simulate_open" in fields_set,
     )
+    use_extended_hours = bool(getattr(request_payload, "use_extended_hours", False))
     planning_mode = bool(getattr(request_payload, "planning_mode", False))
     session_payload = _session_payload_from_request(request)
     settings = get_settings()
     if getattr(settings, "gpt_backend_v2_enabled", False):
-        route_v2 = route_for_request(simulate_open, now=datetime.now(timezone.utc))
+        route_v2 = route_for_request(
+            simulate_open,
+            now=datetime.now(timezone.utc),
+            use_extended_hours=use_extended_hours,
+        )
         try:
             resolved_symbols = await resolve_universe(request_payload.universe, request_payload.style)
         except Exception as exc:
@@ -6803,6 +6811,13 @@ async def gpt_scan_endpoint(
     use_market_routing = bool(getattr(settings, "gpt_market_routing_enabled", True))
     if use_market_routing and not planning_mode:
         route = pick_data_source()
+        if use_extended_hours and not route.extended:
+            route = DataRoute(
+                mode=route.mode,
+                as_of=route.as_of,
+                planning_context=route.planning_context,
+                extended=True,
+            )
         if simulate_open:
             route = apply_simulate_open(route, now=datetime.now(timezone.utc))
         if isinstance(request_payload.universe, list):
@@ -10285,6 +10300,7 @@ async def gpt_plan(
         explicit_value=request_payload.simulate_open,
         explicit_field_set="simulate_open" in fields_set,
     )
+    use_extended_hours = bool(getattr(request_payload, "use_extended_hours", False))
     fallback_plan_response: PlanResponse | None = None
     if getattr(settings, "gpt_market_routing_enabled", True):
         try:
@@ -10305,7 +10321,11 @@ async def gpt_plan(
             response.headers["X-No-Fabrication"] = "1"
             return fallback_plan_response
     if getattr(settings, "gpt_backend_v2_enabled", False):
-        route_v2 = route_for_request(simulate_open, now=datetime.now(timezone.utc))
+        route_v2 = route_for_request(
+            simulate_open,
+            now=datetime.now(timezone.utc),
+            use_extended_hours=use_extended_hours,
+        )
         plan_payload_v2 = await generate_plan_v2(
             symbol,
             style=request_payload.style,
@@ -10317,6 +10337,13 @@ async def gpt_plan(
     use_market_routing = bool(getattr(settings, "gpt_market_routing_enabled", True))
     if use_market_routing:
         route = pick_data_source()
+        if use_extended_hours and not route.extended:
+            route = DataRoute(
+                mode=route.mode,
+                as_of=route.as_of,
+                planning_context=route.planning_context,
+                extended=True,
+            )
         if simulate_open:
             route = apply_simulate_open(route, now=datetime.now(timezone.utc))
         try:

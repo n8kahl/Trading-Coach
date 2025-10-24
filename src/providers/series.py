@@ -21,6 +21,8 @@ _TIMEFRAMES: list[tuple[str, str, int]] = [
     ("5m", "5", 10),
 ]
 
+_EXTENDED_AWARE_FRAMES = {"1m", "5m", "15m", "30m"}
+
 
 def _ensure_aware(dt: datetime) -> datetime:
     if dt.tzinfo is None:
@@ -37,8 +39,22 @@ def _cutoff(as_of: datetime) -> pd.Timestamp:
     return ts
 
 
-async def _load_frame(symbol: str, timeframe: str, max_days: int, cutoff_ts: pd.Timestamp) -> pd.DataFrame:
-    frame = await fetch_polygon_ohlcv(symbol, timeframe, max_days=max_days)
+async def _load_frame(
+    symbol: str,
+    timeframe: str,
+    max_days: int,
+    cutoff_ts: pd.Timestamp,
+    *,
+    extended: bool,
+    label: str,
+) -> pd.DataFrame:
+    include_extended = extended and label in _EXTENDED_AWARE_FRAMES
+    frame = await fetch_polygon_ohlcv(
+        symbol,
+        timeframe,
+        max_days=max_days,
+        include_extended=include_extended,
+    )
     if frame is None or frame.empty:
         raise RuntimeError(f"polygon returned no data for {symbol} timeframe {timeframe}")
     filtered = frame.loc[frame.index <= cutoff_ts]
@@ -72,11 +88,13 @@ class SeriesBundle:
     frames: Dict[str, Dict[str, pd.DataFrame]] = field(default_factory=dict)
     latest_close: Dict[str, float] = field(default_factory=dict)
 
+    extended: bool = False
+
     def get_frame(self, symbol: str, timeframe: str) -> pd.DataFrame | None:
         return self.frames.get(symbol, {}).get(timeframe)
 
 
-async def fetch_series(symbols: List[str], *, mode: DataMode, as_of: datetime) -> SeriesBundle:
+async def fetch_series(symbols: List[str], *, mode: DataMode, as_of: datetime, extended: bool = False) -> SeriesBundle:
     """Fetch Polygon OHLCV series bundle for the requested symbols."""
 
     if not symbols:
@@ -84,13 +102,20 @@ async def fetch_series(symbols: List[str], *, mode: DataMode, as_of: datetime) -
 
     as_of_utc = _ensure_aware(as_of)
     cutoff_ts = _cutoff(as_of_utc)
-    bundle = SeriesBundle(symbols=list(symbols), mode=mode, as_of=as_of_utc)
+    bundle = SeriesBundle(symbols=list(symbols), mode=mode, as_of=as_of_utc, extended=extended)
 
     async def _load_symbol(symbol: str) -> None:
         per_symbol: Dict[str, pd.DataFrame] = {}
         for label, timeframe, max_days in _TIMEFRAMES:
             try:
-                frame = await _load_frame(symbol, timeframe, max_days, cutoff_ts)
+                frame = await _load_frame(
+                    symbol,
+                    timeframe,
+                    max_days,
+                    cutoff_ts,
+                    extended=extended,
+                    label=label,
+                )
             except Exception as exc:
                 logger.warning("series fetch failed for %s/%s: %s", symbol, timeframe, exc)
                 if label == "1d":

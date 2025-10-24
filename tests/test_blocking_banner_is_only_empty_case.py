@@ -41,7 +41,13 @@ async def test_blocking_banner_is_only_empty_case(monkeypatch: pytest.MonkeyPatc
     settings = get_settings()
     monkeypatch.setattr(settings, "gpt_backend_v2_enabled", True, raising=False)
 
-    async def fake_fetch_series(symbols_input: list[str], *, mode: str, as_of: datetime) -> SeriesBundle:
+    async def fake_fetch_series(
+        symbols_input: list[str],
+        *,
+        mode: str,
+        as_of: datetime,
+        extended: bool = False,
+    ) -> SeriesBundle:
         return _series_bundle(symbols_input, as_of)
 
     async def fake_select_contracts(symbol: str, as_of_dt: datetime, plan: dict) -> dict:

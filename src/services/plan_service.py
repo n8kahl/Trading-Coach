@@ -49,9 +49,10 @@ async def generate_plan(
     route: DataRoute,
     app: FastAPI,
 ) -> Dict[str, Any]:
-    series = await fetch_series([symbol], mode=route.mode, as_of=route.as_of)
+    series = await fetch_series([symbol], mode=route.mode, as_of=route.as_of, extended=route.extended)
     geometry = await build_geometry([symbol], series)
     plan_obj = await run_plan(symbol, series=series, geometry=geometry, route=route)
+    plan_obj.setdefault("use_extended_hours", route.extended)
 
     snapshot = {
         "generated_at": route.as_of.isoformat(),
@@ -87,7 +88,11 @@ async def generate_plan(
         plan_obj["charts"] = charts_container
 
     params = charts_container.get("params") if isinstance(charts_container, dict) else None
-    chart_params = sanitize_chart_params(params if isinstance(params, dict) else None)
+    raw_params = dict(params) if isinstance(params, dict) else {}
+    if route.extended:
+        raw_params.setdefault("range", "1d")
+        raw_params["session"] = "extended"
+    chart_params = sanitize_chart_params(raw_params if raw_params else None)
     if chart_params:
         charts_container["params"] = chart_params
         chart_url = await _resolve_chart_url(app, chart_params)

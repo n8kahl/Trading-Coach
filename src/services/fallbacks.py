@@ -30,6 +30,7 @@ def ensure_plan_schema(
         "symbol_count": symbol_count,
     }
     plan_obj["planning_context"] = route.planning_context
+    plan_obj["use_extended_hours"] = route.extended
     plan_obj.setdefault("warnings", [])
     plan_obj["data_quality"] = {
         **data_quality,
@@ -71,8 +72,18 @@ async def _attempt_plan(
 ) -> tuple[dict[str, Any], SeriesBundle, GeometryBundle]:
     mode = mode_override or route.mode
     planning_context = route.planning_context if mode_override is None else ("frozen" if mode == "lkg" else "live")
-    attempt_route = DataRoute(mode=mode, as_of=route.as_of, planning_context=planning_context)
-    series = await fetch_series([symbol], mode=attempt_route.mode, as_of=attempt_route.as_of)
+    attempt_route = DataRoute(
+        mode=mode,
+        as_of=route.as_of,
+        planning_context=planning_context,
+        extended=route.extended,
+    )
+    series = await fetch_series(
+        [symbol],
+        mode=attempt_route.mode,
+        as_of=attempt_route.as_of,
+        extended=attempt_route.extended,
+    )
     geometry = await build_geometry([symbol], series)
     plan_obj = await run_plan(symbol, series=series, geometry=geometry, route=attempt_route)
     plan_obj.setdefault("symbol", symbol)
@@ -98,7 +109,7 @@ async def compute_plan_with_fallback(symbol: str, route: DataRoute) -> dict[str,
     series: SeriesBundle | None = None
     geometry: GeometryBundle | None = None
     try:
-        series = await fetch_series([symbol], mode=route.mode, as_of=route.as_of)
+        series = await fetch_series([symbol], mode=route.mode, as_of=route.as_of, extended=route.extended)
         geometry = await build_geometry([symbol], series)
     except Exception:
         series = None
@@ -137,5 +148,6 @@ async def compute_plan_with_fallback(symbol: str, route: DataRoute) -> dict[str,
             "entry_actionability": None,
             "entry_candidates": [],
         },
+        "use_extended_hours": route.extended,
     }
     return stub

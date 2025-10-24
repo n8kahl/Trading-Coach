@@ -85,10 +85,13 @@ def ensure_scan_schema(
     data_quality = dict(page.get("data_quality") or {})
     page.setdefault("as_of", route.as_of.isoformat())
     page["planning_context"] = route.planning_context
+    page["use_extended_hours"] = route.extended
     page.setdefault("warnings", [])
     page.setdefault("meta", {})
     page["meta"].setdefault("route", route.mode)
     page["meta"].setdefault("snapshot", snapshot)
+    if route.extended:
+        page["meta"].setdefault("session", "extended")
     page.setdefault("snap_trace", getattr(geometry, "snap_trace", None))
     page["data_quality"] = {
         **data_quality,
@@ -116,8 +119,18 @@ async def _attempt_scan(
 ) -> tuple[dict[str, Any], SeriesBundle, GeometryBundle]:
     mode = mode_override or route.mode
     planning_context = route.planning_context if mode_override is None else ("frozen" if mode == "lkg" else "live")
-    attempt_route = DataRoute(mode=mode, as_of=route.as_of, planning_context=planning_context)
-    series = await fetch_series(list(universe), mode=attempt_route.mode, as_of=attempt_route.as_of)
+    attempt_route = DataRoute(
+        mode=mode,
+        as_of=route.as_of,
+        planning_context=planning_context,
+        extended=route.extended,
+    )
+    series = await fetch_series(
+        list(universe),
+        mode=attempt_route.mode,
+        as_of=attempt_route.as_of,
+        extended=attempt_route.extended,
+    )
     geometry = await build_geometry(list(universe), series)
     page = await run_scan(
         list(universe),
@@ -160,9 +173,11 @@ async def compute_scan_with_fallback(
     stub = {
         "as_of": route.as_of.isoformat(),
         "planning_context": route.planning_context,
+        "use_extended_hours": route.extended,
         "meta": {
             "snapshot": snapshot,
             "universe": {"name": "adhoc", "source": "planner", "count": len(universe)},
+            **({"session": "extended"} if route.extended else {}),
         },
         "phase": "scan",
         "next_cursor": None,

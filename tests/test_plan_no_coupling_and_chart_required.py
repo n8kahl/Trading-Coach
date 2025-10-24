@@ -40,8 +40,15 @@ async def test_plan_no_coupling_and_chart_required(monkeypatch: pytest.MonkeyPat
     symbol = "NVDA"
     settings = get_settings()
     monkeypatch.setattr(settings, "gpt_backend_v2_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "gpt_market_routing_enabled", False, raising=False)
 
-    async def fake_fetch_series(symbols: list[str], *, mode: str, as_of: datetime) -> SeriesBundle:
+    async def fake_fetch_series(
+        symbols: list[str],
+        *,
+        mode: str,
+        as_of: datetime,
+        extended: bool = False,
+    ) -> SeriesBundle:
         return _series_bundle(symbols, as_of)
 
     async def fake_select_contracts(symbol: str, as_of_dt: datetime, plan: dict) -> dict:

@@ -41,7 +41,13 @@ async def test_sim_open_routes_live_and_nonempty_scan(monkeypatch: pytest.Monkey
     settings = get_settings()
     monkeypatch.setattr(settings, "gpt_backend_v2_enabled", True, raising=False)
 
-    async def fake_fetch_series(symbols_input: List[str], *, mode: str, as_of: datetime) -> SeriesBundle:
+    async def fake_fetch_series(
+        symbols_input: List[str],
+        *,
+        mode: str,
+        as_of: datetime,
+        extended: bool = False,
+    ) -> SeriesBundle:
         return _series_bundle(symbols_input, as_of)
 
     async def fake_select_contracts(symbol: str, as_of_dt: datetime, plan: dict) -> dict:

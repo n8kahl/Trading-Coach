@@ -55,7 +55,7 @@ async def generate_scan(
     route: DataRoute,
     app: FastAPI,
 ) -> Dict[str, Any]:
-    series = await fetch_series(symbols, mode=route.mode, as_of=route.as_of)
+    series = await fetch_series(symbols, mode=route.mode, as_of=route.as_of, extended=route.extended)
     geometry = await build_geometry(symbols, series)
     page = await run_scan(symbols, style=style, limit=limit, series=series, geometry=geometry, route=route)
 
@@ -65,12 +65,15 @@ async def generate_scan(
     }
     page["as_of"] = route.as_of.isoformat()
     page["planning_context"] = route.planning_context
+    page["use_extended_hours"] = route.extended
     page.setdefault("warnings", [])
     page.setdefault("meta", {})
     page["meta"].setdefault("snapshot", snapshot)
     page["meta"]["style"] = style
     page["meta"]["limit"] = limit
     page["meta"]["route"] = route.mode
+    if route.extended:
+        page["meta"]["session"] = "extended"
     page["meta"]["universe"] = {"name": "resolved", "count": len(symbols)}
     page.setdefault("data_quality", {})
     page["data_quality"].setdefault("expected_move", geometry.expected_move)
@@ -115,7 +118,11 @@ async def generate_scan(
             plan_obj["charts"] = charts_container
 
         params = charts_container.get("params") if isinstance(charts_container, dict) else None
-        chart_params = sanitize_chart_params(params if isinstance(params, dict) else None)
+        raw_params = dict(params) if isinstance(params, dict) else {}
+        if route.extended:
+            raw_params.setdefault("range", "1d")
+            raw_params["session"] = "extended"
+        chart_params = sanitize_chart_params(raw_params if raw_params else None)
         if chart_params:
             charts_container["params"] = chart_params
         chart_payloads.append(chart_params)

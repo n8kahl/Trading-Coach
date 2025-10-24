@@ -111,7 +111,7 @@ async def test_generate_scan_wires_confidence(monkeypatch: pytest.MonkeyPatch):
     series_bundle.frames["TSLA"] = {"1d": daily}
     series_bundle.latest_close["TSLA"] = float(closes[-1])
 
-    async def fake_fetch_series(symbols, mode, as_of):  # noqa: ARG001
+    async def fake_fetch_series(symbols, mode, as_of, extended=False):  # noqa: ARG001
         return series_bundle
 
     async def fake_select_contracts(symbol, as_of, plan):  # noqa: ARG001

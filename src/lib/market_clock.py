@@ -59,24 +59,25 @@ def route_for_request(
     now: datetime | None = None,
     *,
     is_holiday: Optional[Callable[[datetime], bool]] = None,
+    use_extended_hours: bool = False,
 ) -> DataRoute:
     """Return an appropriate DataRoute for the request context."""
     current = _ensure_aware(now or datetime.now(timezone.utc))
     if simulate_open:
         close_dt = most_recent_regular_close(current, is_holiday=is_holiday)
-        return DataRoute(mode="live", as_of=close_dt, planning_context="live")
+        return DataRoute(mode="live", as_of=close_dt, planning_context="live", extended=use_extended_hours)
 
     state = get_market_state(current, is_holiday=is_holiday)
     if state == "open":
-        return DataRoute(mode="live", as_of=current, planning_context="live")
+        return DataRoute(mode="live", as_of=current, planning_context="live", extended=use_extended_hours)
 
     close_dt = most_recent_regular_close(current, is_holiday=is_holiday)
-    return DataRoute(mode="lkg", as_of=close_dt, planning_context="frozen")
+    return DataRoute(mode="lkg", as_of=close_dt, planning_context="frozen", extended=use_extended_hours)
 
 
 def apply_simulate_open(route: DataRoute, *, now: datetime | None = None) -> DataRoute:
     """Force a DataRoute into live mode for simulate_open requests."""
-    return route_for_request(True, now=now or route.as_of)
+    return route_for_request(True, now=now or route.as_of, use_extended_hours=route.extended)
 
 
 __all__ = ["get_market_state", "most_recent_regular_close", "route_for_request", "apply_simulate_open"]

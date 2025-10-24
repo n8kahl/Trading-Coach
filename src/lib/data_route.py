@@ -12,6 +12,7 @@ class DataRoute:
     mode: Literal["live", "lkg"]
     as_of: datetime
     planning_context: Literal["live", "frozen"]
+    extended: bool = False
 
 
 __all__ = ["DataRoute"]

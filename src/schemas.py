@@ -26,6 +26,7 @@ class ScanRequest(BaseModel):
     cursor: str | None = None
     simulate_open: bool = False
     planning_mode: bool = False
+    use_extended_hours: bool = False
 
     @field_validator("universe")
     @staticmethod
@@ -85,6 +86,7 @@ class ScanPage(BaseModel):
 
     as_of: str
     planning_context: Literal["live", "frozen"]
+    use_extended_hours: bool | None = None
     banner: str | None = None
     meta: dict[str, Any]
     candidates: list[ScanCandidate]
