@@ -9385,6 +9385,20 @@ async def _generate_fallback_plan(
         chart_timeframe_hint = normalize_interval(hint_interval_raw)
     except ValueError:
         chart_timeframe_hint = "5m"
+    enhancements: Dict[str, Any] | None = None
+    if include_plan_layers:
+        overlay_interval = chart_timeframe_hint or timeframe
+        try:
+            enhancements = compute_context_overlays(
+                prepared,
+                symbol=symbol,
+                interval=str(overlay_interval),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("fallback_context_overlays_failed", extra={"symbol": symbol, "detail": str(exc)})
+            enhancements = {}
+    if enhancements is not None:
+        plan["context_overlays"] = enhancements
     mtf_confluence_tags = []
     try:
         mtf_confluence_tags = await _compute_multi_timeframe_confluence(
@@ -10165,7 +10179,7 @@ async def _generate_fallback_plan(
             as_of=session_payload.get("as_of"),
             planning_context="live" if is_plan_live else "frozen",
             key_levels={k: v for k, v in key_levels.items() if isinstance(v, (int, float))},
-            overlays=enhancements,
+            overlays=enhancements or plan_block.get("context_overlays"),
         )
         layers["plan_id"] = plan_id
         meta = layers.setdefault("meta", {})
