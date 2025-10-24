@@ -30,6 +30,8 @@ ALLOWED_KEYS: frozenset[str] = frozenset(
     }
 )
 
+DEFAULT_CHART_PATH = "/webview/index.html"
+
 
 def _format_number(value: float | str, decimals: int) -> str:
     try:
@@ -51,7 +53,7 @@ def make_chart_url(
     base_url: str,
     precision_map: Dict[str, int] | None = None,
 ) -> str:
-    """Return canonical /tv URL composed from allow-listed params."""
+    """Return canonical Webview URL composed from allow-listed params."""
 
     symbol = str(params.get("symbol") or "").upper()
     precision = get_precision(symbol, precision_map=precision_map)
@@ -88,9 +90,9 @@ def make_chart_url(
     parsed = urlsplit(base_url)
     scheme = parsed.scheme or "https"
     netloc = parsed.netloc or parsed.path
-    path = parsed.path if parsed.netloc else "/tv"
+    path = parsed.path if parsed.netloc else DEFAULT_CHART_PATH
     if not path or path == "/":
-        path = "/tv"
+        path = DEFAULT_CHART_PATH
 
     return urlunsplit((scheme, netloc, path, query, ""))
 

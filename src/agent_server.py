@@ -2641,6 +2641,10 @@ APP_STATIC_DIR = STATIC_ROOT / "app"
 if APP_STATIC_DIR.exists():
     app.mount("/app", StaticFiles(directory=str(APP_STATIC_DIR), html=True), name="app")
 
+WEBVIEW_STATIC_DIR = (Path(__file__).resolve().parent.parent / "webview").resolve()
+if WEBVIEW_STATIC_DIR.exists():
+    app.mount("/webview", StaticFiles(directory=str(WEBVIEW_STATIC_DIR), html=True), name="webview")
+
 
 @app.get("/metrics", include_in_schema=False)
 async def metrics_endpoint() -> Response:
@@ -5709,8 +5713,8 @@ def _planning_scan_to_page(
 
 
 def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
-    base_root = _resolved_base_url(request)
-    base = f"{base_root}/tv"
+    base_root = _resolved_base_url(request).rstrip("/")
+    base = f"{base_root}/webview/index.html"
     query: Dict[str, str] = {}
     for key, value in params.items():
         if value is None:
@@ -11522,11 +11526,11 @@ async def gpt_plan(
     if live_webview_url and "Live Webview:" not in notes_output:
         link_lines = [f"Live Webview: {live_webview_url}"]
         if chart_url_value:
-            link_lines.append(f"Legacy /tv: {chart_url_value}")
+            link_lines.append(f"Chart Shell: {chart_url_value}")
         links_section = "\n".join(link_lines)
         notes_output = f"{notes_output.rstrip()}\n\n{links_section}" if notes_output else links_section
-    elif chart_url_value and "Legacy /tv:" not in notes_output and live_webview_url:
-        notes_output = f"{notes_output.rstrip()}\nLegacy /tv: {chart_url_value}" if notes_output else f"Legacy /tv: {chart_url_value}"
+    elif chart_url_value and "Chart Shell:" not in notes_output and live_webview_url:
+        notes_output = f"{notes_output.rstrip()}\nChart Shell: {chart_url_value}" if notes_output else f"Chart Shell: {chart_url_value}"
     if plan is not None:
         plan["notes"] = notes_output or None
     bias_output = plan.get("direction") or ((snapshot.get("trend") or {}).get("direction_hint"))
@@ -13164,7 +13168,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     )
 
     if canonical_flag:
-        tv_base = f"{(public_base or origin).rstrip('/')}/tv"
+        webview_base = f"{(public_base or origin).rstrip('/')}/webview/index.html"
         canonical_payload: Dict[str, object] = {
             "symbol": symbol_token,
             "interval": interval_norm,
@@ -13202,7 +13206,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
         canonical_url = make_chart_url(
             canonical_payload,
-            base_url=tv_base,
+            base_url=webview_base,
             precision_map=None,
         )
         _ensure_allowed_host(canonical_url, request)
@@ -13221,7 +13225,8 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
         return ChartLinks(interactive=canonical_url)
 
     configured_base = (settings.chart_base_url or "").strip()
-    base = (configured_base or f"{origin}/charts/html").rstrip("/")
+    default_chart_base = f"{origin}/webview/index.html"
+    base = (configured_base or default_chart_base).rstrip("/")
 
     query: Dict[str, str] = {}
     for key, value in data.items():
