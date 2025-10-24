@@ -1,5 +1,6 @@
 'use client';
 
+import clsx from "clsx";
 import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import type { LineData } from "lightweight-charts";
 import WebviewShell from "@/components/webview/WebviewShell";
@@ -81,8 +82,14 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
     const params = normalizeChartParams(initialSnapshot.plan.charts?.params ?? initialSnapshot.plan.charts_params ?? null);
     return params.supportingLevels !== "0";
   });
+  const [uiTheme, setUiTheme] = useState<"dark" | "light">(() => (chartParamsRaw.theme === "light" ? "light" : "dark"));
   const [highlightedLevel, setHighlightedLevel] = useState<SupportingLevel | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const initStartRef = useRef<number | null>(now());
+  const initLoggedRef = useRef(false);
+  const wsStartRef = useRef<number | null>(null);
+  const analysisStartRef = useRef<number | null>(now());
+  const analysisMeasuredRef = useRef(false);
 
   const plan = initialSnapshot.plan;
   const chartParamsRaw = useMemo(
@@ -107,10 +114,30 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
   }, [plan.session_state?.as_of]);
 
   useEffect(() => {
+    if (!initLoggedRef.current && initStartRef.current != null) {
+      const end = now();
+      if (end != null) {
+        logBudget("webview:init", end - initStartRef.current, 400);
+        initLoggedRef.current = true;
+      }
+    }
+    const latency = extractPlanLatency(plan);
+    if (latency != null) logBudget("plan:initial", latency, 800);
+  }, [plan]);
+
+  useEffect(() => {
     const wsUrl = `${WS_BASE_URL}/ws/plans/${encodeURIComponent(planId)}`;
+    wsStartRef.current = now();
     const socket = new WebSocket(wsUrl);
 
-    socket.onopen = () => setWsStatus("connected");
+    socket.onopen = () => {
+      setWsStatus("connected");
+      if (wsStartRef.current != null) {
+        const end = now();
+        if (end != null) logBudget("ws:connect", end - wsStartRef.current, 500);
+        wsStartRef.current = null;
+      }
+    };
     socket.onclose = () => setWsStatus("disconnected");
     socket.onerror = () => setWsStatus("disconnected");
 
@@ -152,6 +179,11 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
       try {
         const payload = JSON.parse(event.data) as SymbolTickEvent;
         if (payload.t === "tick") {
+          if (!analysisMeasuredRef.current && analysisStartRef.current != null) {
+            const end = now();
+            if (end != null) logBudget("analysis:first-tick", end - analysisStartRef.current, 1200);
+            analysisMeasuredRef.current = true;
+          }
           const timestamp = Math.floor(new Date(payload.ts).getTime() / 1000);
           setPriceSeries((prev) => {
             const next = [...prev, { time: timestamp, value: payload.p }];
@@ -200,7 +232,13 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
 
   useEffect(() => {
     setShowSupportingLevels(chartParamsRaw.supportingLevels !== "0");
-  }, [planId, chartParamsRaw.supportingLevels]);
+    setUiTheme(chartParamsRaw.theme === "light" ? "light" : "dark");
+  }, [chartParamsRaw.supportingLevels, chartParamsRaw.theme]);
+
+  useEffect(() => {
+    analysisStartRef.current = now();
+    analysisMeasuredRef.current = false;
+  }, [planId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -210,6 +248,10 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
 
   const interactiveUrl = plan.charts?.interactive ?? plan.chart_url ?? initialSnapshot.chart_url ?? null;
 
+  const handleThemeToggle = useCallback(() => {
+    setUiTheme((prev) => (prev === "light" ? "dark" : "light"));
+  }, []);
+
   const handleActionsDock = useCallback(
     (action: ActionKey) => {
       if (action === "share" && interactiveUrl && typeof window !== "undefined") {
@@ -217,6 +259,9 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
       }
       if (action === "size" || action === "coach") {
         setSheetOpen(true);
+      }
+      if (action === "size" || action === "validate") {
+        console.info(`[perf] ${actionLabel(action)} triggered — downstream call budget 800ms`);
       }
       setCoachingLog((prev) => [
         {
@@ -238,10 +283,12 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
       dataAgeSeconds={dataAgeSeconds}
       riskBanner={plan.risk_block && typeof plan.risk_block === "object" ? (plan.risk_block as Record<string, string | undefined>).risk_note ?? null : null}
       sessionBanner={plan.session_state?.banner ?? null}
+      theme={uiTheme}
+      onToggleTheme={handleThemeToggle}
     />
   );
 
-  const actionsDock = <ActionsDock onAction={handleActionsDock} />;
+  const actionsDock = <ActionsDock onAction={handleActionsDock} theme={uiTheme} />;
 
   const planPanelProps = {
     plan,
@@ -251,6 +298,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
     supportingLevels,
     highlightedLevel,
     onSelectLevel: (level: SupportingLevel | null) => setHighlightedLevel(level),
+    theme: uiTheme,
   };
 
   const desktopPlanPanel = <PlanPanel {...planPanelProps} />;
@@ -259,7 +307,8 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
     <MobilePlanSheet
       open={sheetOpen}
       onToggle={() => setSheetOpen((prev) => !prev)}
-      actions={<ActionsDock layout="horizontal" onAction={handleActionsDock} />}
+      actions={<ActionsDock layout="horizontal" onAction={handleActionsDock} theme={uiTheme} />}
+      theme={uiTheme}
     >
       <PlanPanel {...planPanelProps} />
     </MobilePlanSheet>
@@ -272,7 +321,8 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
         <ChartContainer
           symbol={upperSymbol}
           interval={chartParamsRaw.interval}
-          theme={chartParamsRaw.theme}
+      chartTheme={chartParamsRaw.theme}
+      uiTheme={uiTheme}
           uiState={chartUiState}
           priceSeries={priceSeries}
           lastPrice={planState.lastPrice ?? undefined}
@@ -287,7 +337,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
           highlightedLevel={highlightedLevel}
           interactiveUrl={interactiveUrl}
         >
-          <CoachingTimeline events={coachingLog} />
+          <CoachingTimeline events={coachingLog} theme={uiTheme} />
           {nextPlanId ? (
             <p className="mt-3 text-xs uppercase tracking-[0.25em] text-neutral-500">
               Next best action available · <a className="text-emerald-200 underline-offset-4 hover:underline" href={`/plan/${encodeURIComponent(nextPlanId)}`}>Switch to {nextPlanId}</a>
@@ -298,6 +348,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
       planPanel={desktopPlanPanel}
       actionsDock={actionsDock}
       mobileSheet={mobileSheet}
+      theme={uiTheme}
     />
   );
 }
@@ -332,31 +383,50 @@ function computeDataAge(asOf?: string | null): number | null {
   return (Date.now() - asOfDate.getTime()) / 1000;
 }
 
-function CoachingTimeline({ events }: { events: CoachingEvent[] }) {
+function CoachingTimeline({ events, theme }: { events: CoachingEvent[]; theme: "dark" | "light" }) {
+  const isLight = theme === "light";
   return (
-    <section className="mt-6 space-y-2 rounded-3xl border border-neutral-800/60 bg-neutral-900/40 p-5 text-sm text-neutral-200">
+    <section
+      className={clsx(
+        "mt-6 space-y-2 rounded-3xl border p-5 text-sm",
+        isLight ? "border-slate-200 bg-white text-slate-700" : "border-neutral-800/60 bg-neutral-900/40 text-neutral-200",
+      )}
+      aria-live="polite"
+    >
       <header className="flex items-center justify-between">
-        <h3 className="text-xs font-semibold uppercase tracking-[0.3em] text-neutral-400">Coaching timeline</h3>
-        <span className="text-[0.65rem] uppercase tracking-[0.3em] text-neutral-500">Latest {Math.min(events.length, 5)} events</span>
+        <h3 className={clsx("text-xs font-semibold uppercase tracking-[0.3em]", isLight ? "text-slate-500" : "text-neutral-400")}>Coaching timeline</h3>
+        <span className={clsx("text-[0.65rem] uppercase tracking-[0.3em]", isLight ? "text-slate-400" : "text-neutral-500")}>
+          Latest {Math.min(events.length, 5)} events
+        </span>
       </header>
       <ol className="space-y-2">
         {events.length === 0 ? (
-          <li className="rounded-xl border border-neutral-800/70 bg-neutral-900/60 px-4 py-3 text-neutral-400">Waiting for live updates…</li>
+          <li
+            className={clsx(
+              "rounded-xl border px-4 py-3",
+              isLight ? "border-slate-200 bg-white text-slate-500" : "border-neutral-800/70 bg-neutral-900/60 text-neutral-400",
+            )}
+          >
+            Waiting for live updates…
+          </li>
         ) : (
           events.slice(0, 5).map((event) => (
             <li
               key={event.id}
-              className={[
+              className={clsx(
                 "rounded-xl border px-4 py-3",
-                event.tone === "positive" && "border-emerald-500/40 bg-emerald-500/10 text-emerald-100",
-                event.tone === "warning" && "border-amber-500/50 bg-amber-500/10 text-amber-100",
-                event.tone === "neutral" && "border-neutral-800/70 bg-neutral-900/70 text-neutral-200",
-              ]
-                .filter(Boolean)
-                .join(" ")}
+                event.tone === "positive" &&
+                  (isLight ? "border-emerald-500/40 bg-emerald-400/20 text-emerald-700" : "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"),
+                event.tone === "warning" &&
+                  (isLight ? "border-amber-500/40 bg-amber-400/20 text-amber-700" : "border-amber-500/50 bg-amber-500/10 text-amber-100"),
+                event.tone === "neutral" &&
+                  (isLight ? "border-slate-200 bg-white text-slate-700" : "border-neutral-800/70 bg-neutral-900/70 text-neutral-200"),
+              )}
             >
-              <div className="text-xs uppercase tracking-[0.2em] text-neutral-400/80">{new Date(event.timestamp).toLocaleTimeString()}</div>
-              <p className="mt-1 leading-relaxed">{event.message}</p>
+              <div className={clsx("text-xs uppercase tracking-[0.2em]", isLight ? "text-slate-500" : "text-neutral-400/80")}>
+                {new Date(event.timestamp).toLocaleTimeString()}
+              </div>
+              <p className={clsx("mt-1 leading-relaxed", isLight ? "text-slate-700" : "text-neutral-200")}>{event.message}</p>
             </li>
           ))
         )}
@@ -370,28 +440,39 @@ function MobilePlanSheet({
   onToggle,
   actions,
   children,
+  theme,
 }: {
   open: boolean;
   onToggle: () => void;
   actions?: React.ReactNode;
   children: React.ReactNode;
+  theme: "dark" | "light";
 }) {
+  const isLight = theme === "light";
   return (
     <div className="lg:hidden">
       <button
         type="button"
         onClick={onToggle}
-        className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-full border border-emerald-500/50 bg-emerald-500/20 px-6 py-3 text-xs font-semibold uppercase tracking-[0.3em] text-emerald-100 shadow-lg shadow-emerald-500/30 backdrop-blur"
+        className={clsx(
+          "fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-full border px-6 py-3 text-xs font-semibold uppercase tracking-[0.3em] shadow-lg backdrop-blur",
+          isLight ? "border-emerald-500/50 bg-emerald-400/20 text-emerald-700 shadow-emerald-400/40" : "border-emerald-500/50 bg-emerald-500/20 text-emerald-100 shadow-emerald-500/30",
+        )}
       >
         {open ? "Close Plan" : "Plan Summary"}
       </button>
       <div
-        className={[
-          "fixed inset-x-0 bottom-0 z-30 transform rounded-t-3xl border border-neutral-900/80 bg-neutral-950/95 px-4 pb-8 pt-4 shadow-2xl shadow-black/60 backdrop-blur transition-transform duration-300",
+        className={clsx(
+          "fixed inset-x-0 bottom-0 z-30 transform rounded-t-3xl border px-4 pb-8 pt-4 shadow-2xl backdrop-blur transition-transform duration-300",
+          isLight ? "border-slate-200 bg-white/95 text-slate-700 shadow-slate-200/80" : "border-neutral-900/80 bg-neutral-950/95 text-neutral-200 shadow-black/60",
           open ? "translate-y-0" : "translate-y-[calc(100%-4.5rem)]",
-        ].join(" ")}
+        )}
       >
-        <div className="mx-auto h-1 w-16 rounded-full bg-neutral-700/70" onClick={onToggle} role="presentation" />
+        <div
+          className={clsx("mx-auto h-1 w-16 rounded-full", isLight ? "bg-slate-300" : "bg-neutral-700/70")}
+          onClick={onToggle}
+          role="presentation"
+        />
         <div className="mt-4 space-y-4">
           {actions ? <div className="flex flex-wrap justify-center gap-2">{actions}</div> : null}
           <div className="max-h-[65vh] overflow-y-auto pr-1">{children}</div>
@@ -416,4 +497,29 @@ function actionLabel(action: "size" | "alerts" | "validate" | "coach" | "share")
     default:
       return "Action";
   }
+}
+
+function logBudget(name: string, duration: number, budgetMs: number): void {
+  const message = `[perf] ${name} ${duration.toFixed(1)}ms (budget ${budgetMs}ms)`;
+  if (duration > budgetMs) console.warn(`${message} ⚠️`);
+  else console.info(`${message} ✅`);
+}
+
+function extractPlanLatency(plan: PlanSnapshot["plan"]): number | null {
+  const maybe = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  const base = plan as Record<string, unknown>;
+  const meta = base.meta as Record<string, unknown> | undefined;
+  const metrics = base.metrics as Record<string, unknown> | undefined;
+  const candidates: Array<number | null> = [
+    maybe(base["latency_ms"]),
+    maybe(base["plan_latency_ms"]),
+    maybe(base["plan_ms"]),
+    meta ? maybe(meta["latency_ms"]) ?? maybe(meta["plan_ms"]) : null,
+    metrics ? maybe(metrics["latency_ms"]) ?? maybe(metrics["plan_ms"]) : null,
+  ];
+  return candidates.find((value): value is number => value != null) ?? null;
+}
+
+function now(): number | null {
+  return typeof performance !== "undefined" ? performance.now() : null;
 }
