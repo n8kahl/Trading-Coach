@@ -1,13 +1,23 @@
 'use client';
 
-import { useEffect, useMemo, useReducer, useState } from "react";
-import clsx from "clsx";
-import PriceChart from "@/components/PriceChart";
-import { API_BASE_URL, WS_BASE_URL } from "@/lib/env";
-import type { PlanDeltaEvent, PlanSnapshot, StructuredPlan, SymbolTickEvent } from "@/lib/types";
-import PlanDetail from "@/components/PlanDetail";
+import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import type { LineData } from "lightweight-charts";
-import Link from "next/link";
+import WebviewShell from "@/components/webview/WebviewShell";
+import StatusStrip, { type StatusToken } from "@/components/webview/StatusStrip";
+import ActionsDock, { type ActionKey } from "@/components/webview/ActionsDock";
+import PlanPanel from "@/components/webview/PlanPanel";
+import ChartContainer from "@/components/webview/ChartContainer";
+import type { PlanDeltaEvent, PlanSnapshot, StructuredPlan, SymbolTickEvent } from "@/lib/types";
+import { API_BASE_URL, WS_BASE_URL } from "@/lib/env";
+import {
+  normalizeChartParams,
+  parsePrice,
+  parseSupportingLevels,
+  parseTargets,
+  parseUiState,
+  type ParsedUiState,
+  type SupportingLevel,
+} from "@/lib/chart";
 
 type LivePlanClientProps = {
   initialSnapshot: PlanSnapshot;
@@ -58,51 +68,51 @@ function planReducer(prev: PlanState, event: PlanDeltaEvent["changes"]): PlanSta
 
 export default function LivePlanClient({ initialSnapshot, planId, symbol }: LivePlanClientProps) {
   const upperSymbol = (symbol ?? initialSnapshot.plan.symbol ?? "").toUpperCase();
+  const structured = (initialSnapshot.plan.structured_plan ?? null) as StructuredPlan | null;
+
   const [planState, dispatchPlan] = useReducer(planReducer, deriveInitialState(initialSnapshot));
-  const [coachingLog, setCoachingLog] = useState<CoachingEvent[]>(() => {
-    const banner = initialSnapshot.plan.session_state?.banner;
-    const note = initialSnapshot.plan.notes;
-    const items: CoachingEvent[] = [];
-    if (banner) {
-      items.push({
-        id: `banner-${Date.now()}`,
-        timestamp: initialSnapshot.plan.session_state?.as_of ?? new Date().toISOString(),
-        message: banner,
-        tone: "neutral",
-      });
-    }
-    if (note) {
-      items.push({
-        id: `note-${Date.now() + 1}`,
-        timestamp: new Date().toISOString(),
-        message: note,
-        tone: note.toLowerCase().includes("stop") ? "warning" : "neutral",
-      });
-    }
-    return items;
-  });
+  const [coachingLog, setCoachingLog] = useState<CoachingEvent[]>(() => bootstrapCoachingLog(initialSnapshot));
   const [priceSeries, setPriceSeries] = useState<LineData[]>([]);
   const [nextPlanId, setNextPlanId] = useState<string | null>(null);
+  const [wsStatus, setWsStatus] = useState<StatusToken>("connecting");
+  const [priceStatus, setPriceStatus] = useState<StatusToken>("connecting");
+  const [dataAgeSeconds, setDataAgeSeconds] = useState<number | null>(() => computeDataAge(initialSnapshot.plan.session_state?.as_of));
+  const [showSupportingLevels, setShowSupportingLevels] = useState<boolean>(() => {
+    const params = normalizeChartParams(initialSnapshot.plan.charts?.params ?? initialSnapshot.plan.charts_params ?? null);
+    return params.supportingLevels !== "0";
+  });
+  const [highlightedLevel, setHighlightedLevel] = useState<SupportingLevel | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
 
   const plan = initialSnapshot.plan;
-  const structured = (plan.structured_plan ?? null) as StructuredPlan | null;
-  const entryLevel = structured?.entry?.level ?? plan.entry ?? null;
-  const baseStop = plan.stop ?? structured?.stop ?? null;
-  const summaryLevels = useMemo(() => {
-    const summary = initialSnapshot.summary as { key_levels?: Record<string, number> } | undefined;
-    if (summary?.key_levels && typeof summary.key_levels === "object") {
-      return summary.key_levels as Record<string, number>;
-    }
-    const planLevels = (initialSnapshot.plan as { key_levels?: Record<string, number> }).key_levels;
-    if (planLevels && typeof planLevels === "object") {
-      return planLevels as Record<string, number>;
-    }
-    return {} as Record<string, number>;
-  }, [initialSnapshot]);
+  const chartParamsRaw = useMemo(
+    () => normalizeChartParams(plan.charts?.params ?? plan.charts_params ?? null),
+    [plan.charts?.params, plan.charts_params],
+  );
+  const chartUiState: ParsedUiState = useMemo(() => parseUiState(chartParamsRaw.ui_state ?? null), [chartParamsRaw]);
+  const supportingLevels = useMemo(() => parseSupportingLevels(chartParamsRaw.levels), [chartParamsRaw.levels]);
+
+  const entryFromChart = parsePrice(chartParamsRaw.entry);
+  const stopFromChart = parsePrice(chartParamsRaw.stop);
+  const targetsFromChart = parseTargets(chartParamsRaw.tp);
+
+  const entryLevel = entryFromChart ?? structured?.entry?.level ?? plan.entry ?? null;
+  const baseStop = stopFromChart ?? plan.stop ?? structured?.stop ?? null;
+  const targets = targetsFromChart.length ? targetsFromChart : structured?.targets ?? plan.targets ?? [];
+
+  useEffect(() => {
+    setDataAgeSeconds(computeDataAge(plan.session_state?.as_of));
+    const timer = window.setInterval(() => setDataAgeSeconds(computeDataAge(plan.session_state?.as_of)), 30_000);
+    return () => window.clearInterval(timer);
+  }, [plan.session_state?.as_of]);
 
   useEffect(() => {
     const wsUrl = `${WS_BASE_URL}/ws/plans/${encodeURIComponent(planId)}`;
     const socket = new WebSocket(wsUrl);
+
+    socket.onopen = () => setWsStatus("connected");
+    socket.onclose = () => setWsStatus("disconnected");
+    socket.onerror = () => setWsStatus("disconnected");
 
     socket.onmessage = (event) => {
       try {
@@ -110,9 +120,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
         if (payload.t !== "plan_delta") return;
         dispatchPlan(payload.changes);
         const nextPlan = (payload.changes as Record<string, unknown>).next_plan_id;
-        if (typeof nextPlan === "string" && nextPlan) {
-          setNextPlanId(nextPlan);
-        }
+        if (typeof nextPlan === "string" && nextPlan) setNextPlanId(nextPlan);
         if (payload.changes.note) {
           setCoachingLog((prev) => [
             {
@@ -125,22 +133,8 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
           ]);
         }
       } catch (error) {
-        if (process.env.NODE_ENV !== "production") {
-          console.error("plan ws parse error", error);
-        }
+        if (process.env.NODE_ENV !== "production") console.error("plan ws parse error", error);
       }
-    };
-
-    socket.onerror = () => {
-      setCoachingLog((prev) => [
-        {
-          id: `error-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          message: "Plan stream disconnected. Attempting to reconnect…",
-          tone: "warning",
-        },
-        ...prev,
-      ]);
     };
 
     return () => {
@@ -153,6 +147,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
     const streamUrl = `${API_BASE_URL}/stream/${encodeURIComponent(upperSymbol)}`;
     const source = new EventSource(streamUrl);
 
+    source.onopen = () => setPriceStatus("connected");
     source.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data) as SymbolTickEvent;
@@ -160,9 +155,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
           const timestamp = Math.floor(new Date(payload.ts).getTime() / 1000);
           setPriceSeries((prev) => {
             const next = [...prev, { time: timestamp, value: payload.p }];
-            if (next.length > MAX_POINTS) {
-              next.splice(0, next.length - MAX_POINTS);
-            }
+            if (next.length > MAX_POINTS) next.splice(0, next.length - MAX_POINTS);
             return next;
           });
           dispatchPlan({ last_price: payload.p });
@@ -178,13 +171,12 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
           ]);
         }
       } catch (error) {
-        if (process.env.NODE_ENV !== "production") {
-          console.error("symbol stream error", error);
-        }
+        if (process.env.NODE_ENV !== "production") console.error("symbol stream error", error);
       }
     };
 
     source.onerror = () => {
+      setPriceStatus("disconnected");
       source.close();
       setCoachingLog((prev) => [
         {
@@ -202,211 +194,226 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
     };
   }, [upperSymbol]);
 
-  const targets = useMemo(() => {
-    if (structured?.targets?.length) return structured.targets;
-    if (plan.targets?.length) return plan.targets;
-    return [];
-  }, [structured?.targets, plan.targets]);
+  useEffect(() => {
+    if (!showSupportingLevels) setHighlightedLevel(null);
+  }, [showSupportingLevels]);
 
-  const summaryCards = [
-    {
-      label: "Status",
-      value: planState.status?.replace("_", " ").toUpperCase() ?? "N/A",
-      accent: "from-emerald-400/40 to-emerald-500/20",
-    },
-    {
-      label: "Next step",
-      value: planState.nextStep ?? "Monitor execution",
-      accent: "from-sky-400/40 to-sky-500/20",
-    },
-    {
-      label: "R:R to TP1",
-      value: planState.rr ? planState.rr.toFixed(2) : "—",
-      accent: "from-amber-400/40 to-amber-500/20",
-    },
-  ];
+  useEffect(() => {
+    setShowSupportingLevels(chartParamsRaw.supportingLevels !== "0");
+  }, [planId, chartParamsRaw.supportingLevels]);
 
-  if (planState.trailingStop || baseStop) {
-    summaryCards.push({
-      label: planState.trailingStop ? "Trail stop" : "Initial stop",
-      value: (planState.trailingStop ?? baseStop)?.toFixed(2) ?? "—",
-      accent: "from-rose-400/30 to-rose-500/20",
-    });
-  }
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!highlightedLevel) return;
+    if (window.innerWidth < 1024) setSheetOpen(true);
+  }, [highlightedLevel]);
+
+  const interactiveUrl = plan.charts?.interactive ?? plan.chart_url ?? initialSnapshot.chart_url ?? null;
+
+  const handleActionsDock = useCallback(
+    (action: ActionKey) => {
+      if (action === "share" && interactiveUrl && typeof window !== "undefined") {
+        window.open(interactiveUrl, "_blank", "noopener");
+      }
+      if (action === "size" || action === "coach") {
+        setSheetOpen(true);
+      }
+      setCoachingLog((prev) => [
+        {
+          id: `dock-${action}-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          message: `${actionLabel(action)} triggered · routed to automation queue.`,
+          tone: action === "validate" ? "warning" : "neutral",
+        },
+        ...prev.slice(0, 49),
+      ]);
+    },
+    [interactiveUrl],
+  );
+
+  const statusStrip = (
+    <StatusStrip
+      wsStatus={wsStatus}
+      priceStatus={priceStatus}
+      dataAgeSeconds={dataAgeSeconds}
+      riskBanner={plan.risk_block && typeof plan.risk_block === "object" ? (plan.risk_block as Record<string, string | undefined>).risk_note ?? null : null}
+      sessionBanner={plan.session_state?.banner ?? null}
+    />
+  );
+
+  const actionsDock = <ActionsDock onAction={handleActionsDock} />;
+
+  const planPanelProps = {
+    plan,
+    structured,
+    badges: plan.badges ?? structured?.badges ?? [],
+    confidence: plan.confidence ?? chartUiState.confidence,
+    supportingLevels,
+    highlightedLevel,
+    onSelectLevel: (level: SupportingLevel | null) => setHighlightedLevel(level),
+  };
+
+  const desktopPlanPanel = <PlanPanel {...planPanelProps} />;
+
+  const mobileSheet = (
+    <MobilePlanSheet
+      open={sheetOpen}
+      onToggle={() => setSheetOpen((prev) => !prev)}
+      actions={<ActionsDock layout="horizontal" onAction={handleActionsDock} />}
+    >
+      <PlanPanel {...planPanelProps} />
+    </MobilePlanSheet>
+  );
 
   return (
-    <div className="space-y-8 px-6 py-10 sm:px-10">
-      <PlanDetail plan={plan} structured={structured} planId={plan.plan_id} />
+    <WebviewShell
+      statusStrip={statusStrip}
+      chartPanel={
+        <ChartContainer
+          symbol={upperSymbol}
+          interval={chartParamsRaw.interval}
+          theme={chartParamsRaw.theme}
+          uiState={chartUiState}
+          priceSeries={priceSeries}
+          lastPrice={planState.lastPrice ?? undefined}
+          entry={entryLevel ?? undefined}
+          stop={planState.trailingStop ?? baseStop ?? undefined}
+          trailingStop={planState.trailingStop ?? undefined}
+          targets={targets}
+          supportingLevels={supportingLevels}
+          showSupportingLevels={showSupportingLevels}
+          onToggleSupportingLevels={() => setShowSupportingLevels((prev) => !prev)}
+          onHighlightLevel={setHighlightedLevel}
+          highlightedLevel={highlightedLevel}
+          interactiveUrl={interactiveUrl}
+        >
+          <CoachingTimeline events={coachingLog} />
+          {nextPlanId ? (
+            <p className="mt-3 text-xs uppercase tracking-[0.25em] text-neutral-500">
+              Next best action available · <a className="text-emerald-200 underline-offset-4 hover:underline" href={`/plan/${encodeURIComponent(nextPlanId)}`}>Switch to {nextPlanId}</a>
+            </p>
+          ) : null}
+        </ChartContainer>
+      }
+      planPanel={desktopPlanPanel}
+      actionsDock={actionsDock}
+      mobileSheet={mobileSheet}
+    />
+  );
+}
 
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <div className="text-sm uppercase tracking-[0.3em] text-neutral-400">Plan console</div>
-          <h1 className="mt-2 text-3xl font-semibold text-white sm:text-4xl">
-            {upperSymbol} · {plan.style ?? structured?.style ?? "Unknown"} plan
-          </h1>
-          <p className="mt-2 max-w-xl text-sm text-neutral-400">
-            Session banner:{" "}
-            <span className="text-neutral-200">{plan.session_state?.banner ?? "Live data mode"}</span>
-            {plan.session_state?.as_of ? (
-              <span className="text-neutral-500">
-                {" "}
-                — as of {new Date(plan.session_state.as_of).toLocaleString()}
-              </span>
-            ) : null}
-          </p>
-        </div>
-        {nextPlanId ? (
-          <Link
-            href={`/plan/${encodeURIComponent(nextPlanId)}`}
-            className="inline-flex items-center gap-2 rounded-full border border-cyan-400/60 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-400/20"
-          >
-            Switch to {nextPlanId}
-          </Link>
-        ) : null}
-        {plan.chart_url ? (
-          <Link
-            href={plan.chart_url}
-            target="_blank"
-            className="inline-flex items-center gap-2 rounded-full border border-emerald-400/60 bg-emerald-400/10 px-4 py-2 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-400/20"
-          >
-            View legacy chart
-          </Link>
-        ) : null}
+function bootstrapCoachingLog(snapshot: PlanSnapshot): CoachingEvent[] {
+  const banner = snapshot.plan.session_state?.banner;
+  const note = snapshot.plan.notes;
+  const items: CoachingEvent[] = [];
+  if (banner) {
+    items.push({
+      id: `banner-${Date.now()}`,
+      timestamp: snapshot.plan.session_state?.as_of ?? new Date().toISOString(),
+      message: banner,
+      tone: "neutral",
+    });
+  }
+  if (note) {
+    items.push({
+      id: `note-${Date.now() + 1}`,
+      timestamp: new Date().toISOString(),
+      message: note,
+      tone: note.toLowerCase().includes("stop") ? "warning" : "neutral",
+    });
+  }
+  return items;
+}
+
+function computeDataAge(asOf?: string | null): number | null {
+  if (!asOf) return null;
+  const asOfDate = new Date(asOf);
+  if (Number.isNaN(asOfDate.getTime())) return null;
+  return (Date.now() - asOfDate.getTime()) / 1000;
+}
+
+function CoachingTimeline({ events }: { events: CoachingEvent[] }) {
+  return (
+    <section className="mt-6 space-y-2 rounded-3xl border border-neutral-800/60 bg-neutral-900/40 p-5 text-sm text-neutral-200">
+      <header className="flex items-center justify-between">
+        <h3 className="text-xs font-semibold uppercase tracking-[0.3em] text-neutral-400">Coaching timeline</h3>
+        <span className="text-[0.65rem] uppercase tracking-[0.3em] text-neutral-500">Latest {Math.min(events.length, 5)} events</span>
       </header>
-
-      <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
-        <section className="rounded-3xl border border-neutral-800/80 bg-neutral-900/50 p-6 backdrop-blur">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-sm font-medium text-neutral-400">Live price</div>
-              <div className="mt-1 text-3xl font-semibold text-emerald-300">
-                {planState.lastPrice ? planState.lastPrice.toFixed(2) : "—"}
-              </div>
-            </div>
-            <div className="text-right text-sm text-neutral-400">
-              <div>Entry {structured?.entry?.level?.toFixed(2) ?? plan.entry?.toFixed(2) ?? "—"}</div>
-              <div>Stop {planState.trailingStop?.toFixed(2) ?? plan.stop?.toFixed(2) ?? "—"}</div>
-            </div>
-          </div>
-          <div className="mt-6 overflow-hidden rounded-2xl border border-neutral-800/70 bg-neutral-950/40">
-            <PriceChart
-              data={priceSeries}
-              lastPrice={planState.lastPrice ?? undefined}
-              entry={entryLevel}
-              stop={planState.trailingStop ?? baseStop ?? undefined}
-              trailingStop={planState.trailingStop ?? undefined}
-              targets={targets}
-            />
-          </div>
-        </section>
-
-        <aside className="space-y-4">
-          {summaryCards.map((card) => (
-            <div
-              key={card.label}
-              className={clsx(
-                "rounded-2xl border border-neutral-800/60 bg-gradient-to-br p-5 backdrop-blur",
-                card.accent,
-              )}
+      <ol className="space-y-2">
+        {events.length === 0 ? (
+          <li className="rounded-xl border border-neutral-800/70 bg-neutral-900/60 px-4 py-3 text-neutral-400">Waiting for live updates…</li>
+        ) : (
+          events.slice(0, 5).map((event) => (
+            <li
+              key={event.id}
+              className={[
+                "rounded-xl border px-4 py-3",
+                event.tone === "positive" && "border-emerald-500/40 bg-emerald-500/10 text-emerald-100",
+                event.tone === "warning" && "border-amber-500/50 bg-amber-500/10 text-amber-100",
+                event.tone === "neutral" && "border-neutral-800/70 bg-neutral-900/70 text-neutral-200",
+              ]
+                .filter(Boolean)
+                .join(" ")}
             >
-              <div className="text-xs uppercase tracking-[0.3em] text-neutral-200/70">{card.label}</div>
-              <div className="mt-2 text-lg font-semibold text-white">{card.value}</div>
-            </div>
-          ))}
+              <div className="text-xs uppercase tracking-[0.2em] text-neutral-400/80">{new Date(event.timestamp).toLocaleTimeString()}</div>
+              <p className="mt-1 leading-relaxed">{event.message}</p>
+            </li>
+          ))
+        )}
+      </ol>
+    </section>
+  );
+}
 
-          <div className="rounded-2xl border border-neutral-800/60 bg-neutral-900/40 p-5 backdrop-blur">
-            <div className="text-xs uppercase tracking-[0.3em] text-neutral-400">Targets</div>
-            <ul className="mt-3 space-y-2 text-sm text-neutral-200">
-              {targets.length === 0 ? (
-                <li className="text-neutral-500">No targets published.</li>
-              ) : (
-                targets.map((target, index) => (
-                  <li key={target} className="flex items-center justify-between rounded-xl border border-neutral-800/70 bg-neutral-900/60 px-3 py-2">
-                    <span className="text-neutral-400">TP{index + 1}</span>
-                    <span className="font-semibold text-emerald-300">{target.toFixed(2)}</span>
-                  </li>
-                ))
-              )}
-            </ul>
-          </div>
-        </aside>
-      </div>
-
-      <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
-        <section className="rounded-3xl border border-neutral-800/80 bg-neutral-900/40 p-6 backdrop-blur">
-          <header className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold uppercase tracking-[0.3em] text-neutral-400">
-              Coaching timeline
-            </h2>
-            <span className="text-xs text-neutral-500">Latest {Math.min(coachingLog.length, 6)} updates</span>
-          </header>
-          <ol className="mt-4 space-y-4">
-            {coachingLog.length === 0 ? (
-              <li className="rounded-2xl border border-neutral-800/70 bg-neutral-900/60 p-4 text-sm text-neutral-400">
-                Waiting for the first live update…
-              </li>
-            ) : (
-              coachingLog.slice(0, 6).map((event) => (
-                <li
-                  key={event.id}
-                  className={clsx(
-                    "rounded-2xl border px-4 py-4 text-sm",
-                    event.tone === "positive" && "border-emerald-400/50 bg-emerald-400/10 text-emerald-100",
-                    event.tone === "warning" && "border-amber-400/60 bg-amber-400/10 text-amber-100",
-                    event.tone === "neutral" && "border-neutral-800/70 bg-neutral-900/60 text-neutral-200",
-                  )}
-                >
-                  <div className="text-xs uppercase tracking-[0.2em] text-neutral-400/80">
-                    {new Date(event.timestamp).toLocaleTimeString()}
-                  </div>
-                  <p className="mt-2 leading-relaxed">{event.message}</p>
-                </li>
-              ))
-            )}
-          </ol>
-        </section>
-
-        <section className="space-y-4 rounded-3xl border border-neutral-800/80 bg-neutral-900/40 p-6 backdrop-blur">
-          <div>
-            <div className="text-xs uppercase tracking-[0.3em] text-neutral-400">Plan metadata</div>
-            <dl className="mt-3 space-y-2 text-sm text-neutral-300">
-              <div className="flex items-center justify-between">
-                <dt className="text-neutral-400">Plan ID</dt>
-                <dd className="font-mono text-xs text-neutral-300">{plan.plan_id}</dd>
-              </div>
-              <div className="flex items-center justify-between">
-                <dt className="text-neutral-400">Version</dt>
-                <dd>{plan.structured_plan?.plan_id === plan.plan_id ? "Structured" : "Legacy"}</dd>
-              </div>
-              <div className="flex items-center justify-between">
-                <dt className="text-neutral-400">Confidence</dt>
-                <dd>{plan.confidence ? `${(plan.confidence * 100).toFixed(0)}%` : "—"}</dd>
-              </div>
-              <div className="flex items-center justify-between">
-                <dt className="text-neutral-400">RR to TP1</dt>
-                <dd>{planState.rr ? planState.rr.toFixed(2) : "—"}</dd>
-              </div>
-            </dl>
-          </div>
-
-          <div>
-            <div className="text-xs uppercase tracking-[0.3em] text-neutral-400">Key levels</div>
-            <ul className="mt-2 space-y-1 text-sm text-neutral-300">
-              {Object.entries(summaryLevels)
-                .slice(0, 6)
-                .map(([level, value]) => (
-                  <li key={level} className="flex items-center justify-between text-neutral-400">
-                    <span>{level.replace(/_/g, " ")}</span>
-                    <span className="text-neutral-200">{typeof value === "number" ? value.toFixed(2) : value}</span>
-                  </li>
-                ))}
-              {Object.keys(summaryLevels).length === 0 && (
-                <li className="text-neutral-500">No keyed levels in snapshot.</li>
-              )}
-            </ul>
-          </div>
-        </section>
+function MobilePlanSheet({
+  open,
+  onToggle,
+  actions,
+  children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  actions?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="lg:hidden">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-full border border-emerald-500/50 bg-emerald-500/20 px-6 py-3 text-xs font-semibold uppercase tracking-[0.3em] text-emerald-100 shadow-lg shadow-emerald-500/30 backdrop-blur"
+      >
+        {open ? "Close Plan" : "Plan Summary"}
+      </button>
+      <div
+        className={[
+          "fixed inset-x-0 bottom-0 z-30 transform rounded-t-3xl border border-neutral-900/80 bg-neutral-950/95 px-4 pb-8 pt-4 shadow-2xl shadow-black/60 backdrop-blur transition-transform duration-300",
+          open ? "translate-y-0" : "translate-y-[calc(100%-4.5rem)]",
+        ].join(" ")}
+      >
+        <div className="mx-auto h-1 w-16 rounded-full bg-neutral-700/70" onClick={onToggle} role="presentation" />
+        <div className="mt-4 space-y-4">
+          {actions ? <div className="flex flex-wrap justify-center gap-2">{actions}</div> : null}
+          <div className="max-h-[65vh] overflow-y-auto pr-1">{children}</div>
+        </div>
       </div>
     </div>
   );
+}
+
+function actionLabel(action: "size" | "alerts" | "validate" | "coach" | "share"): string {
+  switch (action) {
+    case "size":
+      return "Sizing request";
+    case "alerts":
+      return "Alerts request";
+    case "validate":
+      return "Plan validation";
+    case "coach":
+      return "Coach question";
+    case "share":
+      return "Share chart";
+    default:
+      return "Action";
+  }
 }

@@ -43,6 +43,13 @@ export type StructuredPlan = {
   strategy_profile?: StrategyProfile | null;
 };
 
+export type ChartParams = Record<string, string>;
+
+export type ChartPayload = {
+  params?: ChartParams | null;
+  interactive?: string | null;
+};
+
 export type PlanSnapshot = {
   plan: {
     plan_id: string;
@@ -64,6 +71,9 @@ export type PlanSnapshot = {
     options_contracts?: Array<Record<string, unknown>>;
     options_note?: string | null;
     rejected_contracts?: Array<Record<string, unknown>>;
+    charts?: ChartPayload | null;
+    charts_params?: ChartParams | null;
+    chart_url?: string | null;
     session_state?: {
       status: string;
       banner: string;

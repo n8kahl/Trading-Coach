@@ -10,6 +10,7 @@ import {
   type ISeriesApi,
   type LineData,
 } from "lightweight-charts";
+import type { SupportingLevel } from "@/lib/chart";
 
 type PriceChartProps = {
   data: LineData[];
@@ -18,6 +19,9 @@ type PriceChartProps = {
   stop?: number | null;
   trailingStop?: number | null;
   targets?: number[];
+  supportingLevels?: SupportingLevel[];
+  showSupportingLevels?: boolean;
+  onHighlightLevel?: (level: SupportingLevel | null) => void;
   compare?: {
     entry?: number | null;
     stop?: number | null;
@@ -26,7 +30,18 @@ type PriceChartProps = {
   } | null;
 };
 
-export default function PriceChart({ data, lastPrice, entry, stop, trailingStop, targets, compare }: PriceChartProps) {
+export default function PriceChart({
+  data,
+  lastPrice,
+  entry,
+  stop,
+  trailingStop,
+  targets,
+  supportingLevels,
+  showSupportingLevels = true,
+  onHighlightLevel,
+  compare,
+}: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
@@ -34,6 +49,8 @@ export default function PriceChart({ data, lastPrice, entry, stop, trailingStop,
   const stopLineRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
   const trailLineRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
   const targetLinesRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]>[]>([]);
+  const supportingLinesRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]>[]>([]);
+  const supportingLevelsRef = useRef<SupportingLevel[]>([]);
   const ghostEntryRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
   const ghostStopRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
   const ghostTargetRefs = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]>[]>([]);
@@ -176,6 +193,72 @@ export default function PriceChart({ data, lastPrice, entry, stop, trailingStop,
     };
   }, [entry, stop, trailingStop, targets]);
 
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+
+    supportingLinesRef.current.forEach((line) => {
+      series.removePriceLine(line);
+    });
+    supportingLinesRef.current = [];
+    supportingLevelsRef.current = Array.isArray(supportingLevels) ? supportingLevels : [];
+
+    if (!showSupportingLevels || !supportingLevelsRef.current.length) {
+      if (onHighlightLevel) onHighlightLevel(null);
+      return;
+    }
+
+    supportingLevelsRef.current.forEach((level) => {
+      const line = series.createPriceLine({
+        price: level.price,
+        color: "rgba(148, 163, 184, 0.5)",
+        lineStyle: LineStyle.Dotted,
+        lineWidth: 1,
+        axisLabelVisible: true,
+        title: level.label,
+      });
+      supportingLinesRef.current.push(line);
+    });
+
+    return () => {
+      supportingLinesRef.current.forEach((line) => series.removePriceLine(line));
+      supportingLinesRef.current = [];
+    };
+  }, [supportingLevels, showSupportingLevels, onHighlightLevel]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!chart || !series || !onHighlightLevel || !supportingLevelsRef.current.length) return;
+
+    const handler = (param: Parameters<IChartApi["subscribeCrosshairMove"]>[0]) => {
+      if (!param || !param.time || !param.seriesPrices) {
+        onHighlightLevel(null);
+        return;
+      }
+      const seriesPrice = param.seriesPrices.get(series);
+      if (typeof seriesPrice !== "number") {
+        onHighlightLevel(null);
+        return;
+      }
+      const candidate = supportingLevelsRef.current.reduce<SupportingLevel | null>((closest, level) => {
+        const delta = Math.abs(level.price - seriesPrice);
+        if (!closest) return delta <= computeTolerance(level.price) ? level : null;
+        const currentDelta = Math.abs(closest.price - seriesPrice);
+        if (delta < currentDelta && delta <= computeTolerance(level.price)) {
+          return level;
+        }
+        return closest;
+      }, null);
+      onHighlightLevel(candidate ?? null);
+    };
+
+    chart.subscribeCrosshairMove(handler);
+    return () => {
+      chart.unsubscribeCrosshairMove(handler);
+    };
+  }, [onHighlightLevel]);
+
   // Compare/ghost overlay
   useEffect(() => {
     const series = seriesRef.current;
@@ -237,4 +320,9 @@ export default function PriceChart({ data, lastPrice, entry, stop, trailingStop,
   }, [JSON.stringify(compare)]);
 
   return <div ref={containerRef} className="h-[360px] w-full" />;
+}
+
+function computeTolerance(price: number): number {
+  if (!Number.isFinite(price) || price <= 0) return 0.1;
+  return Math.max(price * 0.0015, 0.05);
 }
