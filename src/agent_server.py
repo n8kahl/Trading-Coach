@@ -159,6 +159,12 @@ from .strategy.engine import infer_strategy, mtf_amplifier
 from .services.fallbacks import compute_plan_with_fallback
 from .services.plan_service import generate_plan as generate_plan_v2
 from .services.chart_levels import extract_supporting_levels
+from .services.chart_utils import (
+    build_ui_state,
+    infer_session_label,
+    normalize_confidence,
+    normalize_style_token,
+)
 from .services.scan_fallbacks import build_placeholder_candidates, compute_scan_with_fallback
 from .services.scan_service import generate_scan as generate_scan_v2
 from .services.universe import resolve_universe
@@ -167,6 +173,7 @@ from .logic.mtf import mtf_bias
 from .logic.prob_calibration import calibrate_touch_prob, enforce_monotone
 from .logic.runner import build_runner_policy as build_runner_policy_logic
 from .logic.validators import validate_plan as validate_plan_guardrails
+from .server.serialization.levels import _extract_levels_for_chart
 
 logger = logging.getLogger(__name__)
 
@@ -5287,26 +5294,6 @@ def _max_entry_distance_pct(style: str | None) -> float:
     return 0.02
 
 
-def _fallback_levels_param(levels: Dict[str, float], limit: int = 6) -> str | None:
-    if not levels:
-        return None
-    items: List[Tuple[float, str]] = []
-    for name, value in levels.items():
-        try:
-            price = float(value)
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(price):
-            continue
-        label = name.replace("_", " ").title()
-        items.append((abs(price), f"{price:.2f}|{label}"))
-    if not items:
-        return None
-    items.sort(key=lambda pair: pair[0])
-    tokens = [token for _, token in items[:limit]]
-    return ";".join(tokens) if tokens else None
-
-
 def _fallback_confidence(trend_component: float, liquidity_component: float, regime_component: float) -> float:
     composite = 0.6 * trend_component + 0.2 * liquidity_component + 0.2 * regime_component
     return _clamp(composite, 0.45, 0.92)
@@ -5794,13 +5781,6 @@ def _price_scale_for(price: float | None) -> int:
         decimals = 0
     decimals = max(0, min(decimals, 6))
     return int(10 ** decimals)
-
-
-def _extract_levels_for_chart(*contexts: Mapping[str, Any]) -> str | None:
-    usable = [ctx for ctx in contexts if isinstance(ctx, Mapping) and ctx]
-    if not usable:
-        return None
-    return extract_supporting_levels({}, *usable)
 
 
 def _plan_meta_payload(
@@ -8120,10 +8100,10 @@ async def _legacy_scan(
                 level_contexts.append({"plan": signal.plan.as_dict()})
             except Exception:
                 pass
-        levels_token = _extract_levels_for_chart(*level_contexts)
+        levels_token = _extract_levels_for_chart(plan_payload, level_contexts)
         if levels_token:
             chart_query["levels"] = levels_token
-            chart_query["supportingLevels"] = "1"
+        chart_query["supportingLevels"] = "1"
         chart_query["strategy"] = signal.strategy_id
         if plan_id:
             chart_query["plan_id"] = plan_id
@@ -8629,6 +8609,12 @@ async def _generate_fallback_plan(
     except Exception:
         pass
 
+    plan["key_levels"] = {
+        label: float(value)
+        for label, value in levels_map.items()
+        if isinstance(value, (int, float)) and math.isfinite(value)
+    }
+
     mtf_view: Optional[Dict[str, Any]] = None
     if mtf_bundle:
         mtf_view = mtf_bias(
@@ -9073,6 +9059,7 @@ async def _generate_fallback_plan(
     structured_warnings = list(structured_geometry.warnings)
     invariant_broken = any(warning == "INVARIANT_BROKEN" for warning in structured_warnings)
     key_levels_used = _nativeify(structured_geometry.key_levels_used or {})
+    plan["key_levels_used"] = key_levels_used
     structured_runner = _nativeify(dict(structured_geometry.runner_policy or {}))
     structured_tp_reasons_raw = list(structured_geometry.tp_reasons or [])
     stop_label = structured_geometry.stop_label
@@ -9469,10 +9456,18 @@ async def _generate_fallback_plan(
         live_stamp = datetime.now(timezone.utc).isoformat()
         chart_params["live"] = "1"
         chart_params["last_update"] = live_stamp
-    levels_param = _fallback_levels_param({k: v for k, v in key_levels.items() if isinstance(v, (int, float))})
-    if levels_param:
-        chart_params["levels"] = levels_param
-        chart_params["supportingLevels"] = "1"
+    level_context_for_chart = {
+        "key_levels": {k: v for k, v in levels_map.items() if isinstance(v, (int, float)) and math.isfinite(v)},
+        "key_levels_used": key_levels_used or {},
+    }
+    levels_token = _extract_levels_for_chart(plan, level_context_for_chart)
+    if levels_token:
+        chart_params["levels"] = levels_token
+    chart_params["supportingLevels"] = "1"
+    session_label = infer_session_label(as_of_dt)
+    confidence_for_ui = normalize_confidence(confidence)
+    style_for_ui = normalize_style_token(style_token)
+    chart_params["ui_state"] = build_ui_state(session=session_label, confidence=confidence_for_ui, style=style_for_ui)
     chart_links = None
     allowed_chart_keys = set(ChartParams.model_fields.keys())
     extra_chart_params = [key for key in list(chart_params.keys()) if key not in allowed_chart_keys]
@@ -13393,7 +13388,7 @@ async def gpt_context(
         target_profile_nested = plan_block.get("target_profile")
         if isinstance(target_profile_nested, Mapping):
             level_contexts.append(target_profile_nested)
-    levels_token = _extract_levels_for_chart(*level_contexts)
+    levels_token = _extract_levels_for_chart(plan_block, level_contexts)
 
     chart_params = {
         "symbol": _tv_symbol(symbol),
@@ -13406,7 +13401,7 @@ async def gpt_context(
     }
     if levels_token:
         chart_params["levels"] = levels_token
-        chart_params["supportingLevels"] = "1"
+    chart_params["supportingLevels"] = "1"
     response["charts"] = {"params": {key: str(value) for key, value in chart_params.items()}}
     return response
 
