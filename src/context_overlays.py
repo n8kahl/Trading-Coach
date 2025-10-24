@@ -369,6 +369,27 @@ def compute_context_overlays(
     options_summary = _options_summary(options_chain)
     liquidity_metrics = _liquidity_metrics(options_summary)
 
+    fib_levels = {"up": {}, "down": {}}
+    try:
+        window = history.tail(50)
+        if not window.empty:
+            rng_low = float(window["low"].min())
+            rng_high = float(window["high"].max())
+            span = max(0.0, rng_high - rng_low)
+            if span > 0:
+                fib_levels["up"] = {
+                    "FIB1.0": round(rng_high, 4),
+                    "FIB1.272": round(rng_high + 0.272 * span, 4),
+                    "FIB1.618": round(rng_high + 0.618 * span, 4),
+                }
+                fib_levels["down"] = {
+                    "FIB1.0": round(rng_low, 4),
+                    "FIB1.272": round(rng_low - 0.272 * span, 4),
+                    "FIB1.618": round(rng_low - 0.618 * span, 4),
+                }
+    except Exception:
+        fib_levels = {"up": {}, "down": {}}
+
     overlays: Dict[str, object] = {
         "supply_zones": supply_zones,
         "demand_zones": demand_zones,
@@ -386,6 +407,7 @@ def compute_context_overlays(
         "events": [],
         "avwap": avwap,
         "volume_profile": volume_profile,
+        "fib_levels": fib_levels,
     }
 
     return overlays

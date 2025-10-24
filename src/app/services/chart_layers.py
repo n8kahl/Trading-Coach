@@ -15,23 +15,6 @@ def _is_number(value: Any) -> bool:
         return False
 
 
-def _build_level_items(levels: Dict[str, Any] | None, *, precision: int) -> List[Dict[str, Any]]:
-    if not isinstance(levels, dict):
-        return []
-    payload: List[Dict[str, Any]] = []
-    for label, value in levels.items():
-        if not _is_number(value):
-            continue
-        payload.append(
-            {
-                "price": round(float(value), precision),
-                "label": str(label),
-                "kind": "level",
-            }
-        )
-    return payload
-
-
 def _build_zone_items(zones: Iterable[Dict[str, Any]] | None, kind: str, *, precision: int) -> List[Dict[str, Any]]:
     if zones is None:
         return []
@@ -111,16 +94,37 @@ def build_plan_layers(
         "annotations": [],
     }
 
-    levels = _build_level_items(key_levels, precision=precision)
-    layers["levels"] = levels
+    levels: List[Dict[str, Any]] = []
+    seen: set[tuple[str | None, float]] = set()
 
-    primary_levels, supplemental_levels = _split_level_groups(levels, max_primary=6)
-    layers["meta"] = {
-        "level_groups": {
-            "primary": primary_levels,
-            "supplemental": supplemental_levels,
-        }
-    }
+    def _append_level(
+        label: str | None,
+        value: Any,
+        *,
+        kind: str,
+        normalize: bool = False,
+    ) -> None:
+        if not _is_number(value):
+            return
+        price = round(float(value), precision)
+        text = (str(label).strip() if label is not None else "") or None
+        if text and normalize:
+            text = text.replace("_", " ").upper()
+        key = (text, price)
+        if key in seen:
+            return
+        levels.append(
+            {
+                "price": price,
+                "label": text,
+                "kind": kind,
+            }
+        )
+        seen.add(key)
+
+    if isinstance(key_levels, dict):
+        for label, value in key_levels.items():
+            _append_level(str(label), value, kind="level")
 
     zones: List[Dict[str, Any]] = []
     if isinstance(overlays, dict):
@@ -130,16 +134,50 @@ def build_plan_layers(
 
         volume_profile = overlays.get("volume_profile")
         if isinstance(volume_profile, dict):
-            for label in ("vah", "val", "poc"):
-                value = volume_profile.get(label)
-                if _is_number(value):
-                    layers["levels"].append(
-                        {
-                            "price": round(float(value), precision),
-                            "label": label.upper(),
-                            "kind": "volume_profile",
-                        }
-                    )
+            for key, label in (("vah", "VAH"), ("val", "VAL"), ("poc", "POC")):
+                _append_level(label, volume_profile.get(key), kind="volume_profile")
+
+        fib_payload = overlays.get("fib_levels")
+        if isinstance(fib_payload, dict):
+            up_map = fib_payload.get("up") or {}
+            down_map = fib_payload.get("down") or {}
+
+            def _friendly_fib_label(token: str, suffix: str) -> str:
+                base = token.replace("FIB", "FIB ").strip()
+                return f"{base} {suffix}".strip()
+
+            for token, value in up_map.items():
+                _append_level(_friendly_fib_label(str(token), "UP"), value, kind="fib", normalize=True)
+            for token, value in down_map.items():
+                _append_level(_friendly_fib_label(str(token), "DOWN"), value, kind="fib", normalize=True)
+
+        avwap_payload = overlays.get("avwap")
+        if isinstance(avwap_payload, dict):
+            avwap_labels = {
+                "from_open": "AVWAP OPEN",
+                "from_prev_close": "AVWAP PREV CLOSE",
+                "from_session_low": "AVWAP SESSION LOW",
+                "from_session_high": "AVWAP SESSION HIGH",
+            }
+            for key, friendly in avwap_labels.items():
+                _append_level(friendly, avwap_payload.get(key), kind="avwap")
+
+        liquidity_pools = overlays.get("liquidity_pools")
+        if isinstance(liquidity_pools, list):
+            for pool in liquidity_pools:
+                if not isinstance(pool, dict):
+                    continue
+                label = str(pool.get("type") or "LIQUIDITY POOL").replace("_", " ").upper()
+                _append_level(label, pool.get("level"), kind="liquidity_pool")
+    layers["levels"] = levels
+
+    primary_levels, supplemental_levels = _split_level_groups(levels, max_primary=6)
+    layers["meta"] = {
+        "level_groups": {
+            "primary": primary_levels,
+            "supplemental": supplemental_levels,
+        }
+    }
 
     layers["zones"] = zones
     return layers

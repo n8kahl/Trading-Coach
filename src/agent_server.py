@@ -10164,7 +10164,7 @@ async def _generate_fallback_plan(
             as_of=session_payload.get("as_of"),
             planning_context="live" if is_plan_live else "frozen",
             key_levels={k: v for k, v in key_levels.items() if isinstance(v, (int, float))},
-            overlays=None,
+            overlays=enhancements,
         )
         layers["plan_id"] = plan_id
         meta = layers.setdefault("meta", {})
