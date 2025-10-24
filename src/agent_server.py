@@ -13167,6 +13167,8 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
             "theme",
             "plan_id",
             "plan_version",
+            "levels",
+            "supportingLevels",
         ):
             if optional_key in data and data[optional_key] not in (None, ""):
                 canonical_payload[optional_key] = data[optional_key]
