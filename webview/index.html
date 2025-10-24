@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Trading Coach • Webview</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="app-toolbar" role="banner">
+    <form id="symbolForm" class="symbol-form" aria-label="Switch symbol">
+      <label for="symbolInput" class="sr-only">Symbol</label>
+      <input
+        id="symbolInput"
+        name="symbol"
+        type="text"
+        inputmode="uppercase"
+        autocomplete="off"
+        placeholder="Symbol"
+        aria-describedby="symbolShortcut"
+      />
+      <button type="submit" class="pill-btn">Load</button>
+      <span id="symbolShortcut" class="muted shortcut-hint">Press “/” to focus</span>
+    </form>
+    <button id="themeToggle" class="pill-btn" type="button" aria-pressed="false">
+      Light Mode
+    </button>
+  </header>
+  <main id="app-shell" class="app-grid">
+    <section id="chartPanel" class="card panel chart-panel">
+      <header class="panel-header">
+        <div class="panel-title">
+          <h2 id="symbolTitle">—</h2>
+          <span id="statusBanner" class="status-pill" hidden>Live</span>
+        </div>
+        <button
+          id="btnToggleSupportingLevels"
+          class="pill-btn"
+          type="button"
+          aria-pressed="true"
+        >
+          Hide Supporting Levels
+        </button>
+      </header>
+      <div id="chartRoot"></div>
+    </section>
+
+    <aside id="bottomSheet" class="card panel right-panel">
+      <div class="sheet-handle" aria-hidden="true"></div>
+      <section id="confidenceSurface" class="card section"></section>
+      <section id="planSummary" class="card section"></section>
+    </aside>
+
+    <section id="diagPanel" class="card panel diag-panel"></section>
+
+    <nav id="actionsDock" class="actions-dock shadow"></nav>
+    <button id="fab" class="fab-trigger" type="button" aria-label="Toggle actions">NBA</button>
+  </main>
+  <script type="module" src="./shell.js"></script>
+</body>
+</html>
