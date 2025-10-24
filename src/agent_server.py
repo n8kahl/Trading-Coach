@@ -13541,6 +13541,45 @@ async def healthz() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/v1/diag/health", summary="Public health snapshot for Webview diagnostics")
+async def public_diag_health(request: Request) -> Dict[str, Any]:
+    """Expose provider health without requiring an API key (Webview diagnostics panel)."""
+    user = AuthedUser(user_id="webview")
+    health_payload = await gpt_health(user)  # type: ignore[arg-type]
+    return health_payload
+
+
+@app.get("/api/v1/diag/ready", summary="Public readiness snapshot for Webview diagnostics")
+async def public_diag_ready(request: Request) -> Dict[str, Any]:
+    """Return the same payload as /healthz but structured for the observability panel."""
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/v1/diag/routes", summary="Enumerate key GPT routes for Webview diagnostics")
+async def public_diag_routes() -> Dict[str, Any]:
+    """List primary GPT endpoints for quick inspection within the Webview."""
+    return {
+        "routes": {
+            "scan": "/gpt/scan",
+            "plan": "/gpt/plan",
+            "chart_url": "/gpt/chart-url",
+            "context": "/gpt/context/{symbol}",
+        }
+    }
+
+
+@app.get(
+    "/api/v1/plan/current",
+    summary="Return the latest plan snapshot for Webview rendering",
+)
+async def public_plan_current(symbol: str = Query(..., min_length=1), request: Request = None) -> Dict[str, Any]:
+    """Bridge endpoint for the Webview shell; proxies /gpt/plan without API key requirements."""
+    payload = PlanRequest(symbol=symbol.upper())
+    user = AuthedUser(user_id="webview")
+    plan_response = await gpt_plan(payload, request, Response(), user)  # type: ignore[arg-type]
+    return plan_response.model_dump(mode="json")
+
+
 @app.get("/", summary="Service metadata")
 async def root() -> Dict[str, Any]:
     return {
