@@ -13345,6 +13345,8 @@ async def gpt_context(
         except Exception:
             logger.debug("consistency check failed", exc_info=True)
         response["options"] = polygon_bundle
+    plan_block = enhancements.get("plan") if isinstance(enhancements.get("plan"), Mapping) else {}
+
     level_contexts: list[Mapping[str, Any]] = []
     if isinstance(key_levels, Mapping) and key_levels:
         level_contexts.append({"key_levels": key_levels})
