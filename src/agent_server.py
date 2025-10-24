@@ -5788,10 +5788,11 @@ def _price_scale_for(price: float | None) -> int:
     return int(10 ** decimals)
 
 
-def _extract_levels_for_chart(key_levels: Dict[str, float]) -> str | None:
-    if not key_levels:
+def _extract_levels_for_chart(*contexts: Mapping[str, Any]) -> str | None:
+    usable = [ctx for ctx in contexts if isinstance(ctx, Mapping) and ctx]
+    if not usable:
         return None
-    return extract_supporting_levels({"key_levels": key_levels})
+    return extract_supporting_levels({}, *usable)
 
 
 def _plan_meta_payload(
@@ -8101,7 +8102,17 @@ async def _legacy_scan(
         overlay_params = _encode_overlay_params(enhancements or {})
         for key, value in overlay_params.items():
             chart_query[key] = value
-        levels_token = _extract_levels_for_chart(key_levels)
+        level_contexts: list[Mapping[str, Any]] = []
+        if isinstance(key_levels, Mapping) and key_levels:
+            level_contexts.append({"key_levels": key_levels})
+        if isinstance(plan_payload, Mapping) and plan_payload:
+            level_contexts.append(plan_payload)
+        if signal.plan is not None:
+            try:
+                level_contexts.append({"plan": signal.plan.as_dict()})
+            except Exception:
+                pass
+        levels_token = _extract_levels_for_chart(*level_contexts)
         if levels_token:
             chart_query["levels"] = levels_token
             chart_query["supportingLevels"] = "1"
@@ -13327,7 +13338,18 @@ async def gpt_context(
         except Exception:
             logger.debug("consistency check failed", exc_info=True)
         response["options"] = polygon_bundle
-    levels_token = _extract_levels_for_chart(key_levels)
+    level_contexts: list[Mapping[str, Any]] = []
+    if isinstance(key_levels, Mapping) and key_levels:
+        level_contexts.append({"key_levels": key_levels})
+    if isinstance(plan_block, Mapping) and plan_block:
+        level_contexts.append(plan_block)
+        structured_nested = plan_block.get("structured_plan")
+        if isinstance(structured_nested, Mapping):
+            level_contexts.append(structured_nested)
+        target_profile_nested = plan_block.get("target_profile")
+        if isinstance(target_profile_nested, Mapping):
+            level_contexts.append(target_profile_nested)
+    levels_token = _extract_levels_for_chart(*level_contexts)
 
     chart_params = {
         "symbol": _tv_symbol(symbol),

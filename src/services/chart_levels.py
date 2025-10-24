@@ -167,6 +167,7 @@ def _record_level(levels: MutableMapping[str, float], label: str, value: Any) ->
 def _collect_levels_from_mapping(levels: MutableMapping[str, float], mapping: Mapping[str, Any]) -> None:
     for key, value in mapping.items():
         _record_level(levels, key, value)
+        _collect_levels(levels, value, treat_mapping=True)
 
 
 def _collect_levels(levels: MutableMapping[str, float], container: Any, *, treat_mapping: bool = False) -> None:
