@@ -23,8 +23,7 @@ export function mountChart(selector, opts = {}) {
   const levelsRaw =
     opts.levelsTokens ??
     paramOverrides.levels ??
-    urlParams.get('levels') ||
-    '';
+    (urlParams.get('levels') || '');
   const supportingFlag =
     opts.supportingLevels ??
     paramOverrides.supportingLevels ??
