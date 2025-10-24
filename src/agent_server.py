@@ -5499,6 +5499,13 @@ def _planning_scan_to_page(
                 "stop": f"{float(stop_level):.2f}",
                 "tp": ",".join(f"{float(tp):.2f}" for tp in targets_level),
             }
+            supporting_token = extract_supporting_levels(
+                metrics,
+                {"key_levels_used": key_levels_used_payload} if key_levels_used_payload else {},
+            )
+            if supporting_token:
+                chart_params["levels"] = supporting_token
+                chart_params["supportingLevels"] = "1"
             planning_snapshot["chart_params"] = chart_params
             planning_snapshot.setdefault("direction", default_direction)
         elif default_direction:
