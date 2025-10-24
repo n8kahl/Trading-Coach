@@ -18,12 +18,36 @@
   const symbol = params.get("symbol") || "AAPL";
   const emaInputs = (params.get("ema") || "").split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n) && n > 0);
   const showVWAP = params.get("vwap") !== "0";
+  const supportingLevelsVisible = params.get("supportingLevels") !== "0";
   const plan = {
     entry: parseFloat(params.get("entry")),
     stop: parseFloat(params.get("stop")),
     tps: (params.get("tp") || "").split(",").map((v) => parseFloat(v.trim())).filter((v) => Number.isFinite(v)),
   };
-  const keyLevels = (params.get("levels") || "").split(",").map((v) => parseFloat(v.trim())).filter((v) => Number.isFinite(v));
+
+  const parseSupportingLevels = () => {
+    const raw = params.get("levels") || "";
+    if (!raw) return [];
+    const chunks = raw.includes(";") ? raw.split(";") : raw.split(",");
+    const seen = new Set();
+    const levels = [];
+    for (const chunk of chunks) {
+      const token = chunk.trim();
+      if (!token) continue;
+      const [pricePart, labelPart] = token.split("|").map((part) => part.trim());
+      const price = parseFloat(pricePart);
+      if (!Number.isFinite(price)) continue;
+      const label = labelPart || null;
+      const key = `${label || ""}:${price.toFixed(4)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      levels.push({ price, label });
+      if (levels.length >= 40) break;
+    }
+    return levels;
+  };
+
+  const supportingLevels = parseSupportingLevels();
 
   const resolutionToSeconds = (res) => {
     const token = (res || "").trim().toUpperCase();
@@ -76,7 +100,12 @@
     if (plan.entry) addPriceLine(plan.entry, "Entry", "#facc15");
     if (plan.stop) addPriceLine(plan.stop, "Stop", "#ef4444");
     plan.tps.forEach((value, idx) => addPriceLine(value, `TP${idx + 1}`, "#22c55e"));
-    keyLevels.forEach((value, idx) => addPriceLine(value, `Level ${idx + 1}`, "#facc15", LightweightCharts.LineStyle.Dotted));
+    if (supportingLevelsVisible) {
+      supportingLevels.forEach((item, idx) => {
+        const title = item.label || `Level ${idx + 1}`;
+        addPriceLine(item.price, title, "#94a3b8", LightweightCharts.LineStyle.Dotted);
+      });
+    }
   };
 
   window.addEventListener("lightweight-data", (event) => {

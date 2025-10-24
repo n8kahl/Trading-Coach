@@ -106,8 +106,10 @@
   let planLayersMeta = {};
   let planZones = [];
   const MAX_PRIMARY_LEVELS = 6;
+  const SUPPORTING_LEVEL_LIMIT = 40;
   let levelGroups = { primary: [], supplemental: [] };
-  let showAllLevels = false;
+  const supportingLevelsParam = params.get('supportingLevels');
+  let showAllLevels = supportingLevelsParam !== '0';
   let allKeyLevels = [];
   let levelsToggleEl = null;
   let pendingAutoReplan = null;
@@ -246,9 +248,17 @@
     confidence_factors: Array.isArray(planMeta.confidence_factors) ? planMeta.confidence_factors : [],
   };
 
+  const supportingLevelsFromParams = dedupeLevels(parseNamedLevels(params.get('levels')));
   allKeyLevels = collectInitialLevels();
-  showAllLevels = false;
   setLevelGroupsFromMeta(planLayersMeta, allKeyLevels, { silent: true });
+  if (supportingLevelsFromParams.length) {
+    levelGroups.supplemental = dedupeLevels([
+      ...supportingLevelsFromParams,
+      ...levelGroups.supplemental,
+    ]);
+  }
+  updateLevelVisibility({ silent: true });
+  setOrDeleteParam('supportingLevels', showAllLevels ? '1' : '0');
 
   const dataSourceRaw = (params.get('data_source') || '').trim();
   const dataModeToken = (params.get('data_mode') || '').trim().toLowerCase();
@@ -466,15 +476,15 @@ levelsToggleEl = document.getElementById('levels_toggle');
       levelsToggleEl.disabled = true;
       levelsToggleEl.classList.remove('levels-toggle--active');
       levelsToggleEl.setAttribute('aria-pressed', 'false');
-      levelsToggleEl.textContent = 'Show more levels';
-      levelsToggleEl.title = 'Additional levels unavailable';
+      levelsToggleEl.textContent = 'Show Supporting Levels';
+      levelsToggleEl.title = 'Supporting levels unavailable';
       return;
     }
     levelsToggleEl.disabled = false;
     levelsToggleEl.classList.toggle('levels-toggle--active', showAllLevels);
     levelsToggleEl.setAttribute('aria-pressed', showAllLevels ? 'true' : 'false');
-    levelsToggleEl.textContent = showAllLevels ? 'Hide extra levels' : 'Show more levels';
-    levelsToggleEl.title = showAllLevels ? 'Hide supplemental chart levels' : 'Display supplemental chart levels';
+    levelsToggleEl.textContent = showAllLevels ? 'Hide Supporting Levels' : 'Show Supporting Levels';
+    levelsToggleEl.title = showAllLevels ? 'Hide supporting chart levels' : 'Display supporting chart levels';
   }
 
   const etDateFormatter = new Intl.DateTimeFormat('en-US', {
@@ -819,7 +829,10 @@ levelsToggleEl = document.getElementById('levels_toggle');
     levelsToggleEl.addEventListener('click', () => {
       if (!levelGroups.supplemental.length) return;
       showAllLevels = !showAllLevels;
+      setOrDeleteParam('supportingLevels', showAllLevels ? '1' : '0');
       updateLevelVisibility();
+      const newUrl = `${window.location.pathname}?${params.toString()}`;
+      window.history.replaceState({}, '', newUrl);
     });
   }
 
@@ -1549,10 +1562,11 @@ levelsToggleEl = document.getElementById('levels_toggle');
   const refreshLevelLines = () => {
     if (!candleSeries) return;
     const desiredIds = new Set();
-    [...keyLevels]
+    const orderedLevels = [...keyLevels]
       .filter((level) => Number.isFinite(level.price))
       .sort((a, b) => b.price - a.price)
-      .forEach((level, idx) => {
+      .slice(0, SUPPORTING_LEVEL_LIMIT);
+    orderedLevels.forEach((level, idx) => {
         const label = formatLevelLabel(level, idx);
         const id = buildLevelLineId(label, level.price);
         desiredIds.add(id);
@@ -2254,8 +2268,17 @@ levelsToggleEl = document.getElementById('levels_toggle');
     mergedPlanMeta.quotes_notice = planLayersMeta.quotes_notice || null;
     allKeyLevels = collectInitialLevels();
     mergedPlanMeta.key_levels = planBlock.key_levels || response.key_levels || mergedPlanMeta.key_levels;
-    showAllLevels = false;
+    showAllLevels = params.get('supportingLevels') !== '0';
     setLevelGroupsFromMeta(planLayersMeta, allKeyLevels);
+    const refreshSupporting = dedupeLevels(parseNamedLevels(params.get('levels')));
+    if (refreshSupporting.length) {
+      levelGroups.supplemental = dedupeLevels([
+        ...refreshSupporting,
+        ...levelGroups.supplemental,
+      ]);
+    }
+    updateLevelVisibility();
+    setOrDeleteParam('supportingLevels', showAllLevels ? '1' : '0');
 
     setOrDeleteParam('style', styleToken);
     setOrDeleteParam('direction', directionToken);

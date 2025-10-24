@@ -30,6 +30,7 @@ ALLOWED_CHART_PARAM_KEYS: Set[str] = {
     "levels",
     "ema",
     "session",
+    "supportingLevels",
 }
 
 REQUIRED_CHART_PARAM_KEYS: Set[str] = {

@@ -158,6 +158,7 @@ from .features.htf_levels import compute_htf_levels, HTFLevels
 from .strategy.engine import infer_strategy, mtf_amplifier
 from .services.fallbacks import compute_plan_with_fallback
 from .services.plan_service import generate_plan as generate_plan_v2
+from .services.chart_levels import extract_supporting_levels
 from .services.scan_fallbacks import build_placeholder_candidates, compute_scan_with_fallback
 from .services.scan_service import generate_scan as generate_scan_v2
 from .services.universe import resolve_universe
@@ -2570,6 +2571,7 @@ class ChartParams(BaseModel):
     levels: str | None = None
     ema: str | None = None
     session: str | None = None
+    supportingLevels: str | None = None
 
 
 class ChartLinks(BaseModel):
@@ -5786,49 +5788,10 @@ def _price_scale_for(price: float | None) -> int:
     return int(10 ** decimals)
 
 
-def _extract_levels_for_chart(key_levels: Dict[str, float]) -> List[str]:
-    order = [
-        ("session_high", "Session High"),
-        ("session_low", "Session Low"),
-        ("opening_range_high", "OR High"),
-        ("opening_range_low", "OR Low"),
-        ("prev_high", "Prev High"),
-        ("prev_low", "Prev Low"),
-        ("prev_close", "Prev Close"),
-        ("gap_fill", "Gap Fill"),
-    ]
-    included: set[str] = set()
-    levels: List[str] = []
-
-    def _append(value: Any, label: str) -> None:
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            return
-        if not math.isfinite(numeric):
-            return
-        token = f"{numeric:.2f}|{label}"
-        if token not in levels:
-            levels.append(token)
-
-    for key, label in order:
-        if key in key_levels:
-            _append(key_levels.get(key), label)
-            included.add(key)
-
-    for key, value in key_levels.items():
-        if key in included:
-            continue
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(numeric):
-            continue
-        label = key.replace("_", " ").title()
-        _append(numeric, label)
-
-    return levels
+def _extract_levels_for_chart(key_levels: Dict[str, float]) -> str | None:
+    if not key_levels:
+        return None
+    return extract_supporting_levels({"key_levels": key_levels})
 
 
 def _plan_meta_payload(
@@ -8138,9 +8101,10 @@ async def _legacy_scan(
         overlay_params = _encode_overlay_params(enhancements or {})
         for key, value in overlay_params.items():
             chart_query[key] = value
-        level_tokens = _extract_levels_for_chart(key_levels)
-        if level_tokens:
-            chart_query["levels"] = ",".join(level_tokens)
+        levels_token = _extract_levels_for_chart(key_levels)
+        if levels_token:
+            chart_query["levels"] = levels_token
+            chart_query["supportingLevels"] = "1"
         chart_query["strategy"] = signal.strategy_id
         if plan_id:
             chart_query["plan_id"] = plan_id
@@ -13363,7 +13327,7 @@ async def gpt_context(
         except Exception:
             logger.debug("consistency check failed", exc_info=True)
         response["options"] = polygon_bundle
-    level_tokens = _extract_levels_for_chart(key_levels)
+    levels_token = _extract_levels_for_chart(key_levels)
 
     chart_params = {
         "symbol": _tv_symbol(symbol),
@@ -13374,8 +13338,9 @@ async def gpt_context(
         "vwap": "1",
         "theme": "dark",
     }
-    if level_tokens:
-        chart_params["levels"] = ",".join(level_tokens)
+    if levels_token:
+        chart_params["levels"] = levels_token
+        chart_params["supportingLevels"] = "1"
     response["charts"] = {"params": {key: str(value) for key, value in chart_params.items()}}
     return response
 

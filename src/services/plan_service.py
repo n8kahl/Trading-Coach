@@ -12,6 +12,7 @@ from ..providers.geometry import build_geometry
 from ..providers.options import select_contracts
 from ..providers.planner import plan as run_plan
 from ..providers.series import fetch_series
+from .chart_levels import extract_supporting_levels
 from .chart_utils import sanitize_chart_params
 
 logger = logging.getLogger(__name__)
@@ -89,12 +90,17 @@ async def generate_plan(
 
     params = charts_container.get("params") if isinstance(charts_container, dict) else None
     raw_params = dict(params) if isinstance(params, dict) else {}
+    levels_token = extract_supporting_levels(plan_obj)
+    if levels_token:
+        raw_params["levels"] = levels_token
+        raw_params["supportingLevels"] = "1"
     if route.extended:
         raw_params.setdefault("range", "1d")
         raw_params["session"] = "extended"
     chart_params = sanitize_chart_params(raw_params if raw_params else None)
     if chart_params:
         charts_container["params"] = chart_params
+        plan_obj["charts_params"] = chart_params
         chart_url = await _resolve_chart_url(app, chart_params)
         if chart_url:
             plan_obj["chart_url"] = chart_url

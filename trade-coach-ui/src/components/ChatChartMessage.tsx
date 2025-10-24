@@ -101,6 +101,7 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
     };
     if (levelsToken) {
       body.levels = levelsToken;
+      body.supportingLevels = "1";
     }
 
     Object.keys(body).forEach((key) => {

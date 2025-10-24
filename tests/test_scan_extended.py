@@ -119,3 +119,5 @@ async def test_generate_scan_extended_threads_session(monkeypatch: pytest.Monkey
         assert candidate["tps"]
         assert candidate["entry"] is not None
     assert any(params and params.get("session") == "extended" for params in captured_params)
+    assert any(params and params.get("levels") for params in captured_params)
+    assert all(params.get("supportingLevels") == "1" for params in captured_params if params)

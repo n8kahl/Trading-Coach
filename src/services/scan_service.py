@@ -12,6 +12,7 @@ from ..providers.options import select_contracts
 from ..providers.planner import plan as run_plan
 from ..providers.scanner import scan as run_scan
 from ..providers.series import fetch_series
+from .chart_levels import extract_supporting_levels
 from .scan_confidence import compute_scan_confidence
 from .chart_utils import sanitize_chart_params
 
@@ -119,12 +120,17 @@ async def generate_scan(
 
         params = charts_container.get("params") if isinstance(charts_container, dict) else None
         raw_params = dict(params) if isinstance(params, dict) else {}
+        levels_token = extract_supporting_levels(plan_obj)
+        if levels_token:
+            raw_params["levels"] = levels_token
+            raw_params["supportingLevels"] = "1"
         if route.extended:
             raw_params.setdefault("range", "1d")
             raw_params["session"] = "extended"
         chart_params = sanitize_chart_params(raw_params if raw_params else None)
         if chart_params:
             charts_container["params"] = chart_params
+            plan_obj["charts_params"] = chart_params
         chart_payloads.append(chart_params)
         plan_payloads.append(plan_obj)
         enriched.append(candidate)
