@@ -9457,6 +9457,7 @@ async def _generate_fallback_plan(
     levels_param = _fallback_levels_param({k: v for k, v in key_levels.items() if isinstance(v, (int, float))})
     if levels_param:
         chart_params["levels"] = levels_param
+        chart_params["supportingLevels"] = "1"
     chart_links = None
     allowed_chart_keys = set(ChartParams.model_fields.keys())
     extra_chart_params = [key for key in list(chart_params.keys()) if key not in allowed_chart_keys]
