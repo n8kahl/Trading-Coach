@@ -652,6 +652,14 @@ by 2% (capped at style default +4), and finally ease minimum open interest
 (1000→700→500→300). The ladder always yields three `best` contracts unless the
 chain is truly empty.
 
+When Polygon omits greeks right after the close (the common “delta goes null at
+16:00 ET” scenario), the selector now falls back to the previous close snapshot,
+fills missing deltas with a neutral placeholder, and returns two to three
+`yellow` contracts flagged with `DELTA_MISSING_FALLBACK`. These entries carry
+`status: degraded`/`reason: delta_missing_fallback` so downstream surfaces can
+highlight that greeks were unavailable while still avoiding the older
+guardrail placeholders.
+
 ### Response shape
 
 ```jsonc
