@@ -9,7 +9,7 @@ import pandas as pd
 
 from ..contract_selector import grade_option_pick, select_top_n, target_delta_by_style, style_guardrail_rules, reason_tokens
 from ..market_clock import MarketClock
-from ..polygon_options import fetch_polygon_option_chain_asof
+from ..polygon_options import fetch_polygon_option_chain, fetch_polygon_option_chain_asof
 from ..services.chart_utils import infer_session_label
 
 
@@ -176,7 +176,12 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
     desired_count = max(2, min(3, len(desired_targets)))
 
     as_of_resolved, quote_session = _resolve_quote_context(as_of)
-    chain = await fetch_polygon_option_chain_asof(symbol, as_of_resolved)
+    market_closed = not _MARKET_CLOCK.is_rth_open(at=as_of_resolved.astimezone(_ET))
+    use_asof = quote_session == "regular_close" or market_closed
+    if use_asof:
+        chain = await fetch_polygon_option_chain_asof(symbol, as_of_resolved)
+    else:
+        chain = await fetch_polygon_option_chain(symbol)
     if chain is None or chain.empty:
         return {
             "options_contracts": [],
@@ -235,6 +240,19 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
 
     fallback_used = False
     if len(selection.rows) < desired_count and not normalized_chain.empty:
+        df_fallback = normalized_chain.copy()
+        df_fallback["delta"] = df_fallback["delta"].fillna(0.0)
+        existing_flags = df_fallback.get("guardrail_flags")
+        if isinstance(existing_flags, pd.Series):
+            df_fallback["guardrail_flags"] = existing_flags.apply(
+                lambda flags: list(flags) + ["DELTA_MISSING"] if isinstance(flags, (list, tuple, set)) else ["DELTA_MISSING"]
+            )
+        else:
+            df_fallback["guardrail_flags"] = [["DELTA_MISSING"] for _ in range(len(df_fallback))]
+        selection = select_top_n(df_fallback, desired_targets, desired_count)
+        relax_flags.append("DELTA_MISSING_FALLBACK")
+        fallback_used = True
+    if len(selection.rows) < desired_count and not normalized_chain.empty:
         selection = select_top_n(normalized_chain, desired_targets, desired_count)
         fallback_used = True
         relax_flags.append("GUARDRAIL_FALLBACK")
@@ -250,7 +268,9 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
             selection.targets[idx] if idx < len(selection.targets) else None,
         )
         if relax_flags:
-            contract.setdefault("guardrail_flags", list(relax_flags))
+            existing_contract_flags = contract.get("guardrail_flags", [])
+            merged_flags = list(dict.fromkeys(list(existing_contract_flags) + list(relax_flags)))
+            contract["guardrail_flags"] = merged_flags
         options_contracts.append(contract)
 
     note = _build_options_note(relax_flags, rejected_contracts, fallback_used)
@@ -308,6 +328,11 @@ def _serialize_contract(row: pd.Series, quote_session: str, as_of_timestamp: str
         "rating": rating,
         "reasons": reasons,
     }
+    row_flags = row.get("guardrail_flags")
+    if isinstance(row_flags, (list, tuple, set)):
+        contract["guardrail_flags"] = list(row_flags)
+        if "DELTA_MISSING" in contract["guardrail_flags"]:
+            contract["rating"] = "yellow"
     if tradeability is not None:
         contract["tradeability"] = tradeability
     if delta_fit is not None:
