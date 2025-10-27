@@ -879,6 +879,18 @@ components:
         entry_anchor: { type: string, nullable: true }
         entry_actionability: { type: number, format: double, nullable: true }
         actionability_gate: { type: number, format: double, nullable: true }
+        expected_duration:
+          type: object
+          nullable: true
+          properties:
+            minutes: { type: integer, description: "Estimated time to first target in minutes (canonical)" }
+            label: { type: string, description: "Human label (style-based bucket)" }
+            basis:
+              type: array
+              items: { type: string }
+            inputs:
+              type: object
+              additionalProperties: true
         strategy_profile:
           type: object
           nullable: true
@@ -919,6 +931,17 @@ components:
         actionable_soon: true
         waiting_for: "Reclaim ORL @ 188.42 on 1m close + confirming volume"
         actionability_gate: 0.4
+        expected_duration:
+          minutes: 120
+          label: "intraday ~2–4h"
+          basis: ["ATR", "Distance"]
+          inputs:
+            interval: "5m"
+            atr: 1.4
+            em: 2.8
+            distance: 1.38
+            bars: 24
+            per_bar: 0.0575
         target_meta:
           - label: TP1
             prob_touch: 0.62
