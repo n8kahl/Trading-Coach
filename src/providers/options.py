@@ -293,7 +293,7 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
             as_of_resolved.isoformat(),
             len(selection.rows),
         )
-    if len(selection.rows) < desired_count and not normalized_chain.empty:
+    if not delta_missing_fallback_used and len(selection.rows) < desired_count and not normalized_chain.empty:
         selection = select_top_n(normalized_chain, desired_targets, desired_count)
         fallback_used = True
         relax_flags.append("GUARDRAIL_FALLBACK")
