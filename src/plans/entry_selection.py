@@ -132,8 +132,29 @@ def _mtf_multiplier(direction: str, bias: Optional[str], agreement: Optional[flo
 
 def _actionability_score(entry: float, ctx: EntryContext) -> float:
     atr = ctx.atr if ctx.atr and ctx.atr > 0 else 1.0
-    distance_atr = abs(entry - ctx.last_price) / atr
-    distance_term = max(0.0, min(1.0, 1.0 - min(distance_atr, 0.3) / 0.3))
+    last_price = float(ctx.last_price or 0.0)
+    if last_price > 0:
+        distance_pct = abs(entry - last_price) / last_price
+    else:
+        distance_pct = float("inf")
+    distance_atr = abs(entry - last_price) / atr
+    tick_size = ctx.tick if isinstance(ctx.tick, (int, float)) and ctx.tick > 0 else _infer_tick_size(last_price or entry)
+    actionable_soon = is_actionable_soon(entry, last_price, atr, tick_size, ctx.style)
+
+    style = (ctx.style or "").lower()
+    pct_cap = {"scalp": 0.0015, "intraday": 0.0025, "swing": 0.004, "leaps": 0.006}.get(style, 0.0025)
+    atr_cap = {"scalp": 0.25, "intraday": 0.40, "swing": 0.70, "leaps": 1.00}.get(style, 0.40)
+
+    distance_terms = []
+    if math.isfinite(distance_pct) and pct_cap > 0:
+        distance_terms.append(1.0 - min(distance_pct, pct_cap) / pct_cap)
+    if math.isfinite(distance_atr) and atr_cap > 0:
+        distance_terms.append(1.0 - min(distance_atr, atr_cap) / atr_cap)
+    distance_term = max(distance_terms, default=0.0)
+    distance_term = max(0.0, min(1.0, distance_term))
+    if actionable_soon:
+        distance_term = max(distance_term, 0.35)
+
     session_phase = ctx.session_phase or _session_phase_from_timestamp(ctx.timestamp)
     session_boost = 1.0
     if session_phase == "power_hour":

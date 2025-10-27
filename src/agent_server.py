@@ -5063,6 +5063,7 @@ def _apply_option_guardrails(
     strategy_id: str | None = None,
     desired_count: int | None = None,
     return_flags: bool = False,
+    after_hours: bool = False,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]] | List[str], List[str] | None]:
     if not contracts:
         return [], [], []
@@ -5149,14 +5150,25 @@ def _apply_option_guardrails(
         return filtered_basic, rejected_basic
 
     delta_available = frame["delta"].notna().any() if "delta" in frame.columns else False
+    if after_hours:
+        delta_available = False
 
     rules = style_guardrail_rules(style)
     rules.pop("style_key", "intraday")
     base_spread_cap = float(rules.get("max_spread_pct", max_spread_pct))
-    rules["max_spread_pct"] = min(base_spread_cap, float(max_spread_pct))
+    if after_hours:
+        rules["max_spread_pct"] = max(base_spread_cap, float(max_spread_pct) + 4.0)
+    else:
+        rules["max_spread_pct"] = min(base_spread_cap, float(max_spread_pct))
     rules["min_volume"] = float(rules.get("min_volume", 0.0))
+    if after_hours:
+        rules["min_volume"] = 0.0
+        rules["delta_low"] = max(0.0, rules["delta_low"] - 0.1)
+        rules["delta_high"] = min(1.0, rules["delta_high"] + 0.1)
 
     oi_base = max(float(min_open_interest), _GUARDRAIL_OI_STEPS[0])
+    if after_hours:
+        oi_base = max(50.0, min(float(min_open_interest), 300.0))
     oi_steps: List[float] = [oi_base]
     for step in _GUARDRAIL_OI_STEPS[1:]:
         if step < oi_steps[-1]:
@@ -5175,6 +5187,8 @@ def _apply_option_guardrails(
     relaxation_sequence.extend(("oi", value) for value in oi_steps[1:])
 
     relax_flags: List[str] = []
+    if after_hours:
+        relax_flags.append("AFTER_HOURS_RELAXED")
     rejection_records: List[Dict[str, Any]] = []
 
     def _first_failure(row: pd.Series) -> Tuple[Optional[str], Optional[str]]:
@@ -9902,6 +9916,7 @@ async def _generate_fallback_plan(
             strategy_id=strategy_id_value,
             desired_count=desired_contract_count,
             return_flags=True,
+            after_hours=options_quote_session != "regular_open",
         )
         accepted_symbols = {str(item.get("symbol") or "").upper() for item in filtered_contracts if isinstance(item, Mapping)}
         filtered_rejections: List[Dict[str, Any]] = []
@@ -11847,6 +11862,7 @@ async def gpt_plan(
             strategy_id=strategy_id_value,
             desired_count=desired_contract_count,
             return_flags=True,
+            after_hours=options_quote_session != "regular_open",
         )
         combined_rejections: List[Dict[str, Any]] = []
         for rejection in [*selector_rejections, *guardrail_rejections]:

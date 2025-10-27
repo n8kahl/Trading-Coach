@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
@@ -187,6 +187,25 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
         chain = await fetch_polygon_option_chain(symbol)
     chain_row_count = 0 if chain is None else len(chain)
     chain_columns = list(chain.columns) if isinstance(chain, pd.DataFrame) else None
+    if (
+        use_asof
+        and isinstance(chain, pd.DataFrame)
+        and not chain.empty
+        and ("delta" not in chain.columns or chain["delta"].isna().mean() >= 0.8)
+    ):
+        prior_cutoff = as_of_resolved - timedelta(minutes=5)
+        if prior_cutoff.date() == as_of_resolved.date():
+            fallback_chain = await fetch_polygon_option_chain_asof(symbol, prior_cutoff)
+            if isinstance(fallback_chain, pd.DataFrame) and not fallback_chain.empty:
+                _LOGGER.warning(
+                    "as-of option chain delta missing, using fallback window symbol=%s original_rows=%d fallback_rows=%d",
+                    symbol,
+                    chain_row_count,
+                    len(fallback_chain),
+                )
+                chain = fallback_chain
+                chain_row_count = len(chain)
+                chain_columns = list(chain.columns)
     log.info(
         "select_contracts start symbol=%s as_of=%s session=%s use_asof=%s rows=%d cols=%s",
         symbol,
@@ -224,6 +243,13 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
     initial_min_volume = float(rules.get("min_volume", 0.0))
     rules["min_open_interest"] = float(_OI_LADDER[0])
     initial_min_open_interest = rules["min_open_interest"]
+    after_hours_relaxed = False
+    if market_closed:
+        rules["max_spread_pct"] = max(base_spread_cap, base_spread_cap + 4.0)
+        rules["min_open_interest"] = min(rules["min_open_interest"], 100.0)
+        rules["min_volume"] = 0.0
+        after_hours_relaxed = True
+    base_spread_cap = float(rules.get("max_spread_pct", base_spread_cap))
 
     diagnostics = _log_guardrail_pipeline(
         normalized_chain,
@@ -236,6 +262,8 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
     missing_delta_candidates = diagnostics.get("missing_delta")
 
     relax_flags: List[str] = []
+    if after_hours_relaxed:
+        relax_flags.append("AFTER_HOURS_RELAXED")
     rejection_records: List[Tuple[str, str]] = []
     filtered = normalized_chain.copy()
     selection = select_top_n(pd.DataFrame(), [], 0)  # placeholder
@@ -275,7 +303,14 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
         and not missing_delta_candidates.empty
     ):
         df_fallback = missing_delta_candidates.copy()
-        df_fallback["delta"] = df_fallback["delta"].fillna(0.0)
+        if desired_targets:
+            fallback_deltas = pd.Series(
+                [float(desired_targets[min(idx, len(desired_targets) - 1)]) for idx in range(len(df_fallback))],
+                index=df_fallback.index,
+            )
+            df_fallback["delta"] = df_fallback["delta"].fillna(fallback_deltas)
+        else:
+            df_fallback["delta"] = df_fallback["delta"].fillna(0.5)
         existing_flags = df_fallback.get("guardrail_flags")
         if isinstance(existing_flags, pd.Series):
             df_fallback["guardrail_flags"] = existing_flags.apply(
