@@ -10011,8 +10011,7 @@ async def _generate_fallback_plan(
         )
         if placeholder_contracts:
             options_contracts = placeholder_contracts
-            if not options_note:
-                options_note = "Contracts unavailable; using guardrail placeholders."
+            options_note = "Contracts unavailable; using guardrail placeholders."
     if options_contracts:
         for contract in options_contracts:
             if isinstance(contract, dict):
