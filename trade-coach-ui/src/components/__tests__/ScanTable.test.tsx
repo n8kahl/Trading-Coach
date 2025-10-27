@@ -52,4 +52,24 @@ describe('ScanTable', () => {
     expect(chartLink).toHaveAttribute('href', 'https://example.com/chart');
     expect(screen.getByText('~78m')).toBeInTheDocument();
   });
+
+  it('uses structured plan duration when plan is missing it', () => {
+    const rows = [
+      {
+        plan_id: 'PLAN-2',
+        rank: 2,
+        symbol: 'MSFT',
+        setup: 'ema_stack',
+        structured_plan: {
+          expected_duration: {
+            minutes: 42,
+          },
+        },
+      },
+    ];
+
+    render(<ScanTable rows={rows} />);
+
+    expect(screen.getByText('~42m')).toBeInTheDocument();
+  });
 });

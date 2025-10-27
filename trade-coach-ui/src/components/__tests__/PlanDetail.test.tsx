@@ -120,4 +120,18 @@ describe('PlanDetail', () => {
       expect(screen.getByText(/overlays are stale/i)).toBeInTheDocument();
     });
   });
+
+  it('falls back to structured expected duration when plan omits it', async () => {
+    const planWithoutDuration = { ...basePlan };
+    delete (planWithoutDuration as Record<string, unknown>).expected_duration;
+    const structuredWithDuration = { ...structured, expected_duration: basePlan.expected_duration };
+
+    render(<PlanDetail plan={planWithoutDuration} structured={structuredWithDuration} planId={basePlan.plan_id} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Expected Duration')).toBeInTheDocument();
+    });
+    expect(screen.getByText('intraday ~1–2h')).toBeInTheDocument();
+    expect(screen.getByText(/~95 min/i)).toBeInTheDocument();
+  });
 });
