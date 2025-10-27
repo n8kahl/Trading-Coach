@@ -11,6 +11,7 @@ from .actionability import actionability_score, compute_entry_candidates, is_act
 from .entry_selection import EntryAnchor, EntryCandidate, EntryContext, build_entry_candidates as build_entry_plan_candidates, select_best_entry_plan
 from .invariants import assert_invariants, GeometryInvariantError
 from .pipeline import StructuredGeometry, build_structured_geometry
+from .duration import estimate_expected_duration
 
 __all__ = [
     "GeometryConfig",
@@ -45,4 +46,5 @@ __all__ = [
     "GeometryInvariantError",
     "StructuredGeometry",
     "build_structured_geometry",
+    "estimate_expected_duration",
 ]

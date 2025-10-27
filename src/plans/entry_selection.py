@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import List, Mapping, Optional, Sequence
@@ -40,6 +41,7 @@ class EntryContext:
     levels: Mapping[str, float]
     timestamp: Optional[datetime]
     mtf_bias: Optional[str] = None
+    mtf_agreement: Optional[float] = None
     session_phase: Optional[str] = None
     preferred_entries: Optional[Sequence[EntryAnchor]] = None
     tick: float = 0.0
@@ -106,6 +108,28 @@ def _anchors_from_levels(direction: str, levels: Mapping[str, float]) -> List[En
     return anchors
 
 
+def _mtf_multiplier(direction: str, bias: Optional[str], agreement: Optional[float]) -> float:
+    if not bias:
+        return 1.0
+    bias_norm = bias.strip().lower()
+    direction_norm = direction.strip().lower()
+    try:
+        agreement_val = float(agreement) if agreement is not None else 0.0
+    except (TypeError, ValueError):
+        agreement_val = 0.0
+    if not math.isfinite(agreement_val):
+        agreement_val = 0.0
+    agreement_clamped = max(0.0, min(1.0, agreement_val))
+    if bias_norm == direction_norm:
+        boost = 0.05 + 0.12 * agreement_clamped
+        return max(0.9, min(1.25, 1.0 + boost))
+    if bias_norm in {"", "neutral"}:
+        neutral_boost = 0.02 * agreement_clamped
+        return max(0.92, min(1.12, 1.0 + neutral_boost))
+    penalty = 0.05 + 0.10 * agreement_clamped
+    return max(0.75, min(1.0, 1.0 - penalty))
+
+
 def _actionability_score(entry: float, ctx: EntryContext) -> float:
     atr = ctx.atr if ctx.atr and ctx.atr > 0 else 1.0
     distance_atr = abs(entry - ctx.last_price) / atr
@@ -116,14 +140,7 @@ def _actionability_score(entry: float, ctx: EntryContext) -> float:
         session_boost = 1.08
     elif session_phase == "open":
         session_boost = 1.02
-    mtf_boost = 1.0
-    if ctx.mtf_bias:
-        bias_norm = ctx.mtf_bias.strip().lower()
-        direction_norm = ctx.direction.strip().lower()
-        if bias_norm == direction_norm:
-            mtf_boost = 1.08
-        elif bias_norm not in {"", "neutral"} and bias_norm != direction_norm:
-            mtf_boost = 0.9
+    mtf_boost = _mtf_multiplier(ctx.direction, ctx.mtf_bias, ctx.mtf_agreement)
     score = distance_term * session_boost * mtf_boost
     return max(0.0, min(1.0, score))
 

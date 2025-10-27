@@ -149,6 +149,7 @@ from .plans import (
     EntryCandidate,
     select_best_entry_plan,
     is_actionable_soon,
+    estimate_expected_duration,
 )
 from .plans.entry import select_structural_entry
 from .levels import inject_style_levels
@@ -2880,6 +2881,7 @@ class PlanResponse(BaseModel):
     source_paths: Dict[str, str] = Field(default_factory=dict)
     accuracy_levels: List[str] = Field(default_factory=list)
     rejected_contracts: List[RejectedContract] = Field(default_factory=list)
+    expected_duration: Dict[str, Any] | None = None
     strategy_profile: Dict[str, Any] | None = None
     badges: List[Dict[str, str]] = Field(default_factory=list)
     layers_fetched: bool | None = None
@@ -8697,6 +8699,20 @@ async def _generate_fallback_plan(
         return None
     entry_price = float(entry_candidates[0]["level"])
 
+    mtf_entry_payload: Optional[Dict[str, Any]] = None
+    if mtf_bundle:
+        agreement_val = getattr(mtf_bundle, "agreement", None)
+        try:
+            agreement_payload = round(float(agreement_val), 2)
+        except (TypeError, ValueError):
+            agreement_payload = None
+        if isinstance(agreement_payload, float) and not math.isfinite(agreement_payload):
+            agreement_payload = None
+        mtf_entry_payload = {
+            "bias": mtf_bundle.bias_htf,
+            "agreement": agreement_payload,
+        }
+
     strategy_timestamp = plan_ts_utc.to_pydatetime() if isinstance(plan_ts_utc, pd.Timestamp) else plan_ts_utc
     strategy_ctx = {
         "symbol": symbol,
@@ -8862,6 +8878,7 @@ async def _generate_fallback_plan(
         levels=levels_map,
         timestamp=plan_ts_utc.to_pydatetime() if isinstance(plan_ts_utc, pd.Timestamp) else plan_ts_utc,
         mtf_bias=mtf_bundle.bias_htf if mtf_bundle else None,
+        mtf_agreement=mtf_bundle.agreement if mtf_bundle else None,
         session_phase=(snapshot.get("session") or {}).get("phase"),
         preferred_entries=[EntryAnchor(entry_seed, "structural")] if entry_seed else None,
         tick=tick_size,
@@ -9833,6 +9850,39 @@ async def _generate_fallback_plan(
     plan_block["runner_policy"] = runner
     if geometry.snap_trace:
         plan_block["snap_trace"] = geometry.snap_trace
+    expected_duration_payload: Optional[Dict[str, Any]] = None
+    if not wait_plan and targets:
+        try:
+            atr_for_duration = float(atr_value)
+        except (TypeError, ValueError):
+            atr_for_duration = None
+        if not isinstance(atr_for_duration, (int, float)) or not math.isfinite(atr_for_duration):
+            atr_for_duration = None
+        try:
+            em_for_duration = float(expected_move_abs) if expected_move_abs is not None else None
+        except (TypeError, ValueError):
+            em_for_duration = None
+        if isinstance(em_for_duration, (int, float)) and not math.isfinite(em_for_duration):
+            em_for_duration = None
+        try:
+            first_target = float(targets[0])
+        except (TypeError, ValueError, IndexError):
+            first_target = None
+        if first_target is not None and math.isfinite(entry_price):
+            expected_duration_payload = estimate_expected_duration(
+                style=style_token,
+                interval_hint=chart_timeframe_hint or timeframe,
+                entry=entry_price,
+                tp1=first_target,
+                atr=atr_for_duration,
+                em=em_for_duration,
+                bars_5m=mtf_frames.get("5m"),
+                bars_15m=mtf_frames.get("15m"),
+                bars_60m=mtf_frames.get("60m"),
+            )
+            plan_block["expected_duration"] = expected_duration_payload
+    if mtf_entry_payload:
+        plan_block["mtf_bias"] = mtf_entry_payload
     plan_warnings: List[str] = list(event_warnings)
     if structured_geometry.warnings:
         plan_warnings.extend(structured_geometry.warnings)
@@ -9872,6 +9922,10 @@ async def _generate_fallback_plan(
     if tp_reasons:
         target_profile_dict["tp_reasons"] = tp_reasons
     target_profile_dict.setdefault("runner_policy", runner)
+    if expected_duration_payload:
+        target_profile_dict["expected_duration"] = expected_duration_payload
+    if mtf_entry_payload:
+        target_profile_dict["mtf_bias"] = mtf_entry_payload
     if wait_plan:
         target_profile_dict["probabilities"] = {}
         target_profile_dict["entry"] = None
@@ -9896,6 +9950,10 @@ async def _generate_fallback_plan(
     structured_plan["actionable_soon"] = plan_actionable_soon
     structured_plan["waiting_for"] = entry_waiting_for
     structured_plan["actionability_gate"] = actionability_gate
+    if expected_duration_payload:
+        structured_plan["expected_duration"] = expected_duration_payload
+    if mtf_entry_payload:
+        structured_plan["mtf_bias"] = mtf_entry_payload
     if wait_plan:
         entry_level_for_wait = None
         structured_plan["entry"] = {
@@ -10156,6 +10214,7 @@ async def _generate_fallback_plan(
         em_used=em_used_output,
         rejected_contracts=rejected_contracts,
         calibration_meta=calibration_meta_payload,
+        expected_duration=expected_duration_payload,
         strategy_profile=strategy_profile_payload,
         badges=plan_badges,
         entry_anchor=plan_block.get("entry_anchor"),
@@ -10248,6 +10307,10 @@ async def _generate_fallback_plan(
         meta_payload["tp_reasons"] = plan_response.tp_reasons
     if strategy_profile_payload:
         meta_payload["strategy_profile"] = strategy_profile_payload
+    if expected_duration_payload:
+        meta_payload["expected_duration"] = expected_duration_payload
+    if mtf_entry_payload:
+        meta_payload["mtf_bias"] = mtf_entry_payload
     if htf_payload_final:
         meta_payload["htf"] = htf_payload_final
     if mtf_confluence_payload:
@@ -10513,8 +10576,22 @@ async def gpt_plan(
     htf_payload = plan.get("htf") if isinstance(plan.get("htf"), Mapping) else None
     mtf_notes_plan: List[str] = []
     mtf_payload_plan = strategy_profile_payload.get("mtf")
+    mtf_entry_payload_plan: Optional[Dict[str, Any]] = None
     if isinstance(mtf_payload_plan, Mapping):
         mtf_notes_plan = list(mtf_payload_plan.get("notes") or [])
+        bias_token = mtf_payload_plan.get("bias")
+        agreement_token = mtf_payload_plan.get("agreement")
+        try:
+            agreement_float = round(float(agreement_token), 2) if agreement_token is not None else None
+        except (TypeError, ValueError):
+            agreement_float = None
+        if isinstance(agreement_float, float) and not math.isfinite(agreement_float):
+            agreement_float = None
+        mtf_entry_payload_plan = {
+            "bias": bias_token or plan.get("direction"),
+            "agreement": agreement_float,
+        }
+        plan["mtf_bias"] = mtf_entry_payload_plan
     if mtf_payload_plan:
         plan_debug_block = plan.setdefault("debug", {})
         strategy_debug_block = plan_debug_block.setdefault("strategy", {})
@@ -11202,6 +11279,57 @@ async def gpt_plan(
                 session=session_state_payload,
                 confluence=snapped_names or None,
             )
+            if mtf_entry_payload_plan:
+                structured_plan_payload["mtf_bias"] = mtf_entry_payload_plan
+                if target_profile_dict is not None:
+                    target_profile_dict["mtf_bias"] = mtf_entry_payload_plan
+            if not plan.get("expected_duration") and targets_for_engine:
+                try:
+                    first_target_for_duration = float(targets_for_engine[0])
+                except (TypeError, ValueError, IndexError):
+                    first_target_for_duration = None
+                atr_for_duration = None
+                for candidate_key in ("atr", "atr_tf", "atr_value"):
+                    value_candidate = plan.get(candidate_key)
+                    try:
+                        value_float = float(value_candidate) if value_candidate is not None else None
+                    except (TypeError, ValueError):
+                        value_float = None
+                    if value_float is None or not math.isfinite(value_float) or value_float <= 0:
+                        continue
+                    atr_for_duration = value_float
+                    break
+                expected_move_candidate = plan.get("expected_move") or expected_move_output
+                try:
+                    expected_move_candidate = float(expected_move_candidate) if expected_move_candidate is not None else None
+                except (TypeError, ValueError):
+                    expected_move_candidate = None
+                if (
+                    first_target_for_duration is not None
+                    and entry_for_engine is not None
+                    and math.isfinite(float(entry_for_engine))
+                ):
+                    try:
+                        frames_lookup = mtf_frames  # type: ignore[name-defined]
+                    except NameError:  # pragma: no cover - defensive
+                        frames_lookup = {}
+                    if not isinstance(frames_lookup, dict):
+                        frames_lookup = {}
+                    duration_payload = estimate_expected_duration(
+                        style=style_token,
+                        interval_hint=chart_timeframe_hint,
+                        entry=float(entry_for_engine),
+                        tp1=first_target_for_duration,
+                        atr=atr_for_duration,
+                        em=expected_move_candidate,
+                        bars_5m=frames_lookup.get("5m"),
+                        bars_15m=frames_lookup.get("15m"),
+                        bars_60m=frames_lookup.get("60m"),
+                    )
+                    plan["expected_duration"] = duration_payload
+                    structured_plan_payload["expected_duration"] = duration_payload
+                    if target_profile_dict is not None:
+                        target_profile_dict["expected_duration"] = duration_payload
         except Exception as exc:
             logger.debug("structured plan build failed for %s: %s", symbol, exc)
             target_profile_dict = None
@@ -11771,6 +11899,14 @@ async def gpt_plan(
     accuracy_levels_payload = _nativeify(plan_block.get("accuracy_levels")) if plan_block.get("accuracy_levels") else []
     source_paths_payload = _nativeify(plan_block.get("source_paths")) if plan_block.get("source_paths") else {}
     plan_target_meta = _nativeify(plan_block.get("target_meta")) if plan_block.get("target_meta") else None
+    expected_duration_output = plan_block.get("expected_duration")
+    if not expected_duration_output and isinstance(structured_plan_payload, Mapping):
+        expected_duration_output = structured_plan_payload.get("expected_duration")
+    expected_duration_output = _nativeify(expected_duration_output) if expected_duration_output else None
+    mtf_bias_output = plan_block.get("mtf_bias")
+    if not mtf_bias_output and isinstance(structured_plan_payload, Mapping):
+        mtf_bias_output = structured_plan_payload.get("mtf_bias")
+    mtf_bias_output = _nativeify(mtf_bias_output) if mtf_bias_output else None
     plan_response = PlanResponse(
         plan_id=plan_id,
         version=version,
@@ -11833,6 +11969,7 @@ async def gpt_plan(
         expected_move=expected_move_output,
         remaining_atr=remaining_atr_output,
         em_used=em_used_output,
+        expected_duration=expected_duration_output,
         source_paths=source_paths_payload or {},
         accuracy_levels=accuracy_levels_payload,
         updated_from_version=updated_from_version,
@@ -11883,12 +12020,16 @@ async def gpt_plan(
         meta_payload["entry_candidates"] = plan_response.entry_candidates
     if plan_response.tp_reasons:
         meta_payload["tp_reasons"] = plan_response.tp_reasons
+    if plan_response.expected_duration:
+        meta_payload["expected_duration"] = plan_response.expected_duration
     if plan_response.strategy_profile:
         meta_payload["strategy_profile"] = plan_response.strategy_profile
     if plan_response.htf:
         meta_payload["htf"] = plan_response.htf
     if plan_response.confluence:
         meta_payload["mtf_confluence"] = plan_response.confluence
+    if mtf_bias_output:
+        meta_payload["mtf_bias"] = mtf_bias_output
     plan_response.meta = meta_payload or None
     return _finalize_plan_response(plan_response)
 
