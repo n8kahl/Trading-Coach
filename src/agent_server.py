@@ -8747,12 +8747,14 @@ async def _generate_fallback_plan(
     options_contracts: List[Dict[str, Any]] | None = None
     options_note: str | None = None
     em_cap_used = False
+    simulated_banner_text: str | None = None
     session_payload = _session_payload_from_request(request)
     market_meta, data_meta, as_of_dt, is_open = _market_snapshot_payload(
         session_payload,
         simulate_open=simulate_open,
     )
-    simulated_banner_text = _format_simulated_banner(as_of_dt) if simulate_open else None
+    if simulate_open:
+        simulated_banner_text = _format_simulated_banner(as_of_dt)
     is_plan_live = bool(is_open)
     if simulate_open:
         if isinstance(market_meta, dict):
