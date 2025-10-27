@@ -5078,6 +5078,8 @@ def _apply_option_guardrails(
             return filtered_basic, rejected_basic, []
         return filtered_basic, rejected_basic
 
+    delta_available = frame["delta"].notna().any() if "delta" in frame.columns else False
+
     rules = style_guardrail_rules(style)
     rules.pop("style_key", "intraday")
     base_spread_cap = float(rules.get("max_spread_pct", max_spread_pct))
@@ -5109,15 +5111,24 @@ def _apply_option_guardrails(
         symbol = str(row.get("symbol") or row.get("label") or "")
         delta_val = row.get("delta")
         if pd.isna(delta_val):
-            return "DELTA_MISSING", symbol
-        abs_delta = abs(float(delta_val))
-        if abs_delta < rules["delta_low"]:
-            return "DELTA_TOO_LOW", symbol
-        if abs_delta > rules["delta_high"]:
-            return "DELTA_TOO_HIGH", symbol
+            if delta_available:
+                return "DELTA_MISSING", symbol
+            abs_delta = None
+        else:
+            try:
+                abs_delta = abs(float(delta_val))
+            except (TypeError, ValueError):
+                if delta_available:
+                    return "DELTA_MISSING", symbol
+                abs_delta = None
+        if abs_delta is not None:
+            if abs_delta < rules["delta_low"]:
+                return "DELTA_TOO_LOW", symbol
+            if abs_delta > rules["delta_high"]:
+                return "DELTA_TOO_HIGH", symbol
         dte_val = row.get("dte")
         if pd.isna(dte_val):
-            return "DTE_MISSING", symbol
+            return "DELTA_MISSING", symbol
         dte_float = float(dte_val)
         if dte_float < rules["dte_low"]:
             return "DTE_TOO_SHORT", symbol
@@ -9899,7 +9910,9 @@ async def _generate_fallback_plan(
                 options_contracts = fallback_contracts
                 fallback_note = polygon_result.get("options_note")
                 if fallback_note:
-                    options_note = f"{options_note} · {fallback_note}" if options_note else fallback_note
+                    options_note = fallback_note
+                else:
+                    options_note = "Polygon fallback contracts selected"
             fallback_rejections = polygon_result.get("rejected_contracts") or []
             if fallback_rejections:
                 existing_keys = {(entry.get("symbol"), entry.get("reason")) for entry in rejected_contracts}
