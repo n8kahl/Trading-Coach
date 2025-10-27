@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 from typing import Dict, List, Sequence
 
 import pandas as pd
@@ -201,12 +201,22 @@ def select_top_n(filtered_chain: pd.DataFrame, target_deltas: Sequence[float], c
         remaining = ordered.loc[~ordered.index.isin(used_indexes)].copy()
         if remaining.empty:
             break
-        remaining["delta_fit"] = (remaining["abs_delta"] - float(target)).abs()
-        selected_idx = remaining["delta_fit"].idxmin()
+        try:
+            target_value = float(target)
+        except (TypeError, ValueError):
+            target_value = math.nan
+        remaining["delta_fit"] = (remaining["abs_delta"] - target_value).abs()
+        remaining["delta_fit"] = pd.to_numeric(remaining["delta_fit"], errors="coerce")
+        valid_mask = remaining["delta_fit"].notna() & remaining["delta_fit"].apply(math.isfinite)
+        valid_remaining = remaining[valid_mask]
+        if valid_remaining.empty:
+            selected_idx = remaining.index[0]
+        else:
+            selected_idx = valid_remaining["delta_fit"].idxmin()
         selected = ordered.loc[selected_idx]
         picks.append(selected)
         used_indexes.add(selected_idx)
-        slot_targets.append(float(target))
+        slot_targets.append(target_value if math.isfinite(target_value) else None)
 
     if len(picks) < count:
         for row_idx, row in ordered.iterrows():
