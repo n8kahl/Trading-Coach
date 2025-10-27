@@ -99,6 +99,10 @@ async def generate_plan(
     plan_obj["options_contracts"] = contracts.get("options_contracts", [])
     plan_obj["rejected_contracts"] = contracts.get("rejected_contracts", [])
     plan_obj["options_note"] = contracts.get("options_note")
+    if contracts.get("options_quote_session"):
+        plan_obj["options_quote_session"] = contracts["options_quote_session"]
+    if contracts.get("options_as_of"):
+        plan_obj["options_as_of"] = contracts["options_as_of"]
 
     charts_container = plan_obj.get("charts")
     if not isinstance(charts_container, dict):

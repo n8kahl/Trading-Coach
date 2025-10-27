@@ -86,6 +86,13 @@ from .polygon_options import (
     fetch_polygon_option_chain_asof,
     summarize_polygon_chain,
 )
+from .contract_selector import (
+    grade_option_pick,
+    select_top_n,
+    target_delta_by_style,
+    style_guardrail_rules,
+    reason_tokens,
+)
 from .app.engine import (
     build_target_profile,
     build_structured_plan,
@@ -4950,10 +4957,30 @@ def _fallback_guardrail_contracts(
         if flags:
             entry["guardrail_flags"] = flags
             entry.setdefault("status", "guardrail_violation")
+        spread_val = _safe_number(entry.get("spread_pct"))
+        if spread_val is not None and spread_val <= 1.0:
+            spread_val = spread_val * 100.0
+            entry["spread_pct"] = round(spread_val, 2)
+        tradeability = entry.get("tradeability_score")
+        if tradeability is None:
+            tradeability = entry.get("tradeability") or entry.get("liquidity_score")
+        tradeability_num = _safe_number(tradeability)
+        oi_val = _safe_number(entry.get("open_interest"))
+        delta_fit = _safe_number(entry.get("delta_fit"))
+        rating = grade_option_pick(tradeability_num, spread_val, oi_val, delta_fit)
+        reasons = reason_tokens(tradeability_num, spread_val, oi_val, delta_fit)
+        entry.setdefault("tradeability_score", tradeability_num)
+        if tradeability_num is not None:
+            entry.setdefault("tradeability", tradeability_num)
+        entry.setdefault("rating", rating)
+        entry.setdefault("reasons", reasons)
         fallback.append(entry)
         if len(fallback) >= limit:
             break
     return fallback
+
+
+_GUARDRAIL_OI_STEPS = (1000.0, 700.0, 500.0, 300.0)
 
 
 def _apply_option_guardrails(
@@ -4961,46 +4988,250 @@ def _apply_option_guardrails(
     *,
     max_spread_pct: float,
     min_open_interest: int,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    filtered: List[Dict[str, Any]] = []
-    rejected: List[Dict[str, Any]] = []
-    for contract in contracts:
-        if not isinstance(contract, dict):
-            continue
-        symbol = str(contract.get("symbol") or contract.get("label") or "")
-        spread = _safe_number(contract.get("spread_pct"))
-        bid = _safe_number(contract.get("bid"))
-        ask = _safe_number(contract.get("ask"))
-        if spread is None and bid is not None and ask is not None and (bid + ask) > 0:
-            mid = max((bid + ask) / 2.0, 1e-6)
-            spread = abs(ask - bid) / mid * 100.0
-            contract["spread_pct"] = round(spread, 2)
-        oi_val = contract.get("open_interest")
-        oi_numeric: float | None
-        try:
-            oi_numeric = float(oi_val) if oi_val is not None else None
-        except (TypeError, ValueError):
-            oi_numeric = None
-        reason: str | None = None
-        message: str | None = None
-        if spread is not None and float(spread) > max_spread_pct:
-            reason = "SPREAD_TOO_WIDE"
-            message = f"spread {float(spread):.2f}% exceeds limit {max_spread_pct:.2f}%"
-        elif oi_numeric is None:
-            reason = "OPEN_INTEREST_MISSING"
-            message = "open interest unavailable"
-        elif oi_numeric < min_open_interest:
-            reason = "OPEN_INTEREST_TOO_LOW"
-            message = f"open interest {int(oi_numeric)} < required {min_open_interest}"
-        if reason:
-            rejection_entry = {"symbol": symbol or "UNKNOWN", "reason": reason}
-            if message:
-                rejection_entry["message"] = message
-            rejected.append(rejection_entry)
-            continue
-        filtered.append(contract)
+    style: str | None = None,
+    strategy_id: str | None = None,
+    desired_count: int | None = None,
+    return_flags: bool = False,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]] | List[str], List[str] | None]:
+    if not contracts:
+        return [], [], []
+    records: List[Dict[str, Any]] = [dict(contract) for contract in contracts if isinstance(contract, Mapping)]
+    if not records:
+        return [], [], []
 
-    return filtered[:3], rejected
+    def _basic_guardrail_filter(limit: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        filtered_simple: List[Dict[str, Any]] = []
+        rejected_simple: List[Dict[str, Any]] = []
+        for contract in records:
+            symbol = str(contract.get("symbol") or contract.get("label") or "")
+            spread = _safe_number(contract.get("spread_pct"))
+            bid = _safe_number(contract.get("bid"))
+            ask = _safe_number(contract.get("ask"))
+            if spread is None and bid is not None and ask is not None and (bid + ask) > 0:
+                mid = max((bid + ask) / 2.0, 1e-6)
+                spread = abs(ask - bid) / mid * 100.0
+                contract["spread_pct"] = round(spread, 2)
+            oi_val = contract.get("open_interest")
+            try:
+                oi_numeric = float(oi_val) if oi_val is not None else None
+            except (TypeError, ValueError):
+                oi_numeric = None
+            reason: str | None = None
+            message: str | None = None
+            if spread is not None and float(spread) > max_spread_pct:
+                reason = "SPREAD_TOO_WIDE"
+                message = f"spread {float(spread):.2f}% exceeds limit {max_spread_pct:.2f}%"
+            elif oi_numeric is None:
+                reason = "OPEN_INTEREST_MISSING"
+                message = "open interest unavailable"
+            elif oi_numeric < min_open_interest:
+                reason = "OPEN_INTEREST_TOO_LOW"
+                message = f"open interest {int(oi_numeric)} < required {min_open_interest}"
+            if reason:
+                entry = {"symbol": symbol or "UNKNOWN", "reason": reason}
+                if message:
+                    entry["message"] = message
+                rejected_simple.append(entry)
+                continue
+            filtered_simple.append(contract)
+            if limit and len(filtered_simple) >= limit:
+                break
+        return filtered_simple, rejected_simple
+
+    frame = pd.DataFrame(records)
+    frame["__idx"] = frame.index
+
+    numeric_cols = (
+        "delta",
+        "dte",
+        "spread_pct",
+        "open_interest",
+        "volume",
+        "bid",
+        "ask",
+        "mid",
+        "tradeability",
+        "liquidity_score",
+    )
+    for col in numeric_cols:
+        if col in frame.columns:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+
+    if "mid" not in frame or frame["mid"].isna().all():
+        if "bid" in frame.columns and "ask" in frame.columns:
+            frame["mid"] = (frame["bid"] + frame["ask"]) / 2.0
+
+    if "spread_pct" in frame.columns:
+        spreads = frame["spread_pct"].copy()
+        needs_percent = spreads <= 1.0
+        frame.loc[needs_percent.fillna(False), "spread_pct"] = spreads[needs_percent] * 100.0
+    else:
+        frame["spread_pct"] = pd.Series(dtype=float)
+
+    required_columns = {"delta", "dte"}
+    if not required_columns.issubset(frame.columns):
+        desired_n_basic = desired_count or 3
+        desired_n_basic = max(1, min(3, desired_n_basic))
+        filtered_basic, rejected_basic = _basic_guardrail_filter(desired_n_basic)
+        if return_flags:
+            return filtered_basic, rejected_basic, []
+        return filtered_basic, rejected_basic
+
+    rules = style_guardrail_rules(style)
+    rules.pop("style_key", "intraday")
+    base_spread_cap = float(rules.get("max_spread_pct", max_spread_pct))
+    rules["max_spread_pct"] = min(base_spread_cap, float(max_spread_pct))
+    rules["min_volume"] = float(rules.get("min_volume", 0.0))
+
+    oi_base = max(float(min_open_interest), _GUARDRAIL_OI_STEPS[0])
+    oi_steps: List[float] = [oi_base]
+    for step in _GUARDRAIL_OI_STEPS[1:]:
+        if step < oi_steps[-1]:
+            oi_steps.append(step)
+    rules["min_open_interest"] = oi_steps[0]
+
+    target_defaults = target_delta_by_style(style, strategy_id)
+    desired_n = desired_count or len(target_defaults) or 3
+    desired_n = max(2, min(3, desired_n))
+
+    relaxation_sequence: List[Tuple[str, Optional[float]]] = [
+        ("delta", None),
+        ("dte", None),
+        ("spread", None),
+    ]
+    relaxation_sequence.extend(("oi", value) for value in oi_steps[1:])
+
+    relax_flags: List[str] = []
+    rejection_records: List[Dict[str, Any]] = []
+
+    def _first_failure(row: pd.Series) -> Tuple[Optional[str], Optional[str]]:
+        symbol = str(row.get("symbol") or row.get("label") or "")
+        delta_val = row.get("delta")
+        if pd.isna(delta_val):
+            return "DELTA_MISSING", symbol
+        abs_delta = abs(float(delta_val))
+        if abs_delta < rules["delta_low"]:
+            return "DELTA_TOO_LOW", symbol
+        if abs_delta > rules["delta_high"]:
+            return "DELTA_TOO_HIGH", symbol
+        dte_val = row.get("dte")
+        if pd.isna(dte_val):
+            return "DTE_MISSING", symbol
+        dte_float = float(dte_val)
+        if dte_float < rules["dte_low"]:
+            return "DTE_TOO_SHORT", symbol
+        if dte_float > rules["dte_high"]:
+            return "DTE_TOO_LONG", symbol
+        spread_val = row.get("spread_pct")
+        if pd.isna(spread_val):
+            return "SPREAD_MISSING", symbol
+        if float(spread_val) > rules["max_spread_pct"]:
+            return "SPREAD_TOO_WIDE", symbol
+        oi_val = row.get("open_interest")
+        if pd.isna(oi_val):
+            return "OPEN_INTEREST_MISSING", symbol
+        if float(oi_val) < rules["min_open_interest"]:
+            return "OPEN_INTEREST_TOO_LOW", symbol
+        volume_val = row.get("volume")
+        if pd.isna(volume_val):
+            return "VOLUME_MISSING", symbol
+        if float(volume_val) < rules["min_volume"]:
+            return "VOLUME_TOO_LOW", symbol
+        return None, symbol
+
+    def _filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+        keep: List[int] = []
+        for idx, row in df.iterrows():
+            reason, symbol = _first_failure(row)
+            if reason:
+                rejection_records.append({"symbol": str(symbol or "").upper(), "reason": reason})
+                continue
+            keep.append(idx)
+        return df.loc[keep].copy() if keep else df.iloc[0:0].copy()
+
+    filtered = _filter_dataframe(frame)
+    selection = select_top_n(filtered, target_defaults, desired_n)
+
+    relax_index = 0
+    while len(selection.rows) < desired_n and relax_index < len(relaxation_sequence):
+        relax_type, relax_value = relaxation_sequence[relax_index]
+        relax_index += 1
+        if relax_type == "delta":
+            rules["delta_low"] = max(0.0, rules["delta_low"] - 0.05)
+            rules["delta_high"] = min(1.0, rules["delta_high"] + 0.05)
+            relax_flags.append("DELTA_WINDOW_RELAXED")
+        elif relax_type == "dte":
+            rules["dte_low"] = max(0.0, rules["dte_low"] - 2.0)
+            rules["dte_high"] = rules["dte_high"] + 2.0
+            relax_flags.append("DTE_RELAXED")
+        elif relax_type == "spread":
+            rules["max_spread_pct"] = min(base_spread_cap + 4.0, rules["max_spread_pct"] + 2.0)
+            relax_flags.append("SPREAD_RELAXED")
+        elif relax_type == "oi" and relax_value is not None:
+            rules["min_open_interest"] = float(relax_value)
+            relax_flags.append(f"OPEN_INTEREST_RELAXED_{int(relax_value)}")
+        filtered = _filter_dataframe(frame)
+        selection = select_top_n(filtered, target_defaults, desired_n)
+
+    fallback_used = False
+    if len(selection.rows) < desired_n:
+        selection = select_top_n(frame, target_defaults, desired_n)
+        fallback_used = True
+        relax_flags.append("GUARDRAIL_FALLBACK")
+
+    dedup_rejections: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for rejection in rejection_records:
+        sym = str(rejection.get("symbol") or "").upper()
+        reason = str(rejection.get("reason") or "").upper()
+        if not reason:
+            continue
+        key = (sym or "UNKNOWN", reason)
+        if key not in dedup_rejections:
+            dedup_rejections[key] = {"symbol": sym or "UNKNOWN", "reason": reason}
+
+    guardrail_rejections = list(dedup_rejections.values())
+
+    selected_contracts: List[Dict[str, Any]] = []
+    for idx, row in enumerate(selection.rows):
+        source_idx = int(row.get("__idx", row.name))
+        base = dict(records[source_idx]) if 0 <= source_idx < len(records) else dict(row.dropna().to_dict())
+        tradeability = row.get("tradeability_score")
+        spread_pct = row.get("spread_pct")
+        oi_val = row.get("open_interest")
+        delta_val = row.get("delta")
+        target_delta = selection.targets[idx] if idx < len(selection.targets) else None
+        delta_fit = None
+        if delta_val is not None and target_delta is not None and not pd.isna(delta_val):
+            delta_fit = abs(abs(float(delta_val)) - float(target_delta))
+        rating = grade_option_pick(tradeability, spread_pct, oi_val, delta_fit)
+        reasons_list = reason_tokens(
+            float(tradeability) if tradeability is not None and not pd.isna(tradeability) else None,
+            float(spread_pct) if spread_pct is not None and not pd.isna(spread_pct) else None,
+            float(oi_val) if oi_val is not None and not pd.isna(oi_val) else None,
+            float(delta_fit) if delta_fit is not None else None,
+        )
+        base["spread_pct"] = _safe_number(spread_pct)
+        base["open_interest"] = _safe_number(oi_val)
+        base["tradeability_score"] = _safe_number(tradeability)
+        if tradeability is not None and not pd.isna(tradeability):
+            base["tradeability"] = _safe_number(tradeability)
+        if delta_fit is not None:
+            base["delta_fit"] = round(float(delta_fit), 4)
+        base["rating"] = rating
+        base["reasons"] = reasons_list
+        if relax_flags:
+            base.setdefault("guardrail_flags", sorted(set(relax_flags)))
+        selected_contracts.append(base)
+
+    if fallback_used and guardrail_rejections:
+        for entry in selected_contracts:
+            flags = entry.setdefault("guardrail_flags", [])
+            if "GUARDRAIL_FALLBACK" not in flags:
+                flags.append("GUARDRAIL_FALLBACK")
+
+    if return_flags:
+        return selected_contracts[:desired_n], guardrail_rejections, relax_flags
+    return selected_contracts[:desired_n], guardrail_rejections
 
 
 def _build_market_snapshot(history: pd.DataFrame, key_levels: Dict[str, float]) -> Dict[str, Any]:
@@ -7301,6 +7532,10 @@ async def gpt_scan_endpoint(
             except (TypeError, IndexError):
                 pass
             side_hint = _infer_contract_side(None, direction)
+            if direction == "short":
+                side_hint = "put"
+            else:
+                side_hint = "call"
             style_token = (request_payload.style or "").strip().lower() or "intraday"
             plan_anchor = {
                 "underlying_entry": entry,
@@ -9369,6 +9604,10 @@ async def _generate_fallback_plan(
     rejected_contracts: List[Dict[str, str]] = []
     style_public = (public_style(style_token) or style_token or "intraday").lower()
     side_hint = _infer_contract_side(None, direction)
+    if direction == "short":
+        side_hint = "put"
+    else:
+        side_hint = "call"
     if include_options_contracts and side_hint:
         plan_anchor = {
             "underlying_entry": entry_price,
@@ -9487,6 +9726,8 @@ async def _generate_fallback_plan(
         chart_params["levels"] = levels_token
     chart_params["supportingLevels"] = "1"
     session_label = infer_session_label(as_of_dt)
+    options_quote_session = "regular_open" if session_label == "live" else "regular_close"
+    options_as_of_timestamp = as_of_dt.isoformat()
     confidence_for_ui = normalize_confidence(confidence)
     style_for_ui = normalize_style_token(style_token)
     chart_params["ui_state"] = build_ui_state(session=session_label, confidence=confidence_for_ui, style=style_for_ui)
@@ -9566,10 +9807,16 @@ async def _generate_fallback_plan(
                     if rejection.get("message"):
                         rejection_entry["message"] = str(rejection["message"])
                     selector_rejections.append(rejection_entry)
-        filtered_contracts, guardrail_rejections = _apply_option_guardrails(
+        desired_targets = target_delta_by_style(style_token, strategy_id_value)
+        desired_contract_count = max(2, min(3, len(desired_targets) or 3))
+        filtered_contracts, guardrail_rejections, relax_flags = _apply_option_guardrails(
             extracted_contracts,
             max_spread_pct=float(getattr(settings, "ft_max_spread_pct", 8.0)),
             min_open_interest=int(getattr(settings, "ft_min_oi", 300)),
+            style=style_token,
+            strategy_id=strategy_id_value,
+            desired_count=desired_contract_count,
+            return_flags=True,
         )
         accepted_symbols = {str(item.get("symbol") or "").upper() for item in filtered_contracts if isinstance(item, Mapping)}
         filtered_rejections: List[Dict[str, Any]] = []
@@ -9596,6 +9843,9 @@ async def _generate_fallback_plan(
             record_selector_rejections(rejection_list, source="live")
         if filtered_contracts:
             options_contracts = filtered_contracts
+            if relax_flags and not options_note:
+                labels = ", ".join(sorted(set(relax_flags)))
+                options_note = f"Contracts relaxed ({labels}); review guardrail_flags."
         else:
             reason_list = rejection_list if rejection_list else filtered_rejections
             fallback_contracts = _fallback_guardrail_contracts(extracted_contracts, reason_list, symbol=symbol)
@@ -9628,6 +9878,11 @@ async def _generate_fallback_plan(
                 rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
         else:
             options_payload = None
+    if options_contracts:
+        for contract in options_contracts:
+            if isinstance(contract, dict):
+                contract.setdefault("quote_session", options_quote_session)
+                contract.setdefault("as_of_timestamp", options_as_of_timestamp)
     expected_move_value = None
     if isinstance(expected_move_abs, (int, float)) and math.isfinite(expected_move_abs):
         expected_move_value = round(float(expected_move_abs), 4)
@@ -9727,6 +9982,8 @@ async def _generate_fallback_plan(
             "actionable_now": plan_actionable_now,
             "actionable_soon": plan_actionable_soon,
             "score": round(composite_score, 3) if composite_score is not None else plan.get("score"),
+            "options_quote_session": options_quote_session,
+            "options_as_of": options_as_of_timestamp,
         }
     )
     plan_block["entry_anchor"] = plan.get("entry_anchor")
@@ -10414,6 +10671,9 @@ async def gpt_plan(
             )
         if simulate_open:
             route = apply_simulate_open(route, now=datetime.now(timezone.utc))
+        route_session_label = infer_session_label(route.as_of)
+        options_quote_session = "regular_open" if route_session_label == "live" else "regular_close"
+        options_as_of_timestamp = route.as_of.isoformat()
         try:
             plan_payload = await compute_plan_with_fallback(symbol, route)
         except Exception:  # pragma: no cover - defensive
@@ -11365,6 +11625,11 @@ async def gpt_plan(
 
     style_public = public_style(style_token) or "intraday"
     side_hint = _infer_contract_side(plan.get("side"), plan.get("direction") or direction_hint)
+    direction_token = (plan.get("direction") or direction_hint or "").lower()
+    if direction_token == "short":
+        side_hint = "put"
+    elif direction_token == "long":
+        side_hint = "call"
     options_payload = first.get("options")
     if side_hint:
         plan_anchor: Dict[str, Any] = {}
@@ -11423,10 +11688,16 @@ async def gpt_plan(
                     if rejection.get("message"):
                         entry["message"] = str(rejection["message"])
                     selector_rejections.append(entry)
-        filtered_contracts, guardrail_rejections = _apply_option_guardrails(
+        desired_targets = target_delta_by_style(style_token, strategy_id_value)
+        desired_contract_count = max(2, min(3, len(desired_targets) or 3))
+        filtered_contracts, guardrail_rejections, relax_flags = _apply_option_guardrails(
             extracted_contracts,
             max_spread_pct=float(getattr(settings, "ft_max_spread_pct", 8.0)),
             min_open_interest=int(getattr(settings, "ft_min_oi", 300)),
+            style=style_token,
+            strategy_id=strategy_id_value,
+            desired_count=desired_contract_count,
+            return_flags=True,
         )
         combined_rejections: List[Dict[str, Any]] = []
         for rejection in [*selector_rejections, *guardrail_rejections]:
@@ -11454,6 +11725,9 @@ async def gpt_plan(
                 record_selector_rejections(rejection_list, source="live")
         if filtered_contracts:
             options_contracts = filtered_contracts
+            if relax_flags and not options_note:
+                labels = ", ".join(sorted(set(relax_flags)))
+                options_note = f"Contracts relaxed ({labels}); review guardrail_flags."
         else:
             fallback_contracts = _fallback_guardrail_contracts(
                 extracted_contracts,

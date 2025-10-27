@@ -45,7 +45,11 @@ async def test_options_selection_returns_contract(monkeypatch: pytest.MonkeyPatc
     assert result["options_contracts"]
     assert result["options_contracts"][0]["option_type"] == "call"
     note = result.get("options_note")
-    assert note is None or "contracts excluded" in note or note == "Filters applied"
+    if note is not None:
+        assert "Contracts" in note
+    for contract in result["options_contracts"]:
+        assert contract.get("rating") in {"green", "yellow", "red"}
+        assert isinstance(contract.get("reasons"), list)
 
 
 @pytest.mark.asyncio()
@@ -63,6 +67,13 @@ async def test_options_selection_returns_note_when_filtered(monkeypatch: pytest.
 
     plan = {"direction": "short", "targets": [93.0], "bias": "short"}
     result = await select_contracts("AAPL", datetime(2024, 6, 10, tzinfo=timezone.utc), plan)
-    assert result["options_contracts"] == []
-    assert result["options_note"]
-    assert result["rejected_contracts"]
+    picks = result.get("options_contracts") or []
+    assert picks, "Expect fallback contracts even when guardrails trigger"
+    for contract in picks:
+        flags = contract.get("guardrail_flags") or []
+        assert flags, "fallback contracts should include guardrail flags"
+        assert contract.get("rating") in {"green", "yellow", "red"}
+        assert isinstance(contract.get("reasons"), list)
+    note = result.get("options_note")
+    assert note and "Contracts" in note
+    assert result.get("rejected_contracts")
