@@ -4981,6 +4981,76 @@ def _fallback_guardrail_contracts(
     return fallback
 
 
+def _build_guardrail_placeholders(
+    *,
+    symbol: str,
+    direction: str,
+    desired_count: int,
+    entry_price: float | None,
+    targets: Sequence[float] | None,
+    quote_session: str,
+    as_of_timestamp: str,
+    rejection_flags: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return guardrail placeholder option contracts when no live candidates are available."""
+
+    desired = max(2, min(3, desired_count or 2))
+    reason_codes = sorted({
+        str(entry.get("reason") or "").upper()
+        for entry in rejection_flags
+        if entry.get("reason")
+    })
+    if not reason_codes:
+        reason_codes = ["DATA_UNAVAILABLE"]
+    side = "call" if direction == "long" else "put"
+    try:
+        base_strike = float(entry_price) if entry_price is not None else None
+    except (TypeError, ValueError):
+        base_strike = None
+    if base_strike is None and targets:
+        for candidate in targets:
+            try:
+                base_strike = float(candidate)
+                break
+            except (TypeError, ValueError):
+                continue
+    if base_strike is None:
+        base_strike = 100.0
+    base_strike = round(base_strike, 2)
+    if direction == "long":
+        offsets = [0.0, 1.0, 2.0]
+    else:
+        offsets = [0.0, -1.0, -2.0]
+    placeholders: List[Dict[str, Any]] = []
+    for idx in range(desired):
+        offset = offsets[idx] if idx < len(offsets) else offsets[-1] + (idx - len(offsets) + 1) * (1.0 if direction == "long" else -1.0)
+        strike = round(base_strike + offset, 2)
+        contract = {
+            "symbol": f"{symbol.upper()}-{side.upper()}-FALLBACK-{idx + 1}",
+            "label": f"Guardrail placeholder {idx + 1}",
+            "type": side,
+            "option_type": side,
+            "strike": strike,
+            "price": None,
+            "bid": None,
+            "ask": None,
+            "mid": None,
+            "spread_pct": None,
+            "open_interest": 0,
+            "volume": 0,
+            "dte": None,
+            "tradeability_score": 0.0,
+            "guardrail_flags": list(reason_codes),
+            "status": "guardrail_violation",
+            "rating": "red",
+            "reasons": ["fallback_guardrail"] + reason_codes,
+            "quote_session": quote_session,
+            "as_of_timestamp": as_of_timestamp,
+        }
+        placeholders.append(contract)
+    return placeholders
+
+
 _GUARDRAIL_OI_STEPS = (1000.0, 700.0, 500.0, 300.0)
 
 
@@ -9802,6 +9872,7 @@ async def _generate_fallback_plan(
     event_warnings: List[str] = []
     if event_window_blocked:
         event_warnings.append("EVENT_WINDOW_BLOCKED")
+    desired_contract_count = 0
     if include_options_contracts:
         extracted_contracts = _extract_options_contracts(options_payload)
         selector_rejections: List[Dict[str, Any]] = []
@@ -9927,6 +9998,21 @@ async def _generate_fallback_plan(
                 options_quote_session = fallback_quote_session
             if fallback_as_of_token:
                 options_as_of_timestamp = fallback_as_of_token
+    if include_options_contracts and not options_contracts:
+        placeholder_contracts = _build_guardrail_placeholders(
+            symbol=symbol,
+            direction=direction,
+            desired_count=desired_contract_count or 3,
+            entry_price=entry_price,
+            targets=targets,
+            quote_session=options_quote_session,
+            as_of_timestamp=options_as_of_timestamp,
+            rejection_flags=rejected_contracts,
+        )
+        if placeholder_contracts:
+            options_contracts = placeholder_contracts
+            if not options_note:
+                options_note = "Contracts unavailable; using guardrail placeholders."
     if options_contracts:
         for contract in options_contracts:
             if isinstance(contract, dict):
