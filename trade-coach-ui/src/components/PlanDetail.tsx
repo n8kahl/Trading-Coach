@@ -3,7 +3,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { API_BASE_URL, withAuthHeaders } from '@/lib/env';
-import type { Badge, PlanSnapshot, StrategyProfile, StructuredPlan, TargetMetaEntry } from '@/lib/types';
+import type {
+  Badge,
+  ExpectedDuration,
+  PlanSnapshot,
+  StrategyProfile,
+  StructuredPlan,
+  TargetMetaEntry,
+} from '@/lib/types';
 
 type PlanDetailProps = {
   plan: PlanSnapshot['plan'];
@@ -152,6 +159,7 @@ export default function PlanDetail({ plan, structured, planId }: PlanDetailProps
 
   const badges = plan.badges ?? structured?.badges ?? [];
   const strategyProfile = (plan.strategy_profile ?? structured?.strategy_profile) as StrategyProfile | undefined;
+  const expectedDuration = (plan.expected_duration ?? structured?.expected_duration) as ExpectedDuration | undefined;
   const riskBlock = (plan.risk_block ?? (structured as any)?.risk_block) as Record<string, unknown> | undefined;
   const executionRules = (plan.execution_rules ?? (structured as any)?.execution_rules) as Record<string, unknown> | undefined;
   const sourcePaths = (plan.source_paths ?? {}) as Record<string, string>;
@@ -205,8 +213,27 @@ export default function PlanDetail({ plan, structured, planId }: PlanDetailProps
                     <p className="mt-1 leading-relaxed text-neutral-300">{strategyProfile.runner}</p>
                   </div>
                 ) : null}
+                {expectedDuration ? (
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">Expected Duration</p>
+                    <p className="mt-1 leading-relaxed text-neutral-200">{expectedDuration.label}</p>
+                    <p className="text-xs text-neutral-500">
+                      ~{expectedDuration.minutes} min
+                      {expectedDuration.basis?.length ? ` · ${expectedDuration.basis.join(', ')}` : ''}
+                    </p>
+                  </div>
+                ) : null}
               </div>
             </div>
+          </div>
+        ) : expectedDuration ? (
+          <div className="rounded-2xl border border-neutral-800/80 bg-neutral-950/60 p-4 text-sm text-neutral-200">
+            <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">Expected Duration</p>
+            <p className="mt-2 text-base font-semibold text-white">{expectedDuration.label}</p>
+            <p className="mt-1 text-xs text-neutral-500">
+              ~{expectedDuration.minutes} min
+              {expectedDuration.basis?.length ? ` · ${expectedDuration.basis.join(', ')}` : ''}
+            </p>
           </div>
         ) : null}
       </header>

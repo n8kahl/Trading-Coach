@@ -36,6 +36,12 @@ describe('PlanDetail', () => {
       { label: 'Power Hour', kind: 'strategy' },
       { label: 'Intraday', kind: 'style' },
     ],
+    expected_duration: {
+      minutes: 95,
+      label: 'intraday ~1–2h',
+      basis: ['ATR', 'Distance'],
+      inputs: { interval: '5m' },
+    },
     strategy_profile: {
       name: 'Power Hour Continuation',
       trigger: ['Late session expansion'],
@@ -74,6 +80,7 @@ describe('PlanDetail', () => {
     as_of: '2025-01-01T14:30:00Z',
     badges: basePlan.badges,
     strategy_profile: basePlan.strategy_profile,
+    expected_duration: basePlan.expected_duration,
   };
 
   beforeEach(() => {
@@ -94,6 +101,9 @@ describe('PlanDetail', () => {
     const badges = await screen.findAllByText(/Power Hour/i);
     expect(badges[0]).toHaveTextContent('Power Hour Continuation');
     expect(badges[1]).toHaveTextContent('Power Hour');
+    expect(screen.getByText('Expected Duration')).toBeInTheDocument();
+    expect(screen.getByText('intraday ~1–2h')).toBeInTheDocument();
+    expect(screen.getByText(/~95 min/i)).toBeInTheDocument();
   });
 
   it('shows warning banner when overlays respond with 409', async () => {

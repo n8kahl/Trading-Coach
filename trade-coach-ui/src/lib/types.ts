@@ -13,6 +13,13 @@ export type StrategyProfile = {
   badges?: string[];
 };
 
+export type ExpectedDuration = {
+  minutes: number;
+  label: string;
+  basis?: string[];
+  inputs?: Record<string, unknown>;
+};
+
 export type TargetMetaEntry = {
   label: string;
   price?: number;
@@ -41,6 +48,7 @@ export type StructuredPlan = {
   as_of?: string | null;
   badges?: Badge[];
   strategy_profile?: StrategyProfile | null;
+  expected_duration?: ExpectedDuration | null;
 };
 
 export type ChartParams = Record<string, string>;
@@ -65,6 +73,7 @@ export type PlanSnapshot = {
     warnings?: string[];
     badges?: Badge[];
     strategy_profile?: StrategyProfile | null;
+    expected_duration?: ExpectedDuration | null;
     target_meta?: TargetMetaEntry[];
     accuracy_levels?: string[];
     source_paths?: Record<string, string>;

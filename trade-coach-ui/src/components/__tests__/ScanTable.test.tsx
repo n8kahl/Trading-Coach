@@ -16,6 +16,11 @@ describe('ScanTable', () => {
         bias: 'long',
         confidence: 0.7,
         setup: 'power_hour_trend',
+        plan: {
+          expected_duration: {
+            minutes: 78,
+          },
+        },
         charts: {
           params: {
             symbol: 'AAPL',
@@ -45,5 +50,6 @@ describe('ScanTable', () => {
     expect(rankCell).toBeInTheDocument();
     const chartLink = screen.getByText('Open chart');
     expect(chartLink).toHaveAttribute('href', 'https://example.com/chart');
+    expect(screen.getByText('~78m')).toBeInTheDocument();
   });
 });

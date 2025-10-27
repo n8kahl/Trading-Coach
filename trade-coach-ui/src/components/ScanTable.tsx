@@ -122,6 +122,7 @@ export default function ScanTable({ rows }: ScanTableProps) {
             <th className="px-4 py-3">RVOL</th>
             <th className="px-4 py-3">Liquidity</th>
             <th className="px-4 py-3">Momentum</th>
+            <th className="px-4 py-3">ETA</th>
             <th className="px-4 py-3">Chart</th>
           </tr>
         </thead>
@@ -137,6 +138,15 @@ export default function ScanTable({ rows }: ScanTableProps) {
             const trigger = row.setup ?? (row['strategy_id'] as string | undefined) ?? '—';
             const badgeLink = links[key];
             const last = metrics['last'] ?? metrics['price'] ?? row['last'];
+            const planBlock = (row['plan'] ?? {}) as Record<string, unknown>;
+            const structuredPlan = (row['structured_plan'] ?? {}) as Record<string, unknown>;
+            const expectedDuration = (planBlock['expected_duration'] ?? structuredPlan['expected_duration']) as
+              | { minutes?: number }
+              | undefined;
+            const etaDisplay =
+              expectedDuration && typeof expectedDuration.minutes === 'number'
+                ? `~${Math.round(Number(expectedDuration.minutes))}m`
+                : '—';
             return (
               <tr key={key} className="border-b border-neutral-800/60 hover:bg-neutral-900/80">
                 <td className="px-4 py-3 font-semibold text-neutral-300">{row.rank}</td>
@@ -152,6 +162,7 @@ export default function ScanTable({ rows }: ScanTableProps) {
                 <td className="px-4 py-3 text-neutral-200">{typeof rvol === 'number' ? rvol.toFixed(2) : '—'}</td>
                 <td className="px-4 py-3 text-neutral-200">{typeof liquidity === 'number' ? liquidity.toFixed(2) : '—'}</td>
                 <td className="px-4 py-3 text-neutral-200">{typeof momentum === 'number' ? momentum.toFixed(2) : '—'}</td>
+                <td className="px-4 py-3 text-neutral-200">{etaDisplay}</td>
                 <td className="px-4 py-3">
                   {row.charts?.params ? (
                     badgeLink?.loading ? (
