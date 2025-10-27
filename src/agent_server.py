@@ -9998,7 +9998,20 @@ async def _generate_fallback_plan(
                 options_quote_session = fallback_quote_session
             if fallback_as_of_token:
                 options_as_of_timestamp = fallback_as_of_token
-    if include_options_contracts and not options_contracts:
+    delta_missing_provider_fallback = (
+        polygon_result is not None
+        and isinstance(polygon_result.get("options_contracts"), list)
+        and polygon_result["options_contracts"]
+        and all(
+            isinstance(entry, Mapping) and entry.get("reason") == "delta_missing_fallback"
+            for entry in polygon_result["options_contracts"]
+        )
+    )
+    if delta_missing_provider_fallback and not options_contracts:
+        options_contracts = list(polygon_result["options_contracts"])
+        if not options_note:
+            options_note = polygon_result.get("options_note") or "Delta missing at close — using as-of snapshot with relaxed delta"
+    elif include_options_contracts and not options_contracts:
         placeholder_contracts = _build_guardrail_placeholders(
             symbol=symbol,
             direction=direction,

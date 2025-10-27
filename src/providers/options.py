@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -16,6 +17,7 @@ from ..services.chart_utils import infer_session_label
 _ET = ZoneInfo("America/New_York")
 _MARKET_CLOCK = MarketClock()
 _OI_LADDER = [1000, 700, 500, 300]
+_LOGGER = logging.getLogger("options.select")
 
 _RELAXATION_SEQUENCE: Sequence[Tuple[str, Optional[float]]] = (
     ("delta", None),
@@ -176,12 +178,24 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
     desired_count = max(2, min(3, len(desired_targets)))
 
     as_of_resolved, quote_session = _resolve_quote_context(as_of)
+    log = _LOGGER
     market_closed = not _MARKET_CLOCK.is_rth_open(at=as_of_resolved.astimezone(_ET))
     use_asof = quote_session == "regular_close" or market_closed
     if use_asof:
         chain = await fetch_polygon_option_chain_asof(symbol, as_of_resolved)
     else:
         chain = await fetch_polygon_option_chain(symbol)
+    chain_row_count = 0 if chain is None else len(chain)
+    chain_columns = list(chain.columns) if isinstance(chain, pd.DataFrame) else None
+    log.info(
+        "select_contracts start symbol=%s as_of=%s session=%s use_asof=%s rows=%d cols=%s",
+        symbol,
+        as_of_resolved.isoformat(),
+        quote_session,
+        use_asof,
+        chain_row_count,
+        chain_columns,
+    )
     if chain is None or chain.empty:
         return {
             "options_contracts": [],
@@ -192,6 +206,7 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
         }
 
     normalized_chain = _normalize_chain(chain, option_type)
+    log.info("filter option_type=%s: %d -> %d", option_type, chain_row_count, len(normalized_chain))
     if normalized_chain.empty:
         return {
             "options_contracts": [],
@@ -204,7 +219,21 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
     rules = style_guardrail_rules(style)
     rules.pop("style_key", None)
     base_spread_cap = float(rules.get("max_spread_pct", 8.0))
+    initial_dte_range = (float(rules["dte_low"]), float(rules["dte_high"]))
+    initial_delta_range = (float(rules["delta_low"]), float(rules["delta_high"]))
+    initial_min_volume = float(rules.get("min_volume", 0.0))
     rules["min_open_interest"] = float(_OI_LADDER[0])
+    initial_min_open_interest = rules["min_open_interest"]
+
+    diagnostics = _log_guardrail_pipeline(
+        normalized_chain,
+        dte_range=initial_dte_range,
+        delta_range=initial_delta_range,
+        max_spread_pct=base_spread_cap,
+        min_open_interest=initial_min_open_interest,
+        min_volume=initial_min_volume,
+    )
+    missing_delta_candidates = diagnostics.get("missing_delta")
 
     relax_flags: List[str] = []
     rejection_records: List[Tuple[str, str]] = []
@@ -239,8 +268,13 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
             relax_flags.append(f"OPEN_INTEREST_RELAXED_{int(rules['min_open_interest'])}")
 
     fallback_used = False
-    if len(selection.rows) < desired_count and not normalized_chain.empty:
-        df_fallback = normalized_chain.copy()
+    delta_missing_fallback_used = False
+    if (
+        len(selection.rows) < desired_count
+        and missing_delta_candidates is not None
+        and not missing_delta_candidates.empty
+    ):
+        df_fallback = missing_delta_candidates.copy()
         df_fallback["delta"] = df_fallback["delta"].fillna(0.0)
         existing_flags = df_fallback.get("guardrail_flags")
         if isinstance(existing_flags, pd.Series):
@@ -252,6 +286,13 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
         selection = select_top_n(df_fallback, desired_targets, desired_count)
         relax_flags.append("DELTA_MISSING_FALLBACK")
         fallback_used = True
+        delta_missing_fallback_used = True
+        log.warning(
+            "delta-missing fallback used symbol=%s as_of=%s count=%d",
+            symbol,
+            as_of_resolved.isoformat(),
+            len(selection.rows),
+        )
     if len(selection.rows) < desired_count and not normalized_chain.empty:
         selection = select_top_n(normalized_chain, desired_targets, desired_count)
         fallback_used = True
@@ -271,6 +312,9 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
             existing_contract_flags = contract.get("guardrail_flags", [])
             merged_flags = list(dict.fromkeys(list(existing_contract_flags) + list(relax_flags)))
             contract["guardrail_flags"] = merged_flags
+        if delta_missing_fallback_used:
+            contract.setdefault("status", "degraded")
+            contract.setdefault("reason", "delta_missing_fallback")
         options_contracts.append(contract)
 
     note = _build_options_note(relax_flags, rejected_contracts, fallback_used)
@@ -295,6 +339,69 @@ def _run_filters(chain: pd.DataFrame, rules: Dict[str, float]) -> Tuple[pd.DataF
         keep_indices.append(idx)
     filtered = chain.loc[keep_indices].copy() if keep_indices else chain.iloc[0:0].copy()
     return filtered, rejections
+
+
+def _log_guardrail_pipeline(
+    frame: pd.DataFrame,
+    *,
+    dte_range: Tuple[float, float],
+    delta_range: Tuple[float, float],
+    max_spread_pct: float,
+    min_open_interest: float,
+    min_volume: float,
+) -> Dict[str, pd.DataFrame]:
+    if frame is None or frame.empty:
+        _LOGGER.info("filter pipeline skipped: frame empty")
+        return {"eligible": pd.DataFrame(), "missing_delta": pd.DataFrame()}
+
+    def _ensure_numeric(df: pd.DataFrame, column: str) -> None:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+        else:
+            df[column] = pd.Series([float("nan")] * len(df), index=df.index)
+
+    diagnostic = frame.copy()
+
+    _ensure_numeric(diagnostic, "dte")
+    _ensure_numeric(diagnostic, "delta")
+    _ensure_numeric(diagnostic, "spread_pct")
+    _ensure_numeric(diagnostic, "open_interest")
+    _ensure_numeric(diagnostic, "volume")
+
+    dte_low, dte_high = dte_range
+    delta_low, delta_high = delta_range
+
+    dte_ok = diagnostic[
+        (diagnostic["dte"] >= float(dte_low))
+        & (diagnostic["dte"] <= float(dte_high))
+    ].copy()
+    _LOGGER.info("filter DTE: %d -> %d", len(diagnostic), len(dte_ok))
+
+    missing_delta = dte_ok[dte_ok["delta"].isna()].copy()
+    if not missing_delta.empty:
+        missing_delta = missing_delta[
+            (missing_delta["spread_pct"] <= float(max_spread_pct))
+            & (missing_delta["open_interest"] >= float(min_open_interest))
+            & (missing_delta["volume"] >= float(min_volume))
+        ].copy()
+    delta_ok = dte_ok[
+        dte_ok["delta"].abs().between(float(delta_low), float(delta_high), inclusive="both")
+    ].copy()
+    _LOGGER.info(
+        "filter DELTA: %d -> %d (delta nulls=%d)",
+        len(dte_ok),
+        len(delta_ok),
+        int(len(missing_delta)),
+    )
+
+    spread_ok = delta_ok[delta_ok["spread_pct"] <= float(max_spread_pct)].copy()
+    _LOGGER.info("filter SPREAD: %d -> %d", len(delta_ok), len(spread_ok))
+
+    oi_ok = spread_ok[spread_ok["open_interest"] >= float(min_open_interest)].copy()
+    vol_ok = oi_ok[oi_ok["volume"] >= float(min_volume)].copy()
+    _LOGGER.info("filter OI/VOL: %d -> %d", len(oi_ok), len(vol_ok))
+
+    return {"eligible": vol_ok, "missing_delta": missing_delta}
 
 
 def _serialize_contract(row: pd.Series, quote_session: str, as_of_timestamp: str, target_delta: Optional[float]) -> Dict[str, Any]:

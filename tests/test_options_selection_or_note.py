@@ -77,3 +77,31 @@ async def test_options_selection_returns_note_when_filtered(monkeypatch: pytest.
     note = result.get("options_note")
     assert note and "Contracts" in note
     assert result.get("rejected_contracts")
+
+
+@pytest.mark.asyncio()
+async def test_delta_missing_fallback_returns_yellow_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
+    frame = pd.DataFrame(
+        [
+            _chain_row("call", 100.0, None, 5, 5.0, 1500, 800),
+            _chain_row("call", 101.0, None, 6, 4.5, 1200, 600),
+            _chain_row("call", 102.0, None, 7, 4.0, 1100, 500),
+        ]
+    )
+
+    async def fake_chain(*args, **kwargs):
+        return frame
+
+    monkeypatch.setattr(options_provider, "fetch_polygon_option_chain_asof", fake_chain)
+
+    plan = {"direction": "long", "style": "intraday"}
+    result = await select_contracts("AAPL", datetime(2025, 10, 27, 20, 0, tzinfo=timezone.utc), plan)
+    contracts = result.get("options_contracts") or []
+    assert contracts, "Expected delta-missing fallback contracts"
+    assert len(contracts) >= 2, "Fallback should return at least two contracts"
+    for contract in contracts:
+        flags = contract.get("guardrail_flags") or []
+        assert "DELTA_MISSING" in flags or "DELTA_MISSING_FALLBACK" in flags
+        assert contract.get("rating") == "yellow"
+        assert contract.get("status") == "degraded"
+        assert contract.get("reason") == "delta_missing_fallback"
