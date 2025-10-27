@@ -2785,6 +2785,7 @@ class ContractsRequest(BaseModel):
     bias: str | None = None
     selection_mode: str | None = None
     plan_anchor: Dict[str, Any] | None = None
+    plan_meta: Dict[str, Any] | None = None
 
 
 class PlanRequest(BaseModel):
@@ -5923,10 +5924,10 @@ def _encode_overlay_params(overlays: Dict[str, Any]) -> Dict[str, str]:
 
 
 CONTRACT_STYLE_DEFAULTS: Dict[str, Dict[str, float | int]] = {
-    "scalp": {"min_dte": 0, "max_dte": 2, "min_delta": 0.55, "max_delta": 0.65, "max_spread_pct": 8.0, "min_oi": 500},
-    "intraday": {"min_dte": 1, "max_dte": 5, "min_delta": 0.45, "max_delta": 0.55, "max_spread_pct": 10.0, "min_oi": 500},
-    "swing": {"min_dte": 7, "max_dte": 45, "min_delta": 0.30, "max_delta": 0.55, "max_spread_pct": 12.0, "min_oi": 500},
-    "leaps": {"min_dte": 180, "max_dte": 1200, "min_delta": 0.25, "max_delta": 0.45, "max_spread_pct": 12.0, "min_oi": 500},
+    "scalp": {"min_dte": 0, "max_dte": 3, "min_delta": 0.55, "max_delta": 0.65, "max_spread_pct": 8.0, "min_oi": 500},
+    "intraday": {"min_dte": 0, "max_dte": 7, "min_delta": 0.45, "max_delta": 0.55, "max_spread_pct": 10.0, "min_oi": 500},
+    "swing": {"min_dte": 10, "max_dte": 45, "min_delta": 0.30, "max_delta": 0.55, "max_spread_pct": 12.0, "min_oi": 500},
+    "leaps": {"min_dte": 180, "max_dte": 1200, "min_delta": 0.25, "max_delta": 0.45, "max_spread_pct": 15.0, "min_oi": 500},
 }
 
 
@@ -9881,6 +9882,13 @@ async def _generate_fallback_plan(
                 bars_60m=mtf_frames.get("60m"),
             )
             plan_block["expected_duration"] = expected_duration_payload
+            if plan_anchor is not None:
+                plan_anchor["expected_duration"] = expected_duration_payload
+    if plan_anchor is not None:
+        if mtf_entry_payload:
+            plan_anchor["mtf_bias"] = mtf_entry_payload
+        if rr_to_t1 is not None:
+            plan_anchor["rr_to_tp1"] = rr_to_t1
     if mtf_entry_payload:
         plan_block["mtf_bias"] = mtf_entry_payload
     plan_warnings: List[str] = list(event_warnings)
@@ -11367,6 +11375,14 @@ async def gpt_plan(
         if targets_list:
             plan_anchor["targets"] = targets_list[:2]
         plan_anchor["horizon_minutes"] = 60 if style_public in {"swing", "leaps"} else 30
+        if plan.get("expected_duration"):
+            plan_anchor["expected_duration"] = plan.get("expected_duration")
+        elif structured_plan_payload and structured_plan_payload.get("expected_duration"):
+            plan_anchor["expected_duration"] = structured_plan_payload.get("expected_duration")
+        if plan.get("mtf_bias"):
+            plan_anchor["mtf_bias"] = plan.get("mtf_bias")
+        if plan.get("rr_to_t1") is not None:
+            plan_anchor["rr_to_tp1"] = plan.get("rr_to_t1")
         contract_request = ContractsRequest(
             symbol=symbol,
             side=side_hint,
@@ -12608,8 +12624,38 @@ def _infer_contract_side(side: str | None, bias: str | None) -> str | None:
     return None
 
 
-def _prepare_contract_filters(payload: ContractsRequest, style: str) -> Dict[str, float | int]:
+def _prepare_contract_filters(
+    payload: ContractsRequest,
+    style: str,
+    plan_anchor: Mapping[str, Any] | None,
+    *,
+    expected_minutes: Optional[float],
+    market_closed: bool,
+) -> Dict[str, float | int]:
     config: Dict[str, float | int] = _style_default_bounds(style)
+    if style in {"scalp", "intraday"}:
+        if expected_minutes is not None:
+            if expected_minutes <= 180:
+                config["min_dte"] = 0
+                config["max_dte"] = max(int(config.get("max_dte", 3)), 3)
+            else:
+                config["min_dte"] = 0
+                config["max_dte"] = max(int(config.get("max_dte", 7)), 7)
+    elif style == "swing":
+        config["min_dte"] = max(int(config.get("min_dte", 10)), 10)
+        config["max_dte"] = max(int(config.get("max_dte", 42)), 42)
+    elif style == "leaps":
+        config["min_dte"] = max(int(config.get("min_dte", 126)), 126)
+        config["max_dte"] = max(int(config.get("max_dte", 365)), 365)
+    if expected_minutes and expected_minutes > 0 and style in {"swing", "leaps"}:
+        # widen window slightly for longer horizons
+        days = max(expected_minutes / 390.0, 0.0)
+        if style == "swing":
+            config["max_dte"] = max(int(config["max_dte"]), int(min(days * 2.0, 90)))
+        else:
+            config["max_dte"] = max(int(config["max_dte"]), int(min(days * 2.0, 720)))
+    if market_closed:
+        config["max_spread_pct"] = float(config.get("max_spread_pct", 12.0)) + 2.0
     if payload.min_dte is not None:
         config["min_dte"] = int(payload.min_dte)
     if payload.max_dte is not None:
@@ -12639,6 +12685,7 @@ def _screen_contracts(
     style: str,
     side: str | None,
     filters: Dict[str, float | int],
+    allow_unfiltered: bool = False,
 ) -> ScreenedContracts:
     candidates: List[Dict[str, Any]] = []
     rejections: List[Dict[str, Any]] = []
@@ -12648,6 +12695,7 @@ def _screen_contracts(
     max_delta = float(filters.get("max_delta", 1.0))
     max_spread = float(filters.get("max_spread_pct", 100.0))
     min_oi = int(filters.get("min_oi", 0))
+    apply_filters = not allow_unfiltered
     for _, row in chain.iterrows():
         option_symbol = row.get("symbol")
         if not option_symbol:
@@ -12680,23 +12728,25 @@ def _screen_contracts(
 
         spread_pct = _compute_spread_pct(bid, ask, price)
         if spread_pct is None:
-            spread_pct = float(row.get("spread_pct") or 999.0) * 100.0 if row.get("spread_pct") is not None else 999.0
-        if spread_pct > max_spread:
+            spread_pct = _normalize_spread_pct_value(row.get("spread_pct"))
+        if spread_pct is None:
+            spread_pct = 999.0
+        if apply_filters and spread_pct > max_spread:
             _reject("SPREAD_TOO_WIDE", spread=f"{float(spread_pct):.2f}%", max_allowed=f"{max_spread:.2f}%")
             continue
 
         dte = row.get("dte")
-        if dte is None and expiration:
-            try:
-                exp_ts = pd.Timestamp(expiration)
-                dte = max((exp_ts.date() - pd.Timestamp.utcnow().date()).days, 0)
-            except Exception:  # pragma: no cover - defensive
-                dte = None
         if dte is None:
-            _reject("DTE_UNAVAILABLE")
-            continue
-        dte_int = int(dte)
-        if dte_int < min_dte or dte_int > max_dte:
+            dte = _compute_dte_from_expiration(expiration)
+        dte_unknown = dte is None
+        if dte is None:
+            dte = min_dte
+        try:
+            dte_int = int(dte)
+        except (TypeError, ValueError):
+            dte_int = min_dte
+            dte_unknown = True
+        if apply_filters and not dte_unknown and (dte_int < min_dte or dte_int > max_dte):
             _reject("DTE_OUT_OF_RANGE", dte=dte_int, min=min_dte, max=max_dte)
             continue
 
@@ -12705,7 +12755,7 @@ def _screen_contracts(
             _reject("DELTA_UNAVAILABLE")
             continue
         abs_delta = abs(float(delta))
-        if abs_delta < min_delta or abs_delta > max_delta:
+        if apply_filters and (abs_delta < min_delta or abs_delta > max_delta):
             _reject("DELTA_OUT_OF_RANGE", delta=round(abs_delta, 3), min=min_delta, max=max_delta)
             continue
 
@@ -12713,7 +12763,7 @@ def _screen_contracts(
         if oi is None:
             oi = row.get("open_interest") or row.get("oi")
         oi_val = float(oi or 0)
-        if oi_val < min_oi:
+        if apply_filters and oi_val < min_oi:
             _reject("OPEN_INTEREST_TOO_LOW", oi=int(oi_val), min=min_oi)
             continue
 
@@ -12894,6 +12944,206 @@ def _enrich_contract_with_plan(contract: Dict[str, Any], plan_anchor: Any, risk_
         enriched.setdefault("cost_basis", {})["per_contract"] = risk_per_contract
     return enriched
 
+
+def _extract_expected_minutes(plan_anchor: Mapping[str, Any] | None) -> Optional[float]:
+    if not isinstance(plan_anchor, Mapping):
+        return None
+    duration = plan_anchor.get("expected_duration")
+    if isinstance(duration, Mapping):
+        minutes = duration.get("minutes")
+        try:
+            minutes_val = float(minutes)
+        except (TypeError, ValueError):
+            return None
+        return minutes_val if math.isfinite(minutes_val) and minutes_val > 0 else None
+    minutes_raw = plan_anchor.get("horizon_minutes")
+    try:
+        minutes_val = float(minutes_raw)
+    except (TypeError, ValueError):
+        return None
+    return minutes_val if math.isfinite(minutes_val) and minutes_val > 0 else None
+
+
+def _normalize_spread_pct_value(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        spread_val = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(spread_val) or spread_val < 0:
+        return None
+    if spread_val <= 1.0:
+        spread_val *= 100.0
+    return spread_val
+
+
+def _compute_dte_from_expiration(expiration: Any) -> Optional[int]:
+    if not expiration:
+        return None
+    try:
+        stamp = pd.Timestamp(expiration)
+    except Exception:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize("UTC")
+    else:
+        stamp = stamp.tz_convert("UTC")
+    today = pd.Timestamp.now(tz="UTC")
+    delta_days = (stamp.date() - today.date()).days
+    return max(int(delta_days), 0)
+
+
+def _relax_filter_ladder(
+    base_filters: Dict[str, float | int],
+    *,
+    style_defaults: Dict[str, float | int],
+    market_closed: bool,
+) -> Iterable[Tuple[Dict[str, float | int], Optional[str]]]:
+    """Yield progressively relaxed filter sets along with reason tags."""
+
+    yield dict(base_filters), None
+
+    widened_delta = dict(base_filters)
+    widened_delta["min_delta"] = _clamp(float(base_filters.get("min_delta", 0.0)) - 0.05, 0.0, 1.0)
+    widened_delta["max_delta"] = _clamp(float(base_filters.get("max_delta", 1.0)) + 0.05, 0.0, 1.0)
+    yield widened_delta, "delta_widened"
+
+    widened_dte = dict(widened_delta)
+    widened_dte["min_dte"] = max(0, int(base_filters.get("min_dte", 0)) - 2)
+    widened_dte["max_dte"] = int(base_filters.get("max_dte", 365)) + 2
+    yield widened_dte, "dte_widened"
+
+    base_spread_cap = float(style_defaults.get("max_spread_pct", base_filters.get("max_spread_pct", 12.0)))
+    widened_spread = dict(widened_dte)
+    widened_spread["max_spread_pct"] = min(
+        float(widened_spread.get("max_spread_pct", base_spread_cap)) + 2.0,
+        base_spread_cap + 4.0,
+    )
+    if market_closed:
+        widened_spread["max_spread_pct"] = max(widened_spread["max_spread_pct"], base_spread_cap + 2.0)
+    yield widened_spread, "spread_widened"
+
+    oi_breakpoints = [1000, 700, 500, 300]
+    current_min_oi = int(base_filters.get("min_oi", 0))
+    for breakpoint in oi_breakpoints:
+        if current_min_oi <= breakpoint:
+            continue
+        relaxed_oi = dict(widened_spread)
+        relaxed_oi["min_oi"] = breakpoint
+        yield relaxed_oi, f"min_oi_{breakpoint}"
+
+
+def _fallback_filters_forcing_three(side: str | None) -> Dict[str, float | int]:
+    filters = {
+        "min_dte": 0,
+        "max_dte": 365 * 3,
+        "min_delta": 0.0,
+        "max_delta": 1.0,
+        "max_spread_pct": 100.0,
+        "min_oi": 0,
+    }
+    if side not in {"call", "put"}:
+        filters["side"] = None
+    return filters
+
+
+def _choose_additional_candidates(
+    chain: pd.DataFrame,
+    quotes: Dict[str, Dict[str, Any]],
+    *,
+    symbol: str,
+    style: str,
+    side: str | None,
+) -> List[Dict[str, Any]]:
+    broad_filters = _fallback_filters_forcing_three(side)
+    fallback = _screen_contracts(
+        chain,
+        quotes,
+        symbol=symbol,
+        style=style,
+        side=side,
+        filters=broad_filters,
+        allow_unfiltered=True,
+    )
+    return list(fallback)
+
+
+def _should_emit_hedge(plan_anchor: Mapping[str, Any] | None) -> bool:
+    if not isinstance(plan_anchor, Mapping):
+        return False
+    mtf_bias = plan_anchor.get("mtf_bias") or {}
+    agreement = None
+    if isinstance(mtf_bias, Mapping):
+        try:
+            agreement = float(mtf_bias.get("agreement"))
+        except (TypeError, ValueError):
+            agreement = None
+    rr_val = None
+    for key in ("rr_to_tp1", "rr", "rr_estimate"):
+        value = plan_anchor.get(key)
+        try:
+            rr_val = float(value)
+            break
+        except (TypeError, ValueError):
+            continue
+    weak_agreement = agreement is not None and math.isfinite(agreement) and agreement < 0.55
+    poor_rr = rr_val is not None and math.isfinite(rr_val) and rr_val < 1.0
+    return weak_agreement or poor_rr
+
+
+def _build_hedge_contract(
+    *,
+    primary_side: str | None,
+    chain: pd.DataFrame,
+    quotes: Dict[str, Dict[str, Any]],
+    symbol: str,
+    style: str,
+    plan_anchor: Mapping[str, Any] | None,
+    risk_amount: float | None,
+    market_closed: bool,
+) -> Optional[Dict[str, Any]]:
+    if primary_side not in {"call", "put"}:
+        return None
+    if not _should_emit_hedge(plan_anchor):
+        return None
+
+    hedge_side = "put" if primary_side == "call" else "call"
+    style_defaults = _style_default_bounds(style)
+    max_spread = float(style_defaults.get("max_spread_pct", 12.0)) + (2.0 if market_closed else 0.0)
+    hedge_filters = {
+        "min_dte": 0,
+        "max_dte": 21 if style in {"scalp", "intraday"} else 35,
+        "min_delta": 0.12,
+        "max_delta": 0.28,
+        "max_spread_pct": max_spread,
+        "min_oi": 200,
+    }
+    screened = _screen_contracts(
+        chain,
+        quotes,
+        symbol=symbol,
+        style=style,
+        side=hedge_side,
+        filters=hedge_filters,
+    )
+    hedge_candidates = list(screened)
+    if not hedge_candidates:
+        hedge_candidates = _choose_additional_candidates(
+            chain,
+            quotes,
+            symbol=symbol,
+            style=style,
+            side=hedge_side,
+        )
+    if not hedge_candidates:
+        return None
+    hedge_contract = _enrich_contract_with_plan(hedge_candidates[0], plan_anchor, risk_amount)
+    hedge_contract["role"] = "hedge"
+    if hedge_contract.get("spread_pct") and hedge_contract["spread_pct"] > hedge_filters["max_spread_pct"]:
+        hedge_contract.setdefault("notes", []).append("Wide spread — consider defined-risk structure")
+    return hedge_contract
+
 @gpt.post("/contracts", summary="Return ranked option contracts for a symbol")
 async def gpt_contracts(
     request_payload: ContractsRequest,
@@ -12903,8 +13153,24 @@ async def gpt_contracts(
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
 
+    snapshot = _MARKET_CLOCK.snapshot()
+    market_closed = snapshot.status != "open"
+    quote_session = "regular_close" if market_closed else "regular_open"
+    as_of_dt = (
+        _MARKET_CLOCK.last_rth_close(at=snapshot.now_et)
+        if market_closed
+        else snapshot.now_et
+    )
+    if as_of_dt.tzinfo is None:
+        as_of_dt = as_of_dt.replace(tzinfo=timezone.utc)
+    as_of_timestamp = as_of_dt.astimezone(timezone.utc).isoformat()
+
     try:
-        chain = await fetch_option_chain_cached(symbol, request_payload.expiry)
+        chain = await fetch_option_chain_cached(
+            symbol,
+            request_payload.expiry,
+            as_of="prev_close" if market_closed else None,
+        )
     except TradierNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail="Tradier integration is not configured") from exc
     except Exception as exc:  # pragma: no cover - defensive
@@ -12919,57 +13185,108 @@ async def gpt_contracts(
     quotes, quotes_meta = await fetch_option_quotes(option_symbols)
 
     style = _normalize_contract_style(request_payload.style)
-    filters = _prepare_contract_filters(request_payload, style)
+    plan_anchor = request_payload.plan_anchor or {}
+    if isinstance(request_payload.plan_meta, Mapping):
+        combined = dict(request_payload.plan_meta)
+        combined.update(plan_anchor)
+        plan_anchor = combined
+    expected_minutes = _extract_expected_minutes(plan_anchor)
+    filters = _prepare_contract_filters(
+        request_payload,
+        style,
+        plan_anchor,
+        expected_minutes=expected_minutes,
+        market_closed=market_closed,
+    )
     side = _infer_contract_side(request_payload.side, request_payload.bias)
     risk_amount = request_payload.risk_amount or request_payload.max_price or 100.0
+    style_defaults = _style_default_bounds(style)
 
-    candidates = _screen_contracts(
-        chain,
-        quotes,
-        symbol=symbol,
-        style=style,
-        side=side,
-        filters=filters,
-    )
-
-    relaxed = False
-    collected_rejections: List[Dict[str, Any]] = list(getattr(candidates, "rejections", []))
-    if not candidates:
-        relaxed = True
-        filters_delta = filters.copy()
-        filters_delta["min_delta"] = _clamp(float(filters_delta.get("min_delta", 0.0)) - 0.05, 0.0, 1.0)
-        filters_delta["max_delta"] = _clamp(float(filters_delta.get("max_delta", 1.0)) + 0.05, 0.0, 1.0)
-        candidates = _screen_contracts(
+    collected_rejections: List[Dict[str, Any]] = []
+    relaxation_reasons: List[str] = []
+    candidates: List[Dict[str, Any]] = []
+    chosen_filters: Dict[str, float | int] = dict(filters)
+    ladder = list(_relax_filter_ladder(filters, style_defaults=style_defaults, market_closed=market_closed))
+    for candidate_filters, reason in ladder:
+        screened = _screen_contracts(
             chain,
             quotes,
             symbol=symbol,
             style=style,
             side=side,
-            filters=filters_delta,
+            filters=candidate_filters,
         )
-        collected_rejections.extend(getattr(candidates, "rejections", []))
-        if not candidates:
-            filters_dte = filters_delta.copy()
-            filters_dte["min_dte"] = max(0, int(filters_dte.get("min_dte", 0)) - 2)
-            filters_dte["max_dte"] = int(filters_dte.get("max_dte", 365)) + 2
-            candidates = _screen_contracts(
-                chain,
-                quotes,
-                symbol=symbol,
-                style=style,
-                side=side,
-                filters=filters_dte,
-            )
-            collected_rejections.extend(getattr(candidates, "rejections", []))
-            filters = filters_dte
-        else:
-            filters = filters_delta
-    else:
-        filters = filters
+        collected_rejections.extend(getattr(screened, "rejections", []))
+        candidates = list(screened)
+        chosen_filters = dict(candidate_filters)
+        if len(candidates) >= 3:
+            if reason:
+                relaxation_reasons.append(reason)
+            break
+        if reason:
+            relaxation_reasons.append(reason)
 
-    plan_anchor = getattr(request_payload, "plan_anchor", None)
-    best = [_enrich_contract_with_plan(contract, plan_anchor, risk_amount) for contract in candidates[:3]]
-    alternatives = [_enrich_contract_with_plan(contract, plan_anchor, risk_amount) for contract in candidates[3:10]]
+    fallback_used = False
+    if len(candidates) < 3:
+        fallback_used = True
+        extra = _choose_additional_candidates(
+            chain,
+            quotes,
+            symbol=symbol,
+            style=style,
+            side=side,
+        )
+        merged: Dict[str, Dict[str, Any]] = {}
+        for contract in candidates + extra:
+            key = str(contract.get("symbol") or contract.get("label"))
+            if not key:
+                continue
+            if key not in merged:
+                merged[key] = contract
+        candidates = list(merged.values())
+        if "fallback_minimum" not in relaxation_reasons:
+            relaxation_reasons.append("fallback_minimum")
+
+    def _sort_key(item: Mapping[str, Any]) -> Tuple[float, float]:
+        return (
+            float(item.get("tradeability") or 0.0),
+            float(item.get("liquidity_score") or 0.0),
+        )
+
+    candidates.sort(key=_sort_key, reverse=True)
+    if len(candidates) < 3 and option_symbols:
+        fallback = _choose_additional_candidates(
+            chain,
+            quotes,
+            symbol=symbol,
+            style=style,
+            side=None,
+        )
+        existing_keys = {str(item.get("symbol")) for item in candidates}
+        for contract in sorted(fallback, key=_sort_key, reverse=True):
+            key = str(contract.get("symbol"))
+            if key in existing_keys:
+                continue
+            candidates.append(contract)
+            existing_keys.add(key)
+            if len(candidates) >= 3:
+                break
+
+    best_candidates = candidates[:3]
+    alternative_candidates = candidates[3:10]
+    plan_anchor_mapping: Mapping[str, Any] | None = plan_anchor if isinstance(plan_anchor, Mapping) else None
+    best = [_enrich_contract_with_plan(contract, plan_anchor_mapping, risk_amount) for contract in best_candidates]
+    alternatives = [_enrich_contract_with_plan(contract, plan_anchor_mapping, risk_amount) for contract in alternative_candidates]
+    hedge_payload = _build_hedge_contract(
+        primary_side=side,
+        chain=chain,
+        quotes=quotes,
+        symbol=symbol,
+        style=style,
+        plan_anchor=plan_anchor_mapping,
+        risk_amount=risk_amount,
+        market_closed=market_closed,
+    )
 
     # Compact table view for UI rendering
     table_rows: List[Dict[str, Any]] = []
@@ -13021,12 +13338,16 @@ async def gpt_contracts(
         "side": side,
         "style": style,
         "risk_amount": risk_amount,
-        "filters": filters,
-        "relaxed_filters": relaxed,
+        "filters": chosen_filters,
+        "relaxed_filters": bool(relaxation_reasons or fallback_used),
+        "relaxation_reasons": relaxation_reasons if relaxation_reasons else [],
         "best": best,
         "alternatives": alternatives,
+        "hedge": hedge_payload,
         "table": table_rows,
         "rejections": deduped_rejections,
+        "quote_session": quote_session,
+        "as_of_timestamp": as_of_timestamp,
     }
     if deduped_rejections:
         record_selector_rejections(deduped_rejections, source="selector")
@@ -13037,6 +13358,9 @@ async def gpt_contracts(
         else:
             response_payload["quotes_notice"] = str(notice)
     response_payload["quotes_mode"] = quotes_meta.get("mode") or "unknown"
+    response_payload["quote_meta"] = dict(quotes_meta)
+    if not response_payload["relaxation_reasons"]:
+        response_payload.pop("relaxation_reasons")
     return response_payload
 
 

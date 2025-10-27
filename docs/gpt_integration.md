@@ -635,15 +635,22 @@ Style defaults applied server-side when you omit filters:
 
 | Style    | DTE window | Delta window | Max spread % | Min OI |
 |----------|------------|--------------|--------------|--------|
-| scalp    | 0–2        | 0.55–0.65    | 8            | 500    |
-| intraday | 1–5        | 0.45–0.55    | 10           | 500    |
-| swing    | 7–45       | 0.30–0.55    | 12           | 500    |
-| leaps    | ≥180       | 0.25–0.45    | 12           | 500    |
+| scalp    | 0–3        | 0.55–0.65    | 8            | 500    |
+| intraday | 0–7        | 0.45–0.55    | 10           | 500    |
+| swing    | 10–45      | 0.30–0.55    | 12           | 500    |
+| leaps    | ≥180       | 0.25–0.45    | 15           | 500    |
 
 No budget-based filtering is applied. The optional `risk_amount` (default
 **$100**) is only used to size the P/L projections returned for each contract.
-If no contracts pass, the service widens the delta window by ±0.05, then the
-DTE window by ±2 days before returning an empty result.
+When a plan provides an `expected_duration`, the selector biases the DTE window
+toward near-expiry for intraday/scalp trades, 2–6 weeks for swing trades, and
+six months or more for leaps automatically.
+
+If no contracts pass, the service progressively relaxes guardrails: widen the
+delta window by ±0.05, expand DTE by ±2 trading days, raise the max spread cap
+by 2% (capped at style default +4), and finally ease minimum open interest
+(1000→700→500→300). The ladder always yields three `best` contracts unless the
+chain is truly empty.
 
 ### Response shape
 
@@ -662,6 +669,7 @@ DTE window by ±2 days before returning an empty result.
     "min_oi": 500
   },
   "relaxed_filters": false,
+  "relaxation_reasons": [],
   "best": [
     {
       "label": "NVDA 2024-10-18 460C",
@@ -700,13 +708,28 @@ DTE window by ±2 days before returning an empty result.
   ],
   "alternatives": [
     { "symbol": "…", "tradeability": 81.2 }
-  ]
+  ],
+  "hedge": {
+    "role": "hedge",
+    "label": "NVDA 2024-10-11 430P",
+    "delta": -0.22,
+    "tradeability": 72.1,
+    "pnl": { "at_tp1": 95.0 },
+    "pl_projection": { "contracts_possible": 1, "risk_budget": 120.0 }
+  },
+  "quote_session": "regular_open",
+  "as_of_timestamp": "2024-10-09T14:30:00Z",
+  "quotes_mode": "production",
+  "quote_meta": { "mode": "production" }
 }
 ```
 
 `tradeability` (0–100) weights spread (40 %), delta fit (30 %), open interest
-(20 %), and implied-vol regime (10 %). The endpoint returns up to three
-contracts in `best` and the next seven in `alternatives`.
+(20 %), and implied-vol regime (10 %). The endpoint always returns three
+contracts in `best`, up to seven more in `alternatives`, and—when warranted—a
+`hedge` payload. `quote_session` distinguishes live (`regular_open`) from
+previous-close (`regular_close`) evaluations, with `as_of_timestamp` mirroring
+the source quote time.
 
 Field summary:
 

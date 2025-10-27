@@ -26,7 +26,7 @@ class TradierConfig:
 
 
 _CACHE_TTL_SECONDS = 15.0
-_CHAIN_CACHE: Dict[Tuple[str, str | None], Tuple[float, pd.DataFrame]] = {}
+_CHAIN_CACHE: Dict[Tuple[str, str | None, str], Tuple[float, pd.DataFrame]] = {}
 _QUOTE_CACHE: Dict[Tuple[str, ...], Tuple[float, Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]]] = {}
 _SANDBOX_NOTICE_LOGGED = False
 
@@ -205,8 +205,8 @@ def _normalize_quote_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     return summary
 
 
-async def fetch_option_chain_cached(symbol: str, expiration: str | None = None) -> pd.DataFrame:
-    key = (symbol.upper(), expiration)
+async def fetch_option_chain_cached(symbol: str, expiration: str | None = None, *, as_of: str | None = None) -> pd.DataFrame:
+    key = (symbol.upper(), expiration, as_of or "live")
     now = time.monotonic()
     cached = _CHAIN_CACHE.get(key)
     if cached and now - cached[0] < _CACHE_TTL_SECONDS:
