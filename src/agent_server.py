@@ -93,6 +93,7 @@ from .contract_selector import (
     style_guardrail_rules,
     reason_tokens,
 )
+from .providers.options import select_contracts as select_polygon_contracts
 from .app.engine import (
     build_target_profile,
     build_structured_plan,
@@ -9878,6 +9879,41 @@ async def _generate_fallback_plan(
                 rejected_contracts.append({"symbol": symbol.upper(), "reason": "EVENT_WINDOW_BLOCKED"})
         else:
             options_payload = None
+    polygon_result: Dict[str, Any] | None = None
+    if include_options_contracts and not options_contracts:
+        fallback_plan_payload = {
+            "direction": direction,
+            "bias": direction,
+            "style": style_token,
+            "strategy_id": strategy_id_value,
+            "targets": targets,
+        }
+        fallback_as_of = as_of_dt or datetime.now(timezone.utc)
+        try:
+            polygon_result = await select_polygon_contracts(symbol, fallback_as_of, fallback_plan_payload)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("polygon_fallback_contracts_failed", extra={"symbol": symbol, "error": str(exc)})
+        else:
+            fallback_contracts = polygon_result.get("options_contracts") or []
+            if fallback_contracts:
+                options_contracts = fallback_contracts
+                fallback_note = polygon_result.get("options_note")
+                if fallback_note:
+                    options_note = f"{options_note} · {fallback_note}" if options_note else fallback_note
+            fallback_rejections = polygon_result.get("rejected_contracts") or []
+            if fallback_rejections:
+                existing_keys = {(entry.get("symbol"), entry.get("reason")) for entry in rejected_contracts}
+                for entry in fallback_rejections:
+                    key = (entry.get("symbol"), entry.get("reason"))
+                    if key not in existing_keys:
+                        rejected_contracts.append(entry)
+                        existing_keys.add(key)
+            fallback_quote_session = polygon_result.get("options_quote_session")
+            fallback_as_of_token = polygon_result.get("options_as_of")
+            if fallback_quote_session:
+                options_quote_session = fallback_quote_session
+            if fallback_as_of_token:
+                options_as_of_timestamp = fallback_as_of_token
     if options_contracts:
         for contract in options_contracts:
             if isinstance(contract, dict):
