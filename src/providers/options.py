@@ -179,6 +179,7 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
 
     as_of_resolved, quote_session = _resolve_quote_context(as_of)
     log = _LOGGER
+    log.info("[%s] selecting contracts as_of=%s", symbol, as_of_resolved.isoformat())
     market_closed = not _MARKET_CLOCK.is_rth_open(at=as_of_resolved.astimezone(_ET))
     use_asof = quote_session == "regular_close" or market_closed
     if use_asof:
@@ -207,15 +208,15 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
                 chain_row_count = len(chain)
                 chain_columns = list(chain.columns)
     log.info(
-        "select_contracts start symbol=%s as_of=%s session=%s use_asof=%s rows=%d cols=%s",
+        "[%s] Chain length=%d cols=%s session=%s use_asof=%s",
         symbol,
-        as_of_resolved.isoformat(),
-        quote_session,
-        use_asof,
         chain_row_count,
         chain_columns,
+        quote_session,
+        use_asof,
     )
     if chain is None or chain.empty:
+        log.warning("[%s] No option chain data at %s", symbol, as_of_resolved.isoformat())
         return {
             "options_contracts": [],
             "rejected_contracts": [],
@@ -298,6 +299,82 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
             rules["min_open_interest"] = float(relax_value or rules["min_open_interest"])
             relax_flags.append(f"OPEN_INTEREST_RELAXED_{int(rules['min_open_interest'])}")
 
+    def _relaxed_contract_fallback(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[str]]:
+        if df is None or df.empty:
+            return [], None, None
+        fallback_frame = df.copy()
+        numeric_cols = [
+            "dte",
+            "delta",
+            "spread_pct",
+            "open_interest",
+            "volume",
+            "bid",
+            "ask",
+            "mid",
+        ]
+        for col in numeric_cols:
+            if col in fallback_frame.columns:
+                fallback_frame[col] = pd.to_numeric(fallback_frame[col], errors="coerce")
+        for required_col in ("dte", "delta", "spread_pct", "open_interest"):
+            if required_col not in fallback_frame.columns:
+                fallback_frame[required_col] = pd.Series([float("nan")] * len(fallback_frame), index=fallback_frame.index)
+        if "mid" not in fallback_frame or fallback_frame["mid"].isna().all():
+            if "bid" in fallback_frame.columns and "ask" in fallback_frame.columns:
+                fallback_frame["mid"] = (
+                    pd.to_numeric(fallback_frame["bid"], errors="coerce")
+                    + pd.to_numeric(fallback_frame["ask"], errors="coerce")
+                ) / 2.0
+        if "spread_pct" in fallback_frame.columns:
+            spreads = fallback_frame["spread_pct"]
+            needs_percent = spreads <= 1.0
+            mask = needs_percent.fillna(False)
+            fallback_frame.loc[mask, "spread_pct"] = spreads[mask] * 100.0
+        pre_count = len(fallback_frame)
+        dte_ok = fallback_frame[
+            fallback_frame["dte"].between(1, 45, inclusive="both")
+        ].copy()
+        delta_ok = dte_ok[dte_ok["delta"].abs().between(0.15, 0.55, inclusive="both")].copy()
+        spread_ok = delta_ok[delta_ok["spread_pct"] <= 15.0].copy()
+        oi_ok = spread_ok[spread_ok["open_interest"] >= 50.0].copy()
+        log.info(
+            "[%s] Relaxed filters counts pre=%d dte=%d delta=%d spread=%d oi=%d",
+            symbol,
+            pre_count,
+            len(dte_ok),
+            len(delta_ok),
+            len(spread_ok),
+            len(oi_ok),
+        )
+        if oi_ok.empty:
+            missing_delta = dte_ok[dte_ok["delta"].isna()].copy()
+            if not missing_delta.empty:
+                relaxed = missing_delta.sort_values(by=["spread_pct", "open_interest"], ascending=[True, False]).head(3)
+                contracts: List[Dict[str, Any]] = []
+                for _, row in relaxed.iterrows():
+                    contract = _serialize_contract(row, quote_session, as_of_resolved.isoformat(), None)
+                    flags = list(dict.fromkeys((contract.get("guardrail_flags") or []) + ["DELTA_MISSING_FALLBACK"]))
+                    contract["guardrail_flags"] = flags
+                    contract["status"] = "degraded"
+                    contract["reason"] = "delta_missing_fallback"
+                    contract["rating"] = contract.get("rating") or "yellow"
+                    contracts.append(contract)
+                return contracts, "Delta missing at close — relaxed filter fallback", "DELTA_MISSING_FALLBACK"
+            log.error("[%s] No eligible contracts after relaxed filters", symbol)
+            return [], "No contracts met filters", None
+        selected = oi_ok.sort_values(by=["spread_pct", "open_interest"], ascending=[True, False]).head(3)
+        contracts = []
+        for _, row in selected.iterrows():
+            contract = _serialize_contract(row, quote_session, as_of_resolved.isoformat(), None)
+            flags = list(dict.fromkeys((contract.get("guardrail_flags") or []) + ["RELAXED_SIMPLE_FILTERS"]))
+            contract["guardrail_flags"] = flags
+            contract.setdefault("status", "relaxed")
+            contract.setdefault("reason", "relaxed_filter_fallback")
+            if not contract.get("rating"):
+                contract["rating"] = "yellow"
+            contracts.append(contract)
+        return contracts, "Filters relaxed — using liquidity fallback", "RELAXED_SIMPLE_FILTERS"
+
     fallback_used = False
     delta_missing_fallback_used = False
     if (
@@ -356,6 +433,24 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
         options_contracts.append(contract)
 
     note = _build_options_note(relax_flags, rejected_contracts, fallback_used)
+
+    target_min = 3
+    if len(options_contracts) < target_min and not normalized_chain.empty:
+        fallback_contracts, fallback_note, fallback_flag = _relaxed_contract_fallback(normalized_chain)
+        if fallback_contracts:
+            log.warning(
+                "[%s] Relaxed fallback supplying %d contracts (original=%d)",
+                symbol,
+                len(fallback_contracts),
+                len(options_contracts),
+            )
+            options_contracts = fallback_contracts
+            if fallback_flag and fallback_flag not in relax_flags:
+                relax_flags.append(fallback_flag)
+            if fallback_note:
+                note = fallback_note
+        elif not options_contracts and fallback_note and not note:
+            note = fallback_note
 
     return {
         "options_contracts": options_contracts,

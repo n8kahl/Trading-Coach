@@ -5071,6 +5071,15 @@ def _apply_option_guardrails(
     if not records:
         return [], [], []
 
+    pinned_contracts: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        status_token = str(record.get("status") or "").lower()
+        reason_token = str(record.get("reason") or "").lower()
+        if status_token in {"degraded", "relaxed"} or "fallback" in reason_token:
+            symbol_token = str(record.get("symbol") or record.get("label") or "").upper()
+            if symbol_token and symbol_token not in pinned_contracts:
+                pinned_contracts[symbol_token] = dict(record)
+
     def _basic_guardrail_filter(limit: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         filtered_simple: List[Dict[str, Any]] = []
         rejected_simple: List[Dict[str, Any]] = []
@@ -5328,9 +5337,53 @@ def _apply_option_guardrails(
             if "GUARDRAIL_FALLBACK" not in flags:
                 flags.append("GUARDRAIL_FALLBACK")
 
+    if pinned_contracts:
+        existing_symbols: Dict[str, int] = {
+            str(contract.get("symbol") or "").upper(): idx for idx, contract in enumerate(selected_contracts)
+        }
+        for sym, pinned in pinned_contracts.items():
+            if not sym:
+                continue
+            flags_from_pinned = list(pinned.get("guardrail_flags") or [])
+            if sym in existing_symbols:
+                idx = existing_symbols[sym]
+                merged = dict(selected_contracts[idx])
+                merged_flags = list(
+                    dict.fromkeys((merged.get("guardrail_flags") or []) + flags_from_pinned + ["RELAXED_FALLBACK_INCLUDED"])
+                )
+                if fallback_used and "GUARDRAIL_FALLBACK" not in merged_flags:
+                    merged_flags.append("GUARDRAIL_FALLBACK")
+                merged["guardrail_flags"] = merged_flags
+                if pinned.get("status"):
+                    merged.setdefault("status", pinned.get("status"))
+                if pinned.get("reason"):
+                    merged.setdefault("reason", pinned.get("reason"))
+                if pinned.get("rating") and not merged.get("rating"):
+                    merged["rating"] = pinned["rating"]
+                if pinned.get("reasons") and not merged.get("reasons"):
+                    merged["reasons"] = pinned["reasons"]
+                selected_contracts[idx] = merged
+            else:
+                enriched = dict(pinned)
+                flags = list(dict.fromkeys(flags_from_pinned + ["RELAXED_FALLBACK_INCLUDED"]))
+                if fallback_used and "GUARDRAIL_FALLBACK" not in flags:
+                    flags.append("GUARDRAIL_FALLBACK")
+                enriched["guardrail_flags"] = flags
+                if not enriched.get("status"):
+                    enriched["status"] = "degraded"
+                if not enriched.get("reason"):
+                    enriched["reason"] = "guardrail_relaxed"
+                if not enriched.get("rating"):
+                    enriched["rating"] = "yellow"
+                selected_contracts.append(enriched)
+        if desired_n and len(selected_contracts) > max(desired_n, 3):
+            selected_contracts = selected_contracts[: max(desired_n, 3)]
+
+    limit = max(desired_n, min(3, len(selected_contracts)))
+    limit = min(limit, len(selected_contracts))
     if return_flags:
-        return selected_contracts[:desired_n], guardrail_rejections, relax_flags
-    return selected_contracts[:desired_n], guardrail_rejections
+        return selected_contracts[:limit], guardrail_rejections, relax_flags
+    return selected_contracts[:limit], guardrail_rejections
 
 
 def _build_market_snapshot(history: pd.DataFrame, key_levels: Dict[str, float]) -> Dict[str, Any]:
@@ -9951,29 +10004,68 @@ async def _generate_fallback_plan(
                 options_note = f"Contracts relaxed ({labels}); review guardrail_flags."
         else:
             reason_list = rejection_list if rejection_list else filtered_rejections
-            fallback_contracts = _fallback_guardrail_contracts(extracted_contracts, reason_list, symbol=symbol)
-            if fallback_contracts:
-                options_contracts = fallback_contracts
+            real_candidates: List[Dict[str, Any]] = []
+            for contract in extracted_contracts:
+                if not isinstance(contract, Mapping):
+                    continue
+                status_token = str(contract.get("status") or "").lower()
+                symbol_token = str(contract.get("symbol") or "")
+                label_token = str(contract.get("label") or "")
+                if (
+                    status_token == "placeholder"
+                    or "-FALLBACK-" in symbol_token.upper()
+                    or "placeholder" in label_token.lower()
+                ):
+                    continue
+                real_candidates.append(dict(contract))
+            if real_candidates:
+                def _sort_key(entry: Dict[str, Any]) -> Tuple[float, float]:
+                    spread = _safe_number(entry.get("spread_pct")) or float("inf")
+                    oi_val = _safe_number(entry.get("open_interest")) or 0.0
+                    return (spread, -oi_val)
+
+                real_candidates.sort(key=_sort_key)
+                target_count = max(3, desired_contract_count or 3)
+                options_contracts = real_candidates[:target_count]
+                for contract in options_contracts:
+                    flags = list(dict.fromkeys((contract.get("guardrail_flags") or []) + ["GUARDRAIL_WARNING"]))
+                    contract["guardrail_flags"] = flags
+                    if not contract.get("status"):
+                        contract["status"] = "degraded"
+                    if not contract.get("reason"):
+                        contract["reason"] = "guardrail_passthrough"
+                    if not contract.get("rating"):
+                        contract["rating"] = "yellow"
                 if not options_note:
                     reason_labels = sorted({entry.get("reason") for entry in reason_list if entry.get("reason")})
                     if reason_labels:
-                        options_note = f"Contracts unavailable ({', '.join(reason_labels)}); review guardrail_flags."
+                        options_note = f"Contracts kept with guardrail warnings ({', '.join(reason_labels)})"
                     else:
-                        options_note = "Contracts unavailable; review guardrail_flags."
+                        options_note = "Contracts kept with guardrail warnings"
             else:
-                options_contracts = []
-                if filtered_rejections and not options_note:
-                    reason_labels = sorted({entry.get("reason") for entry in filtered_rejections if entry.get("reason")})
-                    if reason_labels:
-                        options_note = f"Contracts rejected ({', '.join(reason_labels)})"
-                    else:
-                        options_note = "Contracts filtered by liquidity guardrails"
-                elif isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
-                    options_note = str(options_payload["quotes_notice"])
-                elif not side_hint:
-                    options_note = "Options side unavailable for this plan"
+                fallback_contracts = _fallback_guardrail_contracts(extracted_contracts, reason_list, symbol=symbol)
+                if fallback_contracts:
+                    options_contracts = fallback_contracts
+                    if not options_note:
+                        reason_labels = sorted({entry.get("reason") for entry in reason_list if entry.get("reason")})
+                        if reason_labels:
+                            options_note = f"Contracts unavailable ({', '.join(reason_labels)}); review guardrail_flags."
+                        else:
+                            options_note = "Contracts unavailable; review guardrail_flags."
                 else:
-                    options_note = "No tradeable contracts met filters"
+                    options_contracts = []
+                    if filtered_rejections and not options_note:
+                        reason_labels = sorted({entry.get("reason") for entry in filtered_rejections if entry.get("reason")})
+                        if reason_labels:
+                            options_note = f"Contracts rejected ({', '.join(reason_labels)})"
+                        else:
+                            options_note = "Contracts filtered by liquidity guardrails"
+                    elif isinstance(options_payload, dict) and options_payload.get("quotes_notice"):
+                        options_note = str(options_payload["quotes_notice"])
+                    elif not side_hint:
+                        options_note = "Options side unavailable for this plan"
+                    else:
+                        options_note = "No tradeable contracts met filters"
         if event_window_blocked:
             options_contracts = []
             options_note = "Blocked by event window"
@@ -12558,8 +12650,85 @@ async def assistant_exec(
     }
 
     options_block = plan_response.options or {}
+    options_contracts_override: List[Dict[str, Any]] | None = None
+    options_note_override: Optional[str] = None
+
+    def _is_real_contract(contract: Mapping[str, Any]) -> bool:
+        status_token = str(contract.get("status") or "").lower()
+        symbol_token = str(contract.get("symbol") or "")
+        label_token = str(contract.get("label") or "")
+        if status_token == "placeholder":
+            return False
+        if "-FALLBACK-" in symbol_token.upper():
+            return False
+        if "placeholder" in label_token.lower():
+            return False
+        return True
+
+    def _filter_real(seq: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+        real: List[Dict[str, Any]] = []
+        for item in seq or []:
+            if not isinstance(item, Mapping):
+                continue
+            if _is_real_contract(item):
+                real.append(dict(item))
+        return real
+
     if not options_block and plan_response.options_contracts:
-        options_block = {"best": plan_response.options_contracts, "source": "plan_snapshot"}
+        block_real = _filter_real(plan_response.options_contracts)
+        if block_real:
+            options_block = {"best": block_real, "source": "plan_snapshot"}
+            options_contracts_override = block_real
+    else:
+        block_real = _filter_real(options_block.get("best") or [])
+        if block_real:
+            options_block = dict(options_block)
+            options_block["best"] = block_real
+            options_contracts_override = block_real
+        else:
+            options_block = {}
+
+    if not options_block or not options_block.get("best"):
+        plan_real = _filter_real(plan_response.options_contracts or [])
+        if plan_real and not options_block:
+            options_block = {"best": plan_real, "source": "plan_snapshot"}
+            options_contracts_override = plan_real
+        if not options_block or not options_block.get("best"):
+            live_contracts: List[Dict[str, Any]] = []
+            as_of_dt = datetime.now(timezone.utc)
+            as_of_token: str | None = None
+            if plan_response.session_state and plan_response.session_state.get("as_of"):
+                as_of_token = str(plan_response.session_state.get("as_of"))
+            elif plan_block.get("options_as_of"):
+                as_of_token = str(plan_block.get("options_as_of"))
+            if as_of_token:
+                token = as_of_token.strip()
+                if token.endswith("Z"):
+                    token = token[:-1] + "+00:00"
+                try:
+                    as_of_dt = datetime.fromisoformat(token)
+                except ValueError:
+                    as_of_dt = datetime.now(timezone.utc)
+            fallback_plan_payload = {
+                "direction": plan_block.get("direction") or plan_block.get("bias") or plan_response.bias or "long",
+                "bias": plan_block.get("direction") or plan_response.bias or "long",
+                "style": plan_block.get("style") or plan_response.style,
+                "strategy_id": plan_block.get("strategy") or plan_response.strategy_id,
+                "targets": plan_block.get("targets") or plan_response.targets,
+            }
+            try:
+                polygon_result = await select_polygon_contracts(plan_response.symbol, as_of_dt, fallback_plan_payload)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("polygon contract refresh failed for %s: %s", plan_response.symbol, exc)
+            else:
+                live_contracts = _filter_real(polygon_result.get("options_contracts") or [])
+                if live_contracts:
+                    options_block = {
+                        "best": live_contracts,
+                        "source": polygon_result.get("options_note") or "polygon",
+                    }
+                    options_contracts_override = live_contracts
+                    options_note_override = polygon_result.get("options_note")
     if not options_block or not options_block.get("best"):
         example = None
         try:
@@ -12574,10 +12743,12 @@ async def assistant_exec(
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("options example lookup failed for %s: %s", plan_request.symbol, exc)
         if example:
+            example_contract = dict(example)
             options_block = {
-                "best": [example],
+                "best": [example_contract],
                 "source": "tradier",
             }
+            options_contracts_override = [example_contract]
 
     context_block = {
         "events": plan_response.events,
@@ -12598,9 +12769,15 @@ async def assistant_exec(
         meta_block["confluence_tags"] = plan_response.confluence_tags
     if plan_response.tp_reasons:
         meta_block["tp_reasons"] = plan_response.tp_reasons
-    if plan_response.options_contracts:
-        meta_block["options_contracts"] = plan_response.options_contracts
-    if plan_response.options_note:
+    if options_contracts_override is not None:
+        final_options_contracts = options_contracts_override
+    else:
+        final_options_contracts = _filter_real(plan_response.options_contracts or [])
+    if final_options_contracts:
+        meta_block["options_contracts"] = final_options_contracts
+    if options_note_override is not None:
+        meta_block["options_note"] = options_note_override
+    elif plan_response.options_note:
         meta_block["options_note"] = plan_response.options_note
     if plan_response.confluence:
         meta_block["mtf_confluence"] = plan_response.confluence
