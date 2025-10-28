@@ -3034,6 +3034,11 @@ class MultiContextResponse(BaseModel):
     events: Dict[str, Any] | None = None
     earnings: Dict[str, Any] | None = None
     enrichment_status: str | None = None
+    summary: Dict[str, Any] | None = None
+    decimals: int | None = None
+    data_quality: Dict[str, Any] | None = None
+    contexts: List[Dict[str, Any]] | None = None
+    enrich_source: str | None = None
 
 
 def _normalize_host_token(value: str | None) -> str:
@@ -3098,14 +3103,22 @@ async def _fetch_context_enrichment(symbol: str) -> Dict[str, Any] | None:
 
     base_url = base_url.strip()
     if not base_url:
+        logger.info("Skipping enrichment fetch for %s: enrichment_service_url not configured", symbol)
         return None
 
     url = f"{base_url.rstrip('/')}/enrich/{quote(symbol)}"
     timeout = httpx.Timeout(5.0, connect=2.0)
+    logger.info("Fetching enrichment for %s url=%s", symbol, url)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.get(url)
             resp.raise_for_status()
+            logger.info(
+                "Enrichment fetch succeeded for %s status=%s bytes=%s",
+                symbol,
+                resp.status_code,
+                len(resp.content),
+            )
         except httpx.HTTPError as exc:
             logger.warning("context enrichment fetch failed for %s: %s", symbol, exc)
             return None
@@ -3114,6 +3127,7 @@ async def _fetch_context_enrichment(symbol: str) -> Dict[str, Any] | None:
             return None
 
     try:
+        logger.info("Enrichment JSON parsed for %s", symbol)
         return resp.json()
     except ValueError:
         logger.warning("context enrichment returned invalid JSON for %s", symbol)
@@ -13339,9 +13353,20 @@ async def gpt_multi_context(
     }
     enrichment = await _fetch_context_enrichment(symbol)
     enrichment_status = "ok" if enrichment else "unavailable"
-    sentiment = (enrichment or {}).get("sentiment")
-    events = (enrichment or {}).get("events")
-    earnings = (enrichment or {}).get("earnings")
+    enrichment_keys: List[str] = []
+    sentiment = None
+    events = None
+    earnings = None
+    if enrichment:
+        sentiment = enrichment.get("sentiment") if enrichment.get("sentiment") not in (None, {}) else None
+        if sentiment is not None:
+            enrichment_keys.append("sentiment")
+        events = enrichment.get("events") if enrichment.get("events") not in (None, {}) else None
+        if events is not None:
+            enrichment_keys.append("events")
+        earnings = enrichment.get("earnings") if enrichment.get("earnings") not in (None, {}) else None
+        if earnings is not None:
+            enrichment_keys.append("earnings")
 
     # Build summary block
     frames_used = [c.get("interval") for c in contexts]
@@ -13429,25 +13454,36 @@ async def gpt_multi_context(
     except Exception:
         decimals = 2
 
-    data_quality = {
-        "series_present": bool(request_payload.include_series),
-        "iv_present": any(volatility_regime.get(k) is not None for k in ("iv_rank", "iv_atm")),
-        "earnings_present": earnings is not None,
+    response_payload: Dict[str, Any] = {
+        "symbol": symbol,
+        "snapshots": contexts,
+        "volatility_regime": volatility_regime,
+        "enrichment_status": enrichment_status,
+        "summary": summary,
+        "decimals": decimals,
+        "contexts": contexts,
     }
 
-    return MultiContextResponse(
-        symbol=symbol,
-        snapshots=contexts,
-        volatility_regime=volatility_regime,
-        sentiment=sentiment,
-        events=events,
-        earnings=earnings,
-        enrichment_status=enrichment_status,
-        summary=summary,
-        decimals=decimals,
-        data_quality=data_quality,
-        contexts=contexts,
-    )
+    if sentiment is not None and response_payload.get("sentiment") in (None, {}):
+        response_payload["sentiment"] = sentiment
+    if events is not None and response_payload.get("events") in (None, {}):
+        response_payload["events"] = events
+    if earnings is not None and response_payload.get("earnings") in (None, {}):
+        response_payload["earnings"] = earnings
+
+    if enrichment_keys:
+        response_payload["enrich_source"] = "sidecar"
+        logger.info("Enrichment merged for %s keys=%s", symbol, enrichment_keys)
+    else:
+        logger.warning("No enrichment merged for %s (enrichment_status=%s)", symbol, enrichment_status)
+
+    response_payload["data_quality"] = {
+        "series_present": bool(request_payload.include_series),
+        "iv_present": any(volatility_regime.get(k) is not None for k in ("iv_rank", "iv_atm")),
+        "earnings_present": bool(response_payload.get("earnings")),
+    }
+
+    return MultiContextResponse(**response_payload)
 
 
 def _infer_contract_side(side: str | None, bias: str | None) -> str | None:
