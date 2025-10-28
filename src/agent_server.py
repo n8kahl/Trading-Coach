@@ -3031,8 +3031,8 @@ class MultiContextResponse(BaseModel):
     snapshots: List[Dict[str, Any]]
     volatility_regime: Dict[str, Any]
     sentiment: Dict[str, Any] | None = None
-    events: Dict[str, Any] | None = None
-    earnings: Dict[str, Any] | None = None
+    events: List[Dict[str, Any]] | Dict[str, Any] | None = None
+    earnings: List[Dict[str, Any]] | Dict[str, Any] | None = None
     enrichment_status: str | None = None
     summary: Dict[str, Any] | None = None
     decimals: int | None = None
@@ -13358,13 +13358,13 @@ async def gpt_multi_context(
     events = None
     earnings = None
     if enrichment:
-        sentiment = enrichment.get("sentiment") if enrichment.get("sentiment") not in (None, {}) else None
+        sentiment = enrichment.get("sentiment")
         if sentiment is not None:
             enrichment_keys.append("sentiment")
-        events = enrichment.get("events") if enrichment.get("events") not in (None, {}) else None
+        events = enrichment.get("events")
         if events is not None:
             enrichment_keys.append("events")
-        earnings = enrichment.get("earnings") if enrichment.get("earnings") not in (None, {}) else None
+        earnings = enrichment.get("earnings")
         if earnings is not None:
             enrichment_keys.append("earnings")
 
@@ -13464,11 +13464,11 @@ async def gpt_multi_context(
         "contexts": contexts,
     }
 
-    if sentiment is not None and response_payload.get("sentiment") in (None, {}):
+    if sentiment is not None and response_payload.get("sentiment") is None:
         response_payload["sentiment"] = sentiment
-    if events is not None and response_payload.get("events") in (None, {}):
+    if events is not None and response_payload.get("events") is None:
         response_payload["events"] = events
-    if earnings is not None and response_payload.get("earnings") in (None, {}):
+    if earnings is not None and response_payload.get("earnings") is None:
         response_payload["earnings"] = earnings
 
     if enrichment_keys:
