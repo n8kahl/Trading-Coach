@@ -5051,6 +5051,45 @@ def _build_guardrail_placeholders(
     return placeholders
 
 
+def _contract_is_placeholder(contract: Mapping[str, Any]) -> bool:
+    status_token = str(contract.get("status") or "").lower()
+    symbol_token = str(contract.get("symbol") or "")
+    label_token = str(contract.get("label") or "")
+    if status_token == "placeholder":
+        return True
+    if "-FALLBACK-" in symbol_token.upper():
+        return True
+    if "placeholder" in label_token.lower():
+        return True
+    return False
+
+
+def _filter_real_contracts(contracts: Sequence[Mapping[str, Any]] | None) -> List[Dict[str, Any]]:
+    real: List[Dict[str, Any]] = []
+    if not contracts:
+        return real
+    for entry in contracts:
+        if not isinstance(entry, Mapping):
+            continue
+        if _contract_is_placeholder(entry):
+            continue
+        real.append(dict(entry))
+    return real
+
+
+def _only_placeholder_contracts(contracts: Sequence[Mapping[str, Any]] | None) -> bool:
+    if not contracts:
+        return False
+    has_placeholder = False
+    for entry in contracts:
+        if not isinstance(entry, Mapping):
+            continue
+        if not _contract_is_placeholder(entry):
+            return False
+        has_placeholder = True
+    return has_placeholder
+
+
 _GUARDRAIL_OI_STEPS = (1000.0, 700.0, 500.0, 300.0)
 
 
@@ -10004,20 +10043,7 @@ async def _generate_fallback_plan(
                 options_note = f"Contracts relaxed ({labels}); review guardrail_flags."
         else:
             reason_list = rejection_list if rejection_list else filtered_rejections
-            real_candidates: List[Dict[str, Any]] = []
-            for contract in extracted_contracts:
-                if not isinstance(contract, Mapping):
-                    continue
-                status_token = str(contract.get("status") or "").lower()
-                symbol_token = str(contract.get("symbol") or "")
-                label_token = str(contract.get("label") or "")
-                if (
-                    status_token == "placeholder"
-                    or "-FALLBACK-" in symbol_token.upper()
-                    or "placeholder" in label_token.lower()
-                ):
-                    continue
-                real_candidates.append(dict(contract))
+            real_candidates = _filter_real_contracts(extracted_contracts)
             if real_candidates:
                 def _sort_key(entry: Dict[str, Any]) -> Tuple[float, float]:
                     spread = _safe_number(entry.get("spread_pct")) or float("inf")
@@ -10074,7 +10100,10 @@ async def _generate_fallback_plan(
         else:
             options_payload = None
     polygon_result: Dict[str, Any] | None = None
-    if include_options_contracts and not options_contracts:
+    placeholders_only = _only_placeholder_contracts(options_contracts)
+    if include_options_contracts and (not options_contracts or placeholders_only):
+        if placeholders_only:
+            options_contracts = []
         fallback_plan_payload = {
             "direction": direction,
             "bias": direction,
@@ -12653,34 +12682,13 @@ async def assistant_exec(
     options_contracts_override: List[Dict[str, Any]] | None = None
     options_note_override: Optional[str] = None
 
-    def _is_real_contract(contract: Mapping[str, Any]) -> bool:
-        status_token = str(contract.get("status") or "").lower()
-        symbol_token = str(contract.get("symbol") or "")
-        label_token = str(contract.get("label") or "")
-        if status_token == "placeholder":
-            return False
-        if "-FALLBACK-" in symbol_token.upper():
-            return False
-        if "placeholder" in label_token.lower():
-            return False
-        return True
-
-    def _filter_real(seq: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-        real: List[Dict[str, Any]] = []
-        for item in seq or []:
-            if not isinstance(item, Mapping):
-                continue
-            if _is_real_contract(item):
-                real.append(dict(item))
-        return real
-
     if not options_block and plan_response.options_contracts:
-        block_real = _filter_real(plan_response.options_contracts)
+        block_real = _filter_real_contracts(plan_response.options_contracts)
         if block_real:
             options_block = {"best": block_real, "source": "plan_snapshot"}
             options_contracts_override = block_real
     else:
-        block_real = _filter_real(options_block.get("best") or [])
+        block_real = _filter_real_contracts(options_block.get("best"))
         if block_real:
             options_block = dict(options_block)
             options_block["best"] = block_real
@@ -12689,7 +12697,7 @@ async def assistant_exec(
             options_block = {}
 
     if not options_block or not options_block.get("best"):
-        plan_real = _filter_real(plan_response.options_contracts or [])
+        plan_real = _filter_real_contracts(plan_response.options_contracts)
         if plan_real and not options_block:
             options_block = {"best": plan_real, "source": "plan_snapshot"}
             options_contracts_override = plan_real
@@ -12721,7 +12729,7 @@ async def assistant_exec(
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("polygon contract refresh failed for %s: %s", plan_response.symbol, exc)
             else:
-                live_contracts = _filter_real(polygon_result.get("options_contracts") or [])
+                live_contracts = _filter_real_contracts(polygon_result.get("options_contracts"))
                 if live_contracts:
                     options_block = {
                         "best": live_contracts,
@@ -12772,7 +12780,7 @@ async def assistant_exec(
     if options_contracts_override is not None:
         final_options_contracts = options_contracts_override
     else:
-        final_options_contracts = _filter_real(plan_response.options_contracts or [])
+        final_options_contracts = _filter_real_contracts(plan_response.options_contracts)
     if final_options_contracts:
         meta_block["options_contracts"] = final_options_contracts
     if options_note_override is not None:
