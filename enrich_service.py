@@ -80,7 +80,12 @@ async def _fetch_finnhub_json(
 
     sanitized = {k: ("***" if k.lower() == "token" else v) for k, v in params.items()}
     url = f"{FINNHUB_BASE_URL}{path}"
-    logger.info("Finnhub request %s url=%s params=%s", name, url, {k: v for k, v in sanitized.items() if k != "token"})
+    logger.info(
+        "Finnhub request %s url=%s params=%s",
+        name,
+        url,
+        {k: v for k, v in sanitized.items() if k != "token"},
+    )
 
     try:
         response = await client.get(url, params=params, timeout=15.0)
@@ -97,7 +102,12 @@ async def _fetch_finnhub_json(
 
     if response.status_code != 200:
         body_excerpt = response.text[:200]
-        logger.warning("Finnhub error %s status=%s body=%s", name, response.status_code, body_excerpt)
+        logger.warning(
+            "Finnhub error %s status=%s body=%s",
+            name,
+            response.status_code,
+            body_excerpt,
+        )
         return {
             "data": None,
             "error": f"status {response.status_code}: {body_excerpt}",
@@ -127,50 +137,31 @@ def _extract_sentiment(data: Any) -> Dict[str, Any]:
     return {}
 
 
-async def _build_events(client: httpx.AsyncClient) -> tuple[Dict[str, Any], Dict[str, Any]]:
-    """Build macro events summary using Finnhub with Trading Economics fallback."""
+async def _build_events(
+    client: httpx.AsyncClient,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Build macro events summary using Trading Economics (primary) with Finnhub fallback."""
 
     summary: Dict[str, Any] = {
         "label": "none",
         "next_fomc_minutes": None,
         "next_cpi_minutes": None,
         "next_nfp_minutes": None,
-        "source": "finnhub",
+        "source": "tradingeconomics",
     }
     meta: Dict[str, Any] = {
         "finnhub_status": None,
         "finnhub_error": None,
-        "fallback_used": False,
+        "fallback_used": False,  # will now indicate Finnhub fallback
         "fallback_error": None,
     }
 
     today = dt.date.today()
     calendar: List[Dict[str, Any]] = []
 
-    if FINNHUB_API_KEY:
-        fin_params = {
-            "from": today.isoformat(),
-            "to": (today + dt.timedelta(days=14)).isoformat(),
-            "country": "US",
-            "token": FINNHUB_API_KEY,
-        }
-        finnhub_result = await _fetch_finnhub_json(
-            client,
-            "events_economic",
-            "/calendar/economic",
-            fin_params,
-        )
-        meta["finnhub_status"] = finnhub_result.get("status")
-        if finnhub_result.get("error"):
-            meta["finnhub_error"] = finnhub_result["error"]
-        data = finnhub_result.get("data")
-        if isinstance(data, dict):
-            calendar = data.get("economicCalendar") or []
-        elif isinstance(data, list):
-            calendar = data
-
-    if not calendar and TE_API_KEY:
-        logger.info("Using Trading Economics fallback for macro events")
+    # ---- PRIMARY: Trading Economics (US, 14d) ----
+    te_rows: List[Dict[str, Any]] = []
+    if TE_API_KEY:
         te_url = "https://api.tradingeconomics.com/calendar"
         te_params = {
             "country": "united states",
@@ -184,7 +175,7 @@ async def _build_events(client: httpx.AsyncClient) -> tuple[Dict[str, Any], Dict
             te_rows = resp.json()
         except Exception as exc:  # pragma: no cover
             te_rows = []
-            meta["fallback_error"] = str(exc)[:200]
+            meta["fallback_error"] = str(exc)[:200]  # keep for visibility
         normalized: List[Dict[str, Any]] = []
         if isinstance(te_rows, list):
             for row in te_rows:
@@ -212,9 +203,36 @@ async def _build_events(client: httpx.AsyncClient) -> tuple[Dict[str, Any], Dict
         if normalized:
             calendar = normalized
             summary["source"] = "tradingeconomics"
+        else:
+            meta["fallback_error"] = meta.get("fallback_error") or "te_empty_or_error"
+
+    # ---- FALLBACK: Finnhub economic calendar (US, 14d) if TE failed/empty ----
+    if not calendar and FINNHUB_API_KEY:
+        fin_params = {
+            "from": today.isoformat(),
+            "to": (today + dt.timedelta(days=14)).isoformat(),
+            "country": "US",
+            "token": FINNHUB_API_KEY,
+        }
+        finnhub_result = await _fetch_finnhub_json(
+            client,
+            "events_economic",
+            "/calendar/economic",
+            fin_params,
+        )
+        meta["finnhub_status"] = finnhub_result.get("status")
+        if finnhub_result.get("error"):
+            meta["finnhub_error"] = finnhub_result["error"]
+        data = finnhub_result.get("data")
+        if isinstance(data, dict):
+            calendar = data.get("economicCalendar") or []
+        elif isinstance(data, list):
+            calendar = data
+        if calendar:
+            summary["source"] = "finnhub"
             meta["fallback_used"] = True
         elif not meta.get("fallback_error"):
-            meta["fallback_error"] = "empty_response"
+            meta["fallback_error"] = "finnhub_empty"
 
     def _event_timestamp(item: Dict[str, Any]) -> Optional[dt.datetime]:
         datetime_token = item.get("datetime")
@@ -253,7 +271,17 @@ async def _build_events(client: httpx.AsyncClient) -> tuple[Dict[str, Any], Dict
         return min(future) if future else None
 
     next_cpi = next_minutes(("cpi", "consumer price"))
-    next_fomc = next_minutes(("fomc", "federal reserve", "fed", "interest rate decision", "policy", "statement", "press"))
+    next_fomc = next_minutes(
+        (
+            "fomc",
+            "federal reserve",
+            "fed",
+            "interest rate decision",
+            "policy",
+            "statement",
+            "press",
+        )
+    )
     next_nfp = next_minutes(("non-farm", "nonfarm", "payroll"))
 
     if next_fomc is not None:
@@ -284,8 +312,14 @@ async def enrich(symbol: str) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail="FINNHUB_API_KEY not configured")
 
     endpoint_specs = {
-        "earnings": ("/stock/earnings", {"symbol": symbol_clean, "token": FINNHUB_API_KEY}),
-        "sentiment": ("/news-sentiment", {"symbol": symbol_clean, "token": FINNHUB_API_KEY}),
+        "earnings": (
+            "/stock/earnings",
+            {"symbol": symbol_clean, "token": FINNHUB_API_KEY},
+        ),
+        "sentiment": (
+            "/news-sentiment",
+            {"symbol": symbol_clean, "token": FINNHUB_API_KEY},
+        ),
     }
 
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -348,7 +382,7 @@ async def enrich(symbol: str) -> Dict[str, Any]:
     if events_meta.get("finnhub_error"):
         event_entry["error"] = events_meta["finnhub_error"]
     if events_meta.get("fallback_used"):
-        event_entry["fallback"] = "tradingeconomics"
+        event_entry["fallback"] = "finnhub"
     finnhub_requests["events_macro"] = event_entry or {"status": None}
     payload["finnhub_requests"] = finnhub_requests
 
@@ -376,9 +410,17 @@ async def healthcheck() -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
             params = {"symbol": "SPY", "token": FINNHUB_API_KEY}
-            logger.info("Finnhub request healthz url=%s/quote params=%s", FINNHUB_BASE_URL, {"symbol": "SPY"})
+            logger.info(
+                "Finnhub request healthz url=%s/quote params=%s",
+                FINNHUB_BASE_URL,
+                {"symbol": "SPY"},
+            )
             resp = await client.get(f"{FINNHUB_BASE_URL}/quote", params=params)
-            logger.info("Finnhub response healthz status=%s bytes=%s", resp.status_code, len(resp.content))
+            logger.info(
+                "Finnhub response healthz status=%s bytes=%s",
+                resp.status_code,
+                len(resp.content),
+            )
             summary["status"] = resp.status_code
             summary["ok"] = resp.status_code == 200
             summary["checked_at"] = _now_iso()
@@ -433,11 +475,17 @@ async def _fetch_quote_symbol(client: httpx.AsyncClient, symbol: str) -> Dict[st
             timeout=8.0,
         )
         if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail="finnhub quote error")
+            raise HTTPException(
+                status_code=resp.status_code, detail="finnhub quote error"
+            )
         q = resp.json() or {}
         c, pc = q.get("c"), q.get("pc")
         pct = None
-        if isinstance(c, (int, float)) and isinstance(pc, (int, float)) and pc not in (0, None):
+        if (
+            isinstance(c, (int, float))
+            and isinstance(pc, (int, float))
+            and pc not in (0, None)
+        ):
             try:
                 pct = (c / pc) - 1.0
             except Exception:
@@ -446,7 +494,9 @@ async def _fetch_quote_symbol(client: httpx.AsyncClient, symbol: str) -> Dict[st
             "symbol": symbol,
             "last": c,
             "percent": pct,
-            "time_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+            "time_utc": dt.datetime.now(dt.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat(),
             "stale": False,
         }
     except Exception:
@@ -454,7 +504,9 @@ async def _fetch_quote_symbol(client: httpx.AsyncClient, symbol: str) -> Dict[st
             "symbol": symbol,
             "last": None,
             "percent": None,
-            "time_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+            "time_utc": dt.datetime.now(dt.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat(),
             "stale": True,
         }
 
