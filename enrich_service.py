@@ -12,7 +12,7 @@ import datetime as dt
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -23,6 +23,7 @@ load_dotenv()
 
 # Load lazily; don't crash import if missing. We'll 503 at request time.
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+TE_API_KEY = os.getenv("TE_API_KEY")
 
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 
@@ -109,16 +110,6 @@ async def _fetch_finnhub_json(
     return result
 
 
-def _extract_events(data: Any) -> list[Dict[str, Any]]:
-    if isinstance(data, dict):
-        calendar = data.get("earningsCalendar") or data.get("data")
-        if isinstance(calendar, list):
-            return calendar
-    if isinstance(data, list):
-        return data
-    return []
-
-
 def _extract_earnings(data: Any) -> list[Dict[str, Any]]:
     if isinstance(data, list):
         return data
@@ -136,6 +127,149 @@ def _extract_sentiment(data: Any) -> Dict[str, Any]:
     return {}
 
 
+async def _build_events(client: httpx.AsyncClient) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Build macro events summary using Finnhub with Trading Economics fallback."""
+
+    summary: Dict[str, Any] = {
+        "label": "none",
+        "next_fomc_minutes": None,
+        "next_cpi_minutes": None,
+        "next_nfp_minutes": None,
+        "source": "finnhub",
+    }
+    meta: Dict[str, Any] = {
+        "finnhub_status": None,
+        "finnhub_error": None,
+        "fallback_used": False,
+        "fallback_error": None,
+    }
+
+    today = dt.date.today()
+    calendar: List[Dict[str, Any]] = []
+
+    if FINNHUB_API_KEY:
+        fin_params = {
+            "from": today.isoformat(),
+            "to": (today + dt.timedelta(days=14)).isoformat(),
+            "country": "US",
+            "token": FINNHUB_API_KEY,
+        }
+        finnhub_result = await _fetch_finnhub_json(
+            client,
+            "events_economic",
+            "/calendar/economic",
+            fin_params,
+        )
+        meta["finnhub_status"] = finnhub_result.get("status")
+        if finnhub_result.get("error"):
+            meta["finnhub_error"] = finnhub_result["error"]
+        data = finnhub_result.get("data")
+        if isinstance(data, dict):
+            calendar = data.get("economicCalendar") or []
+        elif isinstance(data, list):
+            calendar = data
+
+    if not calendar and TE_API_KEY:
+        logger.info("Using Trading Economics fallback for macro events")
+        te_url = "https://api.tradingeconomics.com/calendar"
+        te_params = {
+            "country": "united states",
+            "from": today.isoformat(),
+            "to": (today + dt.timedelta(days=14)).isoformat(),
+            "c": TE_API_KEY,
+        }
+        try:
+            resp = await client.get(te_url, params=te_params, timeout=8.0)
+            resp.raise_for_status()
+            te_rows = resp.json()
+        except Exception as exc:  # pragma: no cover
+            te_rows = []
+            meta["fallback_error"] = str(exc)[:200]
+        normalized: List[Dict[str, Any]] = []
+        if isinstance(te_rows, list):
+            for row in te_rows:
+                if not isinstance(row, dict):
+                    continue
+                event_name = (row.get("Event") or "").strip()
+                if not event_name:
+                    continue
+                when_raw = row.get("Date")
+                date_token = None
+                time_token = None
+                if isinstance(when_raw, str) and "T" in when_raw:
+                    date_token, _, remainder = when_raw.partition("T")
+                    time_token = remainder[:5]
+                normalized.append(
+                    {
+                        "event": event_name,
+                        "country": row.get("Country"),
+                        "datetime": when_raw,
+                        "date": date_token,
+                        "time": time_token,
+                        "_source": "tradingeconomics",
+                    }
+                )
+        if normalized:
+            calendar = normalized
+            summary["source"] = "tradingeconomics"
+            meta["fallback_used"] = True
+        elif not meta.get("fallback_error"):
+            meta["fallback_error"] = "empty_response"
+
+    def _event_timestamp(item: Dict[str, Any]) -> Optional[dt.datetime]:
+        datetime_token = item.get("datetime")
+        if isinstance(datetime_token, str):
+            try:
+                iso_token = datetime_token.replace("Z", "+00:00")
+                if "+" not in iso_token[10:]:
+                    iso_token = f"{iso_token}+00:00"
+                return dt.datetime.fromisoformat(iso_token)
+            except ValueError:
+                pass
+        date_str = item.get("date")
+        time_str = item.get("time") or "00:00"
+        if not date_str:
+            return None
+        if isinstance(time_str, str) and time_str.upper() in {"", "TBD", "N/A"}:
+            time_str = "00:00"
+        try:
+            return dt.datetime.fromisoformat(f"{date_str}T{time_str}:00+00:00")
+        except ValueError:
+            return None
+
+    def next_minutes(name_tokens: tuple[str, ...]) -> Optional[int]:
+        now_dt = dt.datetime.now(dt.timezone.utc)
+        future: List[int] = []
+        for item in calendar:
+            title = (item.get("event") or item.get("Event") or "").lower()
+            if not any(token in title for token in name_tokens):
+                continue
+            timestamp = _event_timestamp(item)
+            if not timestamp:
+                continue
+            minutes = int((timestamp - now_dt).total_seconds() // 60)
+            if minutes >= -30:
+                future.append(minutes if minutes >= 0 else 0)
+        return min(future) if future else None
+
+    next_cpi = next_minutes(("cpi", "consumer price"))
+    next_fomc = next_minutes(("fomc", "federal reserve", "fed", "interest rate decision", "policy", "statement", "press"))
+    next_nfp = next_minutes(("non-farm", "nonfarm", "payroll"))
+
+    if next_fomc is not None:
+        summary["label"] = "policy_watch"
+    elif next_cpi is not None:
+        summary["label"] = "inflation_watch"
+    elif next_nfp is not None:
+        summary["label"] = "labor_watch"
+
+    summary["next_fomc_minutes"] = next_fomc
+    summary["next_cpi_minutes"] = next_cpi
+    summary["next_nfp_minutes"] = next_nfp
+
+    return summary, meta
+
+
 def _now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
@@ -151,7 +285,6 @@ async def enrich(symbol: str) -> Dict[str, Any]:
 
     endpoint_specs = {
         "earnings": ("/stock/earnings", {"symbol": symbol_clean, "token": FINNHUB_API_KEY}),
-        "events": ("/calendar/earnings", {"symbol": symbol_clean, "token": FINNHUB_API_KEY}),
         "sentiment": ("/news-sentiment", {"symbol": symbol_clean, "token": FINNHUB_API_KEY}),
     }
 
@@ -163,34 +296,43 @@ async def enrich(symbol: str) -> Dict[str, Any]:
                 for name, (path, params) in endpoint_specs.items()
             ]
         )
+        events_summary, events_meta = await _build_events(client)
     results = dict(zip(names, responses))
 
     earnings_result = results["earnings"]
-    events_result = results["events"]
     sentiment_result = results["sentiment"]
 
     earnings_data = _extract_earnings(earnings_result["data"])
-    events_data = _extract_events(events_result["data"])
     sentiment_data = _extract_sentiment(sentiment_result["data"])
+
+    finnhub_ok_flags = [
+        earnings_result.get("error") is None,
+        sentiment_result.get("error") is None,
+        events_meta.get("finnhub_error") is None,
+    ]
 
     payload: Dict[str, Any] = {
         "symbol": symbol_clean,
         "earnings": earnings_data,
-        "events": events_data,
+        "events": events_summary,
         "sentiment": sentiment_data,
-        "finnhub_status": "ok" if any(res.get("error") is None for res in results.values()) else "error",
+        "finnhub_status": "ok" if any(finnhub_ok_flags) else "error",
         "fetched_at": _now_iso(),
     }
 
     if earnings_result.get("error"):
         payload["earnings_error"] = earnings_result["error"]
         payload["earnings_status"] = earnings_result.get("status")
-    if events_result.get("error"):
-        payload["events_error"] = events_result["error"]
-        payload["events_status"] = events_result.get("status")
     if sentiment_result.get("error"):
         payload["sentiment_error"] = sentiment_result["error"]
         payload["sentiment_status"] = sentiment_result.get("status")
+    if events_meta.get("finnhub_error"):
+        payload["events_error"] = events_meta["finnhub_error"]
+    if events_meta.get("finnhub_status") is not None:
+        payload["events_status"] = events_meta["finnhub_status"]
+    if events_meta.get("fallback_error"):
+        payload["events_fallback_error"] = events_meta["fallback_error"]
+    payload["events_fallback_used"] = events_meta.get("fallback_used", False)
 
     finnhub_requests: Dict[str, Dict[str, Any]] = {}
     for name, res in results.items():
@@ -200,6 +342,14 @@ async def enrich(symbol: str) -> Dict[str, Any]:
         if res.get("error"):
             entry["error"] = res["error"]
         finnhub_requests[name] = entry or {"status": None}
+    event_entry: Dict[str, Any] = {}
+    if events_meta.get("finnhub_status") is not None:
+        event_entry["status"] = events_meta["finnhub_status"]
+    if events_meta.get("finnhub_error"):
+        event_entry["error"] = events_meta["finnhub_error"]
+    if events_meta.get("fallback_used"):
+        event_entry["fallback"] = "tradingeconomics"
+    finnhub_requests["events_macro"] = event_entry or {"status": None}
     payload["finnhub_requests"] = finnhub_requests
 
     return payload

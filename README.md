@@ -146,6 +146,7 @@ POLYGON_API_KEY=pk_your_key              # Required for premium Polygon data (op
 BACKEND_API_KEY=super-secret             # Omit for anonymous access during dev
 BASE_URL=https://<your-app>.up.railway.app/tv
 FINNHUB_API_KEY=your_finnhub_key         # Required for enrich_service.py
+TE_API_KEY=replace_me_key:replace_me_secret  # Optional Trading Economics fallback for macro events (key:secret format)
 ENRICH_SERVICE_URL=http://localhost:8081 # Override if deploying enrichment elsewhere
 DB_URL=postgresql://user:pass@host:5432/dbname  # Optional; enables persistent idea snapshots (alias: DATABASE_URL)
 SELF_API_BASE_URL=https://trading-coach-production.up.railway.app  # Used for auto-replan callbacks
@@ -156,6 +157,10 @@ TRADIER_SANDBOX_TOKEN=XXXXXXXXXXXX
 TRADIER_SANDBOX_ACCOUNT=VA0000000000
 TRADIER_SANDBOX_BASE_URL=https://sandbox.tradier.com
 ```
+
+The enrichment sidecar continues to source earnings and sentiment from Finnhub. If `TE_API_KEY`
+is provided, Trading Economics is used only as a fallback when Finnhub's US economic calendar
+returns no upcoming events. The health probe still pings Finnhub's news-sentiment endpoint.
 
 Use `pytest` to run the current unit test suite (indicator maths only right now).
 
