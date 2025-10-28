@@ -2870,6 +2870,7 @@ class PlanResponse(BaseModel):
     market_snapshot: Dict[str, Any] | None = None
     features: Dict[str, Any] | None = None
     options: Dict[str, Any] | None = None
+    enrichment_data: Dict[str, Any] = Field(default_factory=dict)
     options_contracts: List[Dict[str, Any]] = Field(default_factory=list)
     options_note: str | None = None
     calc_notes: Dict[str, Any] | None = None
@@ -3030,6 +3031,7 @@ class MultiContextResponse(BaseModel):
     sentiment: Dict[str, Any] | None = None
     events: Dict[str, Any] | None = None
     earnings: Dict[str, Any] | None = None
+    enrichment_status: str | None = None
 
 
 def _normalize_host_token(value: str | None) -> str:
@@ -3114,6 +3116,48 @@ async def _fetch_context_enrichment(symbol: str) -> Dict[str, Any] | None:
     except ValueError:
         logger.warning("context enrichment returned invalid JSON for %s", symbol)
         return None
+
+
+async def _build_plan_enrichment(symbol: str, as_of: datetime | None) -> Dict[str, Any]:
+    """Local hook for composing enrichment context without network calls."""
+
+    _ = symbol  # reserved for future local enrichment hooks
+    if as_of is None:
+        return {}
+    return {}
+
+
+async def _collect_enrichment_data(
+    symbol: str,
+    as_of: datetime | None,
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Aggregate enrichment data from multiple sources while capturing errors."""
+
+    tasks = [_build_plan_enrichment(symbol, as_of), _fetch_context_enrichment(symbol)]
+    labels = ("builder", "sidecar")
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    data: Dict[str, Any] = {}
+    errors: Dict[str, str] = {}
+    for source, result in zip(labels, results):
+        if isinstance(result, Exception):
+            errors[source] = str(result)
+            continue
+        if result is None:
+            continue
+        if not isinstance(result, Mapping):
+            errors[source] = "invalid_response"
+            continue
+        for key, value in result.items():
+            if value is None:
+                continue
+            existing = data.get(key)
+            if isinstance(existing, Mapping) and isinstance(value, Mapping):
+                merged_payload = dict(existing)
+                merged_payload.update(dict(value))
+                data[key] = merged_payload
+            else:
+                data[key] = value
+    return data, errors
 
 
 def _style_for_strategy(strategy_id: str) -> str:
@@ -9989,19 +10033,31 @@ async def _generate_fallback_plan(
             "plan_version": "1",
         },
     )
-    enrichment = None
+    enrichment_data: Dict[str, Any] = {}
+    enrichment_error_map: Dict[str, str] = {}
     events_block: Dict[str, Any] | None = None
     earnings_block: Dict[str, Any] | None = None
     sentiment_block: Dict[str, Any] | None = None
+    events_source: str | None = None
+    earnings_source: str | None = None
     try:
-        enrichment = await _fetch_context_enrichment(symbol)
+        enrichment_data, enrichment_error_map = await _collect_enrichment_data(symbol, as_of_dt)
     except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("fallback enrichment fetch failed for %s: %s", symbol, exc)
-        enrichment = None
-    if enrichment:
-        events_block = enrichment.get("events")
-        earnings_block = enrichment.get("earnings")
-        sentiment_block = enrichment.get("sentiment")
+        logger.error("enrichment collection failed for %s: %s", symbol, exc)
+        enrichment_data = {}
+        enrichment_error_map = {"collector": str(exc)}
+    if enrichment_data:
+        events_candidate = enrichment_data.get("events")
+        if isinstance(events_candidate, Mapping):
+            events_block = dict(events_candidate)
+            events_source = events_source or "enrichment"
+        earnings_candidate = enrichment_data.get("earnings")
+        if isinstance(earnings_candidate, Mapping):
+            earnings_block = dict(earnings_candidate)
+            earnings_source = earnings_source or "enrichment"
+        sentiment_candidate = enrichment_data.get("sentiment")
+        if isinstance(sentiment_candidate, Mapping):
+            sentiment_block = dict(sentiment_candidate)
     session_state_payload_raw = market_meta.get("session_state") if isinstance(market_meta, dict) else None
     if session_state_payload_raw is None and isinstance(data_meta, dict):
         session_state_payload_raw = data_meta.get("session_state")
@@ -10010,6 +10066,7 @@ async def _generate_fallback_plan(
         macro_window = _macro_event_block(symbol, session_state_payload)
         if macro_window:
             events_block = macro_window
+            events_source = events_source or "macro_window"
     within_event_window = bool((events_block or {}).get("within_event_window"))
     minutes_to_event_token = (events_block or {}).get("min_minutes_to_event")
     minutes_to_event: Optional[int] = None
@@ -10021,6 +10078,41 @@ async def _generate_fallback_plan(
     session_state_payload["within_event_window"] = within_event_window
     if minutes_to_event is not None:
         session_state_payload["minutes_to_event"] = minutes_to_event
+    if events_block and "events" not in enrichment_data:
+        enrichment_data["events"] = events_block
+    if earnings_block and "earnings" not in enrichment_data:
+        enrichment_data["earnings"] = earnings_block
+    if sentiment_block and "sentiment" not in enrichment_data:
+        enrichment_data["sentiment"] = sentiment_block
+    enrichment_error_messages = [
+        f"{source}: {message}"
+        for source, message in enrichment_error_map.items()
+        if message
+    ]
+    if enrichment_data and enrichment_error_messages:
+        enrichment_status = "partial"
+    elif enrichment_data:
+        enrichment_status = "ok"
+    elif enrichment_error_messages:
+        enrichment_status = "error"
+    else:
+        enrichment_status = "unavailable"
+    enrichment_error_str = "; ".join(enrichment_error_messages)
+    enrichment_service_url = getattr(settings, "enrichment_service_url", None)
+    logger.info(
+        "plan_enrichment_status",
+        extra={
+            "symbol": symbol,
+            "events_present": bool(events_block),
+            "earnings_present": bool(earnings_block),
+            "events_source": events_source or "none",
+            "earnings_source": earnings_source or "none",
+            "enrichment_url": enrichment_service_url,
+            "enrichment_missing": not bool(events_block) and not bool(earnings_block),
+            "enrichment_status": enrichment_status,
+            "enrichment_errors": enrichment_error_str,
+        },
+    )
     blocked_styles = {
         token.strip().lower()
         for token in getattr(settings, "ft_event_blocked_styles", [])
@@ -10227,7 +10319,7 @@ async def _generate_fallback_plan(
         )
         if placeholder_contracts:
             options_contracts = placeholder_contracts
-            options_note = "Contracts unavailable; using guardrail placeholders."
+            options_note = "Contracts unavailable; enrichment still included."
     if options_contracts:
         for contract in options_contracts:
             if isinstance(contract, dict):
@@ -10805,6 +10897,7 @@ async def _generate_fallback_plan(
             "vwap": vwap_value,
         },
         options=options_payload if isinstance(options_payload, dict) else None,
+        enrichment_data=enrichment_data,
         options_contracts=options_contracts_payload,
         options_note=options_note if include_options_contracts else None,
         calc_notes=calc_notes_payload,
@@ -10932,6 +11025,9 @@ async def _generate_fallback_plan(
         meta_payload["mtf_confluence"] = mtf_confluence_payload
     if plan_badges:
         meta_payload["badges"] = plan_badges
+    meta_payload["enrichment_status"] = enrichment_status
+    if enrichment_error_messages:
+        meta_payload["enrichment_errors"] = enrichment_error_messages
     plan_response.meta = meta_payload or None
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
     mode_label = "live" if is_plan_live else "frozen"
@@ -11330,23 +11426,22 @@ async def gpt_plan(
     earnings_block = first.get("earnings")
     events_source = "payload" if events_block else None
     earnings_source = "payload" if earnings_block else None
-    enrichment = None
-    if not events_block or not earnings_block:
-        try:
-            enrichment = await _fetch_context_enrichment(symbol)
-        except Exception as exc:
-            logger.debug("enrichment fetch failed for %s: %s", symbol, exc)
-            enrichment = None
-        if not events_block:
-            enriched_events = (enrichment or {}).get("events")
-            if enriched_events:
-                events_block = enriched_events
-                events_source = events_source or "enrichment"
-        if not earnings_block:
-            enriched_earnings = (enrichment or {}).get("earnings")
-            if enriched_earnings:
-                earnings_block = enriched_earnings
-                earnings_source = earnings_source or "enrichment"
+    enrichment_data: Dict[str, Any] = {}
+    enrichment_error_map: Dict[str, str] = {}
+    try:
+        enrichment_data, enrichment_error_map = await _collect_enrichment_data(symbol, as_of_dt)
+    except Exception as exc:
+        logger.error("enrichment collection failed for %s: %s", symbol, exc)
+        enrichment_data = {}
+        enrichment_error_map = {"collector": str(exc)}
+    if not sentiment_block and isinstance(enrichment_data.get("sentiment"), Mapping):
+        sentiment_block = dict(enrichment_data["sentiment"])
+    if not events_block and isinstance(enrichment_data.get("events"), Mapping):
+        events_block = dict(enrichment_data["events"])
+        events_source = events_source or "enrichment"
+    if not earnings_block and isinstance(enrichment_data.get("earnings"), Mapping):
+        earnings_block = dict(enrichment_data["earnings"])
+        earnings_source = earnings_source or "enrichment"
     if not events_block:
         macro_events = _macro_event_block(symbol, session_state_payload)
         if macro_events:
@@ -11363,6 +11458,25 @@ async def gpt_plan(
     session_state_payload["within_event_window"] = within_event_window
     if minutes_to_event is not None:
         session_state_payload["minutes_to_event"] = minutes_to_event
+    if events_block and "events" not in enrichment_data:
+        enrichment_data["events"] = events_block
+    if earnings_block and "earnings" not in enrichment_data:
+        enrichment_data["earnings"] = earnings_block
+    if sentiment_block and "sentiment" not in enrichment_data:
+        enrichment_data["sentiment"] = sentiment_block
+    enrichment_error_messages = [
+        f"{source}: {message}"
+        for source, message in enrichment_error_map.items()
+        if message
+    ]
+    if enrichment_data and enrichment_error_messages:
+        enrichment_status = "partial"
+    elif enrichment_data:
+        enrichment_status = "ok"
+    elif enrichment_error_messages:
+        enrichment_status = "error"
+    else:
+        enrichment_status = "unavailable"
     blocked_styles = {
         token.strip().lower()
         for token in getattr(settings, "ft_event_blocked_styles", [])
@@ -12466,6 +12580,8 @@ async def gpt_plan(
         data_meta.setdefault("events_present", bool(events_block))
         data_meta.setdefault("earnings_present", bool(earnings_block))
 
+    enrichment_error_str = "; ".join(enrichment_error_messages)
+    enrichment_service_url = getattr(settings, "enrichment_service_url", None)
     logger.info(
         "plan_enrichment_status",
         extra={
@@ -12474,6 +12590,10 @@ async def gpt_plan(
             "earnings_present": bool(earnings_block),
             "events_source": events_source or "none",
             "earnings_source": earnings_source or "none",
+            "enrichment_url": enrichment_service_url,
+            "enrichment_missing": not bool(events_block) and not bool(earnings_block),
+            "enrichment_status": enrichment_status,
+            "enrichment_errors": enrichment_error_str,
         },
     )
 
@@ -12607,6 +12727,7 @@ async def gpt_plan(
         market_snapshot=market_snapshot_payload,
         features=features_payload,
         options=options_payload,
+        enrichment_data=enrichment_data,
         options_contracts=options_contracts_payload,
         options_note=options_note if include_options_contracts else None,
         calc_notes=calc_notes_output,
@@ -12681,6 +12802,9 @@ async def gpt_plan(
         meta_payload["mtf_confluence"] = plan_response.confluence
     if mtf_bias_output:
         meta_payload["mtf_bias"] = mtf_bias_output
+    meta_payload["enrichment_status"] = enrichment_status
+    if enrichment_error_messages:
+        meta_payload["enrichment_errors"] = enrichment_error_messages
     plan_response.meta = meta_payload or None
     return _finalize_plan_response(plan_response)
 
@@ -12859,6 +12983,15 @@ async def assistant_exec(
         meta_block["options_note"] = options_note_override
     elif plan_response.options_note:
         meta_block["options_note"] = plan_response.options_note
+    if plan_response.enrichment_data:
+        meta_block["enrichment_data"] = plan_response.enrichment_data
+    if isinstance(plan_response.meta, dict):
+        status_token = plan_response.meta.get("enrichment_status")
+        if status_token is not None:
+            meta_block["enrichment_status"] = status_token
+        enrichment_errors_meta = plan_response.meta.get("enrichment_errors")
+        if enrichment_errors_meta:
+            meta_block["enrichment_errors"] = enrichment_errors_meta
     if plan_response.confluence:
         meta_block["mtf_confluence"] = plan_response.confluence
     if plan_response.key_levels_used:
@@ -13199,6 +13332,7 @@ async def gpt_multi_context(
         "skew_25d": iv_metrics.get("skew_25d"),
     }
     enrichment = await _fetch_context_enrichment(symbol)
+    enrichment_status = "ok" if enrichment else "unavailable"
     sentiment = (enrichment or {}).get("sentiment")
     events = (enrichment or {}).get("events")
     earnings = (enrichment or {}).get("earnings")
@@ -13302,6 +13436,7 @@ async def gpt_multi_context(
         sentiment=sentiment,
         events=events,
         earnings=earnings,
+        enrichment_status=enrichment_status,
         summary=summary,
         decimals=decimals,
         data_quality=data_quality,
