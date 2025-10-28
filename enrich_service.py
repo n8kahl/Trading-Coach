@@ -7,7 +7,9 @@ are cached briefly to avoid hitting rate limits.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import logging
 import os
 import time
 from typing import Any, Dict, Optional
@@ -15,8 +17,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
 
 load_dotenv()
 
@@ -52,285 +53,195 @@ cache = TTLCache(ttl_s=300)
 app = FastAPI(title="Context Enrichment (Finnhub)")
 
 
-async def _get_json(
-    client: httpx.AsyncClient, url: str, params: Dict[str, Any]
-) -> Dict[str, Any]:
-    """Fetch JSON with a small TTL cache."""
+logger = logging.getLogger("enrich_service")
+if not logger.handlers:
+    logger.addHandler(logging.NullHandler())
 
-    cache_key = f"{url}|{sorted(params.items())}"
+
+def _make_cache_key(name: str, params: Dict[str, Any]) -> str:
+    filtered = tuple(sorted((k, v) for k, v in params.items() if k.lower() != "token"))
+    return f"{name}|{filtered}"
+
+
+async def _fetch_finnhub_json(
+    client: httpx.AsyncClient,
+    name: str,
+    path: str,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Fetch Finnhub JSON with logging and basic caching."""
+
+    cache_key = _make_cache_key(name, params)
     cached = cache.get(cache_key)
     if cached is not None:
+        logger.info("Finnhub cache hit %s status=%s", name, cached.get("status"))
         return cached
 
-    response = await client.get(url, params=params, timeout=15.0)
+    sanitized = {k: ("***" if k.lower() == "token" else v) for k, v in params.items()}
+    url = f"{FINNHUB_BASE_URL}{path}"
+    logger.info("Finnhub request %s url=%s params=%s", name, url, {k: v for k, v in sanitized.items() if k != "token"})
+
+    try:
+        response = await client.get(url, params=params, timeout=15.0)
+    except Exception as exc:
+        logger.warning("Finnhub request failed %s error=%s", name, exc)
+        return {"data": None, "error": str(exc)[:200], "status": None}
+
+    logger.info(
+        "Finnhub response %s status=%s bytes=%s",
+        name,
+        response.status_code,
+        len(response.content),
+    )
+
     if response.status_code != 200:
-        raise HTTPException(
-            status_code=502, detail=f"Upstream error {response.status_code}: {response.text[:200]}"
-        )
+        body_excerpt = response.text[:200]
+        logger.warning("Finnhub error %s status=%s body=%s", name, response.status_code, body_excerpt)
+        return {
+            "data": None,
+            "error": f"status {response.status_code}: {body_excerpt}",
+            "status": response.status_code,
+        }
+
     payload = response.json()
-    cache.set(cache_key, payload)
-    return payload
+    result = {"data": payload, "error": None, "status": response.status_code}
+    cache.set(cache_key, result)
+    return result
 
 
-class SentimentBlock(BaseModel):
-    symbol_sentiment: float
-    news_count_24h: Optional[int] = None
-    news_bias_24h: Optional[float] = None
-    social_sentiment: Optional[float] = None
-    headline_risk: Optional[str] = None
+def _extract_events(data: Any) -> list[Dict[str, Any]]:
+    if isinstance(data, dict):
+        calendar = data.get("earningsCalendar") or data.get("data")
+        if isinstance(calendar, list):
+            return calendar
+    if isinstance(data, list):
+        return data
+    return []
 
 
-class EventsBlock(BaseModel):
-    next_fomc_minutes: Optional[int] = None
-    next_cpi_minutes: Optional[int] = None
-    next_nfp_minutes: Optional[int] = None
-    within_event_window: Optional[bool] = None
-    label: Optional[str] = None
-    min_minutes_to_event: Optional[int] = None
+def _extract_earnings(data: Any) -> list[Dict[str, Any]]:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        # Some Finnhub responses nest the list under `data`
+        entries = data.get("data") or data.get("earnings")
+        if isinstance(entries, list):
+            return entries
+    return []
 
 
-class EarningsBlock(BaseModel):
-    next_earnings_at: Optional[str] = None
-    dte_to_earnings: Optional[float] = None
-    pre_or_post: Optional[str] = None
-    earnings_flag: Optional[str] = None
-    expected_move_pct: Optional[float] = None
+def _extract_sentiment(data: Any) -> Dict[str, Any]:
+    if isinstance(data, dict):
+        return data
+    return {}
 
 
-class EnrichmentResponse(BaseModel):
-    symbol: str
-    sentiment: Optional[SentimentBlock] = None
-    events: Optional[EventsBlock] = None
-    earnings: Optional[EarningsBlock] = None
+def _now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _minutes_until(timestamp_utc: dt.datetime) -> int:
-    now = dt.datetime.now(dt.timezone.utc)
-    delta = timestamp_utc - now
-    return max(0, int(delta.total_seconds() // 60))
-
-
-def _iso_str(timestamp_utc: dt.datetime) -> str:
-    return timestamp_utc.replace(microsecond=0).isoformat()
-
-
-async def _build_sentiment(client: httpx.AsyncClient, symbol: str) -> SentimentBlock:
-    params = {"symbol": symbol, "token": FINNHUB_API_KEY}
-    data = await _get_json(client, f"{FINNHUB_BASE_URL}/news-sentiment", params)
-
-    score = float(data.get("companyNewsScore") or 0.0)
-    symbol_sentiment = (score - 0.5) * 2.0  # map 0..1 to -1..1
-
-    buzz = data.get("buzz") or {}
-    news_count = int(buzz.get("articlesInLastWeek") or 0)
-
-    sentiment = data.get("sentiment") or {}
-    bullish = float(sentiment.get("bullishPercent") or 0.5)
-    news_bias = (bullish - 0.5) * 2.0
-
-    headline_risk = "normal"
-    if news_count > 50 or abs(symbol_sentiment) > 0.6:
-        headline_risk = "elevated"
-
-    return SentimentBlock(
-        symbol_sentiment=round(symbol_sentiment, 3),
-        news_count_24h=news_count,
-        news_bias_24h=round(news_bias, 3),
-        social_sentiment=None,
-        headline_risk=headline_risk,
-    )
-
-
-async def _build_events(client: httpx.AsyncClient) -> EventsBlock:
-    today = dt.date.today()
-    params = {
-        "from": today.isoformat(),
-        "to": (today + dt.timedelta(days=7)).isoformat(),
-        "token": FINNHUB_API_KEY,
-    }
-    data = await _get_json(client, f"{FINNHUB_BASE_URL}/calendar/economic", params)
-    calendar = data.get("economicCalendar") or []
-
-    def _event_timestamp(item: Dict[str, Any]) -> Optional[dt.datetime]:
-        datetime_token = item.get("datetime")
-        if isinstance(datetime_token, str):
-            try:
-                return dt.datetime.fromisoformat(datetime_token.replace("Z", "+00:00"))
-            except ValueError:
-                pass
-        date_str = item.get("date")
-        time_str = item.get("time") or "00:00"
-        if not date_str:
-            return None
-        if time_str.upper() in {"", "TBD", "N/A"}:
-            time_str = "00:00"
-        try:
-            return dt.datetime.fromisoformat(f"{date_str}T{time_str}:00+00:00")
-        except ValueError:
-            return None
-
-    def next_minutes(name_tokens: tuple[str, ...]) -> Optional[int]:
-        now_dt = dt.datetime.now(dt.timezone.utc)
-        future: list[int] = []
-        for item in calendar:
-            title = (item.get("event") or "").lower()
-            if not any(token in title for token in name_tokens):
-                continue
-            timestamp = _event_timestamp(item)
-            if not timestamp:
-                continue
-            minutes = int((timestamp - now_dt).total_seconds() // 60)
-            if minutes >= -30:
-                future.append(minutes if minutes >= 0 else 0)
-        return min(future) if future else None
-
-    next_cpi = next_minutes(("cpi", "consumer price"))
-    next_fomc = next_minutes(("fomc", "federal reserve", "interest rate decision"))
-    next_nfp = next_minutes(("non-farm", "nonfarm", "payroll"))
-
-    upcoming = [value for value in (next_cpi, next_fomc, next_nfp) if value is not None]
-    min_minutes = min(upcoming) if upcoming else None
-    within_window = bool(min_minutes is not None and min_minutes <= 120)
-    label = "none"
-    if min_minutes is not None:
-        if min_minutes <= 60:
-            label = "risk"
-        elif min_minutes <= 180:
-            label = "watch"
-
-    return EventsBlock(
-        next_fomc_minutes=next_fomc,
-        next_cpi_minutes=next_cpi,
-        next_nfp_minutes=next_nfp,
-        within_event_window=within_window,
-        label=label,
-        min_minutes_to_event=min_minutes,
-    )
-
-
-async def _build_earnings(client: httpx.AsyncClient, symbol: str) -> EarningsBlock:
-    today = dt.date.today()
-    params = {
-        "from": today.isoformat(),
-        "to": (today + dt.timedelta(days=60)).isoformat(),
-        "token": FINNHUB_API_KEY,
-    }
-    data = await _get_json(client, f"{FINNHUB_BASE_URL}/calendar/earnings", params)
-    calendar = data.get("earningsCalendar") or []
-
-    upcoming: Optional[Dict[str, Any]] = None
-    for item in calendar:
-        if (item.get("symbol") or "").upper() == symbol.upper():
-            upcoming = item
-            break
-
-    if not upcoming:
-        return EarningsBlock(pre_or_post="none", earnings_flag="none")
-
-    date_str = upcoming.get("date") or today.isoformat()
-    hour_str = upcoming.get("hour") or "20:00"
-    try:
-        timestamp = dt.datetime.fromisoformat(f"{date_str}T{hour_str}:00+00:00")
-    except ValueError:
-        timestamp = dt.datetime.fromisoformat(f"{today.isoformat()}T20:00:00+00:00")
-
-    dte = (timestamp.date() - today).days
-    flag = "none"
-    if dte == 0:
-        flag = "today"
-    elif 1 <= dte <= 7:
-        flag = "near"
-
-    pre_or_post = "none"
-    try:
-        hour = int(hour_str.split(":")[0])
-        if hour < 13:
-            pre_or_post = "pre"
-            if dte == 0:
-                flag = "before_open"
-        else:
-            pre_or_post = "post"
-            if dte == 0:
-                flag = "after_close"
-    except ValueError:
-        pass
-
-    return EarningsBlock(
-        next_earnings_at=_iso_str(timestamp),
-        dte_to_earnings=float(dte),
-        pre_or_post=pre_or_post,
-        earnings_flag=flag,
-    )
-
-
-@app.get("/enrich/{symbol}", response_model=EnrichmentResponse)
-async def enrich(symbol: str) -> EnrichmentResponse:
-    symbol = symbol.strip().upper()
-    if not symbol:
+@app.get("/enrich/{symbol}")
+async def enrich(symbol: str) -> Dict[str, Any]:
+    symbol_clean = symbol.strip().upper()
+    if not symbol_clean:
         raise HTTPException(status_code=400, detail="Symbol is required")
 
     if not FINNHUB_API_KEY:
         raise HTTPException(status_code=503, detail="FINNHUB_API_KEY not configured")
 
-    async with httpx.AsyncClient() as client:
-        sentiment = await _build_sentiment(client, symbol)
-        events = await _build_events(client)
-        earnings = await _build_earnings(client, symbol)
+    endpoint_specs = {
+        "earnings": ("/stock/earnings", {"symbol": symbol_clean, "token": FINNHUB_API_KEY}),
+        "events": ("/calendar/earnings", {"symbol": symbol_clean, "token": FINNHUB_API_KEY}),
+        "sentiment": ("/news-sentiment", {"symbol": symbol_clean, "token": FINNHUB_API_KEY}),
+    }
 
-    return EnrichmentResponse(symbol=symbol, sentiment=sentiment, events=events, earnings=earnings)
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        names = list(endpoint_specs.keys())
+        responses = await asyncio.gather(
+            *[
+                _fetch_finnhub_json(client, name, path, params)
+                for name, (path, params) in endpoint_specs.items()
+            ]
+        )
+    results = dict(zip(names, responses))
+
+    earnings_result = results["earnings"]
+    events_result = results["events"]
+    sentiment_result = results["sentiment"]
+
+    earnings_data = _extract_earnings(earnings_result["data"])
+    events_data = _extract_events(events_result["data"])
+    sentiment_data = _extract_sentiment(sentiment_result["data"])
+
+    payload: Dict[str, Any] = {
+        "symbol": symbol_clean,
+        "earnings": earnings_data,
+        "events": events_data,
+        "sentiment": sentiment_data,
+        "finnhub_status": "ok" if any(res.get("error") is None for res in results.values()) else "error",
+        "fetched_at": _now_iso(),
+    }
+
+    if earnings_result.get("error"):
+        payload["earnings_error"] = earnings_result["error"]
+        payload["earnings_status"] = earnings_result.get("status")
+    if events_result.get("error"):
+        payload["events_error"] = events_result["error"]
+        payload["events_status"] = events_result.get("status")
+    if sentiment_result.get("error"):
+        payload["sentiment_error"] = sentiment_result["error"]
+        payload["sentiment_status"] = sentiment_result.get("status")
+
+    finnhub_requests: Dict[str, Dict[str, Any]] = {}
+    for name, res in results.items():
+        entry: Dict[str, Any] = {}
+        if res.get("status") is not None:
+            entry["status"] = res["status"]
+        if res.get("error"):
+            entry["error"] = res["error"]
+        finnhub_requests[name] = entry or {"status": None}
+    payload["finnhub_requests"] = finnhub_requests
+
+    return payload
 
 
 @app.get("/healthz")
-async def healthcheck(ping: bool = Query(False, description="Ping Finnhub to verify reachability")) -> Dict[str, Any]:
-    """Basic process health plus optional Finnhub connectivity check.
-
-    - Always returns `status: ok` if the server is running.
-    - Returns a `finnhub` block indicating whether the API key is configured and,
-      if `ping=true`, whether a recent upstream call succeeded (cached briefly).
-    """
-
-    finnhub_info: Dict[str, Any] = {
+async def healthcheck() -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
         "configured": bool(FINNHUB_API_KEY),
-        "ok": None,
-        "last_checked": None,
-        "message": None,
+        "ok": False,
+        "status": None,
+        "checked_at": None,
     }
 
-    if FINNHUB_API_KEY and ping:
-        cache_key = "health:finnhub"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            finnhub_info.update(cached)
-        else:
-            # Perform a lightweight upstream call and cache the result
-            try:
-                async with httpx.AsyncClient(timeout=8.0) as client:
-                    # Use news-sentiment on a liquid symbol as a simple probe
-                    params = {"symbol": "AAPL", "token": FINNHUB_API_KEY}
-                    resp = await client.get(f"{FINNHUB_BASE_URL}/news-sentiment", params=params)
-                    ok = resp.status_code == 200
-                    finfo = {
-                        "configured": True,
-                        "ok": bool(ok),
-                        "last_checked": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
-                        "message": None if ok else f"status={resp.status_code}",
-                    }
-                    cache.set(cache_key, finfo)
-                    finnhub_info.update(finfo)
-            except Exception as exc:  # pragma: no cover
-                finfo = {
-                    "configured": True,
-                    "ok": False,
-                    "last_checked": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
-                    "message": str(exc)[:200],
-                }
-                cache.set(cache_key, finfo)
-                finnhub_info.update(finfo)
+    if not FINNHUB_API_KEY:
+        summary["error"] = "FINNHUB_API_KEY missing"
+        return {"status": "ok", "finnhub": summary}
 
-    return {
-        "status": "ok",
-        "finnhub": finnhub_info,
-    }
+    cache_key = "health:quote:SPY"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return {"status": "ok", "finnhub": dict(cached)}
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            params = {"symbol": "SPY", "token": FINNHUB_API_KEY}
+            logger.info("Finnhub request healthz url=%s/quote params=%s", FINNHUB_BASE_URL, {"symbol": "SPY"})
+            resp = await client.get(f"{FINNHUB_BASE_URL}/quote", params=params)
+            logger.info("Finnhub response healthz status=%s bytes=%s", resp.status_code, len(resp.content))
+            summary["status"] = resp.status_code
+            summary["ok"] = resp.status_code == 200
+            summary["checked_at"] = _now_iso()
+            if not summary["ok"]:
+                summary["error"] = resp.text[:200]
+    except Exception as exc:  # pragma: no cover
+        summary["ok"] = False
+        summary["status"] = None
+        summary["checked_at"] = _now_iso()
+        summary["error"] = str(exc)[:200]
+
+    cache.set(cache_key, summary)
+    return {"status": "ok", "finnhub": summary}
 
 
 # ---------------------------------------------------------------------------
