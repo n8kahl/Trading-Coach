@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     gpt_market_routing_enabled: bool = Field(True, env="GPT_MARKET_ROUTING_ENABLED")
     gpt_backend_v2_enabled: bool = Field(True, env="GPT_BACKEND_V2_ENABLED")
     ft_no_fallback_trades: bool = Field(False, env="FT_NO_FALLBACK_TRADES")
+    ft_disable_delta_filters: bool = Field(False, env="FT_DISABLE_DELTA_FILTERS")
+    ft_disable_spread_guardrail: bool = Field(False, env="FT_DISABLE_SPREAD_GUARDRAIL")
     ft_max_spread_pct: float = Field(8.0, env="FT_MAX_SPREAD_PCT")
     ft_min_oi: int = Field(300, env="FT_MIN_OI")
     ft_max_drift_bps: float = Field(30.0, env="FT_MAX_DRIFT_BPS")

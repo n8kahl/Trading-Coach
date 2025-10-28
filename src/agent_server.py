@@ -5090,13 +5090,54 @@ def _only_placeholder_contracts(contracts: Sequence[Mapping[str, Any]] | None) -
     return has_placeholder
 
 
+def _ensure_relaxed_minimum_contracts(
+    current: Sequence[Mapping[str, Any]] | None,
+    source: Sequence[Mapping[str, Any]] | None,
+    *,
+    minimum: int = 3,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Ensure at least `minimum` contracts by supplementing from `source` with relaxed flags."""
+
+    existing: List[Dict[str, Any]] = [dict(item) for item in current] if current else []
+    if len(existing) >= minimum or not source:
+        return existing, False
+
+    seen_symbols: Set[str] = {
+        str(item.get("symbol") or "").upper()
+        for item in existing
+        if isinstance(item, Mapping) and item.get("symbol")
+    }
+    additions: List[Dict[str, Any]] = []
+    for candidate in source:
+        if not isinstance(candidate, Mapping):
+            continue
+        symbol_token = str(candidate.get("symbol") or "").upper()
+        if not symbol_token or symbol_token in seen_symbols:
+            continue
+        relaxed = dict(candidate)
+        flags = list(relaxed.get("guardrail_flags") or [])
+        flags.append("RELAXED_MODE")
+        relaxed["guardrail_flags"] = list(dict.fromkeys(flags))
+        relaxed.setdefault("status", "ok_relaxed")
+        relaxed.setdefault("rating", "yellow")
+        additions.append(relaxed)
+        seen_symbols.add(symbol_token)
+        if len(existing) + len(additions) >= minimum:
+            break
+    if additions:
+        existing.extend(additions)
+        return existing, True
+    return existing, False
+
+
+_RELAXED_MODE_NOTE = "Relaxed mode: delta/spread filters bypassed to surface contracts."
 _GUARDRAIL_OI_STEPS = (1000.0, 700.0, 500.0, 300.0)
 
 
 def _apply_option_guardrails(
     contracts: Sequence[Dict[str, Any]],
     *,
-    max_spread_pct: float,
+    max_spread_pct: float | None,
     min_open_interest: int,
     style: str | None = None,
     strategy_id: str | None = None,
@@ -5138,7 +5179,7 @@ def _apply_option_guardrails(
                 oi_numeric = None
             reason: str | None = None
             message: str | None = None
-            if spread is not None and float(spread) > max_spread_pct:
+            if max_spread_pct is not None and spread is not None and float(spread) > max_spread_pct:
                 reason = "SPREAD_TOO_WIDE"
                 message = f"spread {float(spread):.2f}% exceeds limit {max_spread_pct:.2f}%"
             elif oi_numeric is None:
@@ -5203,11 +5244,15 @@ def _apply_option_guardrails(
 
     rules = style_guardrail_rules(style)
     rules.pop("style_key", "intraday")
-    base_spread_cap = float(rules.get("max_spread_pct", max_spread_pct))
-    if after_hours:
-        rules["max_spread_pct"] = max(base_spread_cap, float(max_spread_pct), 400.0)
+    if max_spread_pct is None:
+        base_spread_cap = float(rules.get("max_spread_pct", 9999.0))
+        rules["max_spread_pct"] = float("inf")
     else:
-        rules["max_spread_pct"] = min(base_spread_cap, float(max_spread_pct))
+        base_spread_cap = float(rules.get("max_spread_pct", max_spread_pct))
+        if after_hours:
+            rules["max_spread_pct"] = max(base_spread_cap, float(max_spread_pct), 400.0)
+        else:
+            rules["max_spread_pct"] = min(base_spread_cap, float(max_spread_pct))
     rules["min_volume"] = float(rules.get("min_volume", 0.0))
     if after_hours:
         rules["min_volume"] = 0.0
@@ -5230,11 +5275,14 @@ def _apply_option_guardrails(
     relaxation_sequence: List[Tuple[str, Optional[float]]] = [
         ("delta", None),
         ("dte", None),
-        ("spread", None),
     ]
+    current_spread_limit = float(rules.get("max_spread_pct", base_spread_cap))
+    if max_spread_pct is not None and math.isfinite(current_spread_limit):
+        relaxation_sequence.append(("spread", None))
     relaxation_sequence.extend(("oi", value) for value in oi_steps[1:])
     if after_hours:
-        relaxation_sequence.extend([("spread", None), ("spread", None)])
+        if max_spread_pct is not None:
+            relaxation_sequence.extend([("spread", None), ("spread", None)])
 
     relax_flags: List[str] = []
     if after_hours:
@@ -5310,7 +5358,7 @@ def _apply_option_guardrails(
             rules["dte_low"] = max(0.0, rules["dte_low"] - 2.0)
             rules["dte_high"] = rules["dte_high"] + 2.0
             relax_flags.append("DTE_RELAXED")
-        elif relax_type == "spread":
+        elif relax_type == "spread" and max_spread_pct is not None and math.isfinite(rules.get("max_spread_pct", 0.0)):
             increment = 10.0 if after_hours else 2.0
             rules["max_spread_pct"] = rules["max_spread_pct"] + increment
             relax_flags.append("SPREAD_RELAXED")
@@ -10003,9 +10051,12 @@ async def _generate_fallback_plan(
                     selector_rejections.append(rejection_entry)
         desired_targets = target_delta_by_style(style_token, strategy_id_value)
         desired_contract_count = max(2, min(3, len(desired_targets) or 3))
+        spread_toggle_disabled = bool(getattr(settings, "ft_disable_spread_guardrail", False))
+        max_spread_setting = getattr(settings, "ft_max_spread_pct", 8.0)
+        max_spread_argument = None if spread_toggle_disabled else float(max_spread_setting)
         filtered_contracts, guardrail_rejections, relax_flags = _apply_option_guardrails(
             extracted_contracts,
-            max_spread_pct=float(getattr(settings, "ft_max_spread_pct", 8.0)),
+            max_spread_pct=max_spread_argument,
             min_open_interest=int(getattr(settings, "ft_min_oi", 300)),
             style=style_token,
             strategy_id=strategy_id_value,
@@ -10092,6 +10143,10 @@ async def _generate_fallback_plan(
                         options_note = "Options side unavailable for this plan"
                     else:
                         options_note = "No tradeable contracts met filters"
+        if not event_window_blocked and extracted_contracts:
+            options_contracts, relaxed_added_initial = _ensure_relaxed_minimum_contracts(options_contracts, extracted_contracts)
+            if relaxed_added_initial and not options_note:
+                options_note = _RELAXED_MODE_NOTE
         if event_window_blocked:
             options_contracts = []
             options_note = "Blocked by event window"
@@ -10139,6 +10194,13 @@ async def _generate_fallback_plan(
                 options_quote_session = fallback_quote_session
             if fallback_as_of_token:
                 options_as_of_timestamp = fallback_as_of_token
+    if include_options_contracts and not event_window_blocked and extracted_contracts:
+        options_contracts, relaxed_added_after_polygon = _ensure_relaxed_minimum_contracts(
+            options_contracts,
+            extracted_contracts,
+        )
+        if relaxed_added_after_polygon and not options_note:
+            options_note = _RELAXED_MODE_NOTE
     delta_missing_provider_fallback = (
         polygon_result is not None
         and isinstance(polygon_result.get("options_contracts"), list)
@@ -11978,9 +12040,12 @@ async def gpt_plan(
                     selector_rejections.append(entry)
         desired_targets = target_delta_by_style(style_token, strategy_id_value)
         desired_contract_count = max(2, min(3, len(desired_targets) or 3))
+        spread_toggle_disabled = bool(getattr(settings, "ft_disable_spread_guardrail", False))
+        max_spread_setting = getattr(settings, "ft_max_spread_pct", 8.0)
+        max_spread_argument = None if spread_toggle_disabled else float(max_spread_setting)
         filtered_contracts, guardrail_rejections, relax_flags = _apply_option_guardrails(
             extracted_contracts,
-            max_spread_pct=float(getattr(settings, "ft_max_spread_pct", 8.0)),
+            max_spread_pct=max_spread_argument,
             min_open_interest=int(getattr(settings, "ft_min_oi", 300)),
             style=style_token,
             strategy_id=strategy_id_value,
@@ -12045,6 +12110,13 @@ async def gpt_plan(
                     options_note = "Options side unavailable for this plan"
                 else:
                     options_note = "No tradeable contracts met filters"
+        if include_options_contracts and extracted_contracts and not event_window_blocked:
+            options_contracts, relaxed_added_structured = _ensure_relaxed_minimum_contracts(
+                options_contracts,
+                extracted_contracts,
+            )
+            if relaxed_added_structured and not options_note:
+                options_note = _RELAXED_MODE_NOTE
         if event_window_blocked:
             options_contracts = []
             options_note = "Blocked by event window"
@@ -13316,11 +13388,15 @@ def _screen_contracts(
 ) -> ScreenedContracts:
     candidates: List[Dict[str, Any]] = []
     rejections: List[Dict[str, Any]] = []
+    settings = get_settings()
+    disable_delta_filters = bool(getattr(settings, "ft_disable_delta_filters", False))
+    disable_spread_guardrail = bool(getattr(settings, "ft_disable_spread_guardrail", False))
     min_dte = int(filters.get("min_dte", 0))
     max_dte = int(filters.get("max_dte", 366))
     min_delta = float(filters.get("min_delta", 0.0))
     max_delta = float(filters.get("max_delta", 1.0))
-    max_spread = float(filters.get("max_spread_pct", 100.0))
+    configured_max_spread = float(filters.get("max_spread_pct", 100.0))
+    max_spread = float("inf") if disable_spread_guardrail else configured_max_spread
     min_oi = int(filters.get("min_oi", 0))
     apply_filters = not allow_unfiltered
     for _, row in chain.iterrows():
@@ -13358,9 +13434,10 @@ def _screen_contracts(
             spread_pct = _normalize_spread_pct_value(row.get("spread_pct"))
         if spread_pct is None:
             spread_pct = 999.0
-        if apply_filters and spread_pct > max_spread:
+        if apply_filters and not disable_spread_guardrail and spread_pct > max_spread:
             _reject("SPREAD_TOO_WIDE", spread=f"{float(spread_pct):.2f}%", max_allowed=f"{max_spread:.2f}%")
             continue
+        spread_relaxed = disable_spread_guardrail and spread_pct > configured_max_spread
 
         dte = row.get("dte")
         if dte is None:
@@ -13378,13 +13455,25 @@ def _screen_contracts(
             continue
 
         delta = quote.get("delta") if quote else row.get("delta")
-        if delta is None or not math.isfinite(delta):
-            _reject("DELTA_UNAVAILABLE")
-            continue
-        abs_delta = abs(float(delta))
-        if apply_filters and (abs_delta < min_delta or abs_delta > max_delta):
+        delta_relaxed = False
+        if delta is None or not isinstance(delta, (int, float)) or not math.isfinite(float(delta)):
+            if apply_filters and not disable_delta_filters:
+                _reject("DELTA_UNAVAILABLE")
+                continue
+            delta = None
+            delta_relaxed = True
+        else:
+            delta = float(delta)
+        abs_delta = abs(float(delta)) if delta is not None else None
+        if apply_filters and not disable_delta_filters and abs_delta is not None and (
+            abs_delta < min_delta or abs_delta > max_delta
+        ):
             _reject("DELTA_OUT_OF_RANGE", delta=round(abs_delta, 3), min=min_delta, max=max_delta)
             continue
+        if disable_delta_filters and abs_delta is not None and (
+            abs_delta < min_delta or abs_delta > max_delta
+        ):
+            delta_relaxed = True
 
         oi = quote.get("open_interest") if quote else row.get("open_interest")
         if oi is None:
@@ -13400,9 +13489,14 @@ def _screen_contracts(
         vega = quote.get("vega") if quote else row.get("vega")
         iv = quote.get("iv") if quote else row.get("iv")
 
+        default_delta_for_score = (min_delta + max_delta) / 2.0 if math.isfinite(min_delta) and math.isfinite(max_delta) else 0.35
+        if not math.isfinite(default_delta_for_score) or default_delta_for_score <= 0:
+            default_delta_for_score = 0.35
+        trade_delta_for_score = abs_delta if abs_delta is not None else default_delta_for_score
+
         tradeability = _tradeability_score(
             spread_pct=spread_pct,
-            delta=abs_delta,
+            delta=trade_delta_for_score,
             style=style,
             oi=oi_val,
             iv_rank=None,
@@ -13422,7 +13516,7 @@ def _screen_contracts(
             "spread_pct": round(float(spread_pct), 2) if spread_pct is not None else None,
             "volume": int(volume) if isinstance(volume, (int, float)) else None,
             "oi": int(oi_val),
-            "delta": float(delta),
+            "delta": float(delta) if delta is not None else None,
             "gamma": float(gamma) if isinstance(gamma, (int, float)) else None,
             "theta": float(theta) if isinstance(theta, (int, float)) else None,
             "vega": float(vega) if isinstance(vega, (int, float)) else None,
@@ -13430,6 +13524,15 @@ def _screen_contracts(
             "iv_rank": None,
             "tradeability": tradeability,
         }
+        guardrail_flags: List[str] = []
+        if delta_relaxed:
+            guardrail_flags.append("DELTA_RELAXED")
+            if delta is None:
+                guardrail_flags.append("DELTA_MISSING")
+        if spread_relaxed:
+            guardrail_flags.append("SPREAD_RELAXED")
+        if guardrail_flags:
+            contract["guardrail_flags"] = sorted(set(guardrail_flags))
         prefer_delta = PREFER_DELTA_BY_STYLE.get(style, 0.5)
         try:
             spread_normalized = (
