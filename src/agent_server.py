@@ -2903,6 +2903,8 @@ class PlanResponse(BaseModel):
     em_used: bool | None = None
     calibration_meta: Dict[str, Any] | None = None
     planning_snapshot: Dict[str, Any] | None = None
+    options_quote_session: str | None = None
+    options_as_of: str | None = None
 
 
 def _prune_plan_payload(plan_payload: "PlanResponse") -> None:
@@ -10931,6 +10933,8 @@ async def _generate_fallback_plan(
         actionable_soon=plan_actionable_soon,
         waiting_for=waiting_for_payload,
         actionability_gate=actionability_gate,
+        options_quote_session=options_quote_session,
+        options_as_of=options_as_of_timestamp,
     )
     plan_response = _hydrate_secondary_fields(plan_response)
     if simulate_open:
@@ -12756,6 +12760,8 @@ async def gpt_plan(
         tp_reasons=tp_reasons_payload,
         meta=response_meta,
         rejected_contracts=rejected_contracts,
+        options_quote_session=options_quote_session,
+        options_as_of=options_as_of_timestamp,
     )
     plan_response = _hydrate_secondary_fields(plan_response)
     plan_response.phase = "hydrate"
