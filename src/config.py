@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     )
     enrichment_service_url: str | None = Field(
         default="http://localhost:8081",
-        env="ENRICH_SERVICE_URL",
+        validation_alias=AliasChoices("ENRICH_SERVICE_URL", "enrichment_service_url"),
     )
     finnhub_api_key: str | None = Field(None, env="FINNHUB_API_KEY")
     self_base_url: str | None = Field(None, env="SELF_API_BASE_URL")
