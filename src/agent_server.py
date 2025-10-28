@@ -26,6 +26,7 @@ from collections import Counter
 import copy
 
 import httpx
+from httpx import HTTPError
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Query, Response, WebSocket, WebSocketDisconnect
@@ -2661,6 +2662,26 @@ async def metrics_endpoint() -> Response:
     return Response(content=payload, media_type=content_type)
 
 
+@app.get("/diagnostics/enrich", include_in_schema=False)
+async def diagnostics_enrich() -> Dict[str, Any]:
+    base_url = _enrichment_base_url()
+    if not base_url:
+        return {"status": "disabled"}
+
+    health_url = f"{base_url}/healthz?ping=true"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0), follow_redirects=True) as client:
+        try:
+            resp = await client.get(health_url)
+        except Exception as exc:  # pragma: no cover - best-effort diagnostics
+            return {"url": health_url, "error": str(exc)}
+
+    try:
+        body = resp.json()
+    except ValueError:
+        body = resp.text
+    return {"url": health_url, "status_code": resp.status_code, "body": body}
+
+
 @app.on_event("startup")
 async def _startup_tasks() -> None:
     global _IDEA_PERSISTENCE_ENABLED, _SYMBOL_STREAM_COORDINATOR
@@ -3092,46 +3113,57 @@ def _ensure_allowed_host(url: str, request: Request) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_context_enrichment(symbol: str) -> Dict[str, Any] | None:
-    """Fetch sentiment/event/earnings enrichment data when the sidecar is configured."""
-
+def _enrichment_base_url() -> str:
+    """Return the configured enrichment base URL stripped of trailing slashes."""
     try:
         settings = get_settings()
         base_url = getattr(settings, "enrichment_service_url", None) or ""
     except Exception:
         base_url = ""
+    return base_url.strip().rstrip("/")
 
-    base_url = base_url.strip()
+
+async def _fetch_context_enrichment(symbol: str) -> Dict[str, Any] | None:
+    """Fetch sentiment/event/earnings enrichment data when the sidecar is configured."""
+
+    base_url = _enrichment_base_url()
     if not base_url:
         logger.info("Skipping enrichment fetch for %s: enrichment_service_url not configured", symbol)
         return None
 
-    url = f"{base_url.rstrip('/')}/enrich/{quote(symbol)}"
-    timeout = httpx.Timeout(5.0, connect=2.0)
-    logger.info("Fetching enrichment for %s url=%s", symbol, url)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            logger.info(
-                "Enrichment fetch succeeded for %s status=%s bytes=%s",
-                symbol,
-                resp.status_code,
-                len(resp.content),
-            )
-        except httpx.HTTPError as exc:
-            logger.warning("context enrichment fetch failed for %s: %s", symbol, exc)
-            return None
-        except Exception as exc:  # pragma: no cover - network errors
-            logger.warning("context enrichment fetch error for %s: %s", symbol, exc)
-            return None
+    url = f"{base_url}/enrich/{quote(symbol)}"
+    timeout = httpx.Timeout(8.0, connect=3.0)
+    last_error: HTTPError | None = None
+    for attempt in (1, 2):
+        logger.info("Fetching enrichment for %s url=%s attempt=%s", symbol, url, attempt)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+            except HTTPError as exc:
+                last_error = exc
+                continue
+            except Exception as exc:  # pragma: no cover - network errors
+                logger.warning("context enrichment fetch error for %s: %s", symbol, exc)
+                return None
 
-    try:
+        logger.info(
+            "Enrichment fetch succeeded for %s status=%s bytes=%s",
+            symbol,
+            resp.status_code,
+            len(resp.content),
+        )
+        try:
+            payload = resp.json()
+        except ValueError:
+            logger.warning("context enrichment returned invalid JSON for %s", symbol)
+            return None
         logger.info("Enrichment JSON parsed for %s", symbol)
-        return resp.json()
-    except ValueError:
-        logger.warning("context enrichment returned invalid JSON for %s", symbol)
-        return None
+        return payload
+
+    if last_error is not None:
+        logger.warning("context enrichment fetch failed for %s: %s", symbol, last_error)
+    return None
 
 
 async def _build_plan_enrichment(symbol: str, as_of: datetime | None) -> Dict[str, Any]:

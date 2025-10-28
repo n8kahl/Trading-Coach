@@ -36,6 +36,8 @@ def _resolve_port(default: int = 8000) -> int:
 def main() -> None:
     port = _resolve_port()
     host = os.environ.get("HOST", "0.0.0.0")
+    enrich = os.environ.get("ENRICH_SERVICE_URL", "")
+    print(f"[start_server] PORT={port} ENRICH_SERVICE_URL={enrich!r}")
     uvicorn.run("src.agent_server:app", host=host, port=port)
 
 
