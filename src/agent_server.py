@@ -5157,7 +5157,7 @@ def _apply_option_guardrails(
     rules.pop("style_key", "intraday")
     base_spread_cap = float(rules.get("max_spread_pct", max_spread_pct))
     if after_hours:
-        rules["max_spread_pct"] = max(base_spread_cap, float(max_spread_pct) + 4.0)
+        rules["max_spread_pct"] = max(base_spread_cap, float(max_spread_pct), 400.0)
     else:
         rules["max_spread_pct"] = min(base_spread_cap, float(max_spread_pct))
     rules["min_volume"] = float(rules.get("min_volume", 0.0))
@@ -5185,6 +5185,8 @@ def _apply_option_guardrails(
         ("spread", None),
     ]
     relaxation_sequence.extend(("oi", value) for value in oi_steps[1:])
+    if after_hours:
+        relaxation_sequence.extend([("spread", None), ("spread", None)])
 
     relax_flags: List[str] = []
     if after_hours:
@@ -5261,7 +5263,8 @@ def _apply_option_guardrails(
             rules["dte_high"] = rules["dte_high"] + 2.0
             relax_flags.append("DTE_RELAXED")
         elif relax_type == "spread":
-            rules["max_spread_pct"] = min(base_spread_cap + 4.0, rules["max_spread_pct"] + 2.0)
+            increment = 10.0 if after_hours else 2.0
+            rules["max_spread_pct"] = rules["max_spread_pct"] + increment
             relax_flags.append("SPREAD_RELAXED")
         elif relax_type == "oi" and relax_value is not None:
             rules["min_open_interest"] = float(relax_value)

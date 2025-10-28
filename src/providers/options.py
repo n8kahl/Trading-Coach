@@ -245,8 +245,8 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
     initial_min_open_interest = rules["min_open_interest"]
     after_hours_relaxed = False
     if market_closed:
-        rules["max_spread_pct"] = max(base_spread_cap, base_spread_cap + 4.0)
-        rules["min_open_interest"] = min(rules["min_open_interest"], 100.0)
+        rules["max_spread_pct"] = max(base_spread_cap, 400.0)
+        rules["min_open_interest"] = min(rules["min_open_interest"], 50.0)
         rules["min_volume"] = 0.0
         after_hours_relaxed = True
     base_spread_cap = float(rules.get("max_spread_pct", base_spread_cap))
@@ -267,6 +267,9 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
     rejection_records: List[Tuple[str, str]] = []
     filtered = normalized_chain.copy()
     selection = select_top_n(pd.DataFrame(), [], 0)  # placeholder
+    relaxation_sequence = list(_RELAXATION_SEQUENCE)
+    if after_hours_relaxed:
+        relaxation_sequence.extend([("spread", None), ("spread", None)])
 
     relax_index = 0
     while True:
@@ -275,9 +278,9 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
         selection = select_top_n(filtered, desired_targets, desired_count)
         if len(selection.rows) >= desired_count:
             break
-        if relax_index >= len(_RELAXATION_SEQUENCE):
+        if relax_index >= len(relaxation_sequence):
             break
-        relax_type, relax_value = _RELAXATION_SEQUENCE[relax_index]
+        relax_type, relax_value = relaxation_sequence[relax_index]
         relax_index += 1
         if relax_type == "delta":
             rules["delta_low"] = max(0.0, rules["delta_low"] - 0.05)
@@ -288,8 +291,8 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
             rules["dte_high"] = rules["dte_high"] + 2.0
             relax_flags.append("DTE_RELAXED")
         elif relax_type == "spread":
-            cap_limit = base_spread_cap + 4.0
-            rules["max_spread_pct"] = min(cap_limit, rules["max_spread_pct"] + 2.0)
+            cap_limit = max(base_spread_cap, rules["max_spread_pct"]) + (10.0 if after_hours_relaxed else 2.0)
+            rules["max_spread_pct"] = min(cap_limit, rules["max_spread_pct"] + (10.0 if after_hours_relaxed else 2.0))
             relax_flags.append("SPREAD_RELAXED")
         elif relax_type == "oi":
             rules["min_open_interest"] = float(relax_value or rules["min_open_interest"])
