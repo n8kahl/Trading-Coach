@@ -1891,9 +1891,6 @@ levelsToggleEl = document.getElementById('levels_toggle');
       .filter((item) => Number.isFinite(item));
   };
 
-  applyPlanStatus(currentPlanStatus, latestPlanNote, latestNextStep, null);
-  applyMarketStatus(initialMarketPhase, initialMarketNote);
-
   const matchesPlan = (incomingPlanId) => {
     if (!currentPlanId) return true;
     return (incomingPlanId || '').trim() === currentPlanId;
@@ -2327,6 +2324,9 @@ levelsToggleEl = document.getElementById('levels_toggle');
     }
     return guidanceState;
   };
+
+  applyPlanStatus(currentPlanStatus, latestPlanNote, latestNextStep, null);
+  applyMarketStatus(initialMarketPhase, initialMarketNote);
 
   const estimateDuration = () => {
     if (Number.isFinite(mergedPlanMeta.horizon_minutes)) {
