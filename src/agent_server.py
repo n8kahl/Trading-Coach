@@ -106,7 +106,7 @@ from .app.engine.execution_profiles import ExecutionContext as PlanExecutionCont
 from .app.engine.options_select import score_contract, best_contract_example
 from .app.middleware import SessionMiddleware, get_session
 from .app.routers.session import router as session_router
-from .app.services import parse_session_as_of, make_chart_url, build_plan_layers, get_precision
+from .app.services import parse_session_as_of, make_chart_url, build_plan_layers, get_precision, coerce_by_style
 from .app.providers.macro import get_event_window
 from .app.providers.universe import load_universe
 from .context_overlays import compute_context_overlays
@@ -2592,6 +2592,7 @@ class ChartParams(BaseModel):
     session: str | None = None
     supportingLevels: str | None = None
     force_interval: str | None = None
+    style_hint: str | None = None
     ui_state: str | None = None
 
 
@@ -10047,6 +10048,7 @@ async def _generate_fallback_plan(
         "view": view_token,
         "range": range_token,
         "theme": "dark",
+        "style_hint": style_token,
     }
     _attach_market_chart_params(chart_params, market_meta, data_meta)
     if is_plan_live:
@@ -14366,6 +14368,9 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
     tp1_f = tp_values[0]
 
+    data = coerce_by_style(dict(data))
+    raw_interval = str(data.get("interval") or raw_interval).strip()
+
     try:
         interval_norm = normalize_interval(raw_interval)
     except ValueError as exc:
@@ -14375,12 +14380,6 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     if interval_norm not in allowed_intervals:
         raise HTTPException(status_code=422, detail={"error": f"interval '{raw_interval}' not allowed"})
 
-    view = str(data.get("view") or "6M").strip()
-    allowed_views = {"1d", "5d", "1M", "3M", "6M", "1Y"}
-    if view not in allowed_views:
-        view = "6M"
-    data["view"] = view
-
     interval_style_map = {
         "1m": "scalp",
         "5m": "intraday",
@@ -14388,7 +14387,8 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
         "1h": "swing",
         "d": "swing",
     }
-    style_token = interval_style_map.get(interval_norm, "intraday")
+    style_hint = str(data.get("style_hint") or "").strip().lower()
+    style_token = style_hint or interval_style_map.get(interval_norm, "intraday")
     snap_defaults = {
         "scalp": {"atr_mult": 0.15, "pct": 0.0008},
         "intraday": {"atr_mult": 0.20, "pct": 0.0010},
@@ -14414,6 +14414,14 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
         data["ui_state"] = json.dumps(ui_state_obj, separators=(",", ":"))
     elif not ui_state_raw and style_token:
         data["ui_state"] = json.dumps({"style": style_token}, separators=(",", ":"))
+
+    data.pop("style_hint", None)
+
+    view = str(data.get("view") or "6M").strip()
+    allowed_views = {"1d", "5d", "1M", "3M", "6M", "1Y"}
+    if view not in allowed_views:
+        view = "6M"
+    data["view"] = view
 
     atr_raw = data.get("atr14") or data.get("atr")
     atr_f: float | None = None

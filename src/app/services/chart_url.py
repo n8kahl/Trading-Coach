@@ -72,7 +72,12 @@ def coerce_by_style(params: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(params, dict):
         return params
     ui_state = _parse_ui_state(params.get("ui_state"))
-    style_token = (ui_state.get("style") or params.get("style") or "").strip().lower()
+    style_token = (
+        ui_state.get("style")
+        or params.get("style")
+        or params.get("style_hint")
+        or ""
+    ).strip().lower()
     if not style_token:
         return params
     defaults = STYLE_DEFAULTS.get(style_token)
@@ -124,6 +129,7 @@ def make_chart_url(
     """Return canonical /tv URL composed from allow-listed params."""
 
     params_dict: Dict[str, Any] = coerce_by_style(dict(params))
+    params_dict.pop("style_hint", None)
 
     symbol = str(params_dict.get("symbol") or "").upper()
     precision = get_precision(symbol, precision_map=precision_map)
@@ -169,4 +175,4 @@ def make_chart_url(
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
-__all__ = ["make_chart_url", "ALLOWED_KEYS"]
+__all__ = ["make_chart_url", "ALLOWED_KEYS", "coerce_by_style"]
