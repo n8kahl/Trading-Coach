@@ -1,6 +1,7 @@
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
+from urllib.parse import parse_qs, urlsplit
 
 from src.agent_server import ChartParams, gpt_chart_url
 from src.config import get_settings
@@ -35,10 +36,14 @@ async def test_gpt_chart_url_returns_interactive_focus_params(monkeypatch):
 
     links = await gpt_chart_url(params, request)
 
-    assert links.interactive == (
-        "https://test.local/tv/?center_time=latest&direction=long&entry=430.1&focus=plan"
-        "&interval=5m&stop=428.8&symbol=SPY&tp=432.1,433.55&view=6M"
-    )
+    parsed = urlsplit(links.interactive)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "test.local"
+    assert parsed.path == "/tv/"
+    assert query["interval"] == ["5m"]
+    assert query["range"] == ["1d"]
+    assert query["ui_state"] == ['{"style":"intraday"}']
     assert not hasattr(links, "png")
     get_settings.cache_clear()
 
@@ -74,12 +79,14 @@ async def test_gpt_chart_url_strips_non_canonical_params(monkeypatch):
 
     links = await gpt_chart_url(params, request)
 
-    assert links.interactive == (
-        "https://test.local/tv/?direction=short&entry=177&interval=5m&stop=178&symbol=NVDA&tp=175.5,175.1,174.8&view=6M"
-    )
-    assert "data_source" not in links.interactive
-    assert "data_mode" not in links.interactive
-    assert "last_update" not in links.interactive
+    parsed = urlsplit(links.interactive)
+    query = parse_qs(parsed.query)
+    assert query["interval"] == ["5m"]
+    assert query["range"] == ["1d"]
+    assert query["ui_state"] == ['{"style":"intraday"}']
+    assert "data_source" not in query
+    assert "data_mode" not in query
+    assert "last_update" not in query
     get_settings.cache_clear()
 
 

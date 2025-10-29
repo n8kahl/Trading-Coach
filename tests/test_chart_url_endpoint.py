@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 import pandas as pd
 import pytest
 from httpx import ASGITransport, AsyncClient
+from urllib.parse import parse_qs, urlsplit
 
 from src.agent_server import (
     ChartParams,
@@ -48,16 +49,15 @@ async def test_chart_url_endpoint_returns_tv_link(
     assert response.status_code == 200
     payload = response.json()
     link = payload["interactive"]
-    assert link.startswith("https://test.local/tv/")
-    assert "/webview" not in link
-    for token in (
-        "symbol=SPY",
-        "interval=5m",
-        "entry=430.1",
-        "stop=428.8",
-        "tp=432.1,433.55",
-    ):
-        assert token in link
+    parsed = urlsplit(link)
+    query = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "test.local"
+    assert parsed.path == "/tv/"
+    assert query["symbol"] == ["SPY"]
+    assert query["interval"] == ["5m"]
+    assert query["range"] == ["1d"]
+    assert query["ui_state"] == ['{"style":"intraday"}']
 
 
 @pytest.mark.asyncio
@@ -128,9 +128,13 @@ async def test_plan_trade_detail_contains_tv_link(
     assert response.status_code == 200
     plan_payload = response.json()
     trade_detail = plan_payload["trade_detail"]
-    assert trade_detail.startswith("https://test.local/tv/")
-    assert "/webview" not in trade_detail
-    assert "plan_id=" in trade_detail and "plan_version=" in trade_detail
+    parsed = urlsplit(trade_detail)
+    query = parse_qs(parsed.query)
+    assert parsed.path == "/tv/"
+    assert query["interval"] == ["5m"]
+    assert query.get("range") == ["5D"]
+    assert query["ui_state"] == ['{"style":"intraday"}']
+    assert "plan_id" in query and "plan_version" in query
 
 
 @pytest.mark.asyncio

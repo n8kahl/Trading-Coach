@@ -82,3 +82,46 @@ def test_make_chart_url_includes_ui_state_token():
     assert query["ui_state"] == [
         '{"session":"live","confidence":0.82,"style":"intraday"}'
     ]
+
+
+def test_make_chart_url_defaults_interval_for_swing_style():
+    params = {
+        "symbol": "TSLA",
+        "direction": "long",
+        "entry": 250.0,
+        "stop": 245.0,
+        "tp": [260.0],
+        "ui_state": '{"style":"swing"}',
+    }
+
+    url = make_chart_url(
+        params, base_url="https://example.com/tv/", precision_map={"TSLA": 2}
+    )
+
+    parsed = urlsplit(url)
+    query = parse_qs(parsed.query)
+    assert query["interval"] == ["60"]
+    assert query["view"] == ["3M"]
+    assert query["range"] == ["15d"]
+
+
+def test_make_chart_url_upgrades_intraday_interval_for_swing():
+    params = {
+        "symbol": "TSLA",
+        "interval": "5m",
+        "direction": "long",
+        "entry": 250.0,
+        "stop": 245.0,
+        "tp": [260.0],
+        "ui_state": '{"style":"swing"}',
+    }
+
+    url = make_chart_url(
+        params, base_url="https://example.com/tv/", precision_map={"TSLA": 2}
+    )
+
+    parsed = urlsplit(url)
+    query = parse_qs(parsed.query)
+    assert query["interval"] == ["60"]
+    assert query["view"] == ["3M"]
+    assert query["range"] == ["15d"]

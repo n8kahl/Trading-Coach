@@ -1306,6 +1306,8 @@ ALLOWED_CHART_KEYS = {
     "data_mode",
     "data_age_ms",
     "last_update",
+    "force_interval",
+    "ui_state",
     "market_status",
     "session_status",
     "session_phase",
@@ -2589,6 +2591,7 @@ class ChartParams(BaseModel):
     ema: str | None = None
     session: str | None = None
     supportingLevels: str | None = None
+    force_interval: str | None = None
     ui_state: str | None = None
 
 
@@ -14394,6 +14397,24 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     }
     style_params = snap_defaults.get(style_token, snap_defaults["intraday"])
 
+    ui_state_raw = data.get("ui_state")
+    ui_state_obj: Dict[str, Any] = {}
+    if isinstance(ui_state_raw, str):
+        try:
+            parsed_state = json.loads(ui_state_raw)
+            if isinstance(parsed_state, Mapping):
+                ui_state_obj = dict(parsed_state)
+        except Exception:
+            ui_state_obj = {}
+    elif isinstance(ui_state_raw, Mapping):
+        ui_state_obj = dict(ui_state_raw)
+    if style_token and ui_state_obj.get("style") != style_token:
+        ui_state_obj["style"] = style_token
+    if ui_state_obj and json.dumps(ui_state_obj, separators=(",", ":")) != ui_state_raw:
+        data["ui_state"] = json.dumps(ui_state_obj, separators=(",", ":"))
+    elif not ui_state_raw and style_token:
+        data["ui_state"] = json.dumps({"style": style_token}, separators=(",", ":"))
+
     atr_raw = data.get("atr14") or data.get("atr")
     atr_f: float | None = None
     if atr_raw is not None:
@@ -14604,6 +14625,8 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
             "plan_version",
             "levels",
             "supportingLevels",
+            "force_interval",
+            "ui_state",
         ):
             if optional_key in data and data[optional_key] not in (None, ""):
                 canonical_payload[optional_key] = data[optional_key]

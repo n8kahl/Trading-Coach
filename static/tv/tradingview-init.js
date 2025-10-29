@@ -115,6 +115,39 @@
   const sessionBannerParam = typeof sessionBannerParamRaw === 'string' ? sessionBannerParamRaw.trim() : '';
   const liveFlag = params.get('live') === '1';
   let currentResolution = normalizeResolution(params.get('interval') || '15');
+  const forceIntervalParam = params.get('force_interval') === '1';
+  let parsedUiState = {};
+  try {
+    parsedUiState = JSON.parse(params.get('ui_state') || '{}');
+  } catch {
+    parsedUiState = {};
+  }
+  const styleFromUiState = (parsedUiState && typeof parsedUiState === 'object' && parsedUiState.style
+    ? String(parsedUiState.style)
+    : ''
+  ).toLowerCase();
+
+  const minutesFromResolution = (res) => {
+    const token = (res || '').toString().toUpperCase();
+    if (!token) return 60;
+    if (token === '1D' || token.endsWith('W')) {
+      return 1440;
+    }
+    const numeric = parseInt(token, 10);
+    return Number.isFinite(numeric) ? numeric : 60;
+  };
+
+  if (
+    !forceIntervalParam &&
+    (styleFromUiState === 'swing' || styleFromUiState === 'leaps') &&
+    minutesFromResolution(currentResolution) < 60
+  ) {
+    currentResolution = normalizeResolution('60');
+    params.set('interval', '60');
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, '', newUrl);
+  }
+
   const theme = params.get('theme') === 'light' ? 'light' : 'dark';
   const baseUrl = `${window.location.protocol}//${window.location.host}`;
   const initialPlanId = (params.get('plan_id') || '').trim() || null;
