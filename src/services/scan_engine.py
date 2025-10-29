@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from ..calculations import atr, ema
+from ..features.mtf import MTFBundle, compute_mtf_bundle
 from ..levels import inject_style_levels
 from ..plans import (
     EntryAnchor,
@@ -27,6 +28,7 @@ from ..plans import (
 )
 from ..plans.entry import select_structural_entry
 from ..core.geometry_engine import GeometrySummary, summarize_plan_geometry
+from ..strategy.engine import mtf_amplifier
 from .contract_rules import ContractRuleBook, ContractTemplate
 from .polygon_client import AggregatesResult, PolygonAggregatesClient
 from .universe import UniverseSnapshot
@@ -109,6 +111,59 @@ def _max_entry_distance_pct(style: str | None) -> float:
     return 0.02
 
 
+def _select_frame(windows: Dict[str, pd.DataFrame], *labels: str) -> Optional[pd.DataFrame]:
+    for label in labels:
+        frame = windows.get(label)
+        if frame is not None:
+            return frame
+    return None
+
+
+def _vwap_hint_from_frame(frame: Optional[pd.DataFrame]) -> Optional[float]:
+    if frame is None or frame.empty:
+        return None
+    try:
+        closes = frame["close"].astype(float)
+    except Exception:
+        return None
+    volume = frame.get("volume")
+    if volume is not None:
+        try:
+            volume = volume.astype(float)
+        except Exception:
+            volume = None
+    if volume is None or volume.sum() <= 0:
+        return float(closes.iloc[-1])
+    highs = frame.get("high", closes)
+    lows = frame.get("low", closes)
+    typical = (highs + lows + closes) / 3.0
+    weighted = (typical * volume).sum()
+    denom = volume.sum()
+    if denom <= 0:
+        return float(closes.iloc[-1])
+    return float(weighted / denom)
+
+
+def _agreement_for_direction(direction: str, bundle: MTFBundle) -> Optional[float]:
+    normalized = (direction or "").lower()
+    if normalized not in {"long", "short"}:
+        return None
+    total = 0
+    aligned = 0
+    for state in (bundle.by_tf or {}).values():
+        if state is None:
+            continue
+        if state.ema_up or state.ema_down:
+            total += 1
+            if normalized == "long" and state.ema_up:
+                aligned += 1
+            elif normalized == "short" and state.ema_down:
+                aligned += 1
+    if total == 0:
+        return None
+    return aligned / total
+
+
 @dataclass
 class PlanningCandidate:
     symbol: str
@@ -133,7 +188,7 @@ class PlanningScanResult:
 class PlanningScanEngine:
     """Orchestrates planning-mode symbol analysis."""
 
-    _AGG_WINDOWS = ("1d", "60", "30")
+    _AGG_WINDOWS = ("1d", "60", "30", "15", "5")
     _INDEX_SYMBOLS = ("I:SPX", "I:NDX", "I:RUT", "I:VIX")
 
     def __init__(
@@ -261,6 +316,40 @@ class PlanningScanEngine:
         pullback_pct = (pullback / last_close) * 100.0 if last_close else None
         pullback_atr = pullback / atr_val if atr_val else None
         actionability = max(0.0, 1.0 - min((pullback_atr or 0.0), 3.0) / 3.0)
+
+        bars_5m = _select_frame(windows, "5", "5m")
+        bars_15m = _select_frame(windows, "15", "15m", "30")
+        bars_60m = _select_frame(windows, "60", "60m", "1h")
+        vwap_hint = _vwap_hint_from_frame(bars_5m)
+        mtf_bundle: Optional[MTFBundle] = None
+        mtf_bias: Optional[str] = None
+        mtf_notes: List[str] = []
+        mtf_agreement: Optional[float] = None
+        direction_hint = "long"
+        mtf_multiplier = 1.0
+        if bars_5m is not None and not bars_5m.empty:
+            try:
+                mtf_bundle = compute_mtf_bundle(
+                    symbol,
+                    bars_5m,
+                    bars_15m if bars_15m is not None else pd.DataFrame(),
+                    bars_60m if bars_60m is not None else pd.DataFrame(),
+                    daily,
+                    vwap_hint,
+                )
+            except Exception:
+                mtf_bundle = None
+        if mtf_bundle:
+            mtf_bias = mtf_bundle.bias_htf
+            alignment = _agreement_for_direction(direction_hint, mtf_bundle)
+            if alignment is not None:
+                mtf_bundle.agreement = alignment
+                mtf_agreement = alignment
+            else:
+                mtf_agreement = mtf_bundle.agreement
+            mtf_notes = list(mtf_bundle.notes)
+            mtf_multiplier = mtf_amplifier(direction_hint, mtf_bundle)
+        mtf_multiplier = max(0.9, min(1.1, mtf_multiplier))
 
         levels_map: Dict[str, float] = {}
         try:
@@ -400,7 +489,7 @@ class PlanningScanEngine:
             atr=float(atr_val),
             levels=levels_map,
             timestamp=timestamp,
-            mtf_bias=None,
+            mtf_bias=mtf_bias,
             session_phase=None,
             preferred_entries=[EntryAnchor(entry_seed, "structural")] if entry_seed else None,
             tick=_infer_tick_size(float(last_close)),
@@ -641,8 +730,15 @@ class PlanningScanEngine:
             },
         )
         risk_reward = max(0.0, min(rr / 3.0, 1.0))  # normalise assuming 3:1 as ideal
-
-        readiness = 0.45 * probability + 0.25 * actionability + 0.30 * risk_reward
+        try:
+            actionability_score = float(selected_entry.actionability if selected_entry else actionability)
+        except (TypeError, ValueError):
+            actionability_score = actionability
+        actionability_score = max(0.0, min(actionability_score, 1.0))
+        readiness_base = max(0.0, min(probability * actionability, 1.0))
+        actionability_multiplier = 0.7 + 0.3 * actionability_score
+        risk_reward_multiplier = 0.85 + 0.15 * risk_reward
+        readiness = readiness_base * mtf_multiplier * actionability_multiplier * risk_reward_multiplier
         readiness = max(0.0, min(readiness, 1.0))
         include_candidate = readiness >= self._min_readiness or probability >= self._probability_floor
         if not include_candidate:
@@ -683,11 +779,24 @@ class PlanningScanEngine:
             "tp_reasons": structured_tp_reasons,
             "entry_candidates": entry_candidates,
             "geometry_warnings": structured_warnings,
+            "mtf_bias": mtf_bias,
+            "mtf_notes": list(mtf_notes) if mtf_notes else [],
+            "mtf_agreement": round(mtf_agreement, 3) if mtf_agreement is not None else None,
+            "mtf_amplifier": round(mtf_multiplier, 3),
+            "readiness_base": round(readiness_base, 3),
+            "actionability_score": round(actionability_score, 3),
+            "actionability_multiplier": round(actionability_multiplier, 3),
+            "risk_reward_multiplier": round(risk_reward_multiplier, 3),
         })
         components = {
             "probability": round(probability, 3),
             "actionability": round(actionability, 3),
             "risk_reward": round(risk_reward, 3),
+            "mtf_amplifier": round(mtf_multiplier, 3),
+            "actionability_score": round(actionability_score, 3),
+            "readiness_base": round(readiness_base, 3),
+            "actionability_multiplier": round(actionability_multiplier, 3),
+            "risk_reward_multiplier": round(risk_reward_multiplier, 3),
         }
         candidate = PlanningCandidate(
             symbol=symbol,

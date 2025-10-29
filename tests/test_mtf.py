@@ -51,12 +51,13 @@ def test_compute_mtf_bundle_trending_up() -> None:
     )
     assert isinstance(bundle, MTFBundle)
     assert bundle.bias_htf == "long"
-    assert pytest.approx(bundle.agreement, rel=1e-3) == 0.5  # default until amplified
+    assert pytest.approx(bundle.agreement, rel=1e-3) == 1.0
     assert bundle.by_tf["5m"].ema_up is True
     assert bundle.by_tf["60m"].ema_up is True
     assert bundle.by_tf["D"].ema_up is True
     assert bundle.by_tf["5m"].vwap_rel in {"above", "near"}
-    assert "5m↑" in bundle.notes[0]
+    assert "D↑" in bundle.notes[0]
+    assert "60m↑" in bundle.notes[0]
     assert bundle.notes[1] in {"VWAP>", "VWAP≈"}
 
 
@@ -77,9 +78,11 @@ def test_compute_mtf_bundle_trending_down() -> None:
     )
     assert isinstance(bundle, MTFBundle)
     assert bundle.bias_htf == "short"
+    assert pytest.approx(bundle.agreement, rel=1e-3) == 1.0
     assert bundle.by_tf["5m"].ema_down is True
     assert bundle.by_tf["60m"].ema_down is True
     assert bundle.by_tf["D"].ema_down is True
     assert bundle.by_tf["5m"].vwap_rel in {"below", "near"}
-    assert "5m↓" in bundle.notes[0]
+    assert "D↓" in bundle.notes[0]
+    assert "60m↓" in bundle.notes[0]
     assert bundle.notes[1] in {"VWAP<", "VWAP≈"}

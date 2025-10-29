@@ -6320,6 +6320,12 @@ def _planning_scan_to_page(
                 target_profile_dict = None
                 structured_plan_payload = None
 
+        mtf_notes_payload: List[str] | None = None
+        if isinstance(metrics, Mapping):
+            raw_mtf_notes = metrics.get("mtf_notes")
+            if isinstance(raw_mtf_notes, list):
+                mtf_notes_payload = [str(note) for note in raw_mtf_notes if note]
+
         sc = ScanCandidate(
             symbol=candidate.symbol,
             rank=idx,
@@ -6344,7 +6350,7 @@ def _planning_scan_to_page(
             em_used=bool(em_used_val) if em_used_val is not None else None,
             risk_block=risk_block_payload,
             execution_rules=execution_rules_payload,
-            confluence=[],
+            confluence=mtf_notes_payload or [],
             accuracy_levels=accuracy_levels_payload,
             events=None,
             options=None,

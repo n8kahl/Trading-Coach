@@ -614,13 +614,29 @@ components:
               top: { type: number, format: double }
               bottom: { type: number, format: double }
               label: { type: string }
-        annotations:
-          type: array
-          items:
+    annotations:
+      type: array
+      items:
+        type: object
+        properties:
+          kind: { type: string, description: "Annotation classifier (e.g. forecast_path)" }
+          label: { type: string, nullable: true }
+          style:
             type: object
             properties:
-              time: { type: string }
-              text: { type: string }
+              lineStyle: { type: string, nullable: true }
+              opacity: { type: number, format: double, nullable: true }
+              width: { type: number, format: double, nullable: true }
+              bias: { type: string, nullable: true }
+          points:
+            type: array
+            description: "Chronological path waypoints used for rendering polylines"
+            items:
+              type: object
+              required: [time, value]
+              properties:
+                time: { type: integer, format: int64, description: "Epoch seconds" }
+                value: { type: number, format: double }
         meta:
           type: object
           properties:

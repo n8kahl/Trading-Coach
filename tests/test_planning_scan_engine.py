@@ -40,8 +40,19 @@ async def test_planning_scan_engine_scores_candidates(monkeypatch):
     daily_frame = make_frame(prices)
     intraday_60 = make_frame(prices[-60:])
     intraday_30 = make_frame(prices[-30:])
+    intraday_15 = make_frame(prices[-30:])
+    intraday_5 = make_frame(prices[-30:])
     frames = {
-        "AAPL": AggregatesResult(symbol="AAPL", windows={"1d": daily_frame, "60": intraday_60, "30": intraday_30}),
+        "AAPL": AggregatesResult(
+            symbol="AAPL",
+            windows={
+                "1d": daily_frame,
+                "60": intraday_60,
+                "30": intraday_30,
+                "15": intraday_15,
+                "5": intraday_5,
+            },
+        ),
         "I:SPX": AggregatesResult(symbol="I:SPX", windows={"1d": daily_frame}),
         "I:NDX": AggregatesResult(symbol="I:NDX", windows={"1d": daily_frame}),
         "I:RUT": AggregatesResult(symbol="I:RUT", windows={"1d": daily_frame}),
@@ -70,8 +81,19 @@ async def test_planning_scan_injects_daily_levels(monkeypatch):
     daily_frame = make_frame(prices)
     intraday_60 = make_frame(prices[-60:])
     intraday_30 = make_frame(prices[-30:])
+    intraday_15 = make_frame(prices[-30:])
+    intraday_5 = make_frame(prices[-30:])
     frames = {
-        "MSFT": AggregatesResult(symbol="MSFT", windows={"1d": daily_frame, "60": intraday_60, "30": intraday_30}),
+        "MSFT": AggregatesResult(
+            symbol="MSFT",
+            windows={
+                "1d": daily_frame,
+                "60": intraday_60,
+                "30": intraday_30,
+                "15": intraday_15,
+                "5": intraday_5,
+            },
+        ),
         "I:SPX": AggregatesResult(symbol="I:SPX", windows={"1d": daily_frame}),
     }
     stub_client = StubPolygonClient(frames)

@@ -24,7 +24,7 @@ def test_infer_strategy_prefers_power_hour_with_supportive_mtf() -> None:
         },
         bias_htf="long",
         agreement=0.75,
-        notes=["5m↑, 15m↑, 60m↑, D↑", "VWAP>"],
+        notes=["D↑, 60m↑, 15m↑", "VWAP>"],
     )
     ctx = {
         "symbol": "AAPL",
@@ -47,7 +47,7 @@ def test_infer_strategy_prefers_power_hour_with_supportive_mtf() -> None:
     assert profile.mtf is not None
     assert profile.mtf["bias"] == "long"
     assert profile.mtf["agreement"] == pytest.approx(1.0)
-    assert profile.mtf["notes"] == ["5m↑, 15m↑, 60m↑, D↑", "VWAP>"]
+    assert profile.mtf["notes"] == ["D↑, 60m↑, 15m↑", "VWAP>"]
     assert any(rule.id == "power_hour_trend" and rule.score > 0.6 for rule in profile.matched_rules)
 
 
@@ -61,7 +61,7 @@ def test_infer_strategy_falls_back_when_mtf_conflicts() -> None:
         },
         bias_htf="short",
         agreement=0.2,
-        notes=["5m↓, 15m↓, 60m↓, D↓", "VWAP<"],
+        notes=["D↓, 60m↓, 15m↓", "VWAP<"],
     )
     ctx = {
         "symbol": "AAPL",
@@ -84,4 +84,4 @@ def test_infer_strategy_falls_back_when_mtf_conflicts() -> None:
     assert profile.mtf is not None
     assert profile.mtf["bias"] == "short"
     assert profile.mtf["agreement"] == pytest.approx(0.0)
-    assert profile.mtf["notes"] == ["5m↓, 15m↓, 60m↓, D↓", "VWAP<"]
+    assert profile.mtf["notes"] == ["D↓, 60m↓, 15m↓", "VWAP<"]

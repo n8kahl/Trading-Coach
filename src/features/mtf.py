@@ -142,12 +142,12 @@ def _compute_tf_state(tf: TF, bars: pd.DataFrame, atr_5m: Optional[float], vwap_
     )
 
 
-def _trend_token(state: TFState) -> str:
+def _trend_descriptor(state: TFState) -> tuple[str, str]:
     if state.ema_up:
-        return "↑"
+        return "up", "↑"
     if state.ema_down:
-        return "↓"
-    return "≈"
+        return "down", "↓"
+    return "flat", "≈"
 
 
 def _bias_from_score(score: float) -> Literal["long", "short", "neutral"]:
@@ -194,15 +194,44 @@ def compute_mtf_bundle(
             by_tf[tf] = state
 
         score = 0.0
+        long_counts = 0
+        short_counts = 0
         for tf, state in by_tf.items():
             weight = TF_WEIGHTS.get(tf, 0.0)
             if state.ema_up:
                 score += weight
+                long_counts += 1
             elif state.ema_down:
                 score -= weight
+                short_counts += 1
         bias = _bias_from_score(score)
 
-        trend_note = ", ".join(f"{tf}{_trend_token(by_tf[tf])}" for tf in TF_ORDER)
+        if bias == "long" and (long_counts or short_counts):
+            agreement = long_counts / max(long_counts + short_counts, 1)
+        elif bias == "short" and (long_counts or short_counts):
+            agreement = short_counts / max(long_counts + short_counts, 1)
+        else:
+            agreement = 0.5
+
+        trend_tokens: List[str] = []
+        for tf in ["D", "60m", "15m"]:
+            state = by_tf.get(tf)
+            if not state:
+                continue
+            trend_state, glyph = _trend_descriptor(state)
+            if trend_state == "flat":
+                token = f"{tf}≈flat"
+            else:
+                token = f"{tf}{glyph}"
+            trend_tokens.append(token)
+        if not trend_tokens:
+            for tf in TF_ORDER:
+                state = by_tf.get(tf)
+                if not state:
+                    continue
+                _, glyph = _trend_descriptor(state)
+                trend_tokens.append(f"{tf}{glyph}")
+
         vwap_state = by_tf["5m"].vwap_rel if "5m" in by_tf else "unknown"
         if vwap_state == "above":
             vwap_note = "VWAP>"
@@ -213,12 +242,22 @@ def compute_mtf_bundle(
         else:
             vwap_note = "VWAP?"
 
-        notes = [trend_note, vwap_note]
+        adx_notes: List[str] = []
+        for tf in ("5m", "15m"):
+            state = by_tf.get(tf)
+            if not state or state.adx_slope is None:
+                continue
+            if state.adx_slope > 0.02:
+                adx_notes.append(f"{tf} ADX↗")
+            elif state.adx_slope < -0.02:
+                adx_notes.append(f"{tf} ADX↘")
+
+        notes = [", ".join(trend_tokens), vwap_note, *adx_notes]
 
         return MTFBundle(
             by_tf=by_tf,
             bias_htf=bias,
-            agreement=0.5,
+            agreement=agreement,
             notes=[note for note in notes if note],
         )
     except Exception as exc:  # pragma: no cover - defensive
