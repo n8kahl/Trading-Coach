@@ -26,6 +26,25 @@
     return minutes * 60;
   };
 
+  function canonicalTfLabel(resolution) {
+    const r = (resolution || '').toString().toUpperCase();
+    if (r === '1D') return '1D';
+    if (r === '1W') return '1W';
+    const minutes = parseInt(r, 10);
+    if (Number.isFinite(minutes)) {
+      if (minutes % 60 === 0) return `${minutes / 60}H`;
+      return `${minutes}m`;
+    }
+    return r;
+  }
+
+  function setHeaderDurationLabel() {
+    if (!headerDurationEl) return;
+    const tf = canonicalTfLabel(currentResolution);
+    const rangeParam = (params.get('range') || '').trim();
+    headerDurationEl.textContent = rangeParam ? `${tf} · ${rangeParam.toUpperCase()}` : tf;
+  }
+
   const parseList = (value) =>
     (value || '')
       .split(',')
@@ -302,6 +321,7 @@ const followLiveToggleEl = document.getElementById('follow_live_toggle');
 levelsToggleEl = document.getElementById('levels_toggle');
   const planStatusNoteEl = document.getElementById('plan_status_note');
   const timeframeSwitcherEl = document.getElementById('timeframe_switcher');
+  setHeaderDurationLabel();
   const planPanelEl = document.getElementById('plan_panel');
   const planPanelBodyEl = document.getElementById('plan_panel_body');
   const debugEl = document.getElementById('debug_banner');
@@ -860,18 +880,6 @@ levelsToggleEl = document.getElementById('levels_toggle');
   window.addEventListener('unhandledrejection', (event) => {
     showError(`Unhandled promise rejection: ${event.reason}`);
   });
-
-  const TIMEFRAMES = [
-    { label: '1m', resolution: '1' },
-    { label: '5m', resolution: '5' },
-    { label: '10m', resolution: '10' },
-    { label: '30m', resolution: '30' },
-    { label: '1H', resolution: '60' },
-    { label: '1D', resolution: '1D' },
-    { label: '1W', resolution: '1W' },
-  ];
-  let activeTimeframe =
-    TIMEFRAMES.find((tf) => normalizeResolution(tf.resolution) === currentResolution) || TIMEFRAMES[0];
 
   const layoutBase = {
     background: { type: 'solid', color: theme === 'light' ? '#ffffff' : '#0b0f14' },
@@ -1587,7 +1595,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
   };
 
   const setWatermark = () => {
-    const tfLabel = activeTimeframe ? activeTimeframe.label : currentResolution;
+    const tfLabel = canonicalTfLabel(currentResolution);
     chart.applyOptions({
       watermark: {
         text: `${symbol} · ${tfLabel}`,
@@ -1597,32 +1605,67 @@ levelsToggleEl = document.getElementById('levels_toggle');
 
   const TIMEFRAME_REFRESH_MS = 60000;
 
-  const initializeTimeframes = () => {
-    timeframeSwitcherEl.innerHTML = '';
-    TIMEFRAMES.forEach((tf) => {
-      const button = document.createElement('button');
-      button.className = 'timeframe-button';
-      button.textContent = tf.label;
-      button.dataset.resolution = tf.resolution;
-      if (normalizeResolution(tf.resolution) === currentResolution) {
-        button.classList.add('active');
-        activeTimeframe = tf;
-      }
-      button.addEventListener('click', () => {
-        if (normalizeResolution(tf.resolution) === currentResolution) return;
-        currentResolution = normalizeResolution(tf.resolution);
-        activeTimeframe = tf;
-        params.set('interval', tf.label);
-        const newUrl = `${window.location.pathname}?${params.toString()}`;
-        window.history.replaceState({}, '', newUrl);
-        Array.from(timeframeSwitcherEl.querySelectorAll('button')).forEach((btn) => btn.classList.remove('active'));
-        button.classList.add('active');
-        setWatermark();
-        fetchBars();
-      });
-      timeframeSwitcherEl.appendChild(button);
+  function updateTimeframeActiveButtons() {
+    if (!timeframeSwitcherEl) return;
+    const normalized = normalizeResolution(currentResolution);
+    timeframeSwitcherEl.querySelectorAll('button.tf-btn').forEach((btn) => {
+      const token = btn.getAttribute('data-resolution') || '';
+      const btnNormalized = normalizeResolution(token);
+      btn.classList.toggle('active', btnNormalized === normalized);
     });
-  };
+  }
+
+  async function applyResolution(nextResolution) {
+    const normalized = normalizeResolution(nextResolution || currentResolution);
+    if (!normalized) return;
+
+    if (normalized === currentResolution) {
+      updateTimeframeActiveButtons();
+      setWatermark();
+      setHeaderDurationLabel();
+      return;
+    }
+
+    currentResolution = normalized;
+    updateTimeframeActiveButtons();
+
+    const humanTf = canonicalTfLabel(currentResolution).toLowerCase();
+    if (humanTf) {
+      params.set('interval', humanTf);
+    } else {
+      params.delete('interval');
+    }
+    const newUrl = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, '', newUrl);
+
+    lastSecondsPerBar = Math.max(resolutionToSeconds(currentResolution), 60);
+
+    await fetchBars();
+
+    setWatermark();
+    setHeaderDurationLabel();
+    if (Array.isArray(latestCandleData) && latestCandleData.length) {
+      updateSessionBands(latestCandleData, lastSecondsPerBar);
+    }
+  }
+
+  function initTimeframeSwitcher() {
+    if (!timeframeSwitcherEl) return;
+    const choices = ['1m', '5m', '15m', '1h', '4h', '1D'];
+    timeframeSwitcherEl.innerHTML = choices
+      .map(
+        (tf) =>
+          `<button type="button" class="timeframe-button tf-btn" data-resolution="${tf}">${tf.toUpperCase()}</button>`,
+      )
+      .join('');
+    timeframeSwitcherEl.querySelectorAll('button.tf-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const token = btn.getAttribute('data-resolution');
+        applyResolution(token);
+      });
+    });
+    updateTimeframeActiveButtons();
+  }
 
   const formatPrice = (value) => (Number.isFinite(value) ? value.toFixed(2) : '—');
   const formatPercentage = (value) => {
@@ -2933,7 +2976,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
       }
       streamSource = null;
     }
-    const tfLabel = (activeTimeframe && activeTimeframe.label) || currentResolution || '1m';
+    const tfLabel = canonicalTfLabel(currentResolution || '1');
     applyMarketStatus('replay', `Replaying last ${minutes} minutes using ${tfLabel} bars.`);
     setReplayStatusMessage(`Preparing ${tfLabel} replay…`);
     syncReplayControls();
@@ -3169,7 +3212,6 @@ levelsToggleEl = document.getElementById('levels_toggle');
 
       const secondsPerBar = Math.max(resolutionToSeconds(currentResolution), 60);
       lastSecondsPerBar = secondsPerBar;
-      updateSessionBands(candleData, secondsPerBar);
 
       const lastPrice = bars[bars.length - 1]?.close ?? null;
       lastKnownPrice = lastPrice;
@@ -3369,6 +3411,9 @@ levelsToggleEl = document.getElementById('levels_toggle');
         }
       }
 
+      setHeaderDurationLabel();
+      updateSessionBands(latestCandleData, lastSecondsPerBar);
+
       debugEl.style.display = 'none';
       debugEl.textContent = '';
     } catch (err) {
@@ -3379,7 +3424,8 @@ levelsToggleEl = document.getElementById('levels_toggle');
   };
 
   renderHeader();
-  initializeTimeframes();
+  setHeaderDurationLabel();
+  initTimeframeSwitcher();
   setWatermark();
   fetchBars();
   connectStream();
