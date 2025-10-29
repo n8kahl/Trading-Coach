@@ -34,9 +34,11 @@ def test_ba_structured_geometry_snaps_to_session_levels():
     )
 
     assert structured.stop == pytest.approx(217.44, rel=0, abs=1e-2)
-    assert structured.targets[0] == pytest.approx(214.89, rel=0, abs=1e-2)
-    assert structured.targets[1] == pytest.approx(214.56, rel=0, abs=1e-2)
-    assert structured.targets[2] == pytest.approx(214.53, rel=0, abs=1e-2)
+    assert structured.targets[0] == pytest.approx(214.9, rel=0, abs=1e-2)
+    assert structured.targets[1] == pytest.approx(214.75, rel=0, abs=1e-2)
+    assert structured.targets[2] == pytest.approx(214.55, rel=0, abs=1e-2)
     session_roles = [item["label"] for item in structured.key_levels_used.get("session", [])]
     assert "ORH" in session_roles
     assert any("ORL" in reason["reason"].upper() for reason in structured.tp_reasons)
+    assert "WATCH_PLAN" in structured.warnings
+    assert structured.tp_reasons[0].get("watch_plan") == "true"

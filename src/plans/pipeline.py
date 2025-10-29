@@ -15,6 +15,14 @@ from .runner import compute_runner
 from .invariants import assert_invariants, GeometryInvariantError
 
 
+_STYLE_MAX_EM_FRACTION = {
+    "scalp": 0.35,
+    "intraday": 0.60,
+    "swing": 0.90,
+    "leaps": 1.00,
+}
+
+
 @dataclass
 class StructuredGeometry:
     entry: float
@@ -30,8 +38,8 @@ class StructuredGeometry:
     warnings: List[str]
 
 
-def _normalise_tp_reasons(reasons: Iterable[Dict[str, str | None]]) -> List[Dict[str, str]]:
-    output: List[Dict[str, str]] = []
+def _normalise_tp_reasons(reasons: Iterable[Dict[str, object]]) -> List[Dict[str, object]]:
+    output: List[Dict[str, object]] = []
     for item in reasons:
         label = str(item.get("label") or "").upper()
         reason = str(item.get("reason") or "")
@@ -39,6 +47,23 @@ def _normalise_tp_reasons(reasons: Iterable[Dict[str, str | None]]) -> List[Dict
         payload = {"label": label, "reason": reason}
         if snap_tag:
             payload["snap_tag"] = str(snap_tag).upper()
+        if item.get("watch_plan"):
+            payload["watch_plan"] = "true"
+        for key in (
+            "ideal_price",
+            "ideal_distance",
+            "ideal_fraction",
+            "snap_price",
+            "snap_distance",
+            "snap_fraction",
+            "snap_deviation",
+            "candidate_nodes",
+            "synthetic",
+            "selected_node",
+            "rr_multiple",
+        ):
+            if key in item:
+                payload[key] = item[key]
         output.append(payload)
     return output
 
@@ -63,11 +88,14 @@ def build_structured_geometry(
     warnings: List[str] = []
     direction = (direction or "").lower()
     style_token = (style or "").strip().lower()
+    if style_token in {"0dte", "zero_dte"}:
+        style_token = "scalp"
     if style_token == "leap":
         style_token = "leaps"
 
     entry_val = float(entry)
     atr_val = abs(float(atr_value or 0.0))
+    max_em_fraction = _STYLE_MAX_EM_FRACTION.get(style_token, _STYLE_MAX_EM_FRACTION["intraday"])
 
     em_points = session_expected_move(symbol, plan_time, style_token)
     if (not em_points or em_points <= 0) and em_hint:
@@ -77,6 +105,14 @@ def build_structured_geometry(
     if em_points < 0:
         em_points = 0.0
 
+    stop_price, stop_label = stop_from_structure(
+        entry=entry_val,
+        direction=direction,
+        levels=levels,
+        atr_value=atr_val,
+        style=style_token,
+    )
+
     snapped_tps, tp_reason_payload, snap_tags = snap_targets(
         entry=entry_val,
         direction=direction,
@@ -84,7 +120,14 @@ def build_structured_geometry(
         levels=levels,
         atr_value=atr_val,
         style=style_token,
+        expected_move=em_points,
+        max_em_fraction=max_em_fraction,
+        stop_price=stop_price,
+        rr_floor=rr_floor,
     )
+    watch_plan_flag = "WATCH_PLAN" in snap_tags
+    if watch_plan_flag:
+        warnings.append("TP1 RR below floor")
     snap_reference = [round(tp, 2) for tp in snapped_tps]
     reason_reference = [dict(reason) for reason in tp_reason_payload]
     if snapped_tps and raw_targets:
@@ -175,14 +218,6 @@ def build_structured_geometry(
         if recomputed_tags:
             snap_tags = recomputed_tags
 
-    stop_price, stop_label = stop_from_structure(
-        entry=entry_val,
-        direction=direction,
-        levels=levels,
-        atr_value=atr_val,
-        style=style_token,
-    )
-
     key_levels_used = build_key_levels_used(
         direction=direction,
         stop_level=(stop_price, stop_label),
@@ -199,11 +234,14 @@ def build_structured_geometry(
         profile_nodes=profile_nodes(levels),
     )
 
-    try:
-        assert_invariants(direction, entry_val, stop_price, clamped_tps, rr_floor)
-    except GeometryInvariantError as exc:
-        warnings.append("INVARIANT_BROKEN")
-        warnings.append(str(exc))
+    if watch_plan_flag:
+        warnings.append("WATCH_PLAN")
+    else:
+        try:
+            assert_invariants(direction, entry_val, stop_price, clamped_tps, rr_floor)
+        except GeometryInvariantError as exc:
+            warnings.append("INVARIANT_BROKEN")
+            warnings.append(str(exc))
 
     return StructuredGeometry(
         entry=entry_val,

@@ -35,12 +35,14 @@ def test_geometry_stable_without_htf_levels() -> None:
 
     assert geometry.stop == pytest.approx(97.13, rel=0, abs=1e-2)
     targets = [round(tp, 2) for tp in geometry.targets]
-    assert targets[0] == pytest.approx(103.6, rel=0, abs=1e-2)
+    assert targets[0] == pytest.approx(101.8, rel=0, abs=1e-2)
     assert len(targets) >= 2
-    assert targets[-1] <= 104.4 + 1e-2
+    assert targets[-1] <= 104.1 + 1e-2
     assert geometry.runner_policy["fraction"] == pytest.approx(0.2)
     assert geometry.runner_policy["atr_trail_mult"] == pytest.approx(1.0)
-    assert "VAH" in geometry.snap_tags
+    assert "EM45" in {tag.upper() for tag in geometry.snap_tags}
+    assert "WATCH_PLAN" in geometry.warnings
+    assert geometry.tp_reasons[0].get("watch_plan") == "true"
 
 
 def test_htf_levels_snap_targets_when_near_em_cap() -> None:
@@ -98,5 +100,6 @@ def test_htf_levels_snap_targets_when_near_em_cap() -> None:
     close_targets = [round(tp, 2) for tp in geometry_with_close_htf.targets]
     far_targets = [round(tp, 2) for tp in geometry_with_far_htf.targets]
 
-    assert close_targets[0] == pytest.approx(levels_with_close_htf["pwh"])
-    assert far_targets[0] == base_targets[0]
+    assert base_targets[0] == pytest.approx(101.36, rel=0, abs=1e-2)
+    assert close_targets[0] == pytest.approx(base_targets[0], rel=0, abs=1e-9)
+    assert far_targets[0] == pytest.approx(levels_with_far_htf["pwh"], rel=0, abs=1e-2)

@@ -10003,6 +10003,25 @@ async def _generate_fallback_plan(
                 item["snap_tag"] = snap_tag
             if reason_payload.get("reason"):
                 item["reason"] = reason_payload["reason"]
+            for key in (
+                "ideal_price",
+                "ideal_distance",
+                "ideal_fraction",
+                "snap_price",
+                "snap_distance",
+                "snap_fraction",
+                "snap_deviation",
+                "synthetic",
+                "rr_multiple",
+            ):
+                if key in reason_payload:
+                    item[key] = reason_payload[key]
+            if reason_payload.get("candidate_nodes") and idx == 1:
+                item["candidate_nodes"] = reason_payload["candidate_nodes"]
+            if reason_payload.get("selected_node"):
+                item["selected_node"] = reason_payload["selected_node"]
+            if reason_payload.get("watch_plan"):
+                item["watch_plan"] = True
             target_meta.append(item)
         target_meta = _nativeify(target_meta)
 

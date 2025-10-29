@@ -1067,6 +1067,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
       default:
         break;
     }
+    evaluateGuidance(lastKnownPrice);
   };
 
   const updateFollowLiveToggle = () => {
@@ -1463,6 +1464,11 @@ levelsToggleEl = document.getElementById('levels_toggle');
 
   let planFocusSeries = null;
   let loggedInitialPlan = false;
+  let guidanceState = {
+    key: 'hold',
+    message: 'Structure intact — follow plan.',
+    tone: 'info',
+  };
 
   const ensurePlanFocusSeries = () => {
     if (planFocusSeries) {
@@ -1784,6 +1790,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
     }
     lastDegradedState = isFeedDegraded();
     updateStatusNote();
+    evaluateGuidance(lastKnownPrice);
   };
 
   const applyMarketStatus = (phase, note) => {
@@ -2213,6 +2220,114 @@ levelsToggleEl = document.getElementById('levels_toggle');
     return `${Math.round(num * 100)}% POT`;
   };
 
+  const computeGuidanceState = (priceInput) => {
+    const direction = (mergedPlanMeta.bias || currentPlan.direction || 'long').toLowerCase();
+    const price = Number.isFinite(priceInput)
+      ? Number(priceInput)
+      : Number.isFinite(lastKnownPrice)
+        ? Number(lastKnownPrice)
+        : null;
+    const entry = Number.isFinite(currentPlan.entry) ? Number(currentPlan.entry) : toNumber(mergedPlanMeta.entry);
+    const stop = Number.isFinite(currentPlan.stop) ? Number(currentPlan.stop) : toNumber(mergedPlanMeta.stop);
+    const atr = toNumber(mergedPlanMeta.atr);
+    const targets = Array.isArray(currentPlan.tps) ? currentPlan.tps.filter((tp) => Number.isFinite(tp)) : [];
+    const firstTarget = targets.length ? Number(targets[0]) : null;
+    const targetMeta = Array.isArray(mergedPlanMeta.target_meta) ? mergedPlanMeta.target_meta : [];
+    const firstMeta = targetMeta.length ? targetMeta[0] || {} : {};
+    const probTouch =
+      toNumber(firstMeta.prob_touch_calibrated) ??
+      toNumber(firstMeta.prob_touch) ??
+      null;
+    const probFlag =
+      typeof firstMeta.prob_touch_flag === 'string' ? firstMeta.prob_touch_flag.toLowerCase() : '';
+
+    const defaultState = {
+      key: 'hold',
+      message: 'Structure intact — follow plan.',
+      tone: 'info',
+    };
+
+    const statusToken = typeof currentPlanStatus === 'string' ? currentPlanStatus.toLowerCase() : 'intact';
+    if (statusToken === 'invalidated') {
+      const planHint =
+        pendingAutoReplan && pendingAutoReplan.planId
+          ? ` (${pendingAutoReplan.planId})`
+          : '';
+      return {
+        key: 'invalidated',
+        message: `Invalidated – recomputing next entry${planHint}`,
+        tone: 'warn',
+      };
+    }
+
+    if (price !== null && Number.isFinite(firstTarget)) {
+      const hitTarget =
+        (direction === 'long' && price >= firstTarget - 1e-4) ||
+        (direction === 'short' && price <= firstTarget + 1e-4);
+      if (hitTarget) {
+        return {
+          key: 'take_profit',
+          message: 'Take Profit now — TP1 tagged.',
+          tone: 'positive',
+        };
+      }
+    }
+
+    if (
+      (probFlag === 'below_threshold' || (probTouch !== null && probTouch < 0.4)) &&
+      statusToken !== 'invalidated'
+    ) {
+      return {
+        key: 'take_profit_prob',
+        message: 'Take Profit now — POT collapsing.',
+        tone: 'warn',
+      };
+    }
+
+    if (price !== null && Number.isFinite(stop) && Number.isFinite(atr) && atr > 0.01) {
+      const distance =
+        direction === 'short' ? stop - price : price - stop;
+      if (distance > 0 && distance <= atr * 0.2) {
+        return {
+          key: 'stop_warning',
+          message: 'Stop Loss approaching — tighten risk.',
+          tone: 'warn',
+        };
+      }
+    }
+
+    return defaultState;
+  };
+
+  const updateGuidanceBanner = () => {
+    const bannerEl = document.getElementById('plan_guidance_banner');
+    if (!bannerEl) return;
+    if (!guidanceState || !guidanceState.message || guidanceState.key === 'idle') {
+      bannerEl.hidden = true;
+      bannerEl.textContent = '';
+      bannerEl.className = 'plan-guidance';
+      return;
+    }
+    bannerEl.hidden = false;
+    bannerEl.textContent = guidanceState.message;
+    const tone = guidanceState.tone || 'info';
+    bannerEl.className = `plan-guidance plan-guidance--${tone}`;
+  };
+
+  const evaluateGuidance = (price, { silent = false } = {}) => {
+    const next = computeGuidanceState(price);
+    const changed =
+      !guidanceState ||
+      next.key !== guidanceState.key ||
+      next.message !== guidanceState.message ||
+      next.tone !== guidanceState.tone;
+    guidanceState = next;
+    if (!silent || changed) {
+      updateGuidanceBanner();
+    }
+    return guidanceState;
+  };
+
   const estimateDuration = () => {
     if (Number.isFinite(mergedPlanMeta.horizon_minutes)) {
       const minutes = mergedPlanMeta.horizon_minutes;
@@ -2325,18 +2440,118 @@ levelsToggleEl = document.getElementById('levels_toggle');
     const entryStatusState = (entryStatusObj?.state || '').toLowerCase();
     const reentryCues = Array.isArray(mergedPlanMeta.reentry_cues) ? mergedPlanMeta.reentry_cues : [];
 
+    const watchPlan = targetMeta.some((entry) => entry && (entry.watch_plan === true || entry.watch_plan === 'true'));
+
+    const ladderSource =
+      targetMeta.find(
+        (entry) => entry && Array.isArray(entry.candidate_nodes) && entry.candidate_nodes.length,
+      ) || null;
+    const ladderRaw = ladderSource && Array.isArray(ladderSource.candidate_nodes) ? ladderSource.candidate_nodes : [];
+    const ladderSelected =
+      ladderSource && typeof ladderSource.selected_node === 'string'
+        ? ladderSource.selected_node.toUpperCase()
+        : undefined;
+    const ladderNodes = ladderRaw
+      .map((node) => {
+        if (!node) return null;
+        const price = toNumber(node.price);
+        if (price === null) return null;
+        const label = String(node.label || 'LEVEL').toUpperCase();
+        const distance = toNumber(node.distance);
+        const fraction = toNumber(node.fraction);
+        const rrMultiple = toNumber(node.rr_multiple);
+        return {
+          label,
+          price,
+          distance,
+          fraction,
+          rr: rrMultiple,
+          isSelected: ladderSelected ? label === ladderSelected : false,
+        };
+      })
+      .filter(Boolean);
+    const candidateLadderHtml = ladderNodes
+      .map((node, idx) => {
+        const distanceText = node.distance !== null ? `${node.distance.toFixed(2)} pts` : null;
+        const fractionText =
+          node.fraction !== null ? `${(node.fraction * 100).toFixed(0)}% EM` : null;
+        const rrText = node.rr !== null ? `RR ${node.rr.toFixed(2)}` : null;
+        const metaParts = [distanceText, fractionText, rrText].filter(Boolean).join(' · ');
+        return `
+          <li class="plan-ladder__item${node.isSelected ? ' plan-ladder__item--active' : ''}" data-index="${idx}">
+            <span class="plan-ladder__label">${escapeHtml(node.label)}</span>
+            <span class="plan-ladder__value">${formatPrice(node.price)}</span>
+            ${metaParts ? `<span class="plan-ladder__meta">${metaParts}</span>` : ''}
+          </li>
+        `;
+      })
+      .join('');
+
     const targetsList = currentPlan.tps
       .map((tp, idx) => {
         if (!Number.isFinite(tp)) return null;
         const meta = targetsMeta[idx] || {};
         const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
-        const label = sequence >= 3 ? 'Runner' : `TP${sequence}`;
-        const rrVal = toNumber(meta.rr);
-        const rr = rrVal !== null ? ` · R:R ${rrVal.toFixed(2)}` : '';
+        const label = sequence >= 3 ? 'Runner' : meta.label || `TP${sequence}`;
         const pot = formatProbability(meta.prob_touch);
-        const emVal = toNumber(meta.em_fraction);
-        const em = emVal !== null ? ` · ${emVal.toFixed(2)}×EM` : '';
-        return `<li><strong>${label}:</strong> ${formatPrice(tp)}${em}${pot ? ` · ${pot}` : ''}${rr}</li>`;
+        const snapTag = typeof meta.snap_tag === 'string' ? meta.snap_tag : null;
+        const snapFraction =
+          toNumber(meta.snap_fraction) ?? toNumber(meta.em_fraction);
+        const idealPrice = toNumber(meta.ideal_price);
+        const idealFraction = toNumber(meta.ideal_fraction);
+        const deviationPts = toNumber(meta.snap_deviation);
+        const rrVal = toNumber(meta.rr_multiple ?? meta.rr);
+        const deviationFraction =
+          idealFraction !== null && snapFraction !== null ? Math.abs(snapFraction - idealFraction) : null;
+        const showDeviationWarning = deviationFraction !== null && deviationFraction > 0.15;
+        const chips = [];
+        if (snapTag) {
+          chips.push(
+            `<span class="plan-target__chip plan-target__chip--outline">${escapeHtml(String(snapTag))}</span>`,
+          );
+        }
+        if (snapFraction !== null) {
+          chips.push(
+            `<span class="plan-target__chip">${(snapFraction * 100).toFixed(0)}% EM</span>`,
+          );
+        }
+        if (idealPrice !== null) {
+          const idealLabel =
+            idealFraction !== null ? ` (${(idealFraction * 100).toFixed(0)}% EM)` : '';
+          chips.push(
+            `<span class="plan-target__chip plan-target__chip--ghost">Ideal ${formatPrice(idealPrice)}${idealLabel}</span>`,
+          );
+        }
+        if (deviationPts !== null && Math.abs(deviationPts) >= 0.01) {
+          chips.push(
+            `<span class="plan-target__chip plan-target__chip--muted">Δ ${deviationPts >= 0 ? '+' : ''}${deviationPts.toFixed(2)} pts</span>`,
+          );
+        }
+        if (pot) {
+          chips.push(
+            `<span class="plan-target__chip plan-target__chip--success">${escapeHtml(pot)}</span>`,
+          );
+        }
+        if (rrVal !== null) {
+          chips.push(
+            `<span class="plan-target__chip plan-target__chip--muted">R:R ${rrVal.toFixed(2)}</span>`,
+          );
+        }
+        if (meta.synthetic) {
+          chips.push('<span class="plan-target__chip plan-target__chip--muted">Synthetic ideal</span>');
+        }
+        if (showDeviationWarning) {
+          chips.push(
+            '<span class="plan-target__chip plan-target__chip--warn">Snapped far from ideal; POT re-checked</span>',
+          );
+        }
+        const chipsLine = chips.length ? `<div class="plan-target__meta">${chips.join('')}</div>` : '';
+        return `
+          <li>
+            <div><strong>${escapeHtml(label)}:</strong> ${formatPrice(tp)}${pot ? ` · ${escapeHtml(pot)}` : ''}</div>
+            ${chipsLine}
+          </li>
+        `;
       })
       .filter(Boolean)
       .join('');
@@ -2386,6 +2601,23 @@ levelsToggleEl = document.getElementById('levels_toggle');
       }
       return `${prefix} — look for the defined retest before acting.`;
     })();
+
+    evaluateGuidance(lastPrice, { silent: true });
+
+    const watchPlanNoticeHtml = watchPlan
+      ? '<div class="plan-panel__notice plan-panel__notice--warn">RR below floor on TP1 — treating plan as watch-only until structure improves.</div>'
+      : '';
+    const guidancePlaceholder = '<div class="plan-guidance" id="plan_guidance_banner" hidden></div>';
+    const candidateSectionHtml = candidateLadderHtml
+      ? `<div class="plan-panel__section">
+            <details class="plan-ladder"${watchPlan ? ' open' : ''}>
+              <summary class="plan-ladder__summary">Candidate TP ladder</summary>
+              <ul class="plan-ladder__list">
+                ${candidateLadderHtml}
+              </ul>
+            </details>
+          </div>`
+      : '';
 
     const buildConfluence = () => {
       const biasToken = (mergedPlanMeta.bias || currentPlan.direction || '').toLowerCase();
@@ -2550,7 +2782,13 @@ levelsToggleEl = document.getElementById('levels_toggle');
           <span><small>Horizon</small><strong>${horizonCopy}</strong></span>
           <span><small>R:R (TP1)</small><strong>${rrCopy}</strong></span>
         </div>
-        ${planNoticeHtml ? `<div class="plan-panel__notice plan-panel__notice--info" style="margin-top:6px;">${planNoticeHtml}</div>` : ''}
+        ${guidancePlaceholder}
+        ${watchPlanNoticeHtml}
+        ${
+          planNoticeHtml
+            ? `<div class="plan-panel__notice plan-panel__notice--info" style="margin-top:6px;">${planNoticeHtml}</div>`
+            : ''
+        }
         ${
           strategyLabel
             ? `<div style="margin-top:6px;font-size:12px;letter-spacing:0.06em;text-transform:uppercase;color:rgba(148,163,184,0.78);">Strategy: ${escapeHtml(strategyLabel)}</div>`
@@ -2563,6 +2801,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
           ${targetsList || '<li>No targets supplied.</li>'}
         </ul>
       </div>
+      ${candidateSectionHtml}
       ${
         reentryCuesHtml
           ? `<div class="plan-panel__section">
@@ -2663,6 +2902,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
           : ''
       }
     `;
+    updateGuidanceBanner();
     if (planPanelEl) {
       if (window.innerWidth <= 1024) {
         planPanelEl.open = false;
@@ -2695,6 +2935,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
     const lastEl = document.getElementById('plan_last_price_value');
     if (!lastEl) return;
     lastEl.textContent = Number.isFinite(value) ? formatPrice(value) : '—';
+    evaluateGuidance(value);
   };
 
   const ensureScrollToRealTime = () => {
@@ -3948,21 +4189,44 @@ levelsToggleEl = document.getElementById('levels_toggle');
         lineStyle: LightweightCharts.LineStyle.Solid,
       });
 
+      const planDirection = (planForFrame.direction || mergedPlanMeta.bias || 'long').toLowerCase();
+      const isShortPlan = planDirection === 'short';
+
       planForFrame.tps.forEach((tp, idx) => {
         if (!Number.isFinite(tp)) return;
         const meta = Array.isArray(mergedPlanMeta.target_meta) ? mergedPlanMeta.target_meta[idx] || {} : {};
         const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
         const isRunner = sequence >= 3;
         const label = isRunner ? 'Runner' : meta.label || `TP${sequence}`;
-        const color = isRunner ? '#c084fc' : '#22c55e';
+        const color = isRunner ? '#c084fc' : isShortPlan ? '#f87171' : '#22c55e';
         const id = isRunner ? 'runner-tp' : `tp:${sequence}`;
         registerLine(id, {
           price: tp,
           color,
-          title: label,
+          title: `${label} (snapped)`,
           lineWidth: 2,
-          lineStyle: LightweightCharts.LineStyle.Dashed,
+          lineStyle: LightweightCharts.LineStyle.Solid,
         });
+        if (Number.isFinite(meta.ideal_price)) {
+          const idealFraction = toNumber(meta.ideal_fraction);
+          const idealLabel =
+            idealFraction !== null
+              ? `Ideal ${(idealFraction * 100).toFixed(0)}% EM`
+              : 'Ideal target';
+          const idealColor = isRunner
+            ? 'rgba(192, 132, 252, 0.45)'
+            : isShortPlan
+              ? 'rgba(248, 113, 113, 0.35)'
+              : 'rgba(34, 197, 94, 0.35)';
+          const idealId = isRunner ? 'ideal:runner' : `ideal:tp:${sequence}`;
+          registerLine(idealId, {
+            price: Number(meta.ideal_price),
+            color: idealColor,
+            title: idealLabel,
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+          });
+        }
       });
 
       if (entryLineLate && reentryCueSet.length) {

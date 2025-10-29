@@ -420,6 +420,171 @@
         color: rgba(253, 230, 138, 0.95);
       }
 
+      .plan-guidance {
+        margin-top: 12px;
+        padding: 10px 14px;
+        border-radius: 12px;
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        background: rgba(59, 130, 246, 0.12);
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        color: rgba(191, 219, 254, 0.9);
+      }
+
+      .plan-guidance--info {
+        background: rgba(59, 130, 246, 0.12);
+        border-color: rgba(59, 130, 246, 0.3);
+        color: rgba(191, 219, 254, 0.9);
+      }
+
+      .plan-guidance--warn {
+        background: rgba(248, 113, 113, 0.16);
+        border-color: rgba(248, 113, 113, 0.45);
+        color: rgba(254, 202, 202, 0.95);
+      }
+
+      .plan-guidance--positive {
+        background: rgba(34, 197, 94, 0.18);
+        border-color: rgba(34, 197, 94, 0.45);
+        color: rgba(187, 247, 208, 0.95);
+      }
+
+      .plan-target__meta {
+        margin-top: 6px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .plan-target__chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        background: rgba(59, 130, 246, 0.12);
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        color: rgba(191, 219, 254, 0.9);
+      }
+
+      .plan-target__chip--ghost {
+        background: rgba(148, 163, 184, 0.12);
+        border-color: rgba(148, 163, 184, 0.25);
+        color: rgba(226, 232, 240, 0.88);
+      }
+
+      .plan-target__chip--success {
+        background: rgba(34, 197, 94, 0.18);
+        border-color: rgba(34, 197, 94, 0.4);
+        color: rgba(187, 247, 208, 0.95);
+      }
+
+      .plan-target__chip--warn {
+        background: rgba(250, 204, 21, 0.22);
+        border-color: rgba(250, 204, 21, 0.5);
+        color: rgba(253, 230, 138, 0.95);
+      }
+
+      .plan-target__chip--muted {
+        background: rgba(100, 116, 139, 0.16);
+        border-color: rgba(100, 116, 139, 0.38);
+        color: rgba(226, 232, 240, 0.78);
+      }
+
+      .plan-target__chip--outline {
+        background: rgba(15, 23, 42, 0.45);
+        border: 1px solid rgba(59, 130, 246, 0.55);
+        color: rgba(191, 219, 254, 0.95);
+      }
+
+      .plan-ladder {
+        margin-top: 12px;
+        padding: 0 12px 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(96, 123, 180, 0.3);
+        background: rgba(12, 18, 30, 0.68);
+      }
+
+      .plan-ladder__summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 12px 0;
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: rgba(148, 163, 184, 0.85);
+        cursor: pointer;
+      }
+
+      .plan-ladder__summary::after {
+        content: '▾';
+        font-size: 14px;
+        transition: transform 0.2s ease;
+      }
+
+      .plan-ladder:not([open]) .plan-ladder__summary::after {
+        transform: rotate(-90deg);
+      }
+
+      .plan-ladder__summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .plan-ladder__list {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .plan-ladder__item {
+        border: 1px solid rgba(96, 123, 180, 0.35);
+        border-radius: 12px;
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        background: rgba(15, 23, 42, 0.6);
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      }
+
+      .plan-ladder__item:hover {
+        border-color: rgba(96, 123, 180, 0.55);
+      }
+
+      .plan-ladder__item--active {
+        border-color: rgba(34, 197, 94, 0.55);
+        box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.25);
+      }
+
+      .plan-ladder__label {
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: rgba(226, 232, 240, 0.82);
+      }
+
+      .plan-ladder__value {
+        font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, monospace;
+        font-size: 14px;
+        color: #f8fafc;
+      }
+
+      .plan-ladder__meta {
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: rgba(148, 163, 184, 0.78);
+      }
+
       .plan-log {
         list-style: none;
         margin: 0;

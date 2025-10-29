@@ -65,3 +65,31 @@ def test_snap_targets_uses_structural_nodes():
     assert "ORL" in reasons[0]["reason"].upper()
     assert "SESSION_LOW" in reasons[1]["reason"].upper()
     assert {"ORL", "SESSION_LOW"} <= {tag.upper() for tag in tags}
+
+
+def test_snap_targets_prefers_em_band_over_far_extreme():
+    entry = 634.24
+    raw_targets = [632.0, 630.5, 628.0]
+    levels = {
+        "pdc": 632.1,
+        "val": 631.45,
+        "session_low": 630.25,
+    }
+
+    snapped, reasons, tags = snap_targets(
+        entry,
+        "short",
+        raw_targets,
+        levels,
+        atr_value=1.2,
+        style="intraday",
+        expected_move=5.0,
+        max_em_fraction=0.60,
+        stop_price=636.5,
+        rr_floor=1.3,
+    )
+
+    assert snapped[0] == pytest.approx(632.0, rel=0, abs=1e-2)
+    assert any("EM45" in reason["reason"] for reason in reasons)
+    assert "SESSION_LOW" not in reasons[0]["reason"].upper()
+    assert "EM45" in {tag.upper() for tag in tags}

@@ -40,7 +40,46 @@ function formatNumber(value: number | null | undefined, decimals = 2): string {
 
 function renderTargetMeta(meta: TargetMetaEntry | undefined): JSX.Element {
   if (!meta) return <span className="text-xs text-neutral-500">No meta</span>;
+
   const chips: JSX.Element[] = [];
+  const lines: JSX.Element[] = [];
+  const snapFraction =
+    typeof meta.snap_fraction === 'number'
+      ? meta.snap_fraction
+      : typeof meta.em_fraction === 'number'
+        ? meta.em_fraction
+        : undefined;
+  const idealFraction = typeof meta.ideal_fraction === 'number' ? meta.ideal_fraction : undefined;
+  const deviationFraction =
+    idealFraction != null && snapFraction != null ? Math.abs(snapFraction - idealFraction) : undefined;
+
+  if (typeof meta.snap_price === 'number') {
+    const fractionLabel = snapFraction != null ? `${(snapFraction * 100).toFixed(0)}% EM` : null;
+    lines.push(
+      <span key="snap" className="font-mono text-emerald-200">
+        Snapped {meta.snap_price.toFixed(2)}
+        {fractionLabel ? <span className="text-neutral-400"> ({fractionLabel})</span> : null}
+      </span>,
+    );
+  }
+  if (typeof meta.ideal_price === 'number') {
+    const fractionLabel = idealFraction != null ? `${(idealFraction * 100).toFixed(0)}% EM` : null;
+    lines.push(
+      <span key="ideal" className="font-mono text-cyan-200">
+        Ideal {meta.ideal_price.toFixed(2)}
+        {fractionLabel ? <span className="text-neutral-400"> ({fractionLabel})</span> : null}
+      </span>,
+    );
+  }
+  if (typeof meta.snap_deviation === 'number') {
+    lines.push(
+      <span key="delta" className="text-xs text-neutral-400">
+        Δ {meta.snap_deviation >= 0 ? '+' : ''}
+        {meta.snap_deviation.toFixed(2)} pts
+      </span>,
+    );
+  }
+
   if (typeof meta.prob_touch_calibrated === 'number') {
     chips.push(
       <span key="prob" className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">
@@ -63,7 +102,7 @@ function renderTargetMeta(meta: TargetMetaEntry | undefined): JSX.Element {
   }
   if (meta.snap_tag) {
     chips.push(
-      <span key="snap" className="rounded-full bg-neutral-700/40 px-2 py-0.5 text-xs text-neutral-200">
+      <span key="snap-tag" className="rounded-full bg-neutral-700/40 px-2 py-0.5 text-xs text-neutral-200">
         {meta.snap_tag}
       </span>,
     );
@@ -73,7 +112,38 @@ function renderTargetMeta(meta: TargetMetaEntry | undefined): JSX.Element {
       <span key="cap" className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs text-amber-200">EM capped</span>,
     );
   }
-  return <div className="flex flex-wrap gap-1">{chips}</div>;
+  if (meta.synthetic) {
+    chips.push(
+      <span key="synthetic" className="rounded-full bg-neutral-700/20 px-2 py-0.5 text-xs text-neutral-300">
+        Synthetic ideal
+      </span>,
+    );
+  }
+  if (meta.watch_plan === 'true' || meta.watch_plan === true) {
+    chips.push(
+      <span key="watch" className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs text-amber-200">
+        Watch plan
+      </span>,
+    );
+  }
+  if (deviationFraction != null && deviationFraction > 0.15) {
+    chips.push(
+      <span key="deviation" className="rounded-full bg-rose-500/20 px-2 py-0.5 text-xs text-rose-200">
+        Snapped far from ideal · POT re-checked
+      </span>,
+    );
+  }
+
+  if (!chips.length && !lines.length) {
+    return <span className="text-xs text-neutral-500">No meta</span>;
+  }
+
+  return (
+    <div className="space-y-1">
+      {lines.length ? <div className="flex flex-wrap gap-2 text-xs text-neutral-300">{lines}</div> : null}
+      {chips.length ? <div className="flex flex-wrap gap-1">{chips}</div> : null}
+    </div>
+  );
 }
 
 function Badges({ badges }: { badges: Badge[] | undefined }) {
@@ -109,6 +179,45 @@ export default function PlanDetail({ plan, structured, planId }: PlanDetailProps
     }
     return entries as TargetMetaEntry[];
   }, [plan.target_meta, structured?.targets]);
+
+  const watchPlan = useMemo(
+    () => targetMeta.some((entry) => entry?.watch_plan === 'true' || entry?.watch_plan === true),
+    [targetMeta],
+  );
+
+  const { nodes: candidateNodes, selectedNode } = useMemo(() => {
+    const root = targetMeta.find(
+      (entry) => Array.isArray(entry?.candidate_nodes) && (entry?.candidate_nodes as unknown[]).length > 0,
+    );
+    if (!root || !Array.isArray(root.candidate_nodes)) {
+      return { nodes: [] as Array<{ label: string; price: number | null; distance?: number | null; fraction?: number | null; rr_multiple?: number | null }>, selectedNode: undefined as string | undefined };
+    }
+    const normaliseNumber = (value: unknown): number | null => {
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const nodes = (root.candidate_nodes as Array<Record<string, unknown>>)
+      .map((node) => {
+        const price = normaliseNumber(node.price);
+        const distance = normaliseNumber(node.distance);
+        const fraction = normaliseNumber(node.fraction);
+        const rr = normaliseNumber(node.rr_multiple);
+        return {
+          label: String(node.label ?? 'LEVEL').toUpperCase(),
+          price,
+          distance,
+          fraction,
+          rr_multiple: rr,
+        };
+      })
+      .filter((node) => node.price != null);
+    const selected =
+      typeof root.selected_node === 'string' && root.selected_node.trim()
+        ? root.selected_node.toUpperCase()
+        : undefined;
+    return { nodes, selectedNode: selected };
+  }, [targetMeta]);
 
   useEffect(() => {
     let cancelled = false;
@@ -238,6 +347,12 @@ export default function PlanDetail({ plan, structured, planId }: PlanDetailProps
         ) : null}
       </header>
 
+      {watchPlan ? (
+        <div className="rounded-2xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
+          RR below floor on TP1 &mdash; treating plan as watch-only until structure improves.
+        </div>
+      ) : null}
+
       <div className="overflow-hidden rounded-2xl border border-neutral-800/70">
         <table className="min-w-full text-sm text-neutral-200">
           <thead className="bg-neutral-900/70 text-xs uppercase tracking-[0.25em] text-neutral-400">
@@ -277,6 +392,55 @@ export default function PlanDetail({ plan, structured, planId }: PlanDetailProps
           </tbody>
         </table>
       </div>
+
+      {candidateNodes.length ? (
+        <details className="rounded-2xl border border-neutral-800/70 bg-neutral-950/60 p-4 text-sm text-neutral-200" open={watchPlan}>
+          <summary className="cursor-pointer list-none text-xs uppercase tracking-[0.3em] text-neutral-500 outline-none">
+            Candidate TP ladder
+            <span className="ml-2 text-[0.65rem] text-neutral-400">
+              ({candidateNodes.length})
+            </span>
+          </summary>
+          <ul className="mt-3 space-y-2 text-sm">
+            {candidateNodes.slice(0, 10).map((node, idx) => {
+              const isSelected = selectedNode && node.label === selectedNode;
+              const distanceLabel =
+                typeof node.distance === 'number' && Number.isFinite(node.distance)
+                  ? `${node.distance.toFixed(2)} pts`
+                  : null;
+              const fractionLabel =
+                typeof node.fraction === 'number' && Number.isFinite(node.fraction)
+                  ? `${(node.fraction * 100).toFixed(0)}% EM`
+                  : null;
+              const rrLabel =
+                typeof node.rr_multiple === 'number' && Number.isFinite(node.rr_multiple)
+                  ? `RR ${node.rr_multiple.toFixed(2)}`
+                  : null;
+              return (
+                <li
+                  key={`${node.label}-${idx}`}
+                  className={clsx(
+                    'rounded-xl border px-3 py-2 transition',
+                    isSelected
+                      ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-100'
+                      : 'border-neutral-800/70 bg-neutral-900/50 text-neutral-200',
+                  )}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold">{node.label}</span>
+                    <span className="font-mono text-sm">{formatNumber(node.price)}</span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-3 text-xs text-neutral-400">
+                    {distanceLabel ? <span>{distanceLabel}</span> : null}
+                    {fractionLabel ? <span>{fractionLabel}</span> : null}
+                    {rrLabel ? <span>{rrLabel}</span> : null}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </details>
+      ) : null}
 
       {riskBlock ? (
         <div className="rounded-2xl border border-neutral-800/80 bg-neutral-950/60 p-4 text-sm text-neutral-200">
