@@ -2440,10 +2440,12 @@ levelsToggleEl = document.getElementById('levels_toggle');
     const entryStatusState = (entryStatusObj?.state || '').toLowerCase();
     const reentryCues = Array.isArray(mergedPlanMeta.reentry_cues) ? mergedPlanMeta.reentry_cues : [];
 
-    const watchPlan = targetMeta.some((entry) => entry && (entry.watch_plan === true || entry.watch_plan === 'true'));
+    const watchPlan = targetsMeta.some(
+      (entry) => entry && (entry.watch_plan === true || entry.watch_plan === 'true'),
+    );
 
     const ladderSource =
-      targetMeta.find(
+      targetsMeta.find(
         (entry) => entry && Array.isArray(entry.candidate_nodes) && entry.candidate_nodes.length,
       ) || null;
     const ladderRaw = ladderSource && Array.isArray(ladderSource.candidate_nodes) ? ladderSource.candidate_nodes : [];
