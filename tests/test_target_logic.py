@@ -173,7 +173,9 @@ def test_swing_ignores_expected_move_cap():
     assert targets[0] >= entry + max(atr_1d * 1.20, entry * 0.015) - 0.01
     assert targets[0] > entry + expected_move  # EM cap not applied
     assert target_meta and target_meta[0].get("source") == "stats"
-    assert target_meta[0].get("em_fraction") and target_meta[0]["em_fraction"] > 0
+    assert target_meta[0].get("mfe_quantile") == "q50"
+    assert target_meta[0].get("pot_est") is not None
+    assert "structure_tag" in target_meta[0]
 
 
 def test_rr_floor_triggers_watch_warning_when_unresolved():
@@ -225,8 +227,74 @@ def test_rr_floor_triggers_watch_warning_when_unresolved():
     assert targets[0] > entry
     assert warnings and any("watch plan" in msg.lower() for msg in warnings)
     assert target_meta and len(target_meta) >= len(targets)
-    if len(target_meta) >= 3:
-        assert target_meta[2].get("optional") is True
+    optional_entries = [meta for meta in target_meta if meta.get("optional")]
+    for meta in optional_entries:
+        assert meta.get("optional") is True
+    assert len(optional_entries) <= 1
+    for meta in target_meta:
+        assert "pot_est" in meta
+
+
+def test_optional_tp3_suppressed_when_probability_low():
+    entry = 100.0
+    stop = 99.1
+    atr = 0.65
+    expected_move = 1.1
+    min_rr = 1.2
+
+    base_targets = _base_targets_for_style(
+        style="scalp",
+        bias="long",
+        entry=entry,
+        stop=stop,
+        atr=atr,
+        expected_move=expected_move,
+        min_rr=min_rr,
+        prefer_em_cap=True,
+    )
+
+    ctx = _make_tp_ctx(
+        expected_move=expected_move,
+        atr=atr,
+        atr_5m=0.6,
+        target_stats={
+            "scalp": {
+                "style": "scalp",
+                "expected_move": expected_move,
+                "long": {
+                    "mfe": np.array([0.0015, 0.0018, 0.0021], dtype=float),
+                    "quantiles": {
+                        "q40": 0.0015,
+                        "q50": 0.0018,
+                        "q60": 0.0020,
+                        "q70": 0.0022,
+                        "q75": 0.00225,
+                        "q80": 0.0023,
+                        "q85": 0.00235,
+                        "q90": 0.0024,
+                    },
+                },
+            }
+        },
+    )
+
+    targets, target_meta, warnings, _ = _apply_tp_logic(
+        symbol="SPY",
+        style="scalp",
+        bias="long",
+        entry=entry,
+        stop=stop,
+        base_targets=base_targets,
+        ctx=ctx,
+        min_rr=min_rr,
+        atr=atr,
+        expected_move=expected_move,
+        prefer_em_cap=True,
+    )
+
+    assert len(targets) == 2
+    assert all(not meta.get("optional") for meta in target_meta)
+    assert all("pot_est" in meta for meta in target_meta)
 
 
 def test_intraday_targets_respect_min_spacing():

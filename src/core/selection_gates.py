@@ -25,14 +25,32 @@ def within_hard_caps(candidate: CandidateDict, s_cfg: Dict[str, float]) -> bool:
     """Check if the candidate respects hard ATR/bars caps."""
     d_atr = candidate.get("entry_distance_atr")
     bars = candidate.get("bars_to_trigger")
-    if d_atr is None or bars is None:
+    pct = candidate.get("entry_distance_pct")
+    hard_atr = s_cfg.get("hard_atr_cap")
+    hard_bars = s_cfg.get("hard_bars_cap")
+    hard_pct = s_cfg.get("hard_pct_cap")
+    checks = []
+    if hard_atr is not None and d_atr is not None:
+        try:
+            d_atr_val = float(d_atr)
+        except (TypeError, ValueError):
+            return False
+        checks.append(d_atr_val <= float(hard_atr))
+    if hard_bars is not None and bars is not None:
+        try:
+            bars_val = float(bars)
+        except (TypeError, ValueError):
+            return False
+        checks.append(bars_val <= float(hard_bars))
+    if hard_pct is not None and pct is not None:
+        try:
+            pct_val = float(pct)
+        except (TypeError, ValueError):
+            return False
+        checks.append(pct_val <= float(hard_pct))
+    if not checks:
         return True
-    try:
-        d_atr_val = float(d_atr)
-        bars_val = float(bars)
-    except (TypeError, ValueError):
-        return False
-    return d_atr_val <= s_cfg["hard_atr_cap"] and bars_val <= s_cfg["hard_bars_cap"]
+    return all(checks)
 
 
 def _soft_ratio(value: float | None, pref: float, hard: float) -> float:
@@ -52,9 +70,22 @@ def _soft_ratio(value: float | None, pref: float, hard: float) -> float:
 
 def soft_penalty(candidate: CandidateDict, s_cfg: Dict[str, float], *, scale: float) -> float:
     """Compute lenient penalty between preferred and hard caps."""
-    d_atr_ratio = _soft_ratio(candidate.get("entry_distance_atr"), s_cfg["pref_atr"], s_cfg["hard_atr_cap"])
-    bars_ratio = _soft_ratio(candidate.get("bars_to_trigger"), s_cfg["pref_bars"], s_cfg["hard_bars_cap"])
-    return scale * 0.5 * (d_atr_ratio + bars_ratio)
+    ratios = []
+    pref_atr = s_cfg.get("pref_atr")
+    hard_atr = s_cfg.get("hard_atr_cap")
+    if pref_atr is not None and hard_atr is not None:
+        ratios.append(_soft_ratio(candidate.get("entry_distance_atr"), float(pref_atr), float(hard_atr)))
+    pref_bars = s_cfg.get("pref_bars")
+    hard_bars = s_cfg.get("hard_bars_cap")
+    if pref_bars is not None and hard_bars is not None:
+        ratios.append(_soft_ratio(candidate.get("bars_to_trigger"), float(pref_bars), float(hard_bars)))
+    pref_pct = s_cfg.get("pref_pct")
+    hard_pct = s_cfg.get("hard_pct_cap")
+    if pref_pct is not None and hard_pct is not None:
+        ratios.append(_soft_ratio(candidate.get("entry_distance_pct"), float(pref_pct), float(hard_pct)))
+    if not ratios:
+        return 0.0
+    return scale * (sum(ratios) / len(ratios))
 
 
 def apply_lenient_gate(

@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import List, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from ..config import STYLE_GATES
 from .actionability import is_actionable_soon
 from .geometry import PlanGeometry, _local_invalidation, _stop_bounds, build_plan_geometry
 
@@ -133,24 +134,36 @@ def _mtf_multiplier(direction: str, bias: Optional[str], agreement: Optional[flo
 def _actionability_score(entry: float, ctx: EntryContext) -> float:
     atr = ctx.atr if ctx.atr and ctx.atr > 0 else 1.0
     last_price = float(ctx.last_price or 0.0)
+    style = (ctx.style or "").lower()
+    style_cfg = STYLE_GATES.get(style) or STYLE_GATES.get("intraday", {})
+    pct_cap = style_cfg.get("hard_pct_cap")
+    atr_cap = style_cfg.get("hard_atr_cap")
+    bars_cap = style_cfg.get("hard_bars_cap")
+
     if last_price > 0:
         distance_pct = abs(entry - last_price) / last_price
     else:
         distance_pct = float("inf")
-    distance_atr = abs(entry - last_price) / atr
+    distance_atr = abs(entry - last_price) / atr if atr > 0 else float("inf")
     tick_size = ctx.tick if isinstance(ctx.tick, (int, float)) and ctx.tick > 0 else _infer_tick_size(last_price or entry)
     actionable_soon = is_actionable_soon(entry, last_price, atr, tick_size, ctx.style)
 
-    style = (ctx.style or "").lower()
-    pct_cap = {"scalp": 0.0015, "intraday": 0.0025, "swing": 0.004, "leaps": 0.006}.get(style, 0.0025)
-    atr_cap = {"scalp": 0.25, "intraday": 0.40, "swing": 0.70, "leaps": 1.00}.get(style, 0.40)
+    bars_estimate = distance_atr * 2.0 if math.isfinite(distance_atr) else float("inf")
+    within_pct = True if pct_cap is None else (math.isfinite(distance_pct) and distance_pct <= pct_cap + 1e-9)
+    within_atr = True if atr_cap is None else (math.isfinite(distance_atr) and distance_atr <= atr_cap + 1e-9)
+    within_bars = True if bars_cap is None else (math.isfinite(bars_estimate) and bars_estimate <= bars_cap + 1e-9)
 
-    distance_terms = []
-    if math.isfinite(distance_pct) and pct_cap > 0:
+    if style in {"scalp", "0dte"} and not (within_pct and within_atr and within_bars):
+        return 0.0
+
+    distance_terms: List[float] = []
+    if math.isfinite(distance_pct) and pct_cap:
         distance_terms.append(1.0 - min(distance_pct, pct_cap) / pct_cap)
-    if math.isfinite(distance_atr) and atr_cap > 0:
+    if math.isfinite(distance_atr) and atr_cap:
         distance_terms.append(1.0 - min(distance_atr, atr_cap) / atr_cap)
-    distance_term = max(distance_terms, default=0.0)
+    if math.isfinite(bars_estimate) and bars_cap:
+        distance_terms.append(1.0 - min(bars_estimate, bars_cap) / bars_cap)
+    distance_term = sum(distance_terms) / len(distance_terms) if distance_terms else 0.0
     distance_term = max(0.0, min(1.0, distance_term))
     if actionable_soon:
         distance_term = max(distance_term, 0.35)

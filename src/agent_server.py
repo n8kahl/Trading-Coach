@@ -39,6 +39,7 @@ from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import (
+    STYLE_GATES,
     SNAPSHOT_INTERVAL,
     SNAPSHOT_LOOKBACK,
     UNIFIED_SNAPSHOT_ENABLED,
@@ -9130,6 +9131,10 @@ async def _generate_fallback_plan(
             market_meta.setdefault("simulated_open", True)
         if isinstance(data_meta, dict):
             data_meta.setdefault("simulated_open", True)
+    if isinstance(as_of_dt, datetime):
+        last_update_iso = as_of_dt.astimezone(timezone.utc).isoformat()
+    else:
+        last_update_iso = datetime.now(timezone.utc).isoformat()
     timeframe_map = {"scalp": "1", "intraday": "5", "swing": "60", "leap": "D"}
     timeframe = timeframe_map.get(style_token, "5")
     try:
@@ -9222,6 +9227,13 @@ async def _generate_fallback_plan(
         plan_ts_utc = pd.Timestamp.utcnow()
     if is_plan_live:
         plan_ts_utc = pd.Timestamp.utcnow()
+    elif isinstance(as_of_dt, datetime):
+        as_of_ts = pd.Timestamp(as_of_dt)
+        if as_of_ts.tzinfo is None:
+            as_of_ts = as_of_ts.tz_localize("UTC")
+        else:
+            as_of_ts = as_of_ts.tz_convert("UTC")
+        plan_ts_utc = as_of_ts
     volatility = snapshot.get("volatility") or {}
     ema_trend_up = ema9 > ema20 > ema50
     ema_trend_down = ema9 < ema20 < ema50
@@ -9587,6 +9599,7 @@ async def _generate_fallback_plan(
     plan_actionable_now = False
     plan_actionable_soon = False
     entry_waiting_for: Optional[str] = None
+    defer_for_retest = False
     selection_gate = actionability_gate if (must_be_actionable or min_actionability_override is not None) else None
     geometry, selected_entry_candidate = select_best_entry_plan(
         entry_context,
@@ -9610,11 +9623,12 @@ async def _generate_fallback_plan(
                     stop=round(geometry.stop.price, 4),
                     tag=str(alt_anchor.get("label", "reclaim")).lower(),
                     actionability=boosted_actionability,
-                    actionable_soon=False,
+                    actionable_soon=True,
                     entry_distance_pct=0.0,
                     entry_distance_atr=0.0,
                     bars_to_trigger=0,
                 )
+                defer_for_retest = True
                 entry_waiting_for = _format_waiting_for(str(alt_anchor.get("label", "level")), entry_price, direction)
                 injected_label = str(alt_anchor.get("label", "RETEST")).upper()
                 already_present = False
@@ -9646,10 +9660,12 @@ async def _generate_fallback_plan(
                         },
                     )
             except ValueError:
+                defer_for_retest = True
                 entry_waiting_for = _format_waiting_for(
                     selected_entry_candidate.tag, selected_entry_candidate.entry, direction
                 )
         else:
+            defer_for_retest = True
             entry_waiting_for = _format_waiting_for(
                 selected_entry_candidate.tag, selected_entry_candidate.entry, direction
             )
@@ -9670,8 +9686,26 @@ async def _generate_fallback_plan(
     else:
         distance_atr_val = None
         bars_to_trigger = 99
+    style_caps = STYLE_GATES.get(style_token) or STYLE_GATES.get("intraday", {})
+    pct_cap = style_caps.get("hard_pct_cap")
+    atr_cap = style_caps.get("hard_atr_cap")
+    bars_cap = style_caps.get("hard_bars_cap")
+    bars_estimate = distance_atr_raw * 2.0 if math.isfinite(distance_atr_raw) else float("inf")
+    within_pct = True if pct_cap is None else (math.isfinite(distance_pct_raw) and distance_pct_raw <= pct_cap + 1e-9)
+    within_atr = True if atr_cap is None else (math.isfinite(distance_atr_raw) and distance_atr_raw <= atr_cap + 1e-9)
+    within_bars = True if bars_cap is None else (math.isfinite(bars_estimate) and bars_estimate <= bars_cap + 1e-9)
+    scalp_like = style_token in {"scalp", "0dte"}
+    violates_style_caps = scalp_like and not (within_pct and within_atr and within_bars)
+    if violates_style_caps and entry_waiting_for is None and selected_entry_candidate.tag != "reference":
+        entry_waiting_for = _format_waiting_for(selected_entry_candidate.tag, entry_price, direction)
+    if violates_style_caps and selected_entry_candidate.tag != "reference":
+        defer_for_retest = True
     actionable_soon_flag = is_actionable_soon(entry_price, close_price, atr_value, tick_size, style_token)
+    if defer_for_retest and not actionable_soon_flag:
+        actionable_soon_flag = True
     actionable_now_flag = actionable_soon_flag and math.isfinite(distance_atr_raw) and distance_atr_raw <= 0.5 and bars_to_trigger <= 1
+    if defer_for_retest:
+        actionable_now_flag = False
     selected_entry_candidate = replace(
         selected_entry_candidate,
         entry=round(entry_price, 4),
@@ -9693,7 +9727,9 @@ async def _generate_fallback_plan(
             selected_entry_candidate = replace(selected_entry_candidate, actionability=candidate_actionability)
     plan_actionable_now = actionable_now_flag
     plan_actionable_soon = actionable_soon_flag
-    force_wait_plan = False
+    force_wait_plan = defer_for_retest
+    if defer_for_retest:
+        plan_actionable_soon = True
     if must_be_actionable and candidate_actionability < actionability_gate:
         force_wait_plan = True
         plan_actionable_now = False
@@ -9705,7 +9741,7 @@ async def _generate_fallback_plan(
     if not actionable_soon_flag and entry_waiting_for is None:
         entry_waiting_for = _format_waiting_for(selected_entry_candidate.tag, entry_price, direction)
     distance_to_price = distance_pct_raw if math.isfinite(distance_pct_raw) else float("inf")
-    if plan_actionable_soon and distance_to_price > distance_limit:
+    if plan_actionable_soon and not defer_for_retest and distance_to_price > distance_limit:
         logger.warning(
             "Fallback entry for %s exceeds actionable threshold (distance=%.4f limit=%.4f)",
             symbol,
@@ -10167,10 +10203,9 @@ async def _generate_fallback_plan(
         "style_hint": style_token,
     }
     _attach_market_chart_params(chart_params, market_meta, data_meta)
+    chart_params["last_update"] = last_update_iso
     if is_plan_live:
-        live_stamp = datetime.now(timezone.utc).isoformat()
         chart_params["live"] = "1"
-        chart_params["last_update"] = live_stamp
     level_context_for_chart = {
         "key_levels": {k: v for k, v in levels_map.items() if isinstance(v, (int, float)) and math.isfinite(v)},
         "key_levels_used": key_levels_used or {},
@@ -11934,13 +11969,12 @@ async def gpt_plan(
     charts_payload: Dict[str, Any] = {}
     if chart_params_payload:
         if is_plan_live:
-            live_stamp_payload = chart_params_payload.get("last_update")
-            if not live_stamp_payload:
-                live_stamp_payload = datetime.now(timezone.utc).isoformat()
-                chart_params_payload["last_update"] = live_stamp_payload
+            live_stamp_payload = chart_params_payload.get("last_update") or last_update_iso
+            chart_params_payload["last_update"] = live_stamp_payload
             chart_params_payload["live"] = "1"
         else:
             chart_params_payload.pop("live", None)
+            chart_params_payload.setdefault("last_update", last_update_iso)
         charts_payload["params"] = chart_params_payload
         charts_payload["timeframe"] = chart_timeframe_hint
         charts_payload["guidance"] = hint_guidance
@@ -11957,7 +11991,7 @@ async def gpt_plan(
         if is_plan_live:
             live_param_stamp = live_stamp_payload or chart_params_payload.get("last_update") if chart_params_payload else None
             if not live_param_stamp:
-                live_param_stamp = datetime.now(timezone.utc).isoformat()
+                live_param_stamp = last_update_iso
             chart_url_value = _append_query_params(chart_url_value, {"live": "1", "last_update": live_param_stamp})
         charts_payload["interactive"] = chart_url_value
     elif chart_params_payload and {"direction", "entry", "stop", "tp"}.issubset(chart_params_payload.keys()):
@@ -11970,7 +12004,7 @@ async def gpt_plan(
             },
         )
         if is_plan_live:
-            live_param_stamp = chart_params_payload.get("last_update") or datetime.now(timezone.utc).isoformat()
+            live_param_stamp = chart_params_payload.get("last_update") or last_update_iso
             chart_params_payload["last_update"] = live_param_stamp
             chart_params_payload["live"] = "1"
             fallback_chart_url = _append_query_params(
@@ -12000,9 +12034,10 @@ async def gpt_plan(
         minimal_params.setdefault("focus", "plan")
         minimal_params.setdefault("center_time", "latest")
         minimal_params.setdefault("scale_plan", "auto")
+        minimal_params.setdefault("last_update", last_update_iso)
         if is_plan_live:
             minimal_params["live"] = "1"
-            minimal_params["last_update"] = datetime.now(timezone.utc).isoformat()
+            minimal_params["last_update"] = last_update_iso
         chart_url_value = _build_tv_chart_url(request, minimal_params)
         charts_payload.setdefault("params", minimal_params)
         charts_payload["interactive"] = chart_url_value
@@ -12888,14 +12923,12 @@ async def gpt_plan(
     is_live_plan = planning_context_value == "live"
     if chart_params_payload:
         if is_live_plan:
-            live_stamp = chart_params_payload.get("last_update")
-            if not live_stamp:
-                live_stamp = datetime.now(timezone.utc).isoformat()
-                chart_params_payload["last_update"] = live_stamp
+            live_stamp = chart_params_payload.get("last_update") or last_update_iso
+            chart_params_payload["last_update"] = live_stamp
             chart_params_payload["live"] = "1"
         else:
             chart_params_payload.pop("live", None)
-            chart_params_payload.pop("last_update", None)
+            chart_params_payload.setdefault("last_update", last_update_iso)
     if chart_url_value and is_live_plan:
         live_stamp = chart_params_payload.get("last_update") if chart_params_payload else None
         extra_params = {"live": "1"}

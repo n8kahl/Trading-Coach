@@ -85,6 +85,36 @@ def build_structured_geometry(
         atr_value=atr_val,
         style=style_token,
     )
+    if snapped_tps and raw_targets:
+        adjusted_tps: List[float] = []
+        adjusted_reasons: List[Dict[str, str | None]] = []
+        adjusted_tags: Set[str] = set()
+        for idx, snapped_price in enumerate(snapped_tps):
+            raw_price = float(raw_targets[idx]) if idx < len(raw_targets) else float(snapped_price)
+            reason = dict(tp_reason_payload[idx]) if idx < len(tp_reason_payload) else {"label": f"TP{idx + 1}", "reason": "Stats target", "snap_tag": None}
+            improves_rr = True
+            if direction == "long" and snapped_price is not None:
+                improves_rr = float(snapped_price) >= float(raw_price) - 1e-6
+            if direction == "short" and snapped_price is not None:
+                improves_rr = float(snapped_price) <= float(raw_price) + 1e-6
+            within_em_bounds = True
+            if em_points and em_points > 0:
+                distance = abs(float(snapped_price) - entry_val)
+                within_em_bounds = distance <= float(em_points) * 1.001
+            if improves_rr and within_em_bounds:
+                adjusted_tps.append(round(float(snapped_price), 2))
+                if reason.get("snap_tag"):
+                    adjusted_tags.add(str(reason["snap_tag"]))
+                adjusted_reasons.append(reason)
+            else:
+                fallback_price = round(float(raw_price), 2)
+                reason.pop("snap_tag", None)
+                reason["reason"] = f"{reason.get('reason') or 'Stats target'} · Snap skipped"
+                adjusted_tps.append(fallback_price)
+                adjusted_reasons.append(reason)
+        snapped_tps = adjusted_tps
+        tp_reason_payload = adjusted_reasons
+        snap_tags = adjusted_tags
     snapped_tps = [round(tp, 2) for tp in snapped_tps]
     tp_reasons = _normalise_tp_reasons(tp_reason_payload)
 

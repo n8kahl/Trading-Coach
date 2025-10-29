@@ -130,7 +130,7 @@ def _compute_mfe(frame: pd.DataFrame, horizon_bars: int) -> Tuple[np.ndarray, np
 def _quantiles(values: np.ndarray) -> Dict[str, float]:
     if values.size == 0:
         return {}
-    percentiles = [0.5, 0.7, 0.8, 0.9]
+    percentiles = [0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9]
     output: Dict[str, float] = {}
     for pct in percentiles:
         output[f"q{int(pct * 100)}"] = float(np.quantile(values, pct))

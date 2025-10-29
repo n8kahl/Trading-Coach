@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import Dict, Iterable, List, Tuple
 
+from ..config import STYLE_GATES
+
 STRUCTURE_WEIGHTS = {
     "ORH": 1.0,
     "ORL": 1.0,
@@ -59,15 +61,39 @@ def _infer_tick_size(price: float) -> float:
 
 
 def is_actionable_soon(level_price: float, last_price: float, atr: float, tick: float, style: str) -> bool:
-    style = (style or "").lower()
-    pct_cap = {"scalp": 0.0015, "intraday": 0.0025, "swing": 0.004, "leaps": 0.006}.get(style, 0.0025)
-    atr_cap = {"scalp": 0.25, "intraday": 0.40, "swing": 0.70, "leaps": 1.00}.get(style, 0.40)
+    style_key = (style or "").lower()
+    cfg = STYLE_GATES.get(style_key) or STYLE_GATES.get("intraday", {})
+    pct_cap = cfg.get("hard_pct_cap")
+    atr_cap = cfg.get("hard_atr_cap")
+    bars_cap = cfg.get("hard_bars_cap")
 
     close = float(last_price)
-    atr = max(float(atr or 0.0), float(tick or 0.01))
+    atr_normalized = max(float(atr or 0.0), float(tick or 0.01))
     distance_pct = abs(level_price - close) / max(close, 1e-9)
-    distance_atr = abs(level_price - close) / atr
-    return (distance_pct <= pct_cap) or (distance_atr <= atr_cap)
+    distance_atr = abs(level_price - close) / atr_normalized if atr_normalized > 0 else float("inf")
+    bars_estimate = distance_atr * 2.0 if distance_atr is not None else float("inf")
+
+    within_pct = True
+    if pct_cap is not None and (not isinstance(pct_cap, (int, float)) or pct_cap <= 0):
+        pct_cap = None
+    if pct_cap is not None:
+        within_pct = distance_pct <= pct_cap + 1e-9
+
+    within_atr = True
+    if atr_cap is not None and (not isinstance(atr_cap, (int, float)) or atr_cap <= 0):
+        atr_cap = None
+    if atr_cap is not None:
+        within_atr = math.isfinite(distance_atr) and distance_atr <= atr_cap + 1e-9
+
+    within_bars = True
+    if bars_cap is not None and (not isinstance(bars_cap, (int, float)) or bars_cap <= 0):
+        bars_cap = None
+    if bars_cap is not None:
+        within_bars = math.isfinite(bars_estimate) and bars_estimate <= bars_cap + 1e-9
+
+    if style_key in {"scalp", "0dte"}:
+        return within_pct and within_atr and within_bars
+    return within_bars and (within_pct or within_atr)
 
 
 def actionability_score(

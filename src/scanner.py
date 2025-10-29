@@ -66,27 +66,91 @@ _PRICE_INCREMENT_OVERRIDES: Dict[str, float] = {
 }
 
 
+_SCALP_RULES: List[Dict[str, object]] = [
+    {
+        "label": "TP1",
+        "em_fractions": [0.30, 0.35],
+        "mfe_quantiles": ["q40", "q50"],
+        "pot_min": 0.6,
+    },
+    {
+        "label": "TP2",
+        "em_fractions": [0.55, 0.70],
+        "mfe_quantiles": ["q60", "q70", "q75"],
+        "pot_min": 0.45,
+    },
+    {
+        "label": "TP3",
+        "em_fractions": [0.85],
+        "mfe_quantiles": ["q80", "q85"],
+        "pot_min": 0.3,
+        "optional": True,
+    },
+]
+
+_INTRADAY_RULES: List[Dict[str, object]] = [
+    {
+        "label": "TP1",
+        "em_fractions": [0.40, 0.55],
+        "mfe_quantiles": ["q50"],
+        "pot_min": 0.6,
+    },
+    {
+        "label": "TP2",
+        "em_fractions": [0.70, 0.85],
+        "mfe_quantiles": ["q70", "q80"],
+        "pot_min": 0.45,
+    },
+    {
+        "label": "TP3",
+        "em_fractions": [1.0, 1.1],
+        "mfe_quantiles": ["q85", "q90"],
+        "pot_min": 0.3,
+    },
+]
+
+_SWING_RULES: List[Dict[str, object]] = [
+    {
+        "label": "TP1",
+        "mfe_quantiles": ["q50"],
+        "pot_min": 0.65,
+    },
+    {
+        "label": "TP2",
+        "mfe_quantiles": ["q75", "q80"],
+        "pot_min": 0.45,
+    },
+    {
+        "label": "TP3",
+        "mfe_quantiles": ["q90"],
+        "pot_min": 0.3,
+    },
+]
+
+_LEAPS_RULES: List[Dict[str, object]] = [
+    {
+        "label": "TP1",
+        "mfe_quantiles": ["q50"],
+        "pot_min": 0.65,
+    },
+    {
+        "label": "TP2",
+        "mfe_quantiles": ["q80"],
+        "pot_min": 0.4,
+    },
+    {
+        "label": "TP3",
+        "mfe_quantiles": ["q90"],
+        "pot_min": 0.25,
+    },
+]
+
 _TARGET_RULES: Dict[str, List[Dict[str, object]]] = {
-    "scalp": [
-        {"label": "TP1", "em_fraction": 0.33, "quantile_key": "q50", "pot_min": 0.55},
-        {"label": "TP2", "em_fraction": 0.62, "quantile_key": "q70", "pot_min": 0.4},
-        {"label": "TP3", "em_fraction": 0.85, "quantile_key": "q80", "pot_min": 0.25, "optional": True},
-    ],
-    "intraday": [
-        {"label": "TP1", "em_fraction": 0.45, "quantile_key": "q50", "pot_min": 0.6},
-        {"label": "TP2", "em_fraction": 0.75, "quantile_key": "q70", "pot_min": 0.4},
-        {"label": "TP3", "em_fraction": 1.05, "quantile_key": "q80", "pot_min": 0.3},
-    ],
-    "swing": [
-        {"label": "TP1", "em_fraction": 0.5, "quantile_key": "q50", "pot_min": 0.65},
-        {"label": "TP2", "em_fraction": 0.8, "quantile_key": "q80", "pot_min": 0.45},
-        {"label": "TP3", "em_fraction": 1.1, "quantile_key": "q90", "pot_min": 0.3},
-    ],
-    "leaps": [
-        {"label": "TP1", "em_fraction": 0.55, "quantile_key": "q50", "pot_min": 0.65},
-        {"label": "TP2", "em_fraction": 0.85, "quantile_key": "q80", "pot_min": 0.4},
-        {"label": "TP3", "em_fraction": 1.2, "quantile_key": "q90", "pot_min": 0.25},
-    ],
+    "0dte": list(_SCALP_RULES),
+    "scalp": list(_SCALP_RULES),
+    "intraday": list(_INTRADAY_RULES),
+    "swing": list(_SWING_RULES),
+    "leaps": list(_LEAPS_RULES),
 }
 
 _RUNNER_RULES: Dict[str, Dict[str, Any]] = {
@@ -131,50 +195,102 @@ def _targets_from_stats(
     targets: List[Dict[str, object]] = []
     for idx, rule in enumerate(rules, start=1):
         label = str(rule.get("label") or f"TP{idx}")
-        em_frac = rule.get("em_fraction")
-        quantile_key = rule.get("quantile_key")
-        candidate_distances: List[float] = []
         meta: Dict[str, object] = {"label": label}
+        fractions_raw = rule.get("em_fractions")
+        if fractions_raw is None and rule.get("em_fraction") is not None:
+            fractions_raw = [rule.get("em_fraction")]
+        fractions: List[float] = []
+        if isinstance(fractions_raw, (list, tuple)):
+            for fraction in fractions_raw:
+                try:
+                    val = float(fraction)
+                except (TypeError, ValueError):
+                    continue
+                if val > 0 and math.isfinite(val):
+                    fractions.append(val)
+        quantile_keys_raw = rule.get("mfe_quantiles")
+        if quantile_keys_raw is None and rule.get("quantile_key"):
+            quantile_keys_raw = [rule.get("quantile_key")]
+        quantile_keys: List[str] = []
+        if isinstance(quantile_keys_raw, (list, tuple)):
+            for key in quantile_keys_raw:
+                if not key:
+                    continue
+                quantile_keys.append(str(key))
 
-        if em_value and em_frac:
-            try:
-                em_offset = float(em_frac) * float(em_value)
-                if math.isfinite(em_offset) and em_offset > 0:
-                    candidate_distances.append(em_offset)
-                    meta["em_fraction"] = float(em_frac)
-                    meta["em_basis"] = float(em_value)
-            except (TypeError, ValueError):
-                pass
+        candidates: List[Tuple[float, Dict[str, object]]] = []
+        if em_value is not None and fractions:
+            for fraction in fractions:
+                distance = float(em_value) * fraction
+                if not math.isfinite(distance) or distance <= 0:
+                    continue
+                candidates.append((distance, {"basis": "em", "em_fraction": fraction, "em_basis": float(em_value)}))
 
-        if quantile_key and quantile_key in quantiles:
-            try:
-                ratio = float(quantiles[quantile_key])
-                if math.isfinite(ratio) and ratio > 0 and entry > 0:
-                    candidate_distances.append(entry * ratio)
-                    meta["mfe_quantile"] = quantile_key
-                    meta["mfe_ratio"] = ratio
-            except (TypeError, ValueError):
-                pass
+        if quantile_keys and entry > 0:
+            for key in quantile_keys:
+                ratio_val = quantiles.get(key)
+                try:
+                    ratio = float(ratio_val)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(ratio) or ratio <= 0:
+                    continue
+                distance = entry * ratio
+                if distance <= 0 or not math.isfinite(distance):
+                    continue
+                candidates.append(
+                    (
+                        distance,
+                        {"basis": "mfe", "mfe_quantile": key, "mfe_ratio": ratio},
+                    )
+                )
 
-        if not candidate_distances:
+        if not candidates:
             continue
 
-        distance = min(candidate_distances)
+        candidates = [(dist, info) for dist, info in candidates if math.isfinite(dist) and dist > 0]
+        if not candidates:
+            continue
+
+        best_distance, best_meta = min(candidates, key=lambda item: item[0])
+        distance = best_distance
         if em_limit is not None and em_limit > 0:
             distance = min(distance, em_limit)
         distance = max(distance, min_distance)
 
+        optional = bool(rule.get("optional"))
         pot = estimate_probability(mfe_values, distance / entry) if entry > 0 else None
         if pot is not None and not math.isnan(pot):
             meta["prob_touch"] = float(pot)
+            meta["pot_est"] = float(pot)
         pot_min = rule.get("pot_min")
-        optional = bool(rule.get("optional"))
-        if pot_min is not None and pot is not None and pot < float(pot_min):
-            if optional:
-                continue
-            meta["prob_touch_flag"] = "below_threshold"
-        meta["distance"] = float(distance)
+        if pot_min is not None:
+            try:
+                pot_threshold = float(pot_min)
+            except (TypeError, ValueError):
+                pot_threshold = None
+            else:
+                meta["pot_min"] = pot_threshold
+                if pot is not None and pot < pot_threshold and optional:
+                    continue
+                if pot is not None and pot < pot_threshold and not optional:
+                    meta["prob_touch_flag"] = "below_threshold"
+
         meta["optional"] = optional
+        meta["distance"] = float(distance)
+        if fractions:
+            meta["em_fraction"] = float(min(fractions))
+        if "em_fraction" in best_meta:
+            meta["em_fraction"] = float(best_meta["em_fraction"])
+            meta["em_basis"] = float(best_meta.get("em_basis", em_value or 0.0)) if em_value is not None else None
+        if quantile_keys:
+            meta["mfe_quantile"] = quantile_keys[0]
+        if "mfe_quantile" in best_meta:
+            meta["mfe_quantile"] = best_meta["mfe_quantile"]
+            meta["mfe_ratio"] = best_meta.get("mfe_ratio")
+        if "basis" in best_meta:
+            meta["distance_basis"] = best_meta["basis"]
+
         targets.append({"distance": distance, "meta": meta})
 
     return targets
@@ -958,8 +1074,12 @@ def _apply_tp_logic(
         meta["distance"] = distance_val
         if snapped_tag:
             meta["snap_tag"] = snapped_tag
+            meta["structure_tag"] = snapped_tag
+        else:
+            meta.setdefault("structure_tag", None)
         meta["min_spacing"] = min_spacing
         meta["rr"] = rr(entry, stop, final_price, bias)
+        meta.setdefault("pot_est", meta.get("prob_touch"))
         final_pairs.append((final_price, meta))
 
     if not final_pairs:
@@ -978,6 +1098,34 @@ def _apply_tp_logic(
         final_pairs.sort(key=lambda pair: pair[0])
     else:
         final_pairs.sort(key=lambda pair: pair[0], reverse=True)
+
+    filtered_pairs: List[Tuple[float, Dict[str, Any]]] = []
+    for price, meta in final_pairs:
+        if meta.get("optional"):
+            rr_val = meta.get("rr")
+            try:
+                rr_numeric = float(rr_val) if rr_val is not None else None
+            except (TypeError, ValueError):
+                rr_numeric = None
+            pot_est_raw = meta.get("pot_est") or meta.get("prob_touch")
+            try:
+                pot_est_val = float(pot_est_raw) if pot_est_raw is not None else None
+            except (TypeError, ValueError):
+                pot_est_val = None
+            pot_min = meta.get("pot_min")
+            try:
+                pot_min_numeric = float(pot_min) if pot_min is not None else None
+            except (TypeError, ValueError):
+                pot_min_numeric = None
+            rr_ok = rr_numeric is None or rr_numeric >= float(min_rr) + 0.05
+            pot_ok = True
+            if pot_est_val is not None and pot_min_numeric is not None:
+                pot_ok = pot_est_val >= pot_min_numeric
+            if not rr_ok or not pot_ok:
+                continue
+        filtered_pairs.append((price, meta))
+    if len(filtered_pairs) >= 2:
+        final_pairs = filtered_pairs
 
     results = [price for price, _ in final_pairs]
     meta_list = [meta for _, meta in final_pairs]
