@@ -124,3 +124,8 @@ async def test_generate_plan_extended_adds_session(monkeypatch: pytest.MonkeyPat
     assert plan["entry_actionability"] == pytest.approx(1.0)
     assert "ENTRY_STALE" not in plan.get("warnings", [])
     assert plan["chart_url"] == "https://chart.test/extended"
+    layers = plan.get("plan_layers")
+    assert layers is not None
+    assert isinstance(layers.get("levels"), list) and layers["levels"]
+    assert isinstance(layers.get("meta", {}).get("level_groups", {}).get("primary"), list)
+    assert plan.get("layers_fetched") is True

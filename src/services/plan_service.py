@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import Any, Dict, Optional, Mapping
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Mapping, Iterable
 
 import httpx
 from fastapi import FastAPI
+import pandas as pd
 
 from ..lib.data_route import DataRoute
 from ..providers.geometry import build_geometry
@@ -21,6 +22,7 @@ from .chart_utils import (
     normalize_style_token,
     build_ui_state,
 )
+from ..app.services import build_plan_layers
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,90 @@ async def _resolve_chart_url(app: FastAPI, params: Dict[str, Any]) -> Optional[s
             return None
         payload = response.json()
         return payload.get("interactive")
+
+
+def _interval_to_seconds(token: Optional[str]) -> Optional[int]:
+    if not token:
+        return None
+    normalized = str(token).strip().lower()
+    lookup = {
+        "1": 60,
+        "1m": 60,
+        "3": 180,
+        "3m": 180,
+        "5": 300,
+        "5m": 300,
+        "10": 600,
+        "10m": 600,
+        "15": 900,
+        "15m": 900,
+        "30": 1800,
+        "30m": 1800,
+        "45": 2700,
+        "45m": 2700,
+        "60": 3600,
+        "60m": 3600,
+        "1h": 3600,
+    }
+    if normalized in lookup:
+        return lookup[normalized]
+    if normalized.endswith("m") and normalized[:-1].isdigit():
+        return int(normalized[:-1]) * 60
+    if normalized.endswith("h") and normalized[:-1].isdigit():
+        return int(normalized[:-1]) * 3600
+    if normalized.isdigit():
+        return int(normalized) * 60
+    return None
+
+
+def _normalize_interval_label(token: Optional[str]) -> Optional[str]:
+    if not token:
+        return None
+    normalized = str(token).strip().lower()
+    mapping = {
+        "1": "1m",
+        "1m": "1m",
+        "5": "5m",
+        "5m": "5m",
+        "10": "10m",
+        "10m": "10m",
+        "15": "15m",
+        "15m": "15m",
+        "30": "30m",
+        "30m": "30m",
+        "45": "45m",
+        "45m": "45m",
+        "60": "60m",
+        "60m": "60m",
+        "1h": "60m",
+        "4h": "240m",
+    }
+    return mapping.get(normalized, normalized)
+
+
+def _preferred_frame_sequence(hint: Optional[str]) -> Iterable[str]:
+    normalized = _normalize_interval_label(hint)
+    sequence: list[str] = []
+    if normalized:
+        sequence.append(normalized)
+        if normalized == "60m":
+            sequence.append("65m")
+        elif normalized == "30m":
+            sequence.extend(["15m", "5m"])
+    sequence.extend(["5m", "15m", "65m", "1d"])
+    seen: set[str] = set()
+    for key in sequence:
+        if key not in seen:
+            seen.add(key)
+            yield key
+
+
+def _to_utc_epoch(value: datetime) -> int:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return int(value.timestamp())
 
 
 async def generate_plan(
@@ -166,6 +252,128 @@ async def generate_plan(
 
     plan_obj.setdefault("style", style or style_token)
     plan_obj.setdefault("warnings", [])
+
+    plan_layers: Optional[Dict[str, Any]] = None
+    try:
+        plan_root = plan_obj.get("plan") if isinstance(plan_obj.get("plan"), dict) else plan_obj
+        key_levels_sources = [
+            plan_obj.get("key_levels"),
+            plan_root.get("key_levels") if isinstance(plan_root, Mapping) else None,
+        ]
+        key_levels_payload: Dict[str, Any] = {}
+        for source in key_levels_sources:
+            if isinstance(source, Mapping):
+                for label, value in source.items():
+                    if isinstance(value, (int, float)):
+                        key_levels_payload[label] = float(value)
+        detail = geometry.get(symbol)
+        if not key_levels_payload and detail and isinstance(detail.key_levels_used, Mapping):
+            for namespace in detail.key_levels_used.values():
+                if isinstance(namespace, Mapping):
+                    for label, value in namespace.items():
+                        if isinstance(value, (int, float)):
+                            key_levels_payload.setdefault(label, float(value))
+        overlays = plan_obj.get("context_overlays")
+        if not isinstance(overlays, Mapping) and isinstance(plan_root, Mapping):
+            root_overlays = plan_root.get("context_overlays")
+            overlays = root_overlays if isinstance(root_overlays, Mapping) else None
+
+        interval_hint = None
+        if isinstance(chart_params, dict):
+            interval_hint = chart_params.get("interval")
+        if interval_hint is None:
+            interval_hint = plan_obj.get("interval") or (
+                plan_root.get("interval") if isinstance(plan_root, Mapping) else None
+            )
+
+        frame = None
+        frames = frames_for_symbol if isinstance(frames_for_symbol, Mapping) else {}
+        for candidate in _preferred_frame_sequence(interval_hint):
+            lookup_key = candidate
+            if lookup_key == "60m":
+                lookup_key = "65m"
+            frame_candidate = frames.get(lookup_key)
+            if frame_candidate is not None and not frame_candidate.empty:
+                frame = frame_candidate
+                break
+
+        last_time_s = None
+        interval_s = None
+        last_close_val: Optional[float] = None
+        if frame is not None and not frame.empty:
+            index = frame.index
+            if isinstance(index, pd.DatetimeIndex) and len(index):
+                last_ts = index[-1]
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.tz_localize("UTC")
+                else:
+                    last_ts = last_ts.tz_convert("UTC")
+                last_time_s = int(last_ts.timestamp())
+                if len(index) >= 2:
+                    prev_ts = index[-2]
+                    if prev_ts.tzinfo is None:
+                        prev_ts = prev_ts.tz_localize("UTC")
+                    else:
+                        prev_ts = prev_ts.tz_convert("UTC")
+                    delta_seconds = (last_ts - prev_ts).total_seconds()
+                    if delta_seconds > 0:
+                        interval_s = int(round(delta_seconds))
+            try:
+                last_close_val = float(frame["close"].iloc[-1])
+            except Exception:  # pragma: no cover - defensive
+                last_close_val = None
+
+        if last_close_val is None:
+            if detail and detail.last_close is not None:
+                last_close_val = float(detail.last_close)
+            else:
+                last_close_val = float(series.latest_close.get(symbol)) if symbol in series.latest_close else None
+
+        if last_time_s is None:
+            last_time_s = _to_utc_epoch(route.as_of)
+        if interval_s is None:
+            interval_s = _interval_to_seconds(interval_hint) or 300
+
+        raw_layers = build_plan_layers(
+            symbol=symbol,
+            interval=str(_normalize_interval_label(interval_hint) or "5m"),
+            as_of=route.as_of.isoformat(),
+            planning_context=route.planning_context,
+            key_levels=key_levels_payload,
+            overlays=overlays if isinstance(overlays, Mapping) else None,
+            strategy_id=plan_obj.get("strategy_id") or plan_obj.get("setup") or (
+                plan_root.get("strategy")
+                if isinstance(plan_root, Mapping)
+                else None
+            ),
+            direction=plan_obj.get("direction") or plan_obj.get("bias") or (
+                plan_root.get("direction") if isinstance(plan_root, Mapping) else None
+            ),
+            waiting_for=plan_obj.get("waiting_for") or (
+                plan_root.get("waiting_for") if isinstance(plan_root, Mapping) else None
+            ),
+            plan=plan_root if isinstance(plan_root, Mapping) else None,
+            last_time_s=last_time_s,
+            interval_s=interval_s,
+            last_close=last_close_val,
+        )
+        if raw_layers:
+            raw_layers["plan_id"] = plan_obj.get("plan_id")
+            plan_layers = raw_layers
+        else:
+            plan_layers = None
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("plan_layers build failed for %s: %s", symbol, exc)
+        plan_layers = None
+
+    if plan_layers:
+        plan_obj["plan_layers"] = plan_layers
+        nested_plan = plan_obj.get("plan")
+        if isinstance(nested_plan, dict):
+            nested_plan["plan_layers"] = plan_layers
+        plan_obj["layers_fetched"] = True
+    else:
+        plan_obj.setdefault("layers_fetched", False)
 
     return plan_obj
 

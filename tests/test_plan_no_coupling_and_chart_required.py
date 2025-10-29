@@ -94,3 +94,6 @@ async def test_plan_no_coupling_and_chart_required(monkeypatch: pytest.MonkeyPat
     parsed_state = json.loads(ui_state_raw)
     assert parsed_state["style"] == "intraday"
     assert 0.0 <= parsed_state["confidence"] <= 1.0
+    layers = payload.get("plan_layers")
+    assert layers and isinstance(layers.get("levels"), list)
+    assert payload.get("layers_fetched") is True
