@@ -35,7 +35,14 @@ def overall_confidence(components: Mapping[str, Any]) -> float:
     trend = _extract_score(components, "trend_alignment")
     liquidity = _extract_score(components, "liquidity_structure")
     volatility = _extract_score(components, "volatility_regime")
-    base = 0.6 * trend + 0.2 * liquidity + 0.2 * volatility
+    momentum = _extract_score(components, "momentum_signal")
+    # Rebalanced weights include momentum while preserving a normalized total.
+    base = (
+        0.5 * trend
+        + 0.2 * liquidity
+        + 0.2 * volatility
+        + 0.1 * momentum
+    )
     return max(0.0, min(1.0, base))
 
 

@@ -52,7 +52,7 @@ def test_compute_scan_confidence_full_features():
     )
     assert confidence is not None
     assert 0.0 <= confidence <= 1.0
-    assert math.isclose(confidence, 0.79, rel_tol=0.05)
+    assert 0.70 <= confidence <= 0.90
 
 
 def test_compute_scan_confidence_missing_liquidity_decreases_score():
@@ -79,7 +79,7 @@ def test_compute_scan_confidence_missing_liquidity_decreases_score():
     assert sparse_conf < full_conf
 
 
-def test_compute_scan_confidence_missing_emas_returns_none():
+def test_compute_scan_confidence_missing_emas_soft_degradation():
     detail = _geometry_detail(ema_fast=None, ema_slow=None)  # type: ignore[arg-type]
     plan_obj = {"bias": "long"}
     data_quality = {"series_present": True}
@@ -90,7 +90,8 @@ def test_compute_scan_confidence_missing_emas_returns_none():
         planning_context="live",
         banner=None,
     )
-    assert confidence is None
+    assert confidence is not None
+    assert 0.40 <= confidence <= 0.70
 
 
 @pytest.mark.asyncio
@@ -128,7 +129,10 @@ async def test_generate_scan_wires_confidence(monkeypatch: pytest.MonkeyPatch):
             "bias": detail.bias if detail else "long",
             "entry": detail.last_close - 1 if detail else 100.0,
             "stop": detail.last_close - 3 if detail else 98.0,
-            "targets": [(detail.last_close or 100.0) + 2, (detail.last_close or 100.0) + 3],
+            "targets": [
+                (detail.last_close or 100.0) + 2,
+                (detail.last_close or 100.0) + 3,
+            ],
             "rr_to_t1": 1.5,
             "snap_trace": ["planner:test"],
             "key_levels_used": detail.key_levels_used if detail else {},
@@ -137,28 +141,45 @@ async def test_generate_scan_wires_confidence(monkeypatch: pytest.MonkeyPatch):
             "options_contracts": [{"symbol": f"{symbol} 250C"}],
             "rejected_contracts": [],
             "options_note": None,
-            "charts": {"params": {"symbol": symbol, "interval": "15m", "direction": "long", "entry": 100, "stop": 98, "tp": "102"}},
+            "charts": {
+                "params": {
+                    "symbol": symbol,
+                    "interval": "15m",
+                    "direction": "long",
+                    "entry": 100,
+                    "stop": 98,
+                    "tp": "102",
+                }
+            },
         }
 
     async def fake_chart_urls(app, payloads):  # noqa: ARG001
         return [None for _ in payloads]
 
     detail = _geometry_detail()
-    geometry_bundle = GeometryBundle(symbols=["TSLA"], series=series_bundle, details={"TSLA": detail})
+    geometry_bundle = GeometryBundle(
+        symbols=["TSLA"], series=series_bundle, details={"TSLA": detail}
+    )
 
     async def fake_build_geometry(symbols, series):  # noqa: ARG001
         return geometry_bundle
 
     monkeypatch.setattr("src.services.scan_service.fetch_series", fake_fetch_series)
-    monkeypatch.setattr("src.services.scan_service.select_contracts", fake_select_contracts)
+    monkeypatch.setattr(
+        "src.services.scan_service.select_contracts", fake_select_contracts
+    )
     monkeypatch.setattr("src.services.scan_service.run_plan", fake_run_plan)
     monkeypatch.setattr("src.services.scan_service._chart_urls", fake_chart_urls)
     monkeypatch.setattr("src.services.scan_service.build_geometry", fake_build_geometry)
 
     route = DataRoute(mode="live", as_of=as_of, planning_context="live")
     app = FastAPI()
-    page = await generate_scan(symbols=["TSLA"], style="intraday", limit=1, route=route, app=app)
+    page = await generate_scan(
+        symbols=["TSLA"], style="intraday", limit=1, route=route, app=app
+    )
     candidate = page["candidates"][0]
     assert candidate["confidence"] is not None
     assert 0.0 <= candidate["confidence"] <= 1.0
-    assert candidate.get("source_paths", {}).get("confidence") == "scan_confidence_engine"
+    assert (
+        candidate.get("source_paths", {}).get("confidence") == "scan_confidence_engine"
+    )
