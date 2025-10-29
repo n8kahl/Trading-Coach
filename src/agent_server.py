@@ -270,6 +270,99 @@ def _nyc_time(value: datetime | None) -> datetime | None:
         return value
 
 
+def _interval_to_seconds(token: str | None) -> Optional[int]:
+    if not token:
+        return None
+    normalized = str(token).strip().lower()
+    if not normalized:
+        return None
+    alias = {
+        "1": 60,
+        "1m": 60,
+        "3": 180,
+        "3m": 180,
+        "5": 300,
+        "5m": 300,
+        "10": 600,
+        "10m": 600,
+        "15": 900,
+        "15m": 900,
+        "30": 1800,
+        "30m": 1800,
+        "45": 2700,
+        "45m": 2700,
+        "60": 3600,
+        "60m": 3600,
+        "1h": 3600,
+        "2h": 7200,
+        "120": 7200,
+        "3h": 10800,
+        "180": 10800,
+        "4h": 14400,
+        "240": 14400,
+        "d": 86400,
+        "1d": 86400,
+        "day": 86400,
+        "w": 604800,
+        "1w": 604800,
+    }
+    if normalized in alias:
+        return alias[normalized]
+    match = re.fullmatch(r"(?P<count>\d+)(?P<unit>[mhdw])", normalized)
+    if match:
+        count = int(match.group("count"))
+        unit = match.group("unit")
+        if unit == "m":
+            return count * 60
+        if unit == "h":
+            return count * 3600
+        if unit == "d":
+            return count * 86400
+        if unit == "w":
+            return count * 604800
+    if normalized.isdigit():
+        return int(normalized) * 60
+    return None
+
+
+def _coerce_epoch_seconds(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, pd.Timestamp):
+        ts = value
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return int(ts.timestamp())
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        token = str(value).strip()
+        if not token:
+            return None
+        if token.endswith("Z"):
+            token = token[:-1] + "+00:00"
+        with suppress(ValueError):
+            return _coerce_epoch_seconds(datetime.fromisoformat(token))
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            with suppress(ValueError):
+                dt = datetime.strptime(token, fmt)
+                dt = dt.replace(tzinfo=timezone.utc)
+                return int(dt.timestamp())
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return int(dt.timestamp())
+
+
 def _adx_slope(prepared: pd.DataFrame) -> float | None:
     if "adx14" not in prepared.columns or prepared["adx14"].empty:
         return None
@@ -11058,6 +11151,22 @@ async def _generate_fallback_plan(
             response_meta["banner"] = simulated_banner_text
         plan_response.meta = response_meta
     if include_plan_layers:
+        forecast_last_time_s = None
+        forecast_interval_s = None
+        if isinstance(prepared.index, pd.DatetimeIndex) and not prepared.index.empty:
+            with suppress(Exception):
+                forecast_last_time_s = _coerce_epoch_seconds(prepared.index[-1])
+            if len(prepared.index) >= 2:
+                delta = prepared.index[-1] - prepared.index[-2]
+                with suppress(Exception):
+                    forecast_interval_s = int(pd.Timedelta(delta).total_seconds())
+        if forecast_interval_s is None:
+            forecast_interval_s = _interval_to_seconds(chart_timeframe_hint or timeframe)
+        forecast_last_close = float(close_price) if isinstance(close_price, (int, float)) else None
+        waiting_for_token = None
+        if isinstance(strategy_profile_payload, Mapping):
+            waiting_for_token = strategy_profile_payload.get("waiting_for")
+        waiting_for_token = waiting_for_token or waiting_for_payload
         layers = build_plan_layers(
             symbol=symbol.upper(),
             interval=str(chart_timeframe_hint or timeframe),
@@ -11065,6 +11174,13 @@ async def _generate_fallback_plan(
             planning_context="live" if is_plan_live else "frozen",
             key_levels={k: v for k, v in key_levels.items() if isinstance(v, (int, float))},
             overlays=enhancements or plan_block.get("context_overlays"),
+            strategy_id=strategy_id_value,
+            direction=direction,
+            waiting_for=waiting_for_token,
+            plan=plan_block,
+            last_time_s=forecast_last_time_s,
+            interval_s=forecast_interval_s,
+            last_close=forecast_last_close,
         )
         layers["plan_id"] = plan_id
         meta = layers.setdefault("meta", {})
@@ -12534,6 +12650,24 @@ async def gpt_plan(
         if chart_params_payload and chart_params_payload.get("interval"):
             interval_token = chart_params_payload.get("interval")
         interval_token = interval_token or chart_timeframe_hint or "5m"
+        last_update_token = None
+        if chart_params_payload:
+            last_update_token = chart_params_payload.get("last_update") or chart_params_payload.get("as_of")
+        if not last_update_token and isinstance(session_payload, Mapping):
+            last_update_token = session_payload.get("as_of")
+        forecast_last_time_s = _coerce_epoch_seconds(last_update_token)
+        forecast_interval_s = _interval_to_seconds(interval_token)
+        forecast_last_close = None
+        price_snapshot = snapshot.get("price")
+        if isinstance(price_snapshot, Mapping):
+            price_value = price_snapshot.get("close")
+            if isinstance(price_value, (int, float)):
+                forecast_last_close = float(price_value)
+        waiting_for_token = None
+        if isinstance(strategy_profile_payload, Mapping):
+            waiting_for_token = strategy_profile_payload.get("waiting_for")
+        if not waiting_for_token:
+            waiting_for_token = plan.get("waiting_for")
         plan_layers = build_plan_layers(
             symbol=symbol,
             interval=str(interval_token),
@@ -12541,6 +12675,13 @@ async def gpt_plan(
             planning_context=planning_context_value,
             key_levels=first.get("key_levels"),
             overlays=overlays_payload,
+            strategy_id=strategy_id_value,
+            direction=plan.get("direction") or direction_hint,
+            waiting_for=waiting_for_token,
+            plan=plan,
+            last_time_s=forecast_last_time_s,
+            interval_s=forecast_interval_s,
+            last_close=forecast_last_close,
         )
         if key_levels_used:
             _ensure_plan_layers_cover_used_levels(plan_layers, key_levels_used, precision=precision_for_levels)
