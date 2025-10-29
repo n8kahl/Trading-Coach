@@ -166,6 +166,8 @@ class Features:
     entry_distance_atr: float | None = None
     bars_to_trigger: float | None = None
     vol_proxy: float | None = None
+    entry_status_state: str | None = None
+    entry_status_dist_atr: float | None = None
     gate_penalty: float = 0.0
     gate_reject_reason: str | None = None
 
@@ -265,6 +267,18 @@ def rank(features: Sequence[Features], style: Style) -> List[Scored]:
                     "gate_penalty": round(penalty_total, 4),
                 },
             )
+
+        state_token = (bundle.entry_status_state or "").lower()
+        if state_token in {"late", "triggered"}:
+            late_penalty = 0.35 if style in {"scalp", "intraday"} else 0.20
+            score = max(score - late_penalty, 0.0)
+            dist_atr_value = bundle.entry_status_dist_atr
+            try:
+                if dist_atr_value is not None and float(dist_atr_value) <= 0.30:
+                    score = max(score + late_penalty * 0.5, 0.0)
+            except (TypeError, ValueError):
+                pass
+
         if score <= 0:
             continue
         scored.append(

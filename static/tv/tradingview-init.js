@@ -71,11 +71,31 @@
       .filter(Boolean);
   };
 
-  const parseNumber = (value) => {
-    if (value === null || value === undefined || value === '') return null;
-    const num = Number.parseFloat(value);
-    return Number.isFinite(num) ? num : null;
-  };
+const parseNumber = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number.parseFloat(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+const normalizeReentryCues = (value) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((cue) => {
+      if (!cue || typeof cue !== 'object') return null;
+      const label = typeof cue.label === 'string' && cue.label.trim() ? cue.label.trim() : 'Re-entry';
+      const rawLevel = cue.level;
+      let level = null;
+      if (Number.isFinite(rawLevel)) {
+        level = Number(rawLevel);
+      } else {
+        const parsed = Number.parseFloat(rawLevel);
+        level = Number.isFinite(parsed) ? parsed : null;
+      }
+      const type = typeof cue.type === 'string' && cue.type.trim() ? cue.type.trim() : 'struct';
+      return { label, level, type };
+    })
+    .filter(Boolean);
+};
 
   let planMeta = {};
   try {
@@ -85,11 +105,27 @@
     planMeta = {};
   }
 
+  const planMetaPlan = planMeta && typeof planMeta.plan === 'object' ? planMeta.plan : {};
+  const initialEntryStatus =
+    planMeta && typeof planMeta.entry_status === 'object'
+      ? planMeta.entry_status
+      : planMetaPlan && typeof planMetaPlan.entry_status === 'object'
+        ? planMetaPlan.entry_status
+        : null;
+  const initialReentryCues = normalizeReentryCues(
+    (planMeta && planMeta.reentry_cues) || (planMetaPlan && planMetaPlan.reentry_cues) || [],
+  );
+  const initialChecklist = Array.isArray(planMeta.pre_entry_checklist)
+    ? planMeta.pre_entry_checklist
+    : Array.isArray(planMetaPlan.pre_entry_checklist)
+      ? planMetaPlan.pre_entry_checklist
+      : [];
+
   const planMetaSymbol =
     typeof planMeta.symbol === 'string' && planMeta.symbol.trim()
       ? planMeta.symbol.trim().toUpperCase()
-      : typeof planMeta.plan === 'object' && typeof planMeta.plan.symbol === 'string'
-        ? planMeta.plan.symbol.trim().toUpperCase()
+      : typeof planMetaPlan.symbol === 'string'
+        ? planMetaPlan.symbol.trim().toUpperCase()
         : null;
 
   const planIdSymbol = (() => {
@@ -298,6 +334,9 @@
     key_levels: planMeta.key_levels || null,
     confluence: Array.isArray(planMeta.confluence_tags) ? planMeta.confluence_tags : [],
     confidence_factors: Array.isArray(planMeta.confidence_factors) ? planMeta.confidence_factors : [],
+    entry_status: initialEntryStatus,
+    reentry_cues: initialReentryCues,
+    pre_entry_checklist: Array.from(initialChecklist),
   };
 
   const supportingLevelsFromParams = dedupeLevels(parseNamedLevels(params.get('levels')));
@@ -1820,6 +1859,9 @@ levelsToggleEl = document.getElementById('levels_toggle');
     if (!planPanelBodyEl) return;
     const targetsMeta = Array.isArray(mergedPlanMeta.target_meta) ? mergedPlanMeta.target_meta : [];
     const warnings = Array.isArray(mergedPlanMeta.warnings) ? mergedPlanMeta.warnings : [];
+    const entryStatusObj = mergedPlanMeta.entry_status && typeof mergedPlanMeta.entry_status === 'object' ? mergedPlanMeta.entry_status : null;
+    const entryStatusState = (entryStatusObj?.state || '').toLowerCase();
+    const reentryCues = Array.isArray(mergedPlanMeta.reentry_cues) ? mergedPlanMeta.reentry_cues : [];
 
     const targetsList = currentPlan.tps
       .map((tp, idx) => {
@@ -1843,6 +1885,10 @@ levelsToggleEl = document.getElementById('levels_toggle');
       .join('');
     const checklistHtml = (() => {
       if (warningsList) return warningsList;
+      const predefined = Array.isArray(mergedPlanMeta.pre_entry_checklist) ? mergedPlanMeta.pre_entry_checklist : [];
+      if (predefined.length) {
+        return predefined.map((step) => `<li>${escapeHtml(step)}</li>`).join('');
+      }
       const lowerStrategy = strategyLabel.toLowerCase();
       const steps = [];
       if (/vwap/.test(lowerStrategy)) steps.push('Wait for breakout/retest above VWAP with confirming volume.');
@@ -1851,6 +1897,32 @@ levelsToggleEl = document.getElementById('levels_toggle');
       if (/reversal/.test(lowerStrategy)) steps.push('Require double-top/bottom with neckline reclaim before entering.');
       if (!steps.length) steps.push('Confirm structure alignment and reclaim of entry trigger before acting.');
       return steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('');
+    })();
+
+    const reentryCuesHtml = reentryCues.length
+      ? reentryCues
+          .map((cue) => {
+            const label = escapeHtml(String(cue.label || 'Cue'));
+            const levelText = Number.isFinite(cue.level) ? formatPrice(cue.level) : null;
+            return `<li>${label}${levelText ? ` — ${levelText}` : ''}</li>`;
+          })
+          .join('')
+      : '';
+
+    const planNoticeHtml = (() => {
+      if (!entryStatusState || entryStatusState === 'waiting' || entryStatusState === 'unknown') return '';
+      const prefix = entryStatusState === 'late' ? 'Plan late' : 'Trigger hit';
+      if (reentryCues.length) {
+        const summary = reentryCues
+          .map((cue) => {
+            const label = escapeHtml(String(cue.label || 'Cue'));
+            const levelText = Number.isFinite(cue.level) ? formatPrice(cue.level) : null;
+            return levelText ? `${label} (${levelText})` : label;
+          })
+          .join(' / ');
+        return `${prefix} — look for re-entry at ${summary}.`;
+      }
+      return `${prefix} — look for the defined retest before acting.`;
     })();
 
     const buildConfluence = () => {
@@ -2016,6 +2088,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
           <span><small>Horizon</small><strong>${horizonCopy}</strong></span>
           <span><small>R:R (TP1)</small><strong>${rrCopy}</strong></span>
         </div>
+        ${planNoticeHtml ? `<div class="plan-panel__notice plan-panel__notice--info" style="margin-top:6px;">${planNoticeHtml}</div>` : ''}
         ${
           strategyLabel
             ? `<div style="margin-top:6px;font-size:12px;letter-spacing:0.06em;text-transform:uppercase;color:rgba(148,163,184,0.78);">Strategy: ${escapeHtml(strategyLabel)}</div>`
@@ -2028,6 +2101,14 @@ levelsToggleEl = document.getElementById('levels_toggle');
           ${targetsList || '<li>No targets supplied.</li>'}
         </ul>
       </div>
+      ${
+        reentryCuesHtml
+          ? `<div class="plan-panel__section">
+              <h3>Re-Entry Cues</h3>
+              <ul class="plan-panel__warnings">${reentryCuesHtml}</ul>
+            </div>`
+          : ''
+      }
       ${
         runnerNote
           ? `<div class="plan-panel__section">
@@ -2307,6 +2388,25 @@ levelsToggleEl = document.getElementById('levels_toggle');
     };
     currentPlan = JSON.parse(JSON.stringify(basePlan));
 
+    const entryStatusUpdate =
+      (planBlock.entry_status && typeof planBlock.entry_status === 'object')
+        ? planBlock.entry_status
+        : (response.entry_status && typeof response.entry_status === 'object')
+          ? response.entry_status
+          : mergedPlanMeta.entry_status;
+    const cuesCandidate = Array.isArray(planBlock.reentry_cues)
+      ? planBlock.reentry_cues
+      : Array.isArray(response.reentry_cues)
+        ? response.reentry_cues
+        : mergedPlanMeta.reentry_cues;
+    const reentryCuesUpdate = normalizeReentryCues(cuesCandidate);
+    const checklistCandidate = Array.isArray(planBlock.pre_entry_checklist)
+      ? planBlock.pre_entry_checklist
+      : Array.isArray(response.pre_entry_checklist)
+        ? response.pre_entry_checklist
+        : mergedPlanMeta.pre_entry_checklist;
+    const checklistUpdate = Array.isArray(checklistCandidate) ? Array.from(checklistCandidate) : [];
+
     Object.assign(mergedPlanMeta, {
       symbol: (planBlock.symbol || response.symbol || symbol).toUpperCase(),
       style: styleToken,
@@ -2335,6 +2435,9 @@ levelsToggleEl = document.getElementById('levels_toggle');
         : Array.isArray(response.confidence_factors)
           ? response.confidence_factors
           : mergedPlanMeta.confidence_factors,
+      entry_status: entryStatusUpdate,
+      reentry_cues: reentryCuesUpdate,
+      pre_entry_checklist: checklistUpdate,
     });
 
     const layersCandidate = planBlock.plan_layers || response.plan_layers || null;
@@ -3349,12 +3452,23 @@ levelsToggleEl = document.getElementById('levels_toggle');
         }
       };
 
+      const planEntryStatus = mergedPlanMeta.entry_status && typeof mergedPlanMeta.entry_status === 'object' ? mergedPlanMeta.entry_status : null;
+      const entryStateToken = (planEntryStatus?.state || '').toLowerCase();
+      const entryLineLate = entryStateToken && entryStateToken !== 'waiting' && entryStateToken !== 'unknown';
+      let reentryCueSet = Array.isArray(mergedPlanMeta.reentry_cues) ? mergedPlanMeta.reentry_cues.map((cue) => ({ ...cue })) : [];
+      if (scaleMultiplier !== 1 && Number.isFinite(scaleMultiplier) && scaleMultiplier > 0) {
+        reentryCueSet = reentryCueSet.map((cue) => ({
+          ...cue,
+          level: Number.isFinite(cue.level) ? cue.level * scaleMultiplier : cue.level,
+        }));
+      }
+
       registerLine('entry', {
         price: planForFrame.entry,
-        color: '#facc15',
-        title: 'Entry',
+        color: entryLineLate ? '#94a3b8' : '#facc15',
+        title: entryLineLate ? 'Entry (re-entry focus)' : 'Entry',
         lineWidth: 2,
-        lineStyle: LightweightCharts.LineStyle.Solid,
+        lineStyle: entryLineLate ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid,
       });
 
       registerLine('stop', {
@@ -3381,6 +3495,20 @@ levelsToggleEl = document.getElementById('levels_toggle');
           lineStyle: LightweightCharts.LineStyle.Dashed,
         });
       });
+
+      if (entryLineLate && reentryCueSet.length) {
+        reentryCueSet.forEach((cue, idx) => {
+          if (!cue || !Number.isFinite(cue.level)) return;
+          const color = cue.type === 'dynamic' ? '#38bdf8' : '#94a3b8';
+          registerLine(`reentry:${idx}`, {
+            price: cue.level,
+            color,
+            title: String(cue.label || 'Re-entry Cue'),
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+          });
+        });
+      }
 
       if (Number.isFinite(lastVwap)) {
         registerLine('vwap', {

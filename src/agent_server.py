@@ -151,7 +151,9 @@ from .plans import (
     RunnerPolicy,
     TargetMeta,
     compute_entry_candidates,
+    compute_entry_status,
     build_structured_geometry,
+    build_reentry_cues,
     populate_recent_extrema,
     EntryContext,
     EntryAnchor,
@@ -1452,6 +1454,21 @@ def _hydrate_secondary_fields(payload: "PlanResponse") -> "PlanResponse":
         candidate = _first_non_empty("entry_candidates")
         if candidate:
             payload.entry_candidates = candidate
+
+    if payload.entry_status is None:
+        candidate = _first_non_empty("entry_status")
+        if candidate:
+            payload.entry_status = candidate
+
+    if not payload.reentry_cues:
+        candidate = _first_non_empty("reentry_cues")
+        if candidate:
+            payload.reentry_cues = candidate
+
+    if not payload.pre_entry_checklist:
+        candidate = _first_non_empty("pre_entry_checklist")
+        if candidate:
+            payload.pre_entry_checklist = candidate
 
     if (not payload.badges) and isinstance(plan_block, Mapping):
         candidate = _first_non_empty("badges")
@@ -2866,6 +2883,9 @@ class PlanResponse(BaseModel):
     target_meta: List[Dict[str, Any]] | None = None
     targets_meta: List[Dict[str, Any]] | None = None
     entry_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    entry_status: Dict[str, Any] | None = None
+    reentry_cues: List[Dict[str, Any]] = Field(default_factory=list)
+    pre_entry_checklist: List[str] = Field(default_factory=list)
     rr_to_t1: float | None = None
     confidence: float | None = None
     confidence_factors: List[str] | None = None
@@ -3262,6 +3282,7 @@ def _metrics_to_features(metrics: Metrics, style: RankingStyle) -> RankingFeatur
     entry_distance_atr = _finite_or_none(metrics.entry_distance_atr)
     bars_to_trigger = _finite_or_none(metrics.bars_to_trigger)
     vol_proxy = _finite_or_none(metrics.vol_proxy)
+    entry_status_dist_atr = _finite_or_none(metrics.entry_status_dist_atr)
 
     return RankingFeatures(
         symbol=metrics.symbol.upper(),
@@ -3294,6 +3315,8 @@ def _metrics_to_features(metrics: Metrics, style: RankingStyle) -> RankingFeatur
         entry_distance_atr=entry_distance_atr,
         bars_to_trigger=bars_to_trigger,
         vol_proxy=vol_proxy,
+        entry_status_state=metrics.entry_status_state,
+        entry_status_dist_atr=entry_status_dist_atr,
     )
 
 
@@ -10481,6 +10504,38 @@ async def _generate_fallback_plan(
             "options_as_of": options_as_of_timestamp,
         }
     )
+
+    entry_status_payload = compute_entry_status(
+        plan_block,
+        last_price=close_price,
+        atr=atr_value,
+        style=style_token,
+    )
+    plan_block["entry_status"] = entry_status_payload
+
+    status_state = str(entry_status_payload.get("state") or "").lower()
+    if status_state and status_state not in {"waiting", "unknown"}:
+        cue_context: Dict[str, Any] = {}
+        if isinstance(context, Mapping):
+            cue_context = {
+                "ema20": context.get("ema20"),
+            }
+            key_levels_ctx = context.get("key_levels") or context.get("key")
+            if isinstance(key_levels_ctx, Mapping):
+                cue_context["key_levels"] = key_levels_ctx
+                cue_context.setdefault("prev_high", key_levels_ctx.get("prev_high"))
+            elif key_levels_ctx is not None:
+                cue_context["key_levels"] = key_levels_ctx
+        cues_payload = build_reentry_cues(plan_block, cue_context)
+        if cues_payload:
+            plan_block["reentry_cues"] = cues_payload
+        plan_block["pre_entry_checklist"] = [
+            "Wait for defended retest at a defined cue (Entry/EMA20/PDH).",
+            "Avoid chasing; confirm structure holds above invalidation.",
+        ]
+    else:
+        plan_block.pop("reentry_cues", None)
+
     plan_block["entry_anchor"] = plan.get("entry_anchor")
     plan_block["entry_actionability"] = plan.get("entry_actionability")
     if entry_waiting_for:
@@ -10489,6 +10544,12 @@ async def _generate_fallback_plan(
     meta_block["actionable_now"] = plan_actionable_now
     meta_block["actionable_soon"] = plan_actionable_soon
     meta_block["actionability_gate"] = actionability_gate
+    if entry_status_payload:
+        meta_block["entry_status"] = entry_status_payload
+    if plan_block.get("reentry_cues"):
+        meta_block["reentry_cues"] = plan_block["reentry_cues"]
+    if plan_block.get("pre_entry_checklist"):
+        meta_block["pre_entry_checklist"] = plan_block["pre_entry_checklist"]
     if plan_block.get("entry_anchor"):
         meta_block.setdefault("entry_anchor", plan_block.get("entry_anchor"))
     if plan_block.get("entry_actionability") is not None:
@@ -10921,6 +10982,9 @@ async def _generate_fallback_plan(
         target_meta=response_target_meta,
         targets_meta=response_target_meta,
         entry_candidates=entry_candidates_payload,
+        entry_status=plan_block.get("entry_status"),
+        reentry_cues=plan_block.get("reentry_cues") or [],
+        pre_entry_checklist=plan_block.get("pre_entry_checklist") or [],
         rr_to_t1=rr_to_t1,
         confidence=confidence,
         confidence_factors=confidence_factors or None,
@@ -11078,6 +11142,12 @@ async def _generate_fallback_plan(
         meta_payload["htf"] = htf_payload_final
     if mtf_confluence_payload:
         meta_payload["mtf_confluence"] = mtf_confluence_payload
+    if plan_response.entry_status:
+        meta_payload["entry_status"] = plan_response.entry_status
+    if plan_response.reentry_cues:
+        meta_payload["reentry_cues"] = plan_response.reentry_cues
+    if plan_response.pre_entry_checklist:
+        meta_payload["pre_entry_checklist"] = plan_response.pre_entry_checklist
     if plan_badges:
         meta_payload["badges"] = plan_badges
     meta_payload["enrichment_status"] = enrichment_status

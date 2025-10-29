@@ -12,6 +12,7 @@ from .entry_selection import EntryAnchor, EntryCandidate, EntryContext, build_en
 from .invariants import assert_invariants, GeometryInvariantError
 from .pipeline import StructuredGeometry, build_structured_geometry
 from .duration import estimate_expected_duration
+from .plan_hydrator import compute_entry_status, build_reentry_cues
 
 __all__ = [
     "GeometryConfig",
@@ -47,4 +48,6 @@ __all__ = [
     "StructuredGeometry",
     "build_structured_geometry",
     "estimate_expected_duration",
+    "compute_entry_status",
+    "build_reentry_cues",
 ]

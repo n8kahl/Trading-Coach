@@ -11,6 +11,7 @@ import pandas as pd
 
 from .ranking import Style
 from .scanner import Plan, Signal
+from .plans import compute_entry_status
 
 _ACTIONABILITY_THRESHOLDS = {
     "pct": 1.5,
@@ -56,6 +57,8 @@ class Metrics:
     entry_distance_atr: float
     bars_to_trigger: float
     vol_proxy: float
+    entry_status_state: str | None
+    entry_status_dist_atr: float | None
 
 
 @dataclass(slots=True)
@@ -141,6 +144,33 @@ def compute_metrics_fast(symbol: str, style: Style, context: MetricsContext) -> 
     except (TypeError, ValueError):
         vol_proxy = 0.0
 
+    entry_status_state: str | None = None
+    entry_status_dist_atr: float | None = None
+    if plan and entry_value is not None and math.isfinite(last_close):
+        bias_token = plan.direction or (signal.features or {}).get("direction_bias") or "long"
+        plan_payload = {
+            "entry": entry_value,
+            "bias": bias_token,
+            "direction": bias_token,
+        }
+        try:
+            entry_status = compute_entry_status(
+                plan_payload,
+                last_price=last_close,
+                atr=atr_value,
+                style=style,
+            )
+        except Exception:
+            entry_status = None
+        if isinstance(entry_status, dict):
+            entry_status_state = entry_status.get("state")
+            dist_atr_value = entry_status.get("dist_atr")
+            try:
+                if dist_atr_value is not None and math.isfinite(float(dist_atr_value)):
+                    entry_status_dist_atr = float(dist_atr_value)
+            except (TypeError, ValueError):
+                entry_status_dist_atr = None
+
     return Metrics(
         symbol=symbol,
         sector=sector,
@@ -168,6 +198,8 @@ def compute_metrics_fast(symbol: str, style: Style, context: MetricsContext) -> 
         entry_distance_atr=entry_distance_atr if math.isfinite(entry_distance_atr) else float("nan"),
         bars_to_trigger=bars_to_trigger if math.isfinite(bars_to_trigger) else float("nan"),
         vol_proxy=vol_proxy,
+        entry_status_state=entry_status_state,
+        entry_status_dist_atr=entry_status_dist_atr,
     )
 
 

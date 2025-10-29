@@ -42,58 +42,61 @@ STYLE_DEFAULTS: Dict[str, Dict[str, str]] = {
 DEFAULT_CHART_PATH = "/tv/"
 
 
-def _parse_ui_state(raw: Any) -> Dict[str, Any]:
-    if isinstance(raw, Mapping):
-        return dict(raw)
-    if isinstance(raw, str):
+def _extract_style(ui_state: Any) -> str:
+    """Return normalized style token from a UI state payload."""
+    if isinstance(ui_state, Mapping):
+        token = ui_state.get("style")
+        return str(token or "").strip().lower()
+    if isinstance(ui_state, str):
         try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, Mapping):
-                return dict(parsed)
+            parsed = json.loads(ui_state)
         except Exception:
-            return {}
-    return {}
+            return ""
+        if isinstance(parsed, Mapping):
+            token = parsed.get("style")
+            return str(token or "").strip().lower()
+    return ""
 
 
-def _is_intraday_resolution(token: str) -> bool:
+def _is_intraday(token: str) -> bool:
+    """Identify intraday-style intervals (minutes/hours)."""
     normalized = (token or "").strip().lower()
     if not normalized:
         return True
     if normalized.endswith("d") or normalized.endswith("w"):
         return False
+    normalized = normalized.replace("m", "").replace("h", "").strip()
     try:
-        numeric = int(normalized.replace("h", "").replace("m", ""))
-        return numeric < 1440
+        return int(normalized) < 1440
     except Exception:
         return True
 
 
 def coerce_by_style(params: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(params, dict):
+    params = dict(params or {})
+    if not params:
         return params
-    ui_state = _parse_ui_state(params.get("ui_state"))
-    style_token = (
-        ui_state.get("style")
-        or params.get("style")
-        or params.get("style_hint")
-        or ""
-    ).strip().lower()
+
+    style_token = _extract_style(params.get("ui_state"))
+    if not style_token:
+        for fallback in ("style", "style_hint"):
+            raw = params.get(fallback)
+            if raw:
+                style_token = str(raw).strip().lower()
+                if style_token:
+                    break
     if not style_token:
         return params
+
     defaults = STYLE_DEFAULTS.get(style_token)
     if not defaults:
         return params
 
     interval = str(params.get("interval") or "").strip()
-    force_interval = str(params.get("force_interval") or "").strip()
+    force = str(params.get("force_interval") or "").strip() == "1"
 
-    should_upgrade = (
-        (not interval)
-        or (
-            style_token in {"swing", "leaps"}
-            and _is_intraday_resolution(interval)
-            and force_interval != "1"
-        )
+    should_upgrade = (not interval) or (
+        style_token in {"swing", "leaps"} and _is_intraday(interval) and not force
     )
 
     if should_upgrade:
@@ -103,6 +106,7 @@ def coerce_by_style(params: Dict[str, Any]) -> Dict[str, Any]:
     else:
         params.setdefault("view", defaults["view"])
         params.setdefault("range", defaults["range"])
+
     return params
 
 
