@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Optional
 
 import pandas as pd
 
@@ -70,5 +70,70 @@ def compute_htf_levels(daily_bars: Optional[pd.DataFrame], weekly_bars: Optional
     )
 
 
-__all__ = ["HTFLevels", "compute_htf_levels"]
+def _last_completed_row(frame: Optional[pd.DataFrame]) -> Optional[pd.Series]:
+    if frame is None or frame.empty:
+        return None
+    frame_sorted = frame.sort_index()
+    if len(frame_sorted) < 2:
+        return None
+    return frame_sorted.iloc[-2]
 
+
+def compute_intraday_htf_levels(
+    bars_60m: Optional[pd.DataFrame],
+    bars_240m: Optional[pd.DataFrame],
+) -> Dict[str, float]:
+    """Return H1/H4 highs, lows, and floor pivots for last completed bars."""
+
+    out: Dict[str, float] = {}
+
+    def _hlc(row: Optional[pd.Series]) -> tuple[Optional[float], Optional[float], Optional[float]]:
+        if row is None:
+            return None, None, None
+        try:
+            return float(row["high"]), float(row["low"]), float(row["close"])
+        except Exception:
+            return None, None, None
+
+    def _pivot_triplet(
+        high: Optional[float], low: Optional[float], close: Optional[float]
+    ) -> tuple[Optional[float], Optional[float], Optional[float]]:
+        if high is None or low is None or close is None:
+            return None, None, None
+        pivot = (high + low + close) / 3.0
+        r1 = 2 * pivot - low
+        s1 = 2 * pivot - high
+        return pivot, r1, s1
+
+    h1_row = _last_completed_row(bars_60m)
+    h1_high, h1_low, h1_close = _hlc(h1_row)
+    if h1_high is not None:
+        out["h1_high"] = h1_high
+    if h1_low is not None:
+        out["h1_low"] = h1_low
+    pivot, r1, s1 = _pivot_triplet(h1_high, h1_low, h1_close)
+    if pivot is not None:
+        out["h1_pivot"] = pivot
+    if r1 is not None:
+        out["h1_r1"] = r1
+    if s1 is not None:
+        out["h1_s1"] = s1
+
+    h4_row = _last_completed_row(bars_240m)
+    h4_high, h4_low, h4_close = _hlc(h4_row)
+    if h4_high is not None:
+        out["h4_high"] = h4_high
+    if h4_low is not None:
+        out["h4_low"] = h4_low
+    pivot, r1, s1 = _pivot_triplet(h4_high, h4_low, h4_close)
+    if pivot is not None:
+        out["h4_pivot"] = pivot
+    if r1 is not None:
+        out["h4_r1"] = r1
+    if s1 is not None:
+        out["h4_s1"] = s1
+
+    return out
+
+
+__all__ = ["HTFLevels", "compute_htf_levels", "compute_intraday_htf_levels"]

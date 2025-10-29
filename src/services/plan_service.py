@@ -12,6 +12,7 @@ from ..providers.geometry import build_geometry
 from ..providers.options import select_contracts
 from ..providers.planner import plan as run_plan
 from ..providers.series import fetch_series
+from ..features.htf_levels import compute_intraday_htf_levels
 from .chart_levels import extract_supporting_levels
 from .chart_utils import (
     sanitize_chart_params,
@@ -71,6 +72,29 @@ async def generate_plan(
     geometry = await build_geometry([symbol], series)
     plan_obj = await run_plan(symbol, series=series, geometry=geometry, route=route)
     plan_obj.setdefault("use_extended_hours", route.extended)
+
+    frames_for_symbol = series.frames.get(symbol) if hasattr(series, "frames") else None
+    if isinstance(frames_for_symbol, Mapping):
+        bars_60m = None
+        bars_240m = None
+        for key in ("60m", "60", "1h", "65m"):
+            candidate = frames_for_symbol.get(key)
+            if candidate is not None:
+                bars_60m = candidate
+                break
+        for key in ("240m", "240", "4h", "195m", "260m"):
+            candidate = frames_for_symbol.get(key)
+            if candidate is not None:
+                bars_240m = candidate
+                break
+        intraday_levels = compute_intraday_htf_levels(bars_60m, bars_240m)
+        if intraday_levels:
+            key_levels = plan_obj.get("key_levels")
+            if not isinstance(key_levels, dict):
+                key_levels = {}
+                plan_obj["key_levels"] = key_levels
+            for label, value in intraday_levels.items():
+                key_levels.setdefault(label, value)
 
     snapshot = {
         "generated_at": route.as_of.isoformat(),
