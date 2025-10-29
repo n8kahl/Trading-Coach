@@ -6279,7 +6279,7 @@ def _planning_scan_to_page(
 
 def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
     base_root = _resolved_base_url(request).rstrip("/")
-    base = f"{base_root}/webview/index.html"
+    base = f"{base_root}/tv/"
     query: Dict[str, str] = {}
     for key, value in params.items():
         if value is None:
@@ -14572,7 +14572,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     )
 
     if canonical_flag:
-        webview_base = f"{(public_base or origin).rstrip('/')}/webview/index.html"
+        tv_base = f"{(public_base or origin).rstrip('/')}/tv/"
         canonical_payload: Dict[str, object] = {
             "symbol": symbol_token,
             "interval": interval_norm,
@@ -14610,7 +14610,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
         canonical_url = make_chart_url(
             canonical_payload,
-            base_url=webview_base,
+            base_url=tv_base,
             precision_map=None,
         )
         _ensure_allowed_host(canonical_url, request)
@@ -14629,8 +14629,11 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
         return ChartLinks(interactive=canonical_url)
 
     configured_base = (settings.chart_base_url or "").strip()
-    default_chart_base = f"{origin}/webview/index.html"
-    base = (configured_base or default_chart_base).rstrip("/")
+    default_chart_base = f"{origin.rstrip('/')}/tv/"
+    if configured_base:
+        base = f"{configured_base.rstrip('/')}/"
+    else:
+        base = default_chart_base
 
     query: Dict[str, str] = {}
     for key, value in data.items():
@@ -14659,9 +14662,9 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
             "session_status": session_snapshot.get("status"),
             "session_as_of": session_snapshot.get("as_of"),
             "metric_count": metric_count,
-        "canonical": False,
-    },
-)
+            "canonical": False,
+        },
+    )
     _ensure_allowed_host(url, request)
     return ChartLinks(interactive=url)
 

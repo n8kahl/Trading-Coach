@@ -35,9 +35,9 @@ async def test_gpt_chart_url_returns_interactive_focus_params(monkeypatch):
 
     links = await gpt_chart_url(params, request)
 
-    assert (
-        links.interactive
-        == "https://test.local/webview/index.html?center_time=latest&direction=long&entry=430.1&focus=plan&interval=5m&stop=428.8&symbol=SPY&tp=432.1,433.55&view=6M"
+    assert links.interactive == (
+        "https://test.local/tv/?center_time=latest&direction=long&entry=430.1&focus=plan"
+        "&interval=5m&stop=428.8&symbol=SPY&tp=432.1,433.55&view=6M"
     )
     assert not hasattr(links, "png")
     get_settings.cache_clear()
@@ -74,9 +74,8 @@ async def test_gpt_chart_url_strips_non_canonical_params(monkeypatch):
 
     links = await gpt_chart_url(params, request)
 
-    assert (
-        links.interactive
-        == "https://test.local/webview/index.html?direction=short&entry=177&interval=5m&stop=178&symbol=NVDA&tp=175.5,175.1,174.8&view=6M"
+    assert links.interactive == (
+        "https://test.local/tv/?direction=short&entry=177&interval=5m&stop=178&symbol=NVDA&tp=175.5,175.1,174.8&view=6M"
     )
     assert "data_source" not in links.interactive
     assert "data_mode" not in links.interactive

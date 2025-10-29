@@ -30,7 +30,7 @@ ALLOWED_KEYS: frozenset[str] = frozenset(
     }
 )
 
-DEFAULT_CHART_PATH = "/webview/index.html"
+DEFAULT_CHART_PATH = "/tv/"
 
 
 def _format_number(value: float | str, decimals: int) -> str:
@@ -53,7 +53,7 @@ def make_chart_url(
     base_url: str,
     precision_map: Dict[str, int] | None = None,
 ) -> str:
-    """Return canonical Webview URL composed from allow-listed params."""
+    """Return canonical /tv URL composed from allow-listed params."""
 
     symbol = str(params.get("symbol") or "").upper()
     precision = get_precision(symbol, precision_map=precision_map)
@@ -73,7 +73,9 @@ def make_chart_url(
             payload[key] = _format_number(raw_value, precision)
         elif key == "tp":
             if isinstance(raw_value, (list, tuple)):
-                payload[key] = _coerce_list(raw_value, lambda x: _format_number(x, precision))
+                payload[key] = _coerce_list(
+                    raw_value, lambda x: _format_number(x, precision)
+                )
             else:
                 payload[key] = str(raw_value)
         elif key == "ema":
