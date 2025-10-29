@@ -129,11 +129,11 @@ class PlanMonitor:
     def _note_for_status(self, status: PlanStatus, price: float, rr: Optional[float], breach: Optional[str]) -> str:
         price_copy = f"{price:.2f}"
         if status == PlanStatus.INVALIDATED:
-            return f"Stop level triggered at {price_copy}"
+            return f"Plan invalidated — stop hit at {price_copy}"
         if status == PlanStatus.AT_RISK:
             if breach == "rr_deterioration" and rr is not None:
-                return f"Reward-to-risk fell to {rr:.2f}"
-            return f"Price is within stop buffer ({price_copy})"
+                return f"Reward-to-risk deteriorated to {rr:.2f}"
+            return f"Stop approaching — price within buffer ({price_copy})"
         if status == PlanStatus.REVERSAL:
             return "Reversal criteria met"
         return "Plan intact. Risk profile unchanged."
@@ -163,6 +163,20 @@ class PlanMonitor:
         }
         if price is not None:
             changes["last_price"] = price
+        coach_event: Optional[str] = None
+        if self.status == PlanStatus.INVALIDATED:
+            coach_event = "invalidated"
+        elif self.status == PlanStatus.AT_RISK:
+            if self.last_breach == "stop_buffer_touched":
+                coach_event = "stop_warning"
+            elif self.last_breach == "rr_deterioration":
+                coach_event = "rr_warning"
+        elif self.status == PlanStatus.REVERSAL:
+            coach_event = "reversal_watch"
+
+        if coach_event:
+            changes["coach_event"] = coach_event
+
         payload = {
             "t": "plan_delta",
             "plan_id": self.plan_id,

@@ -22,9 +22,14 @@ def test_trade_follower_flow_long():
     assert entered is not None
     assert entered.state == TradeState.ENTERED
 
+    warning = follower.update_from_price(195.3)
+    assert warning is not None
+    assert warning.event == "stop_warning"
+
     scaled = follower.update_from_price(205.1)
     assert scaled is not None
     assert scaled.state == TradeState.SCALED
+    assert scaled.event == "tp_hit"
     assert follower.trailing_stop is not None
 
     trail_adjust = follower.update_from_price(208.0)

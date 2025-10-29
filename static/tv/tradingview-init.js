@@ -204,6 +204,14 @@ const normalizeReentryCues = (value) => {
   let autoReplanInFlight = false;
   let keyLevels = [];
   const AUTO_REARM_STORAGE_KEY = 'tc_auto_rearm';
+  const FOLLOW_LIVE_STORAGE_KEY = 'tc_follow_live';
+  const coachToastIds = {
+    stop: 'coach_stop_warning',
+    rr: 'coach_rr_warning',
+    tp: 'coach_tp_hit',
+    invalid: 'coach_invalidated',
+    rearm: 'coach_rearm_ready',
+  };
   let autoRearmEnabled = (() => {
     try {
       return window.localStorage.getItem(AUTO_REARM_STORAGE_KEY) === '1';
@@ -339,6 +347,48 @@ const normalizeReentryCues = (value) => {
     pre_entry_checklist: Array.from(initialChecklist),
   };
 
+  const normalizeSessionState = (raw, fallback = {}) => {
+    const base = {
+      status: typeof fallback.status === 'string' && fallback.status ? fallback.status.toLowerCase() : 'closed',
+      as_of: fallback.as_of || null,
+      next_open: fallback.next_open || null,
+      tz: fallback.tz || 'America/New_York',
+      banner: fallback.banner || null,
+    };
+    if (raw && typeof raw === 'object') {
+      const maybeStatus = raw.status || raw.state;
+      if (typeof maybeStatus === 'string' && maybeStatus.trim()) {
+        base.status = maybeStatus.trim().toLowerCase();
+      }
+      if (raw.as_of !== undefined && raw.as_of !== null && String(raw.as_of).trim()) {
+        base.as_of = String(raw.as_of);
+      }
+      if (raw.next_open !== undefined && raw.next_open !== null && String(raw.next_open).trim()) {
+        base.next_open = String(raw.next_open);
+      }
+      if (raw.tz !== undefined && raw.tz !== null && String(raw.tz).trim()) {
+        base.tz = String(raw.tz);
+      }
+      if (raw.banner !== undefined && raw.banner !== null && String(raw.banner).trim()) {
+        base.banner = String(raw.banner);
+      }
+    }
+    return base;
+  };
+
+  const sessionFallback = {
+    status: (sessionStatusParam || sessionPhaseParam || marketStatusParam || (liveFlag ? 'open' : 'closed')) || 'closed',
+    as_of: params.get('session_as_of') || null,
+    next_open: params.get('session_next_open') || params.get('next_open') || null,
+    tz: params.get('session_tz') || 'America/New_York',
+    banner: sessionBannerParam || null,
+  };
+
+  let sessionSnapshot = normalizeSessionState(planMeta.session_state || planMeta.session || null, sessionFallback);
+  if (planMetaPlan && typeof planMetaPlan === 'object' && planMetaPlan.session_state) {
+    sessionSnapshot = normalizeSessionState(planMetaPlan.session_state, sessionSnapshot);
+  }
+
   const supportingLevelsFromParams = dedupeLevels(parseNamedLevels(params.get('levels')));
   allKeyLevels = collectInitialLevels();
   setLevelGroupsFromMeta(planLayersMeta, allKeyLevels, { silent: true });
@@ -361,9 +411,25 @@ const normalizeReentryCues = (value) => {
   let dataLastUpdateDate = parseIsoDate(lastUpdateRaw);
   let dataAgeMs = Number.isFinite(dataAgeMsParam) ? dataAgeMsParam : null;
   let lastHeartbeatMs = dataLastUpdateDate ? dataLastUpdateDate.getTime() : null;
-  let followLive = true;
+  let followLive = (() => {
+    try {
+      const stored = window.localStorage.getItem(FOLLOW_LIVE_STORAGE_KEY);
+      if (stored === '0') return false;
+      if (stored === '1') return true;
+    } catch {
+      // ignore storage errors
+    }
+    return true;
+  })();
   let suppressFollowDetection = false;
   let forceAutoFocus = true;
+  const persistFollowLivePreference = (value) => {
+    try {
+      window.localStorage.setItem(FOLLOW_LIVE_STORAGE_KEY, value ? '1' : '0');
+    } catch {
+      // ignore storage errors
+    }
+  };
   const isFeedDegraded = () =>
     dataModeToken === 'degraded' || (Number.isFinite(dataAgeMs) && dataAgeMs > STALE_FEED_THRESHOLD_MS);
   let lastDegradedState = isFeedDegraded();
@@ -389,6 +455,7 @@ const headerSymbolEl = document.getElementById('header_symbol');
   const headerLastUpdateEl = document.getElementById('header_lastupdate');
   const headerDataSourceEl = document.getElementById('header_datasource');
   const streamingStatusEl = document.getElementById('streaming_status');
+  const prepareNextOpenBtn = document.getElementById('prepare_next_open');
 const followLiveToggleEl = document.getElementById('follow_live_toggle');
 levelsToggleEl = document.getElementById('levels_toggle');
   const planStatusNoteEl = document.getElementById('plan_status_note');
@@ -398,6 +465,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
   const planPanelBodyEl = document.getElementById('plan_panel_body');
   const debugEl = document.getElementById('debug_banner');
   const toastContainerEl = document.getElementById('toast_container');
+  const activeToastsById = new Map();
 
   const headerSymbolMetaEl = (() => {
     if (!headerSymbolEl) return null;
@@ -411,7 +479,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
   })();
 
   const planLogEntries = [];
-  const PLAN_LOG_LIMIT = 50;
+  const PLAN_LOG_LIMIT = 5;
   const PLAN_LOG_VISIBLE_LIMIT = 5;
   let planLogListEl = null;
   let planLogEmptyEl = null;
@@ -717,20 +785,288 @@ levelsToggleEl = document.getElementById('levels_toggle');
     renderPlanLog();
   };
 
-  const showToast = (message, { tone = 'success', duration = 3200 } = {}) => {
-    if (!toastContainerEl || !message) return;
-    const toast = document.createElement('div');
-    toast.className = `toast ${tone === 'warn' ? 'toast--warn' : 'toast--success'}`;
-    toast.textContent = message;
-    toastContainerEl.appendChild(toast);
+  const clearToastTimer = (entry) => {
+    if (entry.timer !== null) {
+      window.clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+  };
+
+  const dismissToastEntry = (entry) => {
+    if (!entry || entry.dismissed) return;
+    entry.dismissed = true;
+    clearToastTimer(entry);
+    entry.toastEl.classList.add('toast--hide');
     window.setTimeout(() => {
-      toast.classList.add('toast--hide');
-      window.setTimeout(() => {
-        if (toast.parentElement === toastContainerEl) {
-          toastContainerEl.removeChild(toast);
+      if (toastContainerEl && entry.toastEl.parentElement === toastContainerEl) {
+        toastContainerEl.removeChild(entry.toastEl);
+      }
+    }, 320);
+    if (entry.id) {
+      activeToastsById.delete(entry.id);
+    }
+  };
+
+  const scheduleToastTimer = (entry, duration) => {
+    clearToastTimer(entry);
+    if (!Number.isFinite(duration) || duration <= 0) {
+      return;
+    }
+    entry.timer = window.setTimeout(() => {
+      dismissToastEntry(entry);
+    }, duration);
+  };
+
+  const buildToastActions = (entry, actions) => {
+    if (!Array.isArray(actions) || actions.length === 0) {
+      if (entry.actionsEl) {
+        entry.toastEl.removeChild(entry.actionsEl);
+        entry.actionsEl = null;
+      }
+      return;
+    }
+    if (!entry.actionsEl) {
+      const actionsEl = document.createElement('div');
+      actionsEl.className = 'toast__actions';
+      entry.toastEl.insertBefore(actionsEl, entry.closeBtn);
+      entry.actionsEl = actionsEl;
+    }
+    entry.actionsEl.innerHTML = '';
+    actions.forEach((action) => {
+      if (!action || !action.label) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'toast__button';
+      if (action.primary) {
+        btn.classList.add('toast__button--primary');
+      }
+      btn.textContent = action.label;
+      btn.addEventListener('click', (event) => {
+        event.preventDefault();
+        try {
+          if (typeof action.handler === 'function') {
+            action.handler(() => dismissToastEntry(entry));
+          }
+        } finally {
+          if (action.dismiss !== false) {
+            dismissToastEntry(entry);
+          }
         }
-      }, 320);
-    }, Math.max(1200, duration));
+      });
+      entry.actionsEl.appendChild(btn);
+    });
+    if (!entry.actionsEl.childElementCount) {
+      entry.toastEl.removeChild(entry.actionsEl);
+      entry.actionsEl = null;
+    }
+  };
+
+  const resolveToastDuration = (actionsLength, durationValue) => {
+    const numeric = Number.isFinite(durationValue) ? durationValue : null;
+    if (actionsLength > 0) {
+      if (numeric === null || numeric <= 0) {
+        return 8000;
+      }
+      return Math.max(0, numeric);
+    }
+    if (numeric === null) {
+      return 3200;
+    }
+    return Math.max(0, numeric);
+  };
+
+  const showToast = (message, { tone = 'success', duration = 3200, actions = [], id = null } = {}) => {
+    if (!toastContainerEl || !message) {
+      return { dismiss: () => {} };
+    }
+    const normalizedTone = tone === 'warn' ? 'warn' : 'success';
+    const toneClass = normalizedTone === 'warn' ? 'toast--warn' : 'toast--success';
+    const actionList = Array.isArray(actions) ? actions.filter((action) => action && action.label) : [];
+    let entry = id ? activeToastsById.get(id) : null;
+    if (entry) {
+      entry.messageEl.textContent = message;
+      if (entry.toneClass !== toneClass) {
+        entry.toastEl.classList.remove(entry.toneClass);
+        entry.toastEl.classList.add(toneClass);
+        entry.toneClass = toneClass;
+      }
+      buildToastActions(entry, actionList);
+      entry.autoDuration = resolveToastDuration(actionList.length, Number(duration));
+      scheduleToastTimer(entry, entry.autoDuration);
+      return { dismiss: () => dismissToastEntry(entry) };
+    }
+
+    const toastEl = document.createElement('div');
+    toastEl.className = `toast ${toneClass}`;
+    const messageEl = document.createElement('div');
+    messageEl.className = 'toast__message';
+    messageEl.textContent = message;
+    toastEl.appendChild(messageEl);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'toast__close';
+    closeBtn.setAttribute('aria-label', 'Dismiss notification');
+    closeBtn.innerHTML = '&times;';
+    toastEl.appendChild(closeBtn);
+
+    const autoDuration = resolveToastDuration(actionList.length, Number(duration));
+    const newEntry = {
+      id,
+      toastEl,
+      messageEl,
+      closeBtn,
+      actionsEl: null,
+      toneClass,
+      timer: null,
+      dismissed: false,
+      autoDuration,
+    };
+
+    buildToastActions(newEntry, actionList);
+    toastContainerEl.appendChild(toastEl);
+
+    const dismiss = () => dismissToastEntry(newEntry);
+    closeBtn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      dismiss();
+    });
+
+    toastEl.addEventListener('mouseenter', () => clearToastTimer(newEntry));
+    toastEl.addEventListener('mouseleave', () => scheduleToastTimer(newEntry, newEntry.autoDuration));
+
+    if (id) {
+      activeToastsById.set(id, newEntry);
+    }
+
+    scheduleToastTimer(newEntry, newEntry.autoDuration);
+
+    return { dismiss };
+  };
+
+  const scrollToPlanSection = (selector) => {
+    if (planPanelEl && !planPanelEl.open) {
+      try {
+        planPanelEl.open = true;
+      } catch {}
+    }
+    let target = null;
+    if (typeof selector === 'string') {
+      target = document.querySelector(selector);
+    } else if (selector && typeof selector.scrollIntoView === 'function') {
+      target = selector;
+    }
+    if (target && typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  };
+
+  const handleCoachEvent = (event, changes = {}) => {
+    if (!event) return;
+    const normalized = String(event).toLowerCase();
+    switch (normalized) {
+      case 'stop_warning':
+        showToast('Stop approaching — tighten risk.', {
+          tone: 'warn',
+          id: coachToastIds.stop,
+          actions: [
+            {
+              label: 'Review Risk',
+              primary: true,
+              handler: () => {
+                scrollToPlanSection('#plan_panel');
+              },
+            },
+            { label: 'Dismiss' },
+          ],
+        });
+        break;
+      case 'rr_warning':
+        showToast('Reward-to-risk deteriorating — reassess the setup.', {
+          tone: 'warn',
+          id: coachToastIds.rr,
+          actions: [
+            {
+              label: 'Review Plan',
+              handler: () => {
+                scrollToPlanSection('#plan_panel');
+              },
+            },
+            { label: 'Dismiss' },
+          ],
+        });
+        break;
+      case 'tp_hit':
+      case 'scaled':
+        showToast('Take profit now — target tagged.', {
+          tone: 'success',
+          id: coachToastIds.tp,
+          actions: [
+            {
+              label: 'Trim',
+              primary: true,
+              handler: () => {
+                scrollToPlanSection('.plan-panel__targets');
+              },
+            },
+            { label: 'Dismiss' },
+          ],
+        });
+        break;
+      case 'invalidated': {
+        const actions = [];
+        if (pendingAutoReplan) {
+          actions.push({
+            label: 'Reload Plan',
+            primary: true,
+            handler: () => {
+              adoptPendingReplan({ viaAuto: false });
+            },
+          });
+        }
+        if (!autoRearmEnabled) {
+          actions.push({
+            label: 'Auto Rearm',
+            handler: () => {
+              setAutoRearmEnabled(true);
+            },
+          });
+        }
+        actions.push({ label: 'Dismiss' });
+        showToast('Plan invalidated — next setup pending.', {
+          tone: 'warn',
+          id: coachToastIds.invalid,
+          actions,
+        });
+        break;
+      }
+      case 'rearm':
+        if (!pendingAutoReplan || autoRearmEnabled) return;
+        showToast(`Next plan ready — ${pendingAutoReplan.planId}`, {
+          tone: 'success',
+          id: coachToastIds.rearm,
+          actions: [
+            {
+              label: 'Reload Plan',
+              primary: true,
+              handler: () => {
+                adoptPendingReplan({ viaAuto: false });
+              },
+            },
+            {
+              label: 'Auto Rearm',
+              handler: () => {
+                setAutoRearmEnabled(true);
+              },
+            },
+            { label: 'Dismiss' },
+          ],
+        });
+        break;
+      default:
+        break;
+    }
   };
 
   const updateFollowLiveToggle = () => {
@@ -745,6 +1081,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
     if (followLive === next) return;
     followLive = next;
     updateFollowLiveToggle();
+    persistFollowLivePreference(followLive);
     if (followLive && scroll) {
       ensureScrollToRealTime();
     }
@@ -754,6 +1091,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
     if (!followLive) return;
     followLive = false;
     updateFollowLiveToggle();
+    persistFollowLivePreference(false);
   };
 
   const updateAutoRearmToggle = () => {
@@ -773,6 +1111,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
   };
 
   const setAutoRearmEnabled = (value) => {
+    const previous = autoRearmEnabled;
     autoRearmEnabled = Boolean(value);
     try {
       window.localStorage.setItem(AUTO_REARM_STORAGE_KEY, autoRearmEnabled ? '1' : '0');
@@ -782,6 +1121,22 @@ levelsToggleEl = document.getElementById('levels_toggle');
     updateAutoRearmToggle();
     if (autoRearmEnabled && pendingAutoReplan && !autoReplanInFlight) {
       adoptPendingReplan({ viaAuto: true });
+    }
+    if (autoRearmEnabled !== previous) {
+      showToast(
+        autoRearmEnabled ? 'Auto rearm enabled — next plan will auto-load.' : 'Auto rearm disabled.',
+        {
+          tone: autoRearmEnabled ? 'success' : 'warn',
+          id: 'auto_rearm_status',
+          duration: 3000,
+        },
+      );
+      if (autoRearmEnabled && coachToastIds) {
+        const rearmEntry = activeToastsById.get(coachToastIds.rearm);
+        if (rearmEntry) {
+          dismissToastEntry(rearmEntry);
+        }
+      }
     }
   };
 
@@ -818,6 +1173,10 @@ levelsToggleEl = document.getElementById('levels_toggle');
       pendingAutoReplan = null;
       renderAutoReplanBanner();
       showToast(viaAuto ? 'Auto replan applied.' : 'Plan reloaded.');
+      const rearmToastEntry = coachToastIds ? activeToastsById.get(coachToastIds.rearm) : null;
+      if (rearmToastEntry) {
+        dismissToastEntry(rearmToastEntry);
+      }
     } catch (error) {
       console.error('Auto replan adoption failed', error);
       showToast('Failed to load next plan', { tone: 'warn' });
@@ -925,6 +1284,20 @@ levelsToggleEl = document.getElementById('levels_toggle');
       updateLevelVisibility();
       const newUrl = `${window.location.pathname}?${params.toString()}`;
       window.history.replaceState({}, '', newUrl);
+    });
+  }
+
+  if (prepareNextOpenBtn) {
+    prepareNextOpenBtn.addEventListener('click', () => {
+      const alreadyEnabled = autoRearmEnabled;
+      setAutoRearmEnabled(true);
+      if (alreadyEnabled) {
+        showToast('Auto rearm already active for the next open.', {
+          tone: 'success',
+          id: 'auto_rearm_status',
+          duration: 2800,
+        });
+      }
     });
   }
 
@@ -1348,6 +1721,49 @@ levelsToggleEl = document.getElementById('levels_toggle');
     }
   };
 
+  const formatSessionTimestamp = (iso, tz = 'America/New_York') => {
+    if (!iso) return null;
+    const parsed = new Date(iso);
+    if (Number.isNaN(parsed.getTime())) return null;
+    try {
+      const formatter = new Intl.DateTimeFormat('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        timeZone: tz || 'America/New_York',
+        timeZoneName: 'short',
+      });
+      return formatter.format(parsed);
+    } catch {
+      return parsed.toLocaleString();
+    }
+  };
+
+  const sessionFrozenCopy = () => {
+    const label = formatSessionTimestamp(sessionSnapshot.as_of, sessionSnapshot.tz);
+    if (!label) return null;
+    return `Frozen as of ${label}`;
+  };
+
+  const updateFrozenIndicators = () => {
+    if (!prepareNextOpenBtn) return;
+    const statusToken = (sessionSnapshot.status || '').toLowerCase();
+    const closed =
+      statusToken === 'closed' ||
+      statusToken === 'afterhours' ||
+      statusToken === 'post' ||
+      statusToken === 'premarket' ||
+      statusToken === 'pre';
+    if (closed) {
+      prepareNextOpenBtn.hidden = false;
+      const nextLabel = formatSessionTimestamp(sessionSnapshot.next_open, sessionSnapshot.tz);
+      prepareNextOpenBtn.title = nextLabel ? `Next open ${nextLabel}` : 'Queue the next open plan';
+    } else {
+      prepareNextOpenBtn.hidden = true;
+    }
+  };
+
   const applyPlanStatus = (status, note, nextStep, rrValue) => {
     if (typeof status === 'string' && status) {
       currentPlanStatus = status.toLowerCase();
@@ -1383,6 +1799,8 @@ levelsToggleEl = document.getElementById('levels_toggle');
     }
     if (note && typeof note === 'string' && note.trim()) {
       latestMarketNote = note.trim();
+    } else if (sessionSnapshot.banner) {
+      latestMarketNote = sessionSnapshot.banner;
     } else {
       latestMarketNote = meta.note;
     }
@@ -1396,6 +1814,18 @@ levelsToggleEl = document.getElementById('levels_toggle');
         latestMarketNote = degradeCopy;
       }
     }
+    const closedPhase = ['closed', 'afterhours', 'premarket', 'pre', 'post'].includes(currentMarketPhase);
+    if (closedPhase) {
+      const frozenCopy = sessionFrozenCopy();
+      if (frozenCopy) {
+        if (latestMarketNote && !latestMarketNote.startsWith('Frozen as of')) {
+          latestMarketNote = `${frozenCopy} · ${latestMarketNote}`;
+        } else {
+          latestMarketNote = frozenCopy;
+        }
+      }
+    }
+    updateFrozenIndicators();
     updateStatusNote();
   };
 
@@ -1482,6 +1912,12 @@ levelsToggleEl = document.getElementById('levels_toggle');
     const rrValue = Number.isFinite(changes.rr_to_t1) ? changes.rr_to_t1 : null;
     applyPlanStatus(statusToken, changes.note, changes.next_step, rrValue);
     const eventTs = parseEventTimestamp(payload);
+    const coachEventToken =
+      typeof changes.coach_event === 'string'
+        ? changes.coach_event
+        : typeof payload.coach_event === 'string'
+          ? payload.coach_event
+          : null;
     const logParts = [];
     if (changes.status) {
       logParts.push(`Status → ${statusLabel(changes.status) || changes.status}`);
@@ -1513,8 +1949,34 @@ levelsToggleEl = document.getElementById('levels_toggle');
       renderAutoReplanBanner();
       if (autoRearmEnabled) {
         adoptPendingReplan({ viaAuto: true });
-      } else {
-        showToast('Next plan ready — reload when you are set.');
+      }
+    }
+    if (coachEventToken) {
+      handleCoachEvent(coachEventToken, changes);
+    } else if (changes.next_plan_id && !autoRearmEnabled) {
+      handleCoachEvent('rearm', changes);
+    } else if (typeof statusToken === 'string' && statusToken.toLowerCase() === 'invalidated') {
+      handleCoachEvent('invalidated', changes);
+    }
+    const normalizedStatus = typeof statusToken === 'string' ? statusToken.toLowerCase() : '';
+    const dismissCoachToast = (id) => {
+      if (!id) return;
+      const entry = activeToastsById.get(id);
+      if (entry) {
+        dismissToastEntry(entry);
+      }
+    };
+    if (normalizedStatus === 'intact') {
+      dismissCoachToast(coachToastIds.stop);
+      dismissCoachToast(coachToastIds.rr);
+      dismissCoachToast(coachToastIds.invalid);
+    }
+    if (['auto_replanned', 'exited', 'invalidated'].includes(normalizedStatus)) {
+      dismissCoachToast(coachToastIds.stop);
+      dismissCoachToast(coachToastIds.rr);
+      dismissCoachToast(coachToastIds.tp);
+      if (normalizedStatus !== 'invalidated') {
+        dismissCoachToast(coachToastIds.invalid);
       }
     }
     if (Number.isFinite(eventTs)) {
@@ -2458,6 +2920,13 @@ levelsToggleEl = document.getElementById('levels_toggle');
     }
     updateLevelVisibility();
     setOrDeleteParam('supportingLevels', showAllLevels ? '1' : '0');
+
+    const sessionStateCandidate = planBlock.session_state || response.session_state || null;
+    if (sessionStateCandidate) {
+      sessionSnapshot = normalizeSessionState(sessionStateCandidate, sessionSnapshot);
+      updateFrozenIndicators();
+      applyMarketStatus(currentMarketPhase || sessionSnapshot.status || 'closed', sessionSnapshot.banner || latestMarketNote);
+    }
 
     setOrDeleteParam('style', styleToken);
     setOrDeleteParam('direction', directionToken);

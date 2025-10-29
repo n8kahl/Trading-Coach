@@ -85,6 +85,8 @@ def build_structured_geometry(
         atr_value=atr_val,
         style=style_token,
     )
+    snap_reference = [round(tp, 2) for tp in snapped_tps]
+    reason_reference = [dict(reason) for reason in tp_reason_payload]
     if snapped_tps and raw_targets:
         adjusted_tps: List[float] = []
         adjusted_reasons: List[Dict[str, str | None]] = []
@@ -101,14 +103,13 @@ def build_structured_geometry(
             if em_points and em_points > 0:
                 distance = abs(float(snapped_price) - entry_val)
                 within_em_bounds = distance <= float(em_points) * 1.001
-            if improves_rr and within_em_bounds:
+            if (reason.get("snap_tag") or improves_rr) and within_em_bounds:
                 adjusted_tps.append(round(float(snapped_price), 2))
                 if reason.get("snap_tag"):
                     adjusted_tags.add(str(reason["snap_tag"]))
                 adjusted_reasons.append(reason)
             else:
                 fallback_price = round(float(raw_price), 2)
-                reason.pop("snap_tag", None)
                 reason["reason"] = f"{reason.get('reason') or 'Stats target'} · Snap skipped"
                 adjusted_tps.append(fallback_price)
                 adjusted_reasons.append(reason)
@@ -117,6 +118,7 @@ def build_structured_geometry(
         snap_tags = adjusted_tags
     snapped_tps = [round(tp, 2) for tp in snapped_tps]
     tp_reasons = _normalise_tp_reasons(tp_reason_payload)
+    baseline_tp_reasons = _normalise_tp_reasons(reason_reference)
 
     clamped_tps = clamp_targets_to_em(
         entry=entry_val,
@@ -156,6 +158,22 @@ def build_structured_geometry(
         style=style_token,
         em_points=em_points,
     )
+
+    if prefer_threshold > 0 and snap_reference:
+        recomputed_tags: Set[str] = set()
+        for idx, price in enumerate(clamped_tps):
+            if idx >= len(snap_reference):
+                continue
+            original_price = snap_reference[idx]
+            if abs(price - original_price) <= prefer_threshold + 1e-6:
+                baseline_reason = baseline_tp_reasons[idx] if idx < len(baseline_tp_reasons) else None
+                if baseline_reason:
+                    snap_tag = baseline_reason.get("snap_tag")
+                    if snap_tag:
+                        recomputed_tags.add(str(snap_tag))
+                        tp_reasons[idx] = dict(baseline_reason)
+        if recomputed_tags:
+            snap_tags = recomputed_tags
 
     stop_price, stop_label = stop_from_structure(
         entry=entry_val,

@@ -6849,6 +6849,7 @@ async def _auto_replan(symbol: str, style: Optional[str], origin_plan_id: str, e
                 "note": note,
                 "next_plan_id": new_plan_id,
                 "timestamp": timestamp,
+                "coach_event": "rearm",
             }
             if new_plan_version is not None:
                 changes["next_plan_version"] = new_plan_version
@@ -9614,6 +9615,9 @@ async def _generate_fallback_plan(
         min_actionability=selection_gate,
     )
     entry_price = geometry.entry
+    wait_due_to_actionability = False
+    wait_due_to_reclaim = False
+    wait_due_to_selector = False
     if _is_behind_tape(selected_entry_candidate, close_price, direction):
         alt_anchor = _nearest_retest_or_reclaim(levels_map, close_price, direction)
         if alt_anchor:
@@ -9665,6 +9669,9 @@ async def _generate_fallback_plan(
                             "evaluation": {"actionability": round(boosted_actionability, 4)},
                         },
                     )
+                label_token = str(alt_anchor.get("label", "")).strip().upper()
+                if label_token == "VWAP" or "VWAP" in label_token:
+                    wait_due_to_reclaim = True
             except ValueError:
                 defer_for_retest = True
                 entry_waiting_for = _format_waiting_for(
@@ -9740,6 +9747,7 @@ async def _generate_fallback_plan(
         force_wait_plan = True
         plan_actionable_now = False
         plan_actionable_soon = False
+        wait_due_to_actionability = True
         if entry_waiting_for is None:
             entry_waiting_for = _format_waiting_for(selected_entry_candidate.tag, entry_price, direction)
     if not actionable_now_flag and entry_waiting_for is None and actionable_soon_flag:
@@ -10389,6 +10397,8 @@ async def _generate_fallback_plan(
             rejection_list = list(dedup.values())
             rejected_contracts.extend(rejection_list)
             record_selector_rejections(rejection_list, source="live")
+        if rejected_contracts and not wait_due_to_selector:
+            wait_due_to_selector = True
         if filtered_contracts:
             options_contracts = filtered_contracts
             if relax_flags and not options_note:
@@ -10693,12 +10703,19 @@ async def _generate_fallback_plan(
     if any(value is not None for value in composite_components_serializable.values()):
         meta_block["composite_components"] = composite_components_serializable
     plan_block["meta"] = meta_block
+    plan_block["entry"] = round(entry_price, 2) if entry_price is not None and math.isfinite(entry_price) else None
+    plan_block["stop"] = round(stop, 2) if stop is not None and math.isfinite(stop) else None
+    plan_block["targets"] = [round(float(tp), 2) for tp in targets] if targets else []
+    plan_block["target_meta"] = target_meta_output
     if wait_plan:
         plan_block["plan_state"] = "WAIT"
-        plan_block["entry"] = None
-        plan_block["stop"] = None
-        plan_block["targets"] = []
-        plan_block["target_meta"] = []
+        if wait_due_to_actionability or wait_due_to_reclaim or wait_due_to_selector:
+            plan_block["entry"] = None
+            plan_block["stop"] = None
+            plan_block["targets"] = []
+            plan_block["target_meta"] = []
+    else:
+        plan_block.pop("plan_state", None)
     if entry_waiting_for:
         existing_wait = strategy_profile_payload.get("waiting_for") if isinstance(strategy_profile_payload, Mapping) else None
         if isinstance(strategy_profile_payload, Mapping):
@@ -10799,7 +10816,7 @@ async def _generate_fallback_plan(
     if geometry.snap_trace:
         plan_block["snap_trace"] = geometry.snap_trace
     expected_duration_payload: Optional[Dict[str, Any]] = None
-    if not wait_plan and targets:
+    if targets:
         try:
             atr_for_duration = float(atr_value)
         except (TypeError, ValueError):
@@ -10884,8 +10901,9 @@ async def _generate_fallback_plan(
     if wait_plan:
         target_profile_dict["probabilities"] = {}
         target_profile_dict["entry"] = None
-        target_profile_dict["stop"] = None
-        target_profile_dict["targets"] = []
+        if wait_due_to_actionability or wait_due_to_reclaim or wait_due_to_selector:
+            target_profile_dict["stop"] = None
+            target_profile_dict["targets"] = []
     structured_plan = build_structured_plan(
         plan_id=plan_id,
         symbol=symbol.upper(),
@@ -10910,15 +10928,13 @@ async def _generate_fallback_plan(
     if mtf_entry_payload:
         structured_plan["mtf_bias"] = mtf_entry_payload
     if wait_plan:
-        entry_level_for_wait = None
+        entry_level_for_wait = round(entry_price, 4) if entry_price is not None else None
         structured_plan["entry"] = {
             "type": "wait",
             "level": entry_level_for_wait,
             "trigger": entry_waiting_for,
         }
-        structured_plan["stop"] = None
-        structured_plan["targets"] = []
-        structured_plan["probabilities"] = {}
+        structured_plan.setdefault("probabilities", {})
     if confidence_visual:
         structured_plan["confidence_visual"] = confidence_visual
     structured_plan["trade_detail"] = chart_url_with_ids
@@ -11089,11 +11105,12 @@ async def _generate_fallback_plan(
     htf_payload_final.setdefault("snapped_targets", [])
 
     response_entry = entry_price if not wait_plan else None
-    response_stop = stop if not wait_plan else None
-    response_targets = targets if not wait_plan else []
+    wait_due_to_any = wait_due_to_actionability or wait_due_to_reclaim or wait_due_to_selector
+    response_stop = None if wait_due_to_any else stop
+    response_targets = [] if wait_due_to_any else targets
     response_target_meta = target_meta_output
     calc_notes_payload = None
-    if not wait_plan and targets:
+    if targets:
         calc_notes_payload = {
             "atr14": round(float(atr_value), 4),
             "rr_inputs": {"entry": entry_price, "stop": stop, "tp1": targets[0]},

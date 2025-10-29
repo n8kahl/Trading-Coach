@@ -142,7 +142,8 @@
       }
 
       .follow-toggle,
-      .levels-toggle {
+      .levels-toggle,
+      .prepare-btn {
         background: rgba(96, 165, 250, 0.12);
         border: 1px solid rgba(96, 165, 250, 0.35);
         color: rgba(219, 234, 254, 0.88);
@@ -156,7 +157,8 @@
       }
 
       .follow-toggle:hover,
-      .levels-toggle:hover {
+      .levels-toggle:hover,
+      .prepare-btn:hover {
         background: rgba(96, 165, 250, 0.2);
         border-color: rgba(96, 165, 250, 0.45);
       }
@@ -171,6 +173,17 @@
         background: rgba(129, 140, 248, 0.2);
         border-color: rgba(129, 140, 248, 0.45);
         color: rgba(199, 210, 254, 0.95);
+      }
+
+      .prepare-btn {
+        background: rgba(139, 92, 246, 0.18);
+        border-color: rgba(139, 92, 246, 0.35);
+        color: rgba(221, 214, 254, 0.92);
+      }
+
+      .prepare-btn:hover {
+        background: rgba(139, 92, 246, 0.3);
+        border-color: rgba(167, 139, 250, 0.55);
       }
 
       .status-pill {
@@ -563,6 +576,11 @@
         backdrop-filter: blur(12px);
         transition: opacity 0.3s ease, transform 0.3s ease;
         pointer-events: auto;
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding-right: 36px;
       }
 
       .toast--success {
@@ -580,6 +598,62 @@
       .toast--hide {
         opacity: 0;
         transform: translateY(-10px);
+      }
+
+      .toast__message {
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+
+      .toast__actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .toast__button {
+        border: 1px solid rgba(226, 232, 240, 0.35);
+        background: rgba(30, 64, 175, 0.28);
+        color: rgba(248, 250, 252, 0.95);
+        border-radius: 999px;
+        padding: 4px 12px;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+      }
+
+      .toast__button:hover {
+        background: rgba(59, 130, 246, 0.35);
+        border-color: rgba(191, 219, 254, 0.65);
+      }
+
+      .toast__button--primary {
+        background: rgba(34, 197, 94, 0.32);
+        border-color: rgba(34, 197, 94, 0.65);
+        color: rgba(220, 252, 231, 0.98);
+      }
+
+      .toast__button--primary:hover {
+        background: rgba(34, 197, 94, 0.5);
+      }
+
+      .toast__close {
+        position: absolute;
+        top: 6px;
+        right: 8px;
+        background: transparent;
+        border: 0;
+        color: inherit;
+        font-size: 16px;
+        cursor: pointer;
+        padding: 4px;
+        line-height: 1;
+      }
+
+      .toast__close:hover {
+        opacity: 0.75;
       }
 
       .chart-wrapper {
@@ -724,6 +798,9 @@
             <span class="streaming-pill__dot"></span>
             Streaming Data
           </span>
+          <button type="button" id="prepare_next_open" class="prepare-btn" hidden>
+            Prepare Next Open
+          </button>
           <button type="button" id="follow_live_toggle" class="follow-toggle follow-toggle--active" aria-pressed="true">
             Follow Live
           </button>

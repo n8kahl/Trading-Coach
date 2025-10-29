@@ -31,6 +31,7 @@ async def test_live_plan_engine_status_transitions():
     at_risk = events[-1]
     assert at_risk["changes"]["status"] == PlanStatus.AT_RISK.value
     assert at_risk["changes"]["next_step"] == "tighten_stop"
+    assert at_risk["changes"].get("coach_event") == "stop_warning"
 
     # Breach stop should invalidate
     events = await engine.handle_market_event("TGT", {"t": "tick", "p": 94.8})
@@ -38,6 +39,7 @@ async def test_live_plan_engine_status_transitions():
     invalidated = events[-1]
     assert invalidated["changes"]["status"] == PlanStatus.INVALIDATED.value
     assert invalidated["changes"]["next_step"] == "plan_invalidated"
+    assert invalidated["changes"].get("coach_event") == "invalidated"
 
 
 @pytest.mark.asyncio
@@ -72,7 +74,8 @@ async def test_live_plan_engine_follower_and_replan():
     assert any(evt["changes"].get("status") == "entered" for evt in events)
 
     events = await engine.handle_market_event("TSLA", {"t": "tick", "p": 104.2})
-    assert any(evt["changes"].get("status") == "scaled" for evt in events)
+    scaled_event = next(evt for evt in events if evt["changes"].get("status") == "scaled")
+    assert scaled_event["changes"].get("coach_event") == "tp_hit"
 
     # Move below trail
     exit_events = await engine.handle_market_event("TSLA", {"t": "tick", "p": 102.5})

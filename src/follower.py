@@ -57,6 +57,8 @@ class TradeFollower:
     trailing_stop: float | None = None
     scaled: bool = False
     auto_replan_triggered: bool = False
+    stop_warning_active: bool = False
+    last_stop_warning_price: float | None = None
 
     def refresh_plan(self, *, entry: float, stop: float, target: float | None, atr: float | None) -> None:
         self.entry_price = entry
@@ -67,6 +69,8 @@ class TradeFollower:
         self.trailing_stop = stop
         self.scaled = False
         self.auto_replan_triggered = False
+        self.stop_warning_active = False
+        self.last_stop_warning_price = None
 
     def _entered(self, price: float) -> bool:
         if self.direction == "long":
@@ -86,6 +90,19 @@ class TradeFollower:
             exit_reason=exit_reason,
             timestamp=_utc_now(),
         )
+
+    def _distance_to_stop(self, price: float) -> float:
+        if self.direction == "long":
+            return price - self.stop_price
+        return self.stop_price - price
+
+    def _stop_warning_threshold(self) -> float | None:
+        if self.atr_value and self.atr_value > 0:
+            return float(self.atr_value) * 0.3
+        distance = abs(self.entry_price - self.stop_price)
+        if distance > 0:
+            return distance * 0.2
+        return None
 
     def update_from_price(self, price: float, atr_value: Optional[float] = None) -> Optional[FollowerUpdate]:
         if atr_value is None:
@@ -122,6 +139,8 @@ class TradeFollower:
         # Stop loss check
         if self.direction == "long" and price <= self.stop_price:
             self.state = TradeState.EXITED
+            self.stop_warning_active = False
+            self.last_stop_warning_price = None
             return self._build_update(
                 note=f"Stop triggered at {price:.2f}. Exiting trade.",
                 state=self.state,
@@ -131,6 +150,8 @@ class TradeFollower:
             )
         if self.direction == "short" and price >= self.stop_price:
             self.state = TradeState.EXITED
+            self.stop_warning_active = False
+            self.last_stop_warning_price = None
             return self._build_update(
                 note=f"Stop triggered at {price:.2f}. Exiting trade.",
                 state=self.state,
@@ -138,6 +159,27 @@ class TradeFollower:
                 event="stop",
                 exit_reason="stop",
             )
+
+        # Stop proximity warning
+        if self.state in {TradeState.ENTERED, TradeState.SCALED, TradeState.TRAILING}:
+            threshold = self._stop_warning_threshold()
+            if threshold:
+                distance = self._distance_to_stop(price)
+                if distance < 0:
+                    self.stop_warning_active = False
+                    self.last_stop_warning_price = None
+                elif distance <= threshold and not self.stop_warning_active:
+                    self.stop_warning_active = True
+                    self.last_stop_warning_price = price
+                    return self._build_update(
+                        note=f"Stop approaching — price within {distance:.2f} of stop.",
+                        state=self.state,
+                        price=price,
+                        event="stop_warning",
+                    )
+                elif distance > threshold * 1.5 and self.stop_warning_active:
+                    self.stop_warning_active = False
+                    self.last_stop_warning_price = None
 
         # Scaling check
         if not self.scaled:
@@ -149,6 +191,8 @@ class TradeFollower:
                 self.state = TradeState.SCALED
                 if self.stop_breakeven:
                     self.stop_price = self.entry_price
+                self.stop_warning_active = False
+                self.last_stop_warning_price = None
                 if self.atr_value and self.atr_value > 0:
                     self.trailing_stop = price - self.atr_value if self.direction == "long" else price + self.atr_value
                 else:
@@ -158,7 +202,7 @@ class TradeFollower:
                     note=f"TP1 reached at {price:.2f}. Scaled position and moved stop to {self.stop_price:.2f}. Trail now {self.trailing_stop:.2f}.",
                     state=self.state,
                     price=price,
-                    event="scaled",
+                    event="tp_hit",
                 )
 
         # Trailing stop adjustments after scaling
@@ -175,6 +219,8 @@ class TradeFollower:
                     )
                 if price <= self.trailing_stop:
                     self.state = TradeState.EXITED
+                    self.stop_warning_active = False
+                    self.last_stop_warning_price = None
                     return self._build_update(
                         note=f"Trail stop {self.trailing_stop:.2f} hit. Closing trade.",
                         state=self.state,
@@ -194,6 +240,8 @@ class TradeFollower:
                     )
                 if price >= self.trailing_stop:
                     self.state = TradeState.EXITED
+                    self.stop_warning_active = False
+                    self.last_stop_warning_price = None
                     return self._build_update(
                         note=f"Trail stop {self.trailing_stop:.2f} hit. Closing trade.",
                         state=self.state,
