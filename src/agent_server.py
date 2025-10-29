@@ -11300,6 +11300,75 @@ async def gpt_plan(
             logger.info(
                 "skipping legacy PLAN_NOT_IN_LAST_SCAN gate for %s", symbol, extra={"user": user_id}
             )
+
+    route_timestamp = datetime.now(timezone.utc)
+    route = route_for_request(
+        simulate_open,
+        now=route_timestamp,
+        use_extended_hours=use_extended_hours,
+    )
+    if simulate_open:
+        route = apply_simulate_open(route, now=route_timestamp)
+
+    try:
+        generated_plan_payload = await generate_plan_v2(
+            symbol=symbol,
+            style=request_payload.style,
+            route=route,
+            app=request.app,
+        )
+    except Exception:
+        logger.exception(
+            "generate_plan_v2 failed; falling back to legacy pipeline",
+            extra={"symbol": symbol},
+        )
+    else:
+        plan_payload = dict(generated_plan_payload or {})
+        plan_payload.setdefault("symbol", symbol)
+        if plan_payload.get("bias") and not plan_payload.get("direction"):
+            plan_payload["direction"] = plan_payload["bias"]
+
+        version_val = plan_payload.get("version")
+        try:
+            version_int = int(version_val) if version_val is not None else 1
+        except (TypeError, ValueError):
+            version_int = 1
+        plan_payload["version"] = version_int
+        plan_payload.setdefault("plan_version", str(plan_payload.get("plan_version") or version_int))
+
+        slug_snapshot = {"timestamp_utc": route.as_of.isoformat()}
+        style_for_slug = plan_payload.get("style") or request_payload.style
+        direction_for_slug = plan_payload.get("direction") or plan_payload.get("bias")
+        if forced_plan_id:
+            plan_payload["plan_id"] = forced_plan_id
+        elif not plan_payload.get("plan_id"):
+            plan_payload["plan_id"] = _generate_plan_slug(
+                symbol,
+                style_for_slug,
+                direction_for_slug,
+                slug_snapshot,
+            )
+
+        charts_params = plan_payload.get("charts_params")
+        if isinstance(charts_params, dict):
+            charts_params["plan_id"] = plan_payload["plan_id"]
+            charts_params["plan_version"] = str(plan_payload.get("plan_version") or version_int)
+
+        charts_block = plan_payload.get("charts")
+        if isinstance(charts_block, dict):
+            params_block = charts_block.get("params")
+            if isinstance(params_block, dict):
+                params_block["plan_id"] = plan_payload["plan_id"]
+                params_block["plan_version"] = str(plan_payload.get("plan_version") or version_int)
+
+        response.headers["X-No-Fabrication"] = "1"
+        plan_response = PlanResponse.model_validate(plan_payload)
+        _prune_plan_payload(plan_response)
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        mode_label = "live" if route.planning_context == "live" else "frozen"
+        record_plan_duration(mode_label, elapsed_ms)
+        record_candidate_count(mode_label, 1)
+        return plan_response
     include_plan_layers = bool(
         getattr(settings, "ff_chart_canonical_v1", False) or getattr(settings, "ff_layers_endpoint", False)
     )
