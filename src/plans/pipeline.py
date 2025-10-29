@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -61,6 +63,10 @@ def _normalise_tp_reasons(reasons: Iterable[Dict[str, object]]) -> List[Dict[str
             "synthetic",
             "selected_node",
             "rr_multiple",
+            "fraction",
+            "em_cap_relaxed",
+            "outside_ideal_band",
+            "no_structural",
         ):
             if key in item:
                 payload[key] = item[key]
@@ -113,6 +119,15 @@ def build_structured_geometry(
         style=style_token,
     )
 
+    risk_value: Optional[float] = None
+    if stop_price is not None:
+        if direction == "long":
+            risk_candidate = entry_val - stop_price
+        else:
+            risk_candidate = stop_price - entry_val
+        if risk_candidate > 0:
+            risk_value = risk_candidate
+
     snapped_tps, tp_reason_payload, snap_tags = snap_targets(
         entry=entry_val,
         direction=direction,
@@ -146,7 +161,34 @@ def build_structured_geometry(
             if em_points and em_points > 0:
                 distance = abs(float(snapped_price) - entry_val)
                 within_em_bounds = distance <= float(em_points) * 1.001
-            if (reason.get("snap_tag") or improves_rr) and within_em_bounds:
+            snap_tag_value = reason.get("snap_tag")
+            synthetic_flag = bool(reason.get("synthetic"))
+            has_structural = bool(reason.get("selected_node"))
+            no_structural_flag = bool(reason.get("no_structural"))
+            all_nodes_outside_em = False
+            if idx == 0 and synthetic_flag and em_points and em_points > 0:
+                max_fraction_style = _STYLE_MAX_EM_FRACTION.get(style_token)
+                if max_fraction_style:
+                    max_distance_cap = float(max_fraction_style) * float(em_points)
+                    candidate_nodes = reason.get("candidate_nodes")
+                    if isinstance(candidate_nodes, list) and candidate_nodes:
+                        distances: List[float] = []
+                        for node in candidate_nodes:
+                            if not isinstance(node, dict):
+                                continue
+                            price_val = node.get("raw_price", node.get("price"))
+                            try:
+                                numeric_price = float(price_val)
+                            except (TypeError, ValueError):
+                                continue
+                            distances.append(abs(numeric_price - entry_val))
+                        if distances and all(distance > max_distance_cap + 1e-6 for distance in distances):
+                            all_nodes_outside_em = True
+            accept_snap = snap_tag_value
+            force_tp1_fallback = synthetic_flag and not has_structural and idx == 0 and (no_structural_flag or all_nodes_outside_em)
+            if force_tp1_fallback:
+                accept_snap = None
+            if (accept_snap or improves_rr) and within_em_bounds:
                 adjusted_tps.append(round(float(snapped_price), 2))
                 if reason.get("snap_tag"):
                     adjusted_tags.add(str(reason["snap_tag"]))
@@ -154,6 +196,9 @@ def build_structured_geometry(
             else:
                 fallback_price = round(float(raw_price), 2)
                 reason["reason"] = f"{reason.get('reason') or 'Stats target'} · Snap skipped"
+                if force_tp1_fallback:
+                    reason.pop("snap_tag", None)
+                    reason.pop("selected_node", None)
                 adjusted_tps.append(fallback_price)
                 adjusted_reasons.append(reason)
         snapped_tps = adjusted_tps
@@ -176,15 +221,118 @@ def build_structured_geometry(
     else:
         prefer_threshold = 0.0
     if prefer_threshold > 0:
-        preferred: List[float] = []
+        preferred_prices: List[float] = []
+        updated_snap_tags: Set[str] = set(snap_tags)
+        em_val = float(em_points) if isinstance(em_points, (int, float)) else 0.0
         for idx, clamped in enumerate(clamped_tps):
             original = snapped_tps[idx] if idx < len(snapped_tps) else clamped
             reason = tp_reasons[idx] if idx < len(tp_reasons) else {}
-            if reason.get("snap_tag") and abs(clamped - original) <= prefer_threshold + 1e-9:
-                preferred.append(round(original, 2))
+            previous_tag = reason.get("snap_tag")
+            candidate_nodes = reason.get("candidate_nodes") if isinstance(reason.get("candidate_nodes"), list) else []
+            candidate_choice: Dict[str, object] | None = None
+            if candidate_nodes:
+                current_distance = abs(original - entry_val)
+                current_rr = reason.get("rr_multiple")
+                if current_rr is None and risk_value:
+                    reward_current = original - entry_val if direction == "long" else entry_val - original
+                    if reward_current > 0:
+                        current_rr = round(reward_current / risk_value, 2)
+                for node in candidate_nodes:
+                    if not isinstance(node, dict):
+                        continue
+                    price_val = node.get("raw_price", node.get("price"))
+                    try:
+                        price_candidate = float(price_val)
+                    except (TypeError, ValueError):
+                        continue
+                    distance_candidate = abs(price_candidate - entry_val)
+                    if distance_candidate >= current_distance - 1e-9:
+                        continue
+                    if (current_distance - distance_candidate) > prefer_threshold + 1e-9:
+                        continue
+                    rr_candidate = node.get("rr_multiple")
+                    if rr_candidate is None and risk_value:
+                        reward_candidate = price_candidate - entry_val if direction == "long" else entry_val - price_candidate
+                        if reward_candidate > 0:
+                            rr_candidate = round(reward_candidate / risk_value, 2)
+                    try:
+                        rr_candidate_val = float(rr_candidate) if rr_candidate is not None else None
+                    except (TypeError, ValueError):
+                        rr_candidate_val = None
+                    if rr_candidate_val is None:
+                        continue
+                    try:
+                        current_rr_val = float(current_rr) if current_rr is not None else None
+                    except (TypeError, ValueError):
+                        current_rr_val = None
+                    if current_rr_val is not None and rr_candidate_val + 1e-9 < current_rr_val - 1e-9:
+                        continue
+                    label_val = str(node.get("label") or "").upper()
+                    if candidate_choice is None or distance_candidate < candidate_choice["distance"] - 1e-9 or (
+                        math.isclose(distance_candidate, candidate_choice["distance"], abs_tol=1e-6)
+                        and rr_candidate_val > candidate_choice["rr"] + 1e-9
+                    ):
+                        candidate_choice = {
+                            "price": price_candidate,
+                            "distance": distance_candidate,
+                            "rr": rr_candidate_val,
+                            "label": label_val,
+                            "node_ref": node,
+                        }
+            prefer_original = reason.get("snap_tag") and abs(clamped - original) <= prefer_threshold + 1e-9
+            if candidate_choice:
+                chosen_price = round(candidate_choice["price"], 2)
+                preferred_prices.append(chosen_price)
+                if previous_tag:
+                    previous_upper = str(previous_tag).upper()
+                    if previous_upper != "WATCH_PLAN":
+                        updated_snap_tags.discard(previous_upper)
+                reason["reason"] = "Nearest structure within 0.25×ATR"
+                reason["snap_price"] = chosen_price
+                reason["snap_distance"] = round(candidate_choice["distance"], 3)
+                if em_val > 0:
+                    fraction_value = candidate_choice["distance"] / em_val
+                    reason["snap_fraction"] = round(fraction_value, 3)
+                    reason["fraction"] = round(fraction_value, 3)
+                ideal_distance_val = reason.get("ideal_distance")
+                if isinstance(ideal_distance_val, (int, float)):
+                    reason["snap_deviation"] = round(candidate_choice["distance"] - float(ideal_distance_val), 3)
+                reason["snap_tag"] = candidate_choice["label"]
+                reason["selected_node"] = candidate_choice["label"]
+                reason["rr_multiple"] = round(candidate_choice["rr"], 2)
+                reason.pop("em_cap_relaxed", None)
+                reason.pop("outside_ideal_band", None)
+                reason["synthetic"] = False
+                if candidate_nodes:
+                    for node in candidate_nodes:
+                        if not isinstance(node, dict):
+                            continue
+                        price_val = node.get("raw_price", node.get("price"))
+                        try:
+                            node_price = float(price_val)
+                        except (TypeError, ValueError):
+                            node_price = None
+                        picked_flag = node_price is not None and math.isclose(node_price, candidate_choice["price"], abs_tol=1e-6)
+                        node["picked"] = picked_flag
+                        if picked_flag:
+                            picked_for = node.setdefault("picked_for", [])
+                            if isinstance(picked_for, list) and reason.get("label") not in picked_for:
+                                picked_for.append(reason.get("label"))
+                        else:
+                            picked_for = node.get("picked_for")
+                            if isinstance(picked_for, list) and reason.get("label") in picked_for:
+                                picked_for.remove(reason.get("label"))
+                updated_snap_tags.add(candidate_choice["label"])
+            elif prefer_original:
+                preferred_prices.append(round(original, 2))
+                if previous_tag:
+                    updated_snap_tags.add(str(previous_tag).upper())
             else:
-                preferred.append(clamped)
-        clamped_tps = preferred
+                preferred_prices.append(round(clamped, 2))
+                if previous_tag:
+                    updated_snap_tags.add(str(previous_tag).upper())
+        clamped_tps = preferred_prices
+        snap_tags = updated_snap_tags
     clamp_applied = any(abs(a - b) > 1e-6 for a, b in zip(clamped_tps, snapped_tps))
     if clamp_applied:
         warnings.append("EM clamp applied")
@@ -209,14 +357,23 @@ def build_structured_geometry(
                 continue
             original_price = snap_reference[idx]
             if abs(price - original_price) <= prefer_threshold + 1e-6:
+                if idx < len(tp_reasons):
+                    current_reason = tp_reasons[idx]
+                    if current_reason.get("reason", "").endswith("Snap skipped"):
+                        continue
+                    if current_reason.get("reason") == "Nearest structure within 0.25×ATR":
+                        continue
                 baseline_reason = baseline_tp_reasons[idx] if idx < len(baseline_tp_reasons) else None
                 if baseline_reason:
                     snap_tag = baseline_reason.get("snap_tag")
                     if snap_tag:
-                        recomputed_tags.add(str(snap_tag))
+                        recomputed_tags.add(str(snap_tag).upper())
                         tp_reasons[idx] = dict(baseline_reason)
         if recomputed_tags:
+            watch_preserved = "WATCH_PLAN" in snap_tags
             snap_tags = recomputed_tags
+            if watch_preserved:
+                snap_tags.add("WATCH_PLAN")
 
     key_levels_used = build_key_levels_used(
         direction=direction,

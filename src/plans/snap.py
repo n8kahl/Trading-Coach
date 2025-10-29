@@ -12,7 +12,40 @@ from .targets import TPIdeal, tp_ideals
 MIN_ATR_MULT_TP1 = {"scalp": 0.50, "intraday": 0.75, "swing": 1.0, "leaps": 1.0}
 TP2_MIN_MULT = 1.5
 
-MAJOR_NODES = {"vah", "val", "poc", "gap_top", "gap_bottom", "gap", "pwh", "pwl", "pwc", "pdh", "pdl", "pdc"}
+MAJOR_NODES = {
+    "vah",
+    "val",
+    "poc",
+    "gap_top",
+    "gap_bottom",
+    "gap",
+    "pwh",
+    "pwl",
+    "pwc",
+    "pdh",
+    "pdl",
+    "pdc",
+    "orh",
+    "orl",
+    "swing_high",
+    "swing_low",
+    "swing_high_5m",
+    "swing_low_5m",
+    "swing_high_1m",
+    "swing_low_1m",
+}
+
+STRUCTURAL_PRIORITY = {token.upper() for token in MAJOR_NODES}
+SESSION_EXTREMES = {
+    "SESSION_HIGH",
+    "SESSION_LOW",
+    "SESSIONH",
+    "SESSIONL",
+    "PDH",
+    "PDL",
+    "DAY_HIGH",
+    "DAY_LOW",
+}
 
 
 def _infer_tick_size(price: float) -> float:
@@ -132,23 +165,34 @@ def snap_targets(
             risk = risk_candidate
 
     ladder_snapshot: List[Dict[str, object]] = []
-    for price, label in ladder[:12]:
+    ladder_meta: Dict[int, Dict[str, object]] = {}
+    for idx, (price, label) in enumerate(ladder):
         price_val = float(price)
         distance_val = abs(price_val - entry_val)
         fraction_val = distance_val / expected_move_val if expected_move_val > 0 else None
-        candidate: Dict[str, object] = {
-            "label": str(label).upper(),
+        reward_candidate = price_val - entry_val if direction == "long" else entry_val - price_val
+        rr_candidate = None
+        if risk and risk > 0 and reward_candidate > 0:
+            rr_candidate = reward_candidate / risk
+        label_token = str(label or "").upper()
+        candidate_entry: Dict[str, object] = {
+            "index": idx,
+            "label": label_token,
             "price": round(price_val, 2),
+            "raw_price": price_val,
             "distance": round(distance_val, 3),
+            "raw_distance": distance_val,
+            "picked": False,
+            "picked_for": [],
         }
         if fraction_val is not None and math.isfinite(fraction_val):
-            candidate["fraction"] = round(fraction_val, 3)
-        if risk and risk > 0:
-            reward_candidate = price_val - entry_val if direction == "long" else entry_val - price_val
-            rr_candidate = reward_candidate / risk if reward_candidate > 0 else 0.0
-            if rr_candidate > 0:
-                candidate["rr_multiple"] = round(rr_candidate, 2)
-        ladder_snapshot.append(candidate)
+            candidate_entry["fraction"] = round(fraction_val, 3)
+        if rr_candidate is not None and math.isfinite(rr_candidate):
+            candidate_entry["rr_multiple"] = round(rr_candidate, 2)
+            candidate_entry["rr_numeric"] = rr_candidate
+        ladder_meta[idx] = candidate_entry
+        if idx < 18:
+            ladder_snapshot.append(candidate_entry)
 
     def _round_price(value: float) -> float:
         if tick > 0:
@@ -159,6 +203,134 @@ def snap_targets(
     def _fraction_tag(fraction: float) -> str:
         scaled = max(0.0, fraction) * 100.0
         return f"EM{int(round(scaled))}"
+
+    def _priority_rank(label: str) -> int:
+        label_norm = (label or "").upper()
+        if label_norm in STRUCTURAL_PRIORITY:
+            return 0
+        if label_norm in SESSION_EXTREMES:
+            return 2
+        return 1
+
+    def _select_tp1_candidate(
+        min_distance_val: float,
+        max_distance_val: float,
+        ideal_distance_target_val: float,
+    ) -> Tuple[Dict[str, object] | None, Dict[str, object]]:
+        band_window = expected_move_val * 0.25 if expected_move_val > 0 else 0.0
+        rr_threshold: float | None = None
+        if risk and risk > 0:
+            floors: List[float] = []
+            floor_input = float(rr_floor) if isinstance(rr_floor, (int, float)) else None
+            style_floor = MIN_ATR_MULT_TP1.get(style_token, MIN_ATR_MULT_TP1["intraday"])
+            floors.append(style_floor)
+            if floor_input is not None and floor_input > 0:
+                floors.append(floor_input)
+            rr_threshold = max(floors) if floors else None
+
+        min_allowable = min_distance_val
+        if band_window > 0:
+            min_allowable = max(0.0, min_distance_val - band_window)
+
+        candidates: List[Dict[str, object]] = []
+        for ladder_idx, (price, label) in enumerate(ladder):
+            if ladder_idx in used_indices:
+                continue
+            candidate_info = ladder_meta.get(ladder_idx)
+            if not candidate_info:
+                continue
+            price_val = float(candidate_info["raw_price"])
+            if direction == "long" and price_val <= entry_val + 1e-9:
+                continue
+            if direction == "short" and price_val >= entry_val - 1e-9:
+                continue
+            if snapped:
+                # For TP1 there should be no previous target, but keep guard for completeness.
+                last_price = snapped[-1]
+                if direction == "long" and price_val <= last_price + 1e-6:
+                    continue
+                if direction == "short" and price_val >= last_price - 1e-6:
+                    continue
+            distance_val = float(candidate_info.get("raw_distance", 0.0))
+            if distance_val < min_allowable - 1e-9:
+                continue
+            if distance_val > max_distance_val + 1e-9:
+                continue
+            rr_value = candidate_info.get("rr_numeric")
+            if rr_threshold is not None:
+                if rr_value is None or rr_value + 1e-9 < rr_threshold:
+                    continue
+            candidate_entry = {
+                "index": ladder_idx,
+                "candidate": candidate_info,
+                "distance": distance_val,
+                "band_delta": abs(distance_val - ideal_distance_target_val),
+                "within_band": abs(distance_val - ideal_distance_target_val) <= band_window + 1e-9,
+            }
+            candidates.append(candidate_entry)
+
+        if not candidates:
+            return None, {"outside_band": False, "em_cap_relaxed": False, "no_structural": True}
+
+        def _pick_from(pool: List[Dict[str, object]]) -> Dict[str, object] | None:
+            if not pool:
+                return None
+            band_pool = [item for item in pool if item["within_band"]]
+            working = band_pool if band_pool else pool
+            working_sorted = sorted(
+                working,
+                key=lambda item: (
+                    item["distance"],
+                    _priority_rank(item["candidate"].get("label")),
+                    item["band_delta"],
+                ),
+            )
+            selection = working_sorted[0]
+            selected_label = str(selection["candidate"].get("label") or "").upper()
+            if selected_label in SESSION_EXTREMES:
+                closer_priority = [
+                    item
+                    for item in pool
+                    if str(item["candidate"].get("label") or "").upper() in STRUCTURAL_PRIORITY
+                    and item["distance"] + 1e-9 < selection["distance"]
+                ]
+                if closer_priority:
+                    return sorted(
+                        closer_priority,
+                        key=lambda item: (
+                            item["distance"],
+                            item["band_delta"],
+                        ),
+                    )[0]
+            return selection
+
+        em_cap_relaxed = False
+        selection: Dict[str, object] | None = None
+        if style_token in {"scalp", "intraday"} and expected_move_val > 0:
+            cap_distance = expected_move_val * 0.65
+            primary_pool = [item for item in candidates if item["distance"] <= cap_distance + 1e-9]
+            if primary_pool:
+                selection = _pick_from(primary_pool)
+            else:
+                secondary_pool = [item for item in candidates if item["distance"] <= expected_move_val + 1e-9]
+                if secondary_pool:
+                    selection = _pick_from(secondary_pool)
+                    if selection is not None:
+                        em_cap_relaxed = True
+        if selection is None:
+            selection = _pick_from(candidates)
+
+        if selection is None:
+            return None, {"outside_band": False, "em_cap_relaxed": False, "no_structural": True}
+
+        chosen_candidate = selection["candidate"]
+        selection_meta = {
+            "outside_band": not selection["within_band"],
+            "em_cap_relaxed": em_cap_relaxed,
+            "band_delta": selection["band_delta"],
+            "no_structural": False,
+        }
+        return chosen_candidate, selection_meta
 
     for idx, ideal in enumerate(ideals):
         if ideal.optional and raw_len < idx + 1:
@@ -186,59 +358,108 @@ def snap_targets(
         best_label: str | None = None
         best_distance: float | None = None
         best_overshoot: float | None = None
+        selection_meta: Dict[str, object] = {
+            "outside_band": False,
+            "em_cap_relaxed": False,
+            "from_tp1_selector": False,
+            "no_structural": False,
+        }
+        chosen_candidate_entry: Dict[str, object] | None = None
 
-        for ladder_idx, (price, label) in enumerate(ladder):
-            if ladder_idx in used_indices:
-                continue
-            price_val = float(price)
-            if direction == "long" and price_val <= entry_val + 1e-9:
-                continue
-            if direction == "short" and price_val >= entry_val - 1e-9:
-                continue
-            distance = abs(price_val - entry_val)
-            if distance < min_distance - 1e-9:
-                continue
-            if distance < ideal_distance_target - 1e-9:
-                continue
-            if distance > max_distance + 1e-9:
-                continue
-            if snapped:
-                last = snapped[-1]
-                if direction == "long" and price_val <= last + 1e-6:
+        if idx == 0:
+            candidate_entry, tp1_meta = _select_tp1_candidate(min_distance, max_distance, ideal_distance_target)
+            selection_meta.update(tp1_meta)
+            if candidate_entry is not None:
+                chosen_candidate_entry = candidate_entry
+                selection_meta["from_tp1_selector"] = True
+                candidate_index = candidate_entry.get("index")
+                if candidate_index is not None:
+                    best_idx = int(candidate_index)
+                best_price = float(candidate_entry.get("raw_price", entry_val))
+                best_label = str(candidate_entry.get("label") or "")
+                best_distance = float(candidate_entry.get("raw_distance", abs(best_price - entry_val)))
+                best_overshoot = abs(best_distance - ideal_distance_target)
+
+        if best_idx is None:
+            for ladder_idx, (price, label) in enumerate(ladder):
+                if ladder_idx in used_indices:
                     continue
-                if direction == "short" and price_val >= last - 1e-6:
+                price_val = float(price)
+                if direction == "long" and price_val <= entry_val + 1e-9:
                     continue
-            overshoot = distance - ideal_distance_target
-            if best_idx is None or (
-                overshoot < (best_overshoot or float("inf")) - 1e-9
-                or (
-                    best_overshoot is not None
-                    and math.isclose(overshoot, best_overshoot, abs_tol=1e-6)
-                    and distance < (best_distance or float("inf"))
-                )
-            ):
-                best_idx = ladder_idx
-                best_price = price_val
-                best_label = label
-                best_distance = distance
-                best_overshoot = overshoot
+                if direction == "short" and price_val >= entry_val - 1e-9:
+                    continue
+                distance = abs(price_val - entry_val)
+                if distance < min_distance - 1e-9:
+                    continue
+                if distance < ideal_distance_target - 1e-9:
+                    continue
+                if distance > max_distance + 1e-9:
+                    continue
+                if snapped:
+                    last = snapped[-1]
+                    if direction == "long" and price_val <= last + 1e-6:
+                        continue
+                    if direction == "short" and price_val >= last - 1e-6:
+                        continue
+                overshoot = distance - ideal_distance_target
+                if best_idx is None or (
+                    overshoot < (best_overshoot or float("inf")) - 1e-9
+                    or (
+                        best_overshoot is not None
+                        and math.isclose(overshoot, best_overshoot, abs_tol=1e-6)
+                        and distance < (best_distance or float("inf"))
+                    )
+                ):
+                    best_idx = ladder_idx
+                    best_price = price_val
+                    best_label = label
+                    best_distance = distance
+                    best_overshoot = overshoot
+
+        if best_idx is not None and chosen_candidate_entry is None:
+            chosen_candidate_entry = ladder_meta.get(best_idx)
 
         snap_tag: str | None = None
+        structural_tag: str | None = None
         price_final: float
         fraction_used: float
         synthetic_flag = False
-        if (
+
+        allow_structural = (
             best_idx is not None
             and best_price is not None
-            and (best_overshoot is None or best_overshoot <= tolerance + 1e-9)
-        ):
+            and (
+                best_overshoot is None
+                or best_overshoot <= tolerance + 1e-9
+                or (idx == 0 and selection_meta.get("from_tp1_selector"))
+            )
+        )
+
+        if allow_structural:
             price_final = _round_price(best_price)
             used_indices.add(best_idx)
-            snap_tag = str(best_label or "").upper()
-            snap_tags.add(snap_tag)
+            structural_tag = str(best_label or "").upper() if best_label else None
+            display_tag_value = structural_tag
+            if idx == 0 and selection_meta.get("em_cap_relaxed"):
+                display_tag_value = "EM_CAP_RELAXED"
+            if structural_tag:
+                snap_tags.add(structural_tag)
+            if display_tag_value and display_tag_value.upper() != structural_tag:
+                snap_tags.add(display_tag_value.upper())
             distance_used = abs(price_final - entry_val)
             fraction_used = distance_used / expected_move_val if expected_move_val > 0 else 0.0
-            reason_text = f"Snapped to {snap_tag} · Ideal {_fraction_tag(fraction_used)}"
+            if selection_meta.get("from_tp1_selector"):
+                reason_parts = ["Nearest structure clearing RR"]
+                if selection_meta.get("outside_band"):
+                    reason_parts.append("outside ideal band")
+                if selection_meta.get("em_cap_relaxed"):
+                    reason_parts.append("EM cap relaxed")
+                reason_text = " · ".join(reason_parts)
+            else:
+                tag_label = display_tag_value or structural_tag or "STRUCTURE"
+                reason_text = f"Snapped to {tag_label} · Ideal {_fraction_tag(fraction_used)}"
+            snap_tag = display_tag_value.upper() if display_tag_value else structural_tag
         else:
             synthetic_flag = True
             synthetic_distance = ideal_distance_target
@@ -250,6 +471,18 @@ def snap_targets(
             snap_tag = synthetic_tag
             snap_tags.add(synthetic_tag)
             reason_text = f"Ideal {synthetic_tag} (synthetic)"
+
+        candidate_rr_value = None
+        if not synthetic_flag and chosen_candidate_entry is not None:
+            chosen_candidate_entry["picked"] = True
+            picked_for = chosen_candidate_entry.setdefault("picked_for", [])
+            if isinstance(picked_for, list) and tp_label not in picked_for:
+                picked_for.append(tp_label)
+            candidate_rr_value = chosen_candidate_entry.get("rr_multiple")
+            if chosen_candidate_entry not in ladder_snapshot:
+                ladder_snapshot.append(chosen_candidate_entry)
+            if structural_tag is None:
+                structural_tag = str(chosen_candidate_entry.get("label") or "").upper() or structural_tag
 
         snapped.append(price_final)
         reason_payload: Dict[str, object] = {
@@ -264,9 +497,18 @@ def snap_targets(
             "snap_fraction": round(fraction_used, 3),
             "snap_deviation": round(distance_used - ideal_distance_target, 3),
             "synthetic": synthetic_flag,
+            "fraction": round(fraction_used, 3),
         }
-        if not synthetic_flag and snap_tag:
-            reason_payload["selected_node"] = snap_tag
+        if selection_meta.get("no_structural"):
+            reason_payload["no_structural"] = True
+        if not synthetic_flag and structural_tag:
+            reason_payload["selected_node"] = structural_tag
+        if candidate_rr_value is not None:
+            reason_payload["rr_multiple"] = candidate_rr_value
+        if selection_meta.get("em_cap_relaxed"):
+            reason_payload["em_cap_relaxed"] = True
+        if selection_meta.get("outside_band"):
+            reason_payload["outside_ideal_band"] = True
         if idx == 0 and ladder_snapshot:
             reason_payload["candidate_nodes"] = ladder_snapshot
 
@@ -525,7 +767,7 @@ def build_key_levels_used(
             {"role": "stop", "label": label.upper(), "price": round(price, 2), "source": "session"}
         )
     for idx, (price, reason) in enumerate(zip(tp_prices, tp_reasons), start=1):
-        label = reason.get("snap_tag")
+        label = reason.get("selected_node") or reason.get("snap_tag")
         if label:
             session_entries.append(
                 {"role": f"tp{idx}", "label": str(label).upper(), "price": round(float(price), 2), "source": "session"}

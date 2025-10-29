@@ -44,6 +44,8 @@ This document captures what is live, where the sharp edges are, and the near-ter
 - Refreshed the `/tv` viewer: multi-timeframe buttons, plan metadata banner, responsive drawer,
   and deduplicated level labels so toggling frames no longer stacks annotations.
 - **Stop/TP parity (Phase 3)** – Structured plans now build stops using defended structure + ATR floors with adaptive wick buffers, enforce style-aware TP spacing, and emit per-target metadata (`prob_touch`, `rr_multiple`, `em_fraction`, reasons) across both planner and scan flows.
+- **Nearest-structure TP1 & EM envelope** – TP1 now favours the closest structural shelf that clears the style-aware RR floor, respects 0.65×EM caps for scalps/intraday, and records full ladder snapshots (with picked flags) for UI debugging.
+- **Structure preference within 0.25×ATR** – Downstream geometry swaps to nearer snapped candidates inside a 0.25×ATR band when they preserve RR, ensuring plans prioritise actionable shelves over session extremes.
 - **Structured plan fallback** – The `/gpt/plan` market-routing branch reuses the refit pipeline so “fallback” plans carry the same metadata (runner policy, strategy profile, target ladder, probabilities) as primary scan-generated plans.
 
 ---
