@@ -96,6 +96,15 @@ async def generate_plan(
             for label, value in intraday_levels.items():
                 key_levels.setdefault(label, value)
 
+            nested_plan = plan_obj.get("plan") if isinstance(plan_obj.get("plan"), dict) else None
+            if nested_plan is not None:
+                nested_key_levels = nested_plan.get("key_levels")
+                if not isinstance(nested_key_levels, dict):
+                    nested_key_levels = {}
+                    nested_plan["key_levels"] = nested_key_levels
+                for label, value in intraday_levels.items():
+                    nested_key_levels.setdefault(label, value)
+
     snapshot = {
         "generated_at": route.as_of.isoformat(),
         "symbol_count": 1,
