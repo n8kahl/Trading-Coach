@@ -11333,33 +11333,35 @@ async def gpt_plan(
             version_int = int(version_val) if version_val is not None else 1
         except (TypeError, ValueError):
             version_int = 1
-        plan_payload["version"] = version_int
-        plan_payload.setdefault("plan_version", str(plan_payload.get("plan_version") or version_int))
 
-        slug_snapshot = {"timestamp_utc": route.as_of.isoformat()}
-        style_for_slug = plan_payload.get("style") or request_payload.style
-        direction_for_slug = plan_payload.get("direction") or plan_payload.get("bias")
         if forced_plan_id:
             plan_payload["plan_id"] = forced_plan_id
         elif not plan_payload.get("plan_id"):
             plan_payload["plan_id"] = _generate_plan_slug(
                 symbol,
-                style_for_slug,
-                direction_for_slug,
-                slug_snapshot,
+                plan_payload.get("style") or request_payload.style,
+                plan_payload.get("direction") or plan_payload.get("bias"),
+                {"timestamp_utc": route.as_of.isoformat()},
             )
+
+        try:
+            next_version = await _next_plan_version(plan_payload["plan_id"])
+        except Exception:
+            next_version = version_int
+        plan_payload["version"] = next_version
+        plan_payload["plan_version"] = str(next_version)
 
         charts_params = plan_payload.get("charts_params")
         if isinstance(charts_params, dict):
             charts_params["plan_id"] = plan_payload["plan_id"]
-            charts_params["plan_version"] = str(plan_payload.get("plan_version") or version_int)
+            charts_params["plan_version"] = plan_payload["plan_version"]
 
         charts_block = plan_payload.get("charts")
         if isinstance(charts_block, dict):
             params_block = charts_block.get("params")
             if isinstance(params_block, dict):
                 params_block["plan_id"] = plan_payload["plan_id"]
-                params_block["plan_version"] = str(plan_payload.get("plan_version") or version_int)
+                params_block["plan_version"] = plan_payload["plan_version"]
 
         response.headers["X-No-Fabrication"] = "1"
         plan_response = PlanResponse.model_validate(plan_payload)
