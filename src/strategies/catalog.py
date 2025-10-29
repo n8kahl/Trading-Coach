@@ -124,6 +124,14 @@ _CATALOG: Dict[str, StrategyProfile] = {
     ),
 }
 
+_ALIASES = {
+    "break_and_retest": "range_break_retest",
+    "break_and_retest_scalp": "range_break_retest",
+    "break_and_retest_intraday": "range_break_retest",
+    "break_and_retest_swing": "range_break_retest",
+    "momentum_play": "baseline_auto",
+}
+
 
 def get_strategy_profile(strategy_id: Optional[str], style: Optional[str] = None) -> Dict[str, object]:
     """Return normalized strategy payload for a given identifier."""
@@ -131,6 +139,10 @@ def get_strategy_profile(strategy_id: Optional[str], style: Optional[str] = None
     if strategy_id:
         key = strategy_id.strip().lower()
         profile = _CATALOG.get(key)
+        if not profile:
+            alias = _ALIASES.get(key)
+            if alias:
+                profile = _CATALOG.get(alias)
         if profile:
             return profile.to_payload()
 

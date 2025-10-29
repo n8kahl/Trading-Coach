@@ -514,19 +514,76 @@ def load_strategies() -> List[Strategy]:
             triggers=[
                 "Key level (support/resistance) is broken with conviction",
                 "Price retests the level without closing beyond it",
-                "Volume confirms the validity of the break and retest"
+                "Volume confirms the validity of the break and retest",
             ],
             options_rules={
-                "dte_range": [0, 10],
-                "delta_range": [0.40, 0.60],
-                "min_open_interest": 300,
-                "min_volume": 200
+                "dte_range": [0, 5],
+                "delta_range": [0.45, 0.60],
+                "min_open_interest": 500,
+                "min_volume": 300,
             },
             stops_tp=(
                 "Stop beyond the retest low/high.  First target is the measured move based on the "
                 "range of the broken level; second targets come from ATR or prior pivots."
             ),
-            win_rate_target=None,
+            win_rate_target=0.57,
+        )
+    )
+
+    strategies.append(
+        Strategy(
+            id="break_and_retest_scalp",
+            name="Break and Retest (Scalp)",
+            category="scalp",
+            description=(
+                "Scalp variation of the break/retest where the retest resolves within a few minutes. "
+                "Best suited for highly liquid names with fast tape and stacked intraday EMAs."
+            ),
+            triggers=[
+                "Intraday level breaks with retest inside 2–3 bars",
+                "Volume surge on the break followed by controlled pullback",
+                "EMA(9/20) remain aligned in trade direction during the retest",
+            ],
+            options_rules={
+                "dte_range": [0, 2],
+                "delta_range": [0.50, 0.65],
+                "min_open_interest": 500,
+                "min_volume": 350,
+                "max_spread_pct": 0.05,
+            },
+            stops_tp=(
+                "Keep stops tight (≈0.4× ATR) beyond the reclaimed level. Scale at 1.0× ATR and "
+                "1.4× ATR, trailing remaining contracts with a 0.6× ATR stop."
+            ),
+            win_rate_target=0.58,
+        )
+    )
+
+    strategies.append(
+        Strategy(
+            id="break_and_retest_swing",
+            name="Break and Retest (Swing)",
+            category="swing",
+            description=(
+                "Swing continuation play focusing on higher-timeframe range breaks that retest and "
+                "hold, creating multi-day momentum opportunities."
+            ),
+            triggers=[
+                "Daily or multi-day range resolves with expanded volume",
+                "Retest closes back in direction of the breakout",
+                "Higher timeframe MAs (21/50 EMA) align with bias",
+            ],
+            options_rules={
+                "dte_range": [15, 30],
+                "delta_range": [0.30, 0.45],
+                "min_open_interest": 400,
+                "min_volume": 250,
+            },
+            stops_tp=(
+                "Place stops beyond the breakout structure on the daily chart. Target 1.5× ATR for "
+                "initial scale, then prior swing pivots or measured move for runners."
+            ),
+            win_rate_target=0.53,
         )
     )
 
@@ -539,23 +596,23 @@ def load_strategies() -> List[Strategy]:
                 "Trade strong momentum moves identified by increasing volume, widening range, and "
                 "EMA alignment.  Enter in the direction of momentum and exit on signs of exhaustion."
             ),
-            triggers=[
-                "Price makes consecutive higher highs (long) or lower lows (short)",
-                "Volume increases on the impulsive moves",
-                "Short‑term EMAs align with the trade direction"
-            ],
-            options_rules={
-                "dte_range": [0, 5],
-                "delta_range": [0.50, 0.65],
-                "min_open_interest": 500,
-                "min_volume": 300
-            },
-            stops_tp=(
-                "Use a dynamic stop such as a trailing ATR or supertrend.  Scale out as momentum "
-                "slows or as the underlying approaches a key level."
-            ),
-            win_rate_target=None,
-        )
+    triggers=[
+        "Price makes consecutive higher highs (long) or lower lows (short)",
+        "Volume increases on the impulsive moves",
+        "Short‑term EMAs align with the trade direction"
+    ],
+    options_rules={
+        "dte_range": [0, 3],
+        "delta_range": [0.50, 0.65],
+        "min_open_interest": 600,
+        "min_volume": 350
+    },
+    stops_tp=(
+        "Use a dynamic stop such as a trailing ATR or supertrend.  Scale out as momentum "
+        "slows or as the underlying approaches a key level."
+    ),
+    win_rate_target=0.54,
+)
     )
 
     return strategies
@@ -566,7 +623,7 @@ def _normalize_category_token(category: Optional[str]) -> str:
     if token in {"leaps", "leap"}:
         return "leap"
     if token == "index":
-        return "intraday"
+        return "index"
     if token in {"scalp", "intraday", "swing"}:
         return token
     return "intraday"

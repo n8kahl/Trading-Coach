@@ -373,7 +373,7 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
             if not contract.get("rating"):
                 contract["rating"] = "yellow"
             contracts.append(contract)
-        return contracts, "Filters relaxed — using liquidity fallback", "RELAXED_SIMPLE_FILTERS"
+        return contracts, "Contracts kept via relaxed liquidity fallback", "RELAXED_SIMPLE_FILTERS"
 
     fallback_used = False
     delta_missing_fallback_used = False
@@ -434,7 +434,7 @@ async def select_contracts(symbol: str, as_of: datetime, plan: Mapping[str, Any]
 
     note = _build_options_note(relax_flags, rejected_contracts, fallback_used)
 
-    target_min = 3
+    target_min = max(desired_count, 2)
     if len(options_contracts) < target_min and not normalized_chain.empty:
         fallback_contracts, fallback_note, fallback_flag = _relaxed_contract_fallback(normalized_chain)
         if fallback_contracts:

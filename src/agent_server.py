@@ -10284,9 +10284,9 @@ async def _generate_fallback_plan(
                 if not options_note:
                     reason_labels = sorted({entry.get("reason") for entry in reason_list if entry.get("reason")})
                     if reason_labels:
-                        options_note = f"Contracts kept with guardrail warnings ({', '.join(reason_labels)})"
+                        options_note = f"Contracts kept with guardrail warnings ({', '.join(reason_labels)}); review guardrail_flags."
                     else:
-                        options_note = "Contracts kept with guardrail warnings"
+                        options_note = "Contracts kept with guardrail warnings; review guardrail_flags."
             else:
                 fallback_contracts = _fallback_guardrail_contracts(extracted_contracts, reason_list, symbol=symbol)
                 if fallback_contracts:

@@ -96,7 +96,7 @@ STYLE_PROFILES: Dict[str, ExecutionProfile] = {
         stop_level_padding=4,
         stop_vwap_padding=3,
         tp_fracs=(0.33, 0.66, 1.0),
-        tp_rr_floor=(1.3, 1.7, 2.2),
+        tp_rr_floor=(1.4, 1.8, 2.3),
     ),
     "swing": ExecutionProfile(
         style="swing",
