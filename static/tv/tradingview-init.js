@@ -4200,12 +4200,12 @@ levelsToggleEl = document.getElementById('levels_toggle');
         const sequence = Number.isFinite(meta.sequence) ? meta.sequence : idx + 1;
         const isRunner = sequence >= 3;
         const label = isRunner ? 'Runner' : meta.label || `TP${sequence}`;
-        const color = isRunner ? '#c084fc' : isShortPlan ? '#f87171' : '#22c55e';
+        const color = isRunner ? '#c084fc' : '#22c55e';
         const id = isRunner ? 'runner-tp' : `tp:${sequence}`;
         registerLine(id, {
           price: tp,
           color,
-          title: `${label} (snapped)`,
+          title: label,
           lineWidth: 2,
           lineStyle: LightweightCharts.LineStyle.Solid,
         });
@@ -4217,9 +4217,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
               : 'Ideal target';
           const idealColor = isRunner
             ? 'rgba(192, 132, 252, 0.45)'
-            : isShortPlan
-              ? 'rgba(248, 113, 113, 0.35)'
-              : 'rgba(34, 197, 94, 0.35)';
+            : 'rgba(34, 197, 94, 0.35)';
           const idealId = isRunner ? 'ideal:runner' : `ideal:tp:${sequence}`;
           registerLine(idealId, {
             price: Number(meta.ideal_price),

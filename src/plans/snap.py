@@ -10,6 +10,12 @@ from .levels import directional_nodes, last_higher_low, last_lower_high, profile
 from .targets import TPIdeal, tp_ideals
 
 MIN_ATR_MULT_TP1 = {"scalp": 0.50, "intraday": 0.75, "swing": 1.0, "leaps": 1.0}
+RR_FLOOR_BY_STYLE = {
+    "scalp": 1.60,
+    "intraday": 1.80,
+    "swing": 2.00,
+    "leaps": 2.00,
+}
 TP2_MIN_MULT = 1.5
 
 MAJOR_NODES = {
@@ -164,6 +170,13 @@ def snap_targets(
         if risk_candidate > tick * 0.25:
             risk = risk_candidate
 
+    tp1_rr_threshold: float | None = None
+    if risk and risk > 0:
+        if isinstance(rr_floor, (int, float)) and float(rr_floor) > 0:
+            tp1_rr_threshold = float(rr_floor)
+        else:
+            tp1_rr_threshold = RR_FLOOR_BY_STYLE.get(style_token, 1.8)
+
     ladder_snapshot: List[Dict[str, object]] = []
     ladder_meta: Dict[int, Dict[str, object]] = {}
     for idx, (price, label) in enumerate(ladder):
@@ -184,6 +197,8 @@ def snap_targets(
             "raw_distance": distance_val,
             "picked": False,
             "picked_for": [],
+            "decisions": [],
+            "considered_for": [],
         }
         if fraction_val is not None and math.isfinite(fraction_val):
             candidate_entry["fraction"] = round(fraction_val, 3)
@@ -216,17 +231,15 @@ def snap_targets(
         min_distance_val: float,
         max_distance_val: float,
         ideal_distance_target_val: float,
+        rr_threshold_override: float | None,
     ) -> Tuple[Dict[str, object] | None, Dict[str, object]]:
         band_window = expected_move_val * 0.25 if expected_move_val > 0 else 0.0
-        rr_threshold: float | None = None
-        if risk and risk > 0:
-            floors: List[float] = []
-            floor_input = float(rr_floor) if isinstance(rr_floor, (int, float)) else None
-            style_floor = MIN_ATR_MULT_TP1.get(style_token, MIN_ATR_MULT_TP1["intraday"])
-            floors.append(style_floor)
-            if floor_input is not None and floor_input > 0:
-                floors.append(floor_input)
-            rr_threshold = max(floors) if floors else None
+        rr_threshold: float | None = rr_threshold_override
+        if rr_threshold is None and risk and risk > 0:
+            if isinstance(rr_floor, (int, float)) and float(rr_floor) > 0:
+                rr_threshold = float(rr_floor)
+            else:
+                rr_threshold = RR_FLOOR_BY_STYLE.get(style_token, 1.8)
 
         min_allowable = min_distance_val
         if band_window > 0:
@@ -239,6 +252,10 @@ def snap_targets(
             candidate_info = ladder_meta.get(ladder_idx)
             if not candidate_info:
                 continue
+            decisions = candidate_info.setdefault("decisions", [])
+            considered_for = candidate_info.setdefault("considered_for", [])
+            if "TP1" not in considered_for:
+                considered_for.append("TP1")
             price_val = float(candidate_info["raw_price"])
             if direction == "long" and price_val <= entry_val + 1e-9:
                 continue
@@ -258,7 +275,19 @@ def snap_targets(
                 continue
             rr_value = candidate_info.get("rr_numeric")
             if rr_threshold is not None:
-                if rr_value is None or rr_value + 1e-9 < rr_threshold:
+                candidate_info["rr_floor"] = rr_threshold
+            if rr_threshold is not None:
+                rr_numeric = float(rr_value) if isinstance(rr_value, (int, float)) else None
+                if rr_numeric is None or rr_numeric + 1e-9 < rr_threshold:
+                    decisions.append(
+                        {
+                            "reason": "REJECT_RR_FLOOR",
+                            "meta": {
+                                "rr": round(rr_numeric, 2) if rr_numeric is not None else None,
+                                "rr_floor": round(rr_threshold, 2),
+                            },
+                        }
+                    )
                     continue
             candidate_entry = {
                 "index": ladder_idx,
@@ -270,7 +299,12 @@ def snap_targets(
             candidates.append(candidate_entry)
 
         if not candidates:
-            return None, {"outside_band": False, "em_cap_relaxed": False, "no_structural": True}
+            return None, {
+                "outside_band": False,
+                "em_cap_relaxed": False,
+                "no_structural": True,
+                "rr_threshold": rr_threshold,
+            }
 
         def _pick_from(pool: List[Dict[str, object]]) -> Dict[str, object] | None:
             if not pool:
@@ -305,23 +339,64 @@ def snap_targets(
             return selection
 
         em_cap_relaxed = False
+        em_relaxed_cap = None
         selection: Dict[str, object] | None = None
         if style_token in {"scalp", "intraday"} and expected_move_val > 0:
-            cap_distance = expected_move_val * 0.65
+            cap_distance = expected_move_val * 0.50
             primary_pool = [item for item in candidates if item["distance"] <= cap_distance + 1e-9]
             if primary_pool:
                 selection = _pick_from(primary_pool)
             else:
-                secondary_pool = [item for item in candidates if item["distance"] <= expected_move_val + 1e-9]
+                secondary_cap = expected_move_val * 0.75
+                secondary_pool = [item for item in candidates if item["distance"] <= secondary_cap + 1e-9]
                 if secondary_pool:
                     selection = _pick_from(secondary_pool)
                     if selection is not None:
                         em_cap_relaxed = True
+                        em_relaxed_cap = "0.75xEM"
         if selection is None:
             selection = _pick_from(candidates)
 
         if selection is None:
-            return None, {"outside_band": False, "em_cap_relaxed": False, "no_structural": True}
+            return None, {
+                "outside_band": False,
+                "em_cap_relaxed": False,
+                "no_structural": True,
+                "rr_threshold": rr_threshold,
+            }
+
+        prefer_interior = False
+        if selection is not None:
+            selected_label = str(selection["candidate"].get("label") or "").upper()
+            if expected_move_val > 0 and selected_label in SESSION_EXTREMES:
+                target_distance = selection["distance"]
+                tolerance_band = expected_move_val * 0.10
+                interior_candidates: List[Dict[str, object]] = []
+                for item in candidates:
+                    candidate_label = str(item["candidate"].get("label") or "").upper()
+                    if candidate_label not in STRUCTURAL_PRIORITY:
+                        continue
+                    if abs(item["distance"] - target_distance) > tolerance_band + 1e-9:
+                        continue
+                    interior_candidates.append(item)
+                if interior_candidates:
+                    interior_candidates.sort(
+                        key=lambda item: (abs(item["distance"] - target_distance), item["distance"])
+                    )
+                    interior_choice = interior_candidates[0]
+                    if interior_choice is not selection:
+                        prefer_interior = True
+                        selection_label = str(selection["candidate"].get("label") or "").upper()
+                        selection["candidate"].setdefault("decisions", []).append(
+                            {
+                                "reason": "REPLACED_BY_INTERIOR",
+                                "meta": {"preferred": str(interior_choice["candidate"].get("label") or "").upper()},
+                            }
+                        )
+                        interior_choice["candidate"].setdefault("decisions", []).append(
+                            {"reason": "PREFER_INTERIOR_OVER_EXTREME"}
+                        )
+                        selection = interior_choice
 
         chosen_candidate = selection["candidate"]
         selection_meta = {
@@ -329,7 +404,11 @@ def snap_targets(
             "em_cap_relaxed": em_cap_relaxed,
             "band_delta": selection["band_delta"],
             "no_structural": False,
+            "prefer_interior": prefer_interior,
+            "rr_threshold": rr_threshold,
         }
+        if em_relaxed_cap:
+            selection_meta["em_relaxed_cap"] = em_relaxed_cap
         return chosen_candidate, selection_meta
 
     for idx, ideal in enumerate(ideals):
@@ -367,7 +446,12 @@ def snap_targets(
         chosen_candidate_entry: Dict[str, object] | None = None
 
         if idx == 0:
-            candidate_entry, tp1_meta = _select_tp1_candidate(min_distance, max_distance, ideal_distance_target)
+            candidate_entry, tp1_meta = _select_tp1_candidate(
+                min_distance,
+                max_distance,
+                ideal_distance_target,
+                tp1_rr_threshold,
+            )
             selection_meta.update(tp1_meta)
             if candidate_entry is not None:
                 chosen_candidate_entry = candidate_entry
@@ -384,6 +468,7 @@ def snap_targets(
             for ladder_idx, (price, label) in enumerate(ladder):
                 if ladder_idx in used_indices:
                     continue
+                candidate_info = ladder_meta.get(ladder_idx)
                 price_val = float(price)
                 if direction == "long" and price_val <= entry_val + 1e-9:
                     continue
@@ -396,6 +481,16 @@ def snap_targets(
                     continue
                 if distance > max_distance + 1e-9:
                     continue
+                if idx == 0:
+                    rr_threshold_check = selection_meta.get("rr_threshold")
+                    if rr_threshold_check is None:
+                        rr_threshold_check = tp1_rr_threshold
+                    if rr_threshold_check is not None:
+                        rr_value_check = None
+                        if candidate_info is not None:
+                            rr_value_check = candidate_info.get("rr_numeric")
+                        if rr_value_check is None or float(rr_value_check) + 1e-9 < rr_threshold_check:
+                            continue
                 if snapped:
                     last = snapped[-1]
                     if direction == "long" and price_val <= last + 1e-6:
@@ -425,6 +520,9 @@ def snap_targets(
         price_final: float
         fraction_used: float
         synthetic_flag = False
+        modifier_entries: List[Dict[str, object]] = []
+        synthetic_meta: Dict[str, object] | None = None
+        tp_rr_floor_value = selection_meta.get("rr_threshold") if idx == 0 else None
 
         allow_structural = (
             best_idx is not None
@@ -443,6 +541,8 @@ def snap_targets(
             display_tag_value = structural_tag
             if idx == 0 and selection_meta.get("em_cap_relaxed"):
                 display_tag_value = "EM_CAP_RELAXED"
+                cap_label = selection_meta.get("em_relaxed_cap") if selection_meta.get("em_relaxed_cap") else "0.75xEM"
+                modifier_entries.append({"reason": "TP1_EM_RELAXED", "meta": {"cap": cap_label}})
             if structural_tag:
                 snap_tags.add(structural_tag)
             if display_tag_value and display_tag_value.upper() != structural_tag:
@@ -453,6 +553,8 @@ def snap_targets(
                 reason_parts = ["Nearest structure clearing RR"]
                 if selection_meta.get("outside_band"):
                     reason_parts.append("outside ideal band")
+                if selection_meta.get("prefer_interior"):
+                    modifier_entries.append({"reason": "PREFER_INTERIOR_OVER_EXTREME"})
                 if selection_meta.get("em_cap_relaxed"):
                     reason_parts.append("EM cap relaxed")
                 reason_text = " · ".join(reason_parts)
@@ -462,7 +564,14 @@ def snap_targets(
             snap_tag = display_tag_value.upper() if display_tag_value else structural_tag
         else:
             synthetic_flag = True
-            synthetic_distance = ideal_distance_target
+            if idx == 0 and expected_move_val > 0:
+                base_fraction = ideal_distance_target / expected_move_val if expected_move_val > 0 else 0.30
+                bounded_fraction = min(max(base_fraction, 0.25), 0.35)
+                capped_fraction = min(bounded_fraction, 0.40)
+                synthetic_distance = capped_fraction * expected_move_val
+                synthetic_meta = {"fraction": "EM25-35", "cap": "≤0.40xEM"}
+            else:
+                synthetic_distance = ideal_distance_target
             price_estimate = entry_val + synthetic_distance if direction == "long" else entry_val - synthetic_distance
             price_final = _round_price(price_estimate)
             distance_used = abs(price_final - entry_val)
@@ -470,7 +579,11 @@ def snap_targets(
             synthetic_tag = _fraction_tag(fraction_used).upper()
             snap_tag = synthetic_tag
             snap_tags.add(synthetic_tag)
-            reason_text = f"Ideal {synthetic_tag} (synthetic)"
+            if idx == 0 and synthetic_meta:
+                modifier_entries.append({"reason": "SYNTHETIC_EM_BUCKET", "meta": synthetic_meta})
+                reason_text = "SYNTHETIC_EM_BUCKET"
+            else:
+                reason_text = f"Ideal {synthetic_tag} (synthetic)"
 
         candidate_rr_value = None
         if not synthetic_flag and chosen_candidate_entry is not None:
@@ -478,6 +591,13 @@ def snap_targets(
             picked_for = chosen_candidate_entry.setdefault("picked_for", [])
             if isinstance(picked_for, list) and tp_label not in picked_for:
                 picked_for.append(tp_label)
+            chosen_candidate_entry.setdefault("decisions", []).append(
+                {"reason": "PICKED_FOR", "meta": {"label": tp_label.upper()}}
+            )
+            if idx == 0 and selection_meta.get("em_cap_relaxed"):
+                chosen_candidate_entry.setdefault("decisions", []).append(
+                    {"reason": "TP1_EM_RELAXED"}
+                )
             candidate_rr_value = chosen_candidate_entry.get("rr_multiple")
             if chosen_candidate_entry not in ladder_snapshot:
                 ladder_snapshot.append(chosen_candidate_entry)
@@ -505,12 +625,23 @@ def snap_targets(
             reason_payload["selected_node"] = structural_tag
         if candidate_rr_value is not None:
             reason_payload["rr_multiple"] = candidate_rr_value
+        elif risk and risk > 0 and price_final is not None:
+            reward_for_candidate = price_final - entry_val if direction == "long" else entry_val - price_final
+            if reward_for_candidate > 0:
+                reason_payload["rr_multiple"] = round(reward_for_candidate / risk, 2)
         if selection_meta.get("em_cap_relaxed"):
             reason_payload["em_cap_relaxed"] = True
         if selection_meta.get("outside_band"):
             reason_payload["outside_ideal_band"] = True
         if idx == 0 and ladder_snapshot:
             reason_payload["candidate_nodes"] = ladder_snapshot
+        if modifier_entries:
+            reason_payload["modifiers"] = modifier_entries
+        if tp_rr_floor_value is not None:
+            reason_payload["rr_floor"] = round(float(tp_rr_floor_value), 2)
+        if synthetic_meta and idx == 0:
+            reason_payload["synthetic_meta"] = synthetic_meta
+        reason_payload["distance"] = reason_payload["snap_distance"]
 
         if risk and risk > 0 and price_final is not None:
             reward = price_final - entry_val if direction == "long" else entry_val - price_final
@@ -556,6 +687,10 @@ def snap_targets(
             "synthetic",
             "selected_node",
             "rr_multiple",
+            "modifiers",
+            "rr_floor",
+            "distance",
+            "synthetic_meta",
         ):
             if key in entry_reason:
                 payload[key] = entry_reason[key]
@@ -696,7 +831,8 @@ def stop_from_structure(
     style: str,
     wick_buffer: float | None = None,
     tick: float | None = None,
-) -> Tuple[float, str]:
+    expected_move: float | None = None,
+) -> Tuple[float, str, Dict[str, object]]:
     """
     Structure-first stop with ATR floor.
     """
@@ -724,34 +860,125 @@ def stop_from_structure(
             return min(price, entry_val - tick_size)
         return max(price, entry_val + tick_size)
 
-    if direction == "short":
-        base = levels.get("orh")
-        label = "ORH"
-        if not isinstance(base, (int, float)):
-            base = last_lower_high(levels)
-            label = "SWING_HIGH"
-        if isinstance(base, (int, float)):
-            stop_structural = float(base) + wick
-        else:
-            stop_structural = entry_val + fallback_mult * atr_value
-            label = "ATR_FALLBACK"
-        stop_price = apply_atr_floor(entry_val, stop_structural, atr_value, direction, style)
-        stop_price = _clamp(stop_price)
-    else:
-        base = levels.get("orl")
-        label = "ORL"
-        if not isinstance(base, (int, float)):
-            base = last_higher_low(levels)
-            label = "SWING_LOW"
-        if isinstance(base, (int, float)):
-            stop_structural = float(base) - wick
-        else:
-            stop_structural = entry_val - fallback_mult * atr_value
-            label = "ATR_FALLBACK"
-        stop_price = apply_atr_floor(entry_val, stop_structural, atr_value, direction, style)
-        stop_price = _clamp(stop_price)
+    expected_move_val = abs(float(expected_move or 0.0))
+    atr_floor_price = apply_atr_floor(entry_val, entry_val, atr_value, direction, style)
 
-    return round(stop_price, 2), label
+    def _atr_condition(candidate: float) -> bool:
+        if direction == "long":
+            return candidate <= atr_floor_price + 1e-9
+        return candidate >= atr_floor_price - 1e-9
+
+    stop_price: float | None = None
+    structural_source: str | None = None
+    structural_anchor_price: float | None = None
+    anchor_tag = "or"
+
+    if direction == "short":
+        or_base = levels.get("orh")
+        swing_base = last_lower_high(levels)
+        or_structural = float(or_base) + wick if isinstance(or_base, (int, float)) else None
+        swing_structural = float(swing_base) + wick if isinstance(swing_base, (int, float)) else None
+        or_distance = abs(or_structural - entry_val) if or_structural is not None else float("inf")
+        or_candidate = (
+            _clamp(apply_atr_floor(entry_val, or_structural, atr_value, direction, style)) if or_structural is not None else None
+        )
+        swing_candidate = (
+            _clamp(apply_atr_floor(entry_val, swing_structural, atr_value, direction, style))
+            if swing_structural is not None
+            else None
+        )
+        prefer_swing = False
+        if (
+            swing_structural is not None
+            and swing_candidate is not None
+            and expected_move_val > 0
+        ):
+            swing_distance = abs(swing_structural - entry_val)
+            em_min = expected_move_val * 0.30
+            em_max = expected_move_val * 0.60
+            if em_min - 1e-9 <= swing_distance <= em_max + 1e-9 and _atr_condition(swing_candidate):
+                if or_candidate is None or swing_distance <= or_distance + 1e-9:
+                    prefer_swing = True
+        if prefer_swing:
+            stop_price = swing_candidate
+            structural_source = "SWING_HIGH"
+            structural_anchor_price = swing_structural
+            anchor_tag = "swing"
+        elif or_candidate is not None:
+            stop_price = or_candidate
+            structural_source = "ORH"
+            structural_anchor_price = or_structural
+            anchor_tag = "or"
+        elif swing_candidate is not None:
+            stop_price = swing_candidate
+            structural_source = "SWING_HIGH"
+            structural_anchor_price = swing_structural
+            anchor_tag = "swing"
+        else:
+            structural_source = "ATR_FALLBACK"
+            stop_price = entry_val + fallback_mult * atr_value
+            stop_price = _clamp(stop_price)
+            anchor_tag = "atr_fallback"
+        label = structural_source or "ATR_FALLBACK"
+    else:
+        or_base = levels.get("orl")
+        swing_base = last_higher_low(levels)
+        or_structural = float(or_base) - wick if isinstance(or_base, (int, float)) else None
+        swing_structural = float(swing_base) - wick if isinstance(swing_base, (int, float)) else None
+        or_distance = abs(entry_val - or_structural) if or_structural is not None else float("inf")
+        or_candidate = (
+            _clamp(apply_atr_floor(entry_val, or_structural, atr_value, direction, style)) if or_structural is not None else None
+        )
+        swing_candidate = (
+            _clamp(apply_atr_floor(entry_val, swing_structural, atr_value, direction, style))
+            if swing_structural is not None
+            else None
+        )
+        prefer_swing = False
+        if (
+            swing_structural is not None
+            and swing_candidate is not None
+            and expected_move_val > 0
+        ):
+            swing_distance = abs(entry_val - swing_structural)
+            em_min = expected_move_val * 0.30
+            em_max = expected_move_val * 0.60
+            if em_min - 1e-9 <= swing_distance <= em_max + 1e-9 and _atr_condition(swing_candidate):
+                if or_candidate is None or swing_distance <= or_distance + 1e-9:
+                    prefer_swing = True
+        if prefer_swing:
+            stop_price = swing_candidate
+            structural_source = "SWING_LOW"
+            structural_anchor_price = swing_structural
+            anchor_tag = "swing"
+        elif or_candidate is not None:
+            stop_price = or_candidate
+            structural_source = "ORL"
+            structural_anchor_price = or_structural
+            anchor_tag = "or"
+        elif swing_candidate is not None:
+            stop_price = swing_candidate
+            structural_source = "SWING_LOW"
+            structural_anchor_price = swing_structural
+            anchor_tag = "swing"
+        else:
+            structural_source = "ATR_FALLBACK"
+            stop_price = entry_val - fallback_mult * atr_value
+            stop_price = _clamp(stop_price)
+            anchor_tag = "atr_fallback"
+        label = structural_source or "ATR_FALLBACK"
+
+    stop_price = round(float(stop_price), 2) if stop_price is not None else round(entry_val, 2)
+    meta = {
+        "anchor": anchor_tag,
+        "wick_buffer": round(wick, 4),
+        "atr_floor": round(atr_floor_price, 4),
+    }
+    if structural_anchor_price is not None:
+        meta["structural"] = round(structural_anchor_price, 4)
+    meta["final"] = stop_price
+    meta["source"] = label
+    return stop_price, label, meta
 
 
 def build_key_levels_used(
@@ -785,6 +1012,7 @@ __all__ = [
     "stop_from_structure",
     "build_key_levels_used",
     "MIN_ATR_MULT_TP1",
+    "RR_FLOOR_BY_STYLE",
     "compute_adaptive_wick_buffer",
     "apply_atr_floor",
 ]

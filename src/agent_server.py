@@ -10013,6 +10013,12 @@ async def _generate_fallback_plan(
                 "snap_deviation",
                 "synthetic",
                 "rr_multiple",
+                "raw_rr_multiple",
+                "snap_rr_multiple",
+                "modifiers",
+                "rr_floor",
+                "distance",
+                "synthetic_meta",
             ):
                 if key in reason_payload:
                     item[key] = reason_payload[key]

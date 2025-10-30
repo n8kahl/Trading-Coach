@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.plans.pipeline import build_structured_geometry
-from src.plans.snap import MIN_ATR_MULT_TP1, snap_targets
+from src.plans.snap import RR_FLOOR_BY_STYLE, snap_targets
 
 
 def test_tp1_prefers_nearest_structure_over_extreme_when_rr_ok() -> None:
@@ -45,51 +45,51 @@ def test_tp1_prefers_nearest_structure_over_extreme_when_rr_ok() -> None:
     assert nodes["SESSION_LOW"] is False
 
 
-@pytest.mark.parametrize(
-    "style, expected_move, fail_distance, pass_distance",
-    (
-        ("scalp", 4.0, 0.4, 1.1),
-        ("intraday", 4.0, 0.7, 1.2),
-        ("swing", 4.0, 0.8, 1.5),
-        ("leaps", 4.0, 0.9, 1.8),
-    ),
-)
+@pytest.mark.parametrize("style", ("scalp", "intraday", "swing", "leaps"))
 def test_tp1_rr_floor_applied_per_style(
     style: str,
-    expected_move: float,
-    fail_distance: float,
-    pass_distance: float,
 ) -> None:
     entry = 100.0
     stop = entry + 1.0
+    rr_floor = RR_FLOOR_BY_STYLE.get(style, 1.8)
+    expected_move = 8.0
+    base_pass_distance = rr_floor + 0.3
+    minimum_structural_distance = expected_move * 0.35
+    pass_distance = max(base_pass_distance, minimum_structural_distance)
+    fail_distance = max(0.2, rr_floor - 0.2)
+    if fail_distance >= pass_distance:
+        fail_distance = pass_distance - 0.5
+    fail_price = entry - fail_distance
+    pass_price = entry - pass_distance
     levels = {
-        "val": entry - fail_distance,
-        "session_low": entry - pass_distance,
+        "val": fail_price,
+        "session_low": pass_price,
     }
 
     snapped, reasons, _ = snap_targets(
         entry=entry,
         direction="short",
-        raw_tps=[entry - pass_distance],
+        raw_tps=[pass_price],
         levels=levels,
         atr_value=1.5,
         style=style,
         expected_move=expected_move,
         stop_price=stop,
-        rr_floor=0.3,
+        rr_floor=rr_floor,
     )
 
     assert snapped, "TP1 should be populated"
-    expected_price = round(entry - pass_distance, 2)
+    expected_price = round(pass_price, 2)
     assert snapped[0] == pytest.approx(expected_price, rel=1e-6)
 
     reason = reasons[0]
     assert reason["snap_tag"] == "SESSION_LOW"
-    assert reason["rr_multiple"] >= MIN_ATR_MULT_TP1[style]
+    assert reason["rr_multiple"] >= rr_floor
 
-    nodes = {node["label"]: node["picked"] for node in reason["candidate_nodes"]}
-    assert nodes["SESSION_LOW"] is True
-    assert nodes["VAL"] is False
+    nodes = {node["label"]: node for node in reason["candidate_nodes"]}
+    assert nodes["SESSION_LOW"]["picked"] is True
+    fail_node = nodes["VAL"]
+    assert fail_node["picked"] is False
 
 
 def test_tp1_respects_em_cap_and_max_fraction() -> None:

@@ -34,11 +34,17 @@ def test_ba_structured_geometry_snaps_to_session_levels():
     )
 
     assert structured.stop == pytest.approx(217.44, rel=0, abs=1e-2)
-    assert structured.targets[0] == pytest.approx(214.9, rel=0, abs=1e-2)
+    assert structured.targets[0] == pytest.approx(215.0, rel=0, abs=1e-2)
     assert structured.targets[1] == pytest.approx(214.75, rel=0, abs=1e-2)
     assert structured.targets[2] == pytest.approx(214.55, rel=0, abs=1e-2)
     session_roles = [item["label"] for item in structured.key_levels_used.get("session", [])]
     assert "ORH" in session_roles
-    assert any("ORL" in reason["reason"].upper() for reason in structured.tp_reasons)
-    assert "WATCH_PLAN" in structured.warnings
+    reason_tp1 = structured.tp_reasons[0]
+    assert str(reason_tp1.get("reason", "")).startswith("SYNTHETIC_EM_BUCKET")
+    candidate_nodes = reason_tp1.get("candidate_nodes") or []
+    assert any(
+        node.get("label") == "ORL" and any(dec.get("reason") == "REJECT_RR_FLOOR" for dec in node.get("decisions", []))
+        for node in candidate_nodes
+    )
+    assert {"WATCH_PLAN", "TP1 RR below floor"} <= set(structured.warnings)
     assert structured.tp_reasons[0].get("watch_plan") == "true"

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import os
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,6 +17,10 @@ from .snap import ensure_monotonic
 from .snap import snap_targets, stop_from_structure, build_key_levels_used
 from .runner import compute_runner
 from .invariants import assert_invariants, GeometryInvariantError
+
+
+logger = logging.getLogger(__name__)
+_DEBUG_SNAP_LADDER = str(os.getenv("DEBUG_SNAP_LADDER", "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 _STYLE_MAX_EM_FRACTION = {
@@ -30,6 +36,7 @@ class StructuredGeometry:
     entry: float
     stop: float
     stop_label: str
+    stop_meta: Dict[str, object] | None
     targets: List[float]
     tp_reasons: List[Dict[str, str]]
     key_levels_used: Dict[str, List[Dict[str, object]]]
@@ -67,6 +74,12 @@ def _normalise_tp_reasons(reasons: Iterable[Dict[str, object]]) -> List[Dict[str
             "em_cap_relaxed",
             "outside_ideal_band",
             "no_structural",
+            "modifiers",
+            "rr_floor",
+            "distance",
+            "synthetic_meta",
+            "raw_rr_multiple",
+            "snap_rr_multiple",
         ):
             if key in item:
                 payload[key] = item[key]
@@ -111,12 +124,13 @@ def build_structured_geometry(
     if em_points < 0:
         em_points = 0.0
 
-    stop_price, stop_label = stop_from_structure(
+    stop_price, stop_label, stop_meta = stop_from_structure(
         entry=entry_val,
         direction=direction,
         levels=levels,
         atr_value=atr_val,
         style=style_token,
+        expected_move=em_points,
     )
 
     risk_value: Optional[float] = None
@@ -145,6 +159,26 @@ def build_structured_geometry(
         warnings.append("TP1 RR below floor")
     snap_reference = [round(tp, 2) for tp in snapped_tps]
     reason_reference = [dict(reason) for reason in tp_reason_payload]
+    if _DEBUG_SNAP_LADDER and tp_reason_payload:
+        candidate_nodes = tp_reason_payload[0].get("candidate_nodes") if tp_reason_payload else None
+        if isinstance(candidate_nodes, list) and candidate_nodes:
+            ladder_payload: List[Dict[str, object]] = []
+            for node in candidate_nodes[:24]:
+                if not isinstance(node, dict):
+                    continue
+                ladder_payload.append(
+                    {
+                        "index": node.get("index"),
+                        "label": node.get("label"),
+                        "price": node.get("price"),
+                        "distance": node.get("distance"),
+                        "rr": node.get("rr_multiple"),
+                        "picked": node.get("picked"),
+                        "decisions": node.get("decisions"),
+                    }
+                )
+            if ladder_payload:
+                logger.debug("tp1 ladder snapshot", extra={"debug": {"snap": {"ladder": ladder_payload}}})
     if snapped_tps and raw_targets:
         adjusted_tps: List[float] = []
         adjusted_reasons: List[Dict[str, str | None]] = []
@@ -152,11 +186,6 @@ def build_structured_geometry(
         for idx, snapped_price in enumerate(snapped_tps):
             raw_price = float(raw_targets[idx]) if idx < len(raw_targets) else float(snapped_price)
             reason = dict(tp_reason_payload[idx]) if idx < len(tp_reason_payload) else {"label": f"TP{idx + 1}", "reason": "Stats target", "snap_tag": None}
-            improves_rr = True
-            if direction == "long" and snapped_price is not None:
-                improves_rr = float(snapped_price) >= float(raw_price) - 1e-6
-            if direction == "short" and snapped_price is not None:
-                improves_rr = float(snapped_price) <= float(raw_price) + 1e-6
             within_em_bounds = True
             if em_points and em_points > 0:
                 distance = abs(float(snapped_price) - entry_val)
@@ -184,23 +213,60 @@ def build_structured_geometry(
                             distances.append(abs(numeric_price - entry_val))
                         if distances and all(distance > max_distance_cap + 1e-6 for distance in distances):
                             all_nodes_outside_em = True
-            accept_snap = snap_tag_value
             force_tp1_fallback = synthetic_flag and not has_structural and idx == 0 and (no_structural_flag or all_nodes_outside_em)
+            accept_snap = False
+            keep_reason: str | None = None
+            if idx == 0:
+                meets_rr = False
+                meets_distance = False
+                raw_distance = abs(float(raw_price) - entry_val)
+                snap_distance = abs(float(snapped_price) - entry_val)
+                atr_threshold_tp1 = atr_val * 0.25 if atr_val > 0 else 0.0
+                if atr_threshold_tp1 > 0 and (raw_distance - snap_distance) >= atr_threshold_tp1 - 1e-9:
+                    meets_distance = True
+                if risk_value and risk_value > 0:
+                    raw_reward = raw_price - entry_val if direction == "long" else entry_val - raw_price
+                    snap_reward = snapped_price - entry_val if direction == "long" else entry_val - snapped_price
+                    if raw_reward > 0 and snap_reward > 0:
+                        raw_rr = raw_reward / risk_value
+                        snap_rr = snap_reward / risk_value
+                        reason.setdefault("raw_rr_multiple", round(raw_rr, 2))
+                        reason.setdefault("snap_rr_multiple", round(snap_rr, 2))
+                        if snap_rr - raw_rr >= 0.20 - 1e-9:
+                            meets_rr = True
+                base_accept = bool(snap_tag_value or has_structural)
+                if base_accept and not force_tp1_fallback and within_em_bounds and (meets_rr or meets_distance):
+                    accept_snap = True
+                if not accept_snap and not force_tp1_fallback:
+                    keep_reason = "KEEP_RAW_TARGET_BETTER_BALANCE"
+            else:
+                improves_rr = True
+                if direction == "long" and snapped_price is not None:
+                    improves_rr = float(snapped_price) >= float(raw_price) - 1e-6
+                if direction == "short" and snapped_price is not None:
+                    improves_rr = float(snapped_price) <= float(raw_price) + 1e-6
+                if (snap_tag_value or improves_rr) and within_em_bounds:
+                    accept_snap = True
+
             if force_tp1_fallback:
-                accept_snap = None
-            if (accept_snap or improves_rr) and within_em_bounds:
+                accept_snap = False
+
+            if accept_snap:
                 adjusted_tps.append(round(float(snapped_price), 2))
                 if reason.get("snap_tag"):
                     adjusted_tags.add(str(reason["snap_tag"]))
                 adjusted_reasons.append(reason)
             else:
                 fallback_price = round(float(raw_price), 2)
-                reason["reason"] = f"{reason.get('reason') or 'Stats target'} · Snap skipped"
-                if force_tp1_fallback:
+                if keep_reason:
+                    adjusted_reasons.append({"label": str(reason.get("label") or f"TP{idx + 1}"), "reason": keep_reason})
+                else:
+                    reason["reason"] = f"{reason.get('reason') or 'Stats target'} · Snap skipped"
                     reason.pop("snap_tag", None)
                     reason.pop("selected_node", None)
+                    reason.pop("modifiers", None)
+                    adjusted_reasons.append(reason)
                 adjusted_tps.append(fallback_price)
-                adjusted_reasons.append(reason)
         snapped_tps = adjusted_tps
         tp_reason_payload = adjusted_reasons
         snap_tags = adjusted_tags
@@ -404,6 +470,7 @@ def build_structured_geometry(
         entry=entry_val,
         stop=stop_price,
         stop_label=stop_label,
+        stop_meta=stop_meta,
         targets=clamped_tps,
         tp_reasons=tp_reasons,
         key_levels_used=key_levels_used,

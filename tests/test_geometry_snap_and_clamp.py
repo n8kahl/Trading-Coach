@@ -31,21 +31,25 @@ def test_clamp_targets_without_strong_snap_strict_em():
 def test_stop_from_structure_short_prefers_orh_buffer():
     entry = 118.5
     levels = {"orh": 120.0}
-    stop_price, label = stop_from_structure(entry, "short", levels, atr_value=0.8, style="intraday")
+    stop_price, label, meta = stop_from_structure(entry, "short", levels, atr_value=0.8, style="intraday")
 
     assert label == "ORH"
     assert stop_price == pytest.approx(120.12, rel=0, abs=1e-2)
     assert stop_price >= entry + 0.6 * 0.8
+    assert meta["anchor"] == "or"
+    assert meta["final"] == stop_price
 
 
 def test_stop_from_structure_long_prefers_orl_buffer():
     entry = 102.0
     levels = {"orl": 99.75}
-    stop_price, label = stop_from_structure(entry, "long", levels, atr_value=0.5, style="intraday")
+    stop_price, label, meta = stop_from_structure(entry, "long", levels, atr_value=0.5, style="intraday")
 
     assert label == "ORL"
     assert stop_price == pytest.approx(99.67, rel=0, abs=1e-2)
     assert stop_price <= entry - 0.6 * 0.5
+    assert meta["anchor"] == "or"
+    assert meta["final"] == stop_price
 
 
 def test_snap_targets_uses_structural_nodes():
@@ -89,7 +93,11 @@ def test_snap_targets_prefers_em_band_over_far_extreme():
         rr_floor=1.3,
     )
 
-    assert snapped[0] == pytest.approx(632.0, rel=0, abs=1e-2)
-    assert any("EM45" in reason["reason"] for reason in reasons)
-    assert "SESSION_LOW" not in reasons[0]["reason"].upper()
-    assert "EM45" in {tag.upper() for tag in tags}
+    assert snapped[0] == pytest.approx(632.5, rel=0, abs=1e-2)
+    reason = reasons[0]
+    assert str(reason.get("reason", "")).startswith("SYNTHETIC_EM_BUCKET")
+    assert reason.get("watch_plan") == "true"
+    modifiers = reason.get("modifiers") or []
+    assert any(isinstance(mod, dict) and mod.get("reason") == "SYNTHETIC_EM_BUCKET" for mod in modifiers)
+    assert "SESSION_LOW" not in (reason.get("snap_tag") or "")
+    assert any(tag.upper().startswith("EM") for tag in tags)
