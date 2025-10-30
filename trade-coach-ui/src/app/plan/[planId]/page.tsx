@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { fetchPlanSnapshot } from "@/lib/api";
 import type { PlanSnapshot } from "@/lib/types";
@@ -12,7 +12,18 @@ export async function generateMetadata({ params }: PlanPageProps): Promise<Metad
   const { planId } = await params;
   let plan: PlanSnapshot | null = null;
   try {
-    plan = await fetchPlanSnapshot(planId);
+    const idOrUrl = planId;
+    if (idOrUrl.startsWith('http')) {
+      try {
+        const url = new URL(idOrUrl);
+        const pid = url.searchParams.get('plan_id');
+        if (pid) {
+          // Redirect so the URL is canonical in the browser
+          redirect(`/plan/${encodeURIComponent(pid)}`);
+        }
+      } catch {}
+    }
+    plan = await fetchPlanSnapshot(idOrUrl);
   } catch {
     // ignore
   }
@@ -30,9 +41,19 @@ export async function generateMetadata({ params }: PlanPageProps): Promise<Metad
 
 export default async function PlanPage({ params }: PlanPageProps) {
   const { planId } = await params;
+  const idOrUrl = planId;
+  if (idOrUrl.startsWith('http')) {
+    try {
+      const url = new URL(idOrUrl);
+      const pid = url.searchParams.get('plan_id');
+      if (pid) redirect(`/plan/${encodeURIComponent(pid)}`);
+    } catch {
+      // fall through
+    }
+  }
   let snapshot: PlanSnapshot;
   try {
-    snapshot = await fetchPlanSnapshot(planId);
+    snapshot = await fetchPlanSnapshot(idOrUrl);
   } catch (error) {
     if (process.env.NODE_ENV !== "production") {
       console.error(error);

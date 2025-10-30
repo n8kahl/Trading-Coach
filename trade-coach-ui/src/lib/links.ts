@@ -1,0 +1,21 @@
+export function buildUiPlanLink(planId: string): string {
+  const base = (process.env.NEXT_PUBLIC_UI_HOST || '').replace(/\/+$/, '');
+  return `${base}/plan/${encodeURIComponent(planId)}`;
+}
+
+export function buildTvLinkFromPlan(plan: any): string | null {
+  const interactive = plan?.charts?.interactive || plan?.chart?.interactive || plan?.chart_url || null;
+  if (typeof interactive === 'string' && interactive) return interactive;
+  const base = (process.env.NEXT_PUBLIC_CHART_BASE || '').replace(/\/+$/, '');
+  const symbol = plan?.symbol || plan?.plan?.symbol;
+  const interval = plan?.charts?.params?.interval || plan?.interval || '5m';
+  if (!base || !symbol) return null;
+  const url = new URL(`${base}/html`);
+  url.searchParams.set('symbol', String(symbol).toUpperCase());
+  url.searchParams.set('interval', String(interval));
+  if (plan?.entry != null) url.searchParams.set('entry', String(plan.entry));
+  if (plan?.stop != null) url.searchParams.set('stop', String(plan.stop));
+  if (Array.isArray(plan?.targets) && plan.targets.length) url.searchParams.set('tp', plan.targets.join(','));
+  return url.toString();
+}
+

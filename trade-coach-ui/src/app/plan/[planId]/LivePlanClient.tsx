@@ -4,6 +4,7 @@ import * as React from 'react';
 import ResponsiveShell from '@/components/ResponsiveShell';
 import StatusBanner from '@/components/StatusBanner';
 import PlanSummaryCard from '@/components/PlanSummaryCard';
+import PlanHeader from '@/components/PlanHeader';
 import ChartContainer from '@/components/webview/ChartContainer';
 import ActionDock from '@/components/ActionDock';
 import type { PlanDeltaEvent, PlanSnapshot } from '@/lib/types';
@@ -114,6 +115,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
 
   return (
     <ResponsiveShell title={pageTitle}>
+      <PlanHeader planId={plan.plan_id} legacyUrl={chartUrl ?? undefined} />
       <StatusBanner
         session={session}
         asOfText={asOfText}

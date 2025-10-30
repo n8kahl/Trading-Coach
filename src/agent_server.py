@@ -2767,6 +2767,16 @@ app.add_middleware(ServiceHeaderMiddleware)
 
 
 
+from fastapi.responses import RedirectResponse
+import os as _os
+
+@app.get("/tv/ui")
+def tv_ui_redirect(plan_id: str) -> RedirectResponse:
+    ui_host = (_os.getenv("PUBLIC_UI_HOST") or "").rstrip("/")
+    if not ui_host:
+        raise HTTPException(status_code=404, detail="PUBLIC_UI_HOST not configured")
+    return RedirectResponse(f"{ui_host}/plan/{plan_id}", status_code=302)
+
 STATIC_ROOT = (Path(__file__).resolve().parent.parent / "static").resolve()
 TV_STATIC_DIR = STATIC_ROOT / "tv"
 if TV_STATIC_DIR.exists():
@@ -13531,6 +13541,15 @@ async def _ensure_snapshot(plan_id: str, version: Optional[int], request: Reques
         await _LIVE_PLAN_ENGINE.register_snapshot(snapshot)
     except Exception:
         logger.exception("live plan engine registration failed during ensure", extra={"plan_id": plan_id})
+    # Inject UI link if configured
+    try:
+        import os
+        ui_host = (os.getenv("PUBLIC_UI_HOST") or "").rstrip("/")
+        if ui_host:
+            ui_block = {"plan_link": f"{ui_host}/plan/{plan_id}"}
+            snapshot["ui"] = {**(snapshot.get("ui") or {}), **ui_block}
+    except Exception:
+        pass
     return snapshot
 
 

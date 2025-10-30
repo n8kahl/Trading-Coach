@@ -1,11 +1,12 @@
 import "server-only";
 
-import { API_BASE_URL, withAuthHeaders } from "./env";
+import { API_BASE } from "./hosts";
+import { withAuthHeaders } from "./env";
 import { ensureCanonicalChartUrl } from "./chartUrl";
 import type { PlanSnapshot } from "./types";
 
 export async function fetchPlanSnapshot(planId: string): Promise<PlanSnapshot> {
-  const url = `${API_BASE_URL}/idea/${encodeURIComponent(planId)}`;
+  const url = `${API_BASE}/idea/${encodeURIComponent(planId)}`;
   const res = await fetch(url, {
     headers: withAuthHeaders({
       Accept: "application/json",
@@ -28,7 +29,7 @@ export async function fetchLatestPlanId(symbol: string, style?: string): Promise
 export async function fetchPlanForSymbol(symbol: string, style?: string): Promise<PlanSnapshot | null> {
   const body: Record<string, unknown> = { symbol: symbol.toUpperCase() };
   if (style) body.style = style;
-  const res = await fetch(`${API_BASE_URL}/gpt/plan`, {
+  const res = await fetch(`${API_BASE}/gpt/plan`, {
     method: 'POST',
     headers: withAuthHeaders({ 'Content-Type': 'application/json', Accept: 'application/json' }),
     body: JSON.stringify(body),
