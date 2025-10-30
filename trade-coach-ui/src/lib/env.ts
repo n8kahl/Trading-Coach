@@ -24,6 +24,13 @@ const DEFAULT_UI_BASE =
 
 export const PUBLIC_UI_BASE_URL = DEFAULT_UI_BASE.replace(/\/$/, "");
 
+export const BUILD_SHA =
+  (process.env.NEXT_PUBLIC_BUILD_SHA as string | undefined) ||
+  (process.env.VERCEL_GIT_COMMIT_SHA as string | undefined) ||
+  (process.env.RAILWAY_GIT_COMMIT_SHA as string | undefined) ||
+  (process.env.GIT_COMMIT as string | undefined) ||
+  "";
+
 export function withAuthHeaders(headers: HeadersInit = {}): HeadersInit {
   if (!API_KEY_HEADER) {
     return headers;

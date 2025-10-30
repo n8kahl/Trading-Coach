@@ -11,7 +11,7 @@ import { usePlanLayers } from '@/lib/hooks/usePlanLayers';
 import { extractPrimaryLevels, extractSupportingLevels } from '@/lib/utils/layers';
 import type { SupportingLevel } from '@/lib/chart';
 import type { PlanDeltaEvent, PlanLayers, PlanSnapshot } from '@/lib/types';
-import { PUBLIC_UI_BASE_URL, WS_BASE_URL } from '@/lib/env';
+import { PUBLIC_UI_BASE_URL, WS_BASE_URL, BUILD_SHA } from '@/lib/env';
 
 const TIMEFRAME_OPTIONS = [
   { value: '1', label: '1m' },
@@ -246,6 +246,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const debugPanel = devMode ? (
     <div className="fixed bottom-4 left-4 z-50 rounded-lg border border-neutral-800 bg-neutral-950/85 px-4 py-3 text-xs text-neutral-200 shadow-lg">
       <div className="font-semibold uppercase tracking-[0.2em] text-neutral-400">Dev Stats</div>
+      <div>Bundle: {BUILD_SHA ? BUILD_SHA.slice(0, 7) : 'n/a'}</div>
       <div>WS: {socketStatus}</div>
       <div>Data age: {dataAgeSeconds != null ? `${dataAgeSeconds.toFixed(1)}s` : 'n/a'}</div>
       <div>Last bar: {lastBarTime ? new Date(lastBarTime).toLocaleTimeString() : 'n/a'}</div>
