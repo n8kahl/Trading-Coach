@@ -212,25 +212,25 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         const ColorTypeSolid = (lib as any)?.ColorType?.Solid ?? "solid";
         const CrosshairModeMagnet = (lib as any)?.CrosshairMode?.Magnet ?? "magnet";
 
-        // Create chart using safest possible options; fall back across APIs
+        // Create chart preferring autosize (legacy/stable path), then fallback to width/height
         let chart: any = null;
         const el = containerRef.current as HTMLDivElement;
+        // StrictMode guard to prevent double init
+        if ((el as any).__lw_attached) {
+          addDbg(`[PlanPriceChart] init skipped: container already has a chart`);
+          return;
+        }
+        (el as any).__lw_attached = true;
+
         const w = el.clientWidth || 800;
         const h = el.clientHeight || 360;
         try {
-          chart = createChartFn(el, { width: w, height: h });
-          addDbg(`[PlanPriceChart] createChart with width/height ok`);
+          chart = createChartFn(el, { autoSize: true });
+          addDbg(`[PlanPriceChart] createChart autosize ok`);
         } catch (e1) {
-          addDbg(`[PlanPriceChart] createChart(width/height) failed: ${String(e1)}`);
-          try {
-            const createChartEx = (lib as any)?.createChartEx || (lib as any)?.createOptionsChart;
-            if (typeof createChartEx === 'function') {
-              chart = createChartEx(el, { width: w, height: h });
-              addDbg(`[PlanPriceChart] createChartEx/createOptionsChart ok`);
-            }
-          } catch (e2) {
-            addDbg(`[PlanPriceChart] createChartEx failed: ${String(e2)}`);
-          }
+          addDbg(`[PlanPriceChart] createChart autosize failed: ${String(e1)}`);
+          chart = createChartFn(el, { width: w, height: h });
+          addDbg(`[PlanPriceChart] createChart width/height ok`);
         }
         if (!chart) {
           addDbg(`[PlanPriceChart] error: unable to create chart; libKeys=${Object.keys(lib || {}).join(',')}`);
@@ -264,46 +264,26 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           },
         });
         const chartApi: any = chart as any;
-        const useUnified = typeof chartApi.addSeries === "function" && typeof chartApi.addCandlestickSeries !== "function";
-        if (!chartApi || (!useUnified && typeof chartApi.addCandlestickSeries !== "function")) {
-          addDbg(`[PlanPriceChart] error: addSeries API not found; chartKeys=${Object.keys(chartApi || {}).join(',')}`);
+        if (!chartApi || typeof chartApi.addCandlestickSeries !== "function" || typeof chartApi.addHistogramSeries !== "function") {
+          addDbg(`[PlanPriceChart] error: legacy series APIs not available; chartKeys=${Object.keys(chartApi || {}).join(',')}`);
           return;
         }
 
-        const candleSeries = useUnified
-          ? chartApi.addSeries({ type: "Candlestick" }, {
-              upColor: GREEN,
-              wickUpColor: GREEN,
-              borderUpColor: GREEN,
-              downColor: RED,
-              wickDownColor: RED,
-              borderDownColor: RED,
-            })
-          : chartApi.addCandlestickSeries({
-              upColor: GREEN,
-              wickUpColor: GREEN,
-              borderUpColor: GREEN,
-              downColor: RED,
-              wickDownColor: RED,
-              borderDownColor: RED,
-            });
+        const candleSeries = chartApi.addCandlestickSeries({
+          upColor: GREEN,
+          wickUpColor: GREEN,
+          borderUpColor: GREEN,
+          downColor: RED,
+          wickDownColor: RED,
+          borderDownColor: RED,
+        });
 
-        const volumeSeries = useUnified
-          ? chartApi.addSeries(
-              { type: "Histogram" },
-              {
-                priceScaleId: "",
-                color: "rgba(148, 163, 184, 0.4)",
-                base: 0,
-              },
-            )
-          : chartApi.addHistogramSeries({
-              priceScaleId: "",
-              color: "rgba(148, 163, 184, 0.4)",
-              base: 0,
-            });
+        const volumeSeries = chartApi.addHistogramSeries({
+          priceScaleId: "",
+          color: "rgba(148, 163, 184, 0.4)",
+        });
 
-        addDbg(`[PlanPriceChart] series created via ${useUnified ? 'addSeries' : 'addCandlestickSeries'}`);
+        addDbg(`[PlanPriceChart] series created via addCandlestickSeries/addHistogramSeries`);
 
         volumeSeries.priceScale().applyOptions({
           scaleMargins: { top: 0.8, bottom: 0 } as PriceScaleMargins,
@@ -312,13 +292,8 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         chartRef.current = chart;
         candleSeriesRef.current = candleSeries;
         volumeSeriesRef.current = volumeSeries;
-        resizeObserverRef.current = new ResizeObserver(() => {
-          chart.applyOptions({
-            width: containerRef.current?.clientWidth,
-            height: containerRef.current?.clientHeight,
-          });
-        });
-        resizeObserverRef.current.observe(containerRef.current);
+        // autoSize=true; no need to keep a ResizeObserver writing dimensions
+        resizeObserverRef.current = null;
         setChartReady(true);
         addDbg(`[PlanPriceChart] chart ready: ${symbol} plan=${planId}`);
       })().catch((error) => {
@@ -352,6 +327,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         chartRef.current?.remove();
         chartRef.current = null;
         chartLibRef.current = null;
+        if (containerRef.current) delete (containerRef.current as any).__lw_attached;
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
