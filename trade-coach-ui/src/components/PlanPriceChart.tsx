@@ -190,9 +190,34 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         }
 
         chartLibRef.current = lib;
-        const chart = createChartFn(containerRef.current, {
+
+        // Wait for container to have non-zero size to avoid internal asserts
+        const waitForSize = async () => {
+          const start = Date.now();
+          while (!disposed && containerRef.current) {
+            const el = containerRef.current;
+            const w = el.clientWidth;
+            const h = el.clientHeight;
+            if (w > 10 && h > 10) return { w, h };
+            if (Date.now() - start > 800) break;
+            await new Promise((r) => requestAnimationFrame(r));
+          }
+          const el = containerRef.current!;
+          return { w: el?.clientWidth ?? 0, h: el?.clientHeight ?? 0 };
+        };
+
+        const size = await waitForSize();
+        addDbg(`[PlanPriceChart] container size w=${size.w} h=${size.h}`);
+
+        const ColorTypeSolid = (lib as any)?.ColorType?.Solid ?? 0;
+        const CrosshairModeMagnet = (lib as any)?.CrosshairMode?.Magnet ?? 0;
+
+        // Create chart with minimal safe options first, then apply richer options
+        const chart = createChartFn(containerRef.current, { autoSize: true });
+
+        (chart as any).applyOptions?.({
           layout: {
-            background: { type: lib.ColorType.Solid, color: theme === "light" ? SURFACE_LIGHT : SURFACE_DARK },
+            background: { type: ColorTypeSolid, color: theme === "light" ? SURFACE_LIGHT : SURFACE_DARK },
             textColor: theme === "light" ? TEXT_LIGHT : TEXT_DARK,
           },
           grid: {
@@ -200,7 +225,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
             horzLines: { color: theme === "light" ? GRID_LIGHT : GRID_DARK },
           },
           crosshair: {
-            mode: lib.CrosshairMode.Magnet,
+            mode: CrosshairModeMagnet,
           },
           rightPriceScale: {
             borderColor: theme === "light" ? "rgba(148,163,184,0.25)" : "rgba(148,163,184,0.2)",
@@ -212,7 +237,6 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
             timeVisible: true,
             secondsVisible: true,
           },
-          autoSize: true,
         });
         const chartApi: any = chart as any;
         const useUnified = typeof chartApi.addSeries === "function" && typeof chartApi.addCandlestickSeries !== "function";
