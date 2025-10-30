@@ -11422,6 +11422,27 @@ async def _generate_fallback_plan(
     if enrichment_error_messages:
         meta_payload["enrichment_errors"] = enrichment_error_messages
     plan_response.meta = meta_payload or None
+    # Ensure /idea/{plan_id} resolves for this generated plan by storing a minimal snapshot
+    try:
+        plan_core = dict(plan_block or {})
+        plan_core["plan_id"] = plan_id
+        plan_core["version"] = 1
+        if structured_plan:
+            plan_core["structured_plan"] = structured_plan
+        if target_profile_dict:
+            plan_core["target_profile"] = target_profile_dict
+        if session_state_payload:
+            plan_core["session_state"] = session_state_payload
+        if chart_params_payload:
+            plan_core["charts_params"] = chart_params_payload
+        plan_core["charts"] = charts_payload
+        minimal_snapshot = {
+            "plan": plan_core,
+            "chart_url": chart_url_with_ids,
+        }
+        await _store_idea_snapshot(plan_id, minimal_snapshot)
+    except Exception:
+        logger.exception("failed to store snapshot for plan %s", plan_id)
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
     mode_label = "live" if is_plan_live else "frozen"
     record_plan_duration(mode_label, elapsed_ms)
