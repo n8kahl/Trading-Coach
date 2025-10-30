@@ -209,8 +209,8 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         const size = await waitForSize();
         addDbg(`[PlanPriceChart] container size w=${size.w} h=${size.h}`);
 
-        const ColorTypeSolid = (lib as any)?.ColorType?.Solid ?? 0;
-        const CrosshairModeMagnet = (lib as any)?.CrosshairMode?.Magnet ?? 0;
+        const ColorTypeSolid = (lib as any)?.ColorType?.Solid ?? "solid";
+        const CrosshairModeMagnet = (lib as any)?.CrosshairMode?.Magnet ?? "magnet";
 
         // Create chart using safest possible options; fall back across APIs
         let chart: any = null;
@@ -237,9 +237,12 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           return;
         }
 
+        const layoutColorType = typeof ColorTypeSolid === "string" ? ColorTypeSolid : "solid";
+        const crosshairMode = typeof CrosshairModeMagnet === "string" ? CrosshairModeMagnet : 1;
+
         (chart as any).applyOptions?.({
           layout: {
-            background: { type: ColorTypeSolid, color: theme === "light" ? SURFACE_LIGHT : SURFACE_DARK },
+            background: { type: layoutColorType, color: theme === "light" ? SURFACE_LIGHT : SURFACE_DARK },
             textColor: theme === "light" ? TEXT_LIGHT : TEXT_DARK,
           },
           grid: {
@@ -247,7 +250,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
             horzLines: { color: theme === "light" ? GRID_LIGHT : GRID_DARK },
           },
           crosshair: {
-            mode: CrosshairModeMagnet,
+            mode: crosshairMode,
           },
           rightPriceScale: {
             borderColor: theme === "light" ? "rgba(148,163,184,0.25)" : "rgba(148,163,184,0.2)",
