@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
-    "build": "next build --turbopack",
+    "build": "CSS_TRANSFORMER_WASM= next build",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run"
@@ -12,19 +12,13 @@
   "dependencies": {
     "@heroicons/react": "^2.2.0",
     "clsx": "^2.1.1",
-    "lightningcss": "npm:lightningcss-wasm@^1.26.0",
-    "lightningcss-wasm": "^1.26.0",
+    "lightningcss": "^1.30.2",
     "lightweight-charts": "^5.0.9",
     "next": "15.5.5",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },
-  "overrides": {
-    "lightningcss": "npm:lightningcss-wasm@^1.26.0"
-  },
-  "optionalDependencies": {
-    "lightningcss-linux-x64-musl": "1.30.2"
-  },
+  
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",

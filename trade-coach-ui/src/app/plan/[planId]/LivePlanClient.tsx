@@ -40,7 +40,8 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
   }, [initialSnapshot]);
 
   const upperSymbol = React.useMemo(() => (symbol ?? plan.symbol ?? '').toUpperCase(), [symbol, plan.symbol]);
-  const chartUrl = useChartUrl(plan);
+  // Cast to satisfy PlanLike (allows undefined but not null in nested fields)
+  const chartUrl = useChartUrl(plan as any);
   const latency = useLatency(streamingEnabled ? lastUpdateAt : undefined);
 
   const handlePlanDelta = React.useCallback((payload: unknown) => {
