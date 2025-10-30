@@ -163,6 +163,8 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     setTimeframe((current) => current || normalizeTimeframeFromPlan(plan));
   }, [plan]);
 
+  const planUiLink = React.useMemo(() => extractUiPlanLink(snapshot), [snapshot]);
+
   const statusStrip = (
     <StatusStrip
       theme={theme}
@@ -216,8 +218,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       devMode={!!devMode}
     />
   );
-
-  const planUiLink = React.useMemo(() => extractUiPlanLink(snapshot), [snapshot]);
 
   const debugPanel = devMode ? (
     <div className="fixed bottom-4 left-4 z-50 rounded-lg border border-neutral-800 bg-neutral-950/85 px-4 py-3 text-xs text-neutral-200 shadow-lg">
