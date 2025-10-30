@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { Suspense, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import TradingViewChart from "@/components/TradingViewChart";
 
@@ -14,7 +14,21 @@ function normalizeResolution(raw: string | null): string {
   return upper;
 }
 
-export default function ChartPage() {
+export default function ChartPageWrapper() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-[#050709] text-neutral-200">
+          Loading chart…
+        </div>
+      }
+    >
+      <ChartPage />
+    </Suspense>
+  );
+}
+
+function ChartPage() {
   const params = useSearchParams();
 
   const { symbol, planId, resolution, theme } = useMemo(() => {
@@ -65,3 +79,5 @@ export default function ChartPage() {
     </div>
   );
 }
+
+export const dynamic = "force-dynamic";
