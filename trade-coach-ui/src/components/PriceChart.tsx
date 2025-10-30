@@ -1,16 +1,10 @@
 'use client';
 
-import { MutableRefObject, useEffect, useRef } from "react";
-import {
-  ColorType,
-  CrosshairMode,
-  LineStyle,
-  createChart,
-  type IChartApi,
-  type ISeriesApi,
-  type LineData,
-} from "lightweight-charts";
+import { MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
+import type { IChartApi, ISeriesApi, LineData } from "lightweight-charts";
 import type { SupportingLevel } from "@/lib/chart";
+
+type ChartLib = typeof import("lightweight-charts");
 
 type PriceChartProps = {
   data: LineData[];
@@ -44,6 +38,7 @@ export default function PriceChart({
 }: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const chartLibRef = useRef<ChartLib | null>(null);
   const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
   const entryLineRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
   const stopLineRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
@@ -54,79 +49,101 @@ export default function PriceChart({
   const ghostEntryRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
   const ghostStopRef = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>(null);
   const ghostTargetRefs = useRef<ReturnType<ISeriesApi<"Area">["createPriceLine"]>[]>([]);
+  const [libReady, setLibReady] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current || chartRef.current) return;
 
-    const chart = (chartRef.current = createChart(containerRef.current, {
-      layout: {
-        background: { type: ColorType.Solid, color: "transparent" },
-        textColor: "#E5E7EB",
-      },
-      grid: {
-        vertLines: { color: "rgba(148, 163, 184, 0.15)" },
-        horzLines: { color: "rgba(148, 163, 184, 0.08)" },
-      },
-      rightPriceScale: {
-        visible: true,
-        borderColor: "rgba(148, 163, 184, 0.2)",
-        scaleMargins: { top: 0.2, bottom: 0.2 },
-      },
-      timeScale: {
-        visible: true,
-        borderColor: "rgba(148, 163, 184, 0.2)",
-        timeVisible: true,
-        secondsVisible: true,
-      },
-      crosshair: {
-        mode: CrosshairMode.Magnet,
-        vertLine: { color: "rgba(74, 222, 128, 0.2)", style: LineStyle.Solid },
-        horzLine: { color: "rgba(74, 222, 128, 0.2)", style: LineStyle.Solid },
-      },
-      autoSize: true,
-    }));
+    let disposed = false;
+    let resizeObserver: ResizeObserver | null = null;
 
-    const areaSeries = chart.addAreaSeries({
-      lineColor: "rgba(74, 222, 128, 0.8)",
-      topColor: "rgba(74, 222, 128, 0.25)",
-      bottomColor: "rgba(74, 222, 128, 0.02)",
-    });
+    (async () => {
+      const lib = await import("lightweight-charts");
+      if (disposed || !containerRef.current || chartRef.current) return;
+      chartLibRef.current = lib;
 
-    seriesRef.current = areaSeries;
+      const chart = (chartRef.current = lib.createChart(containerRef.current, {
+        layout: {
+          background: { type: lib.ColorType.Solid, color: "transparent" },
+          textColor: "#E5E7EB",
+        },
+        grid: {
+          vertLines: { color: "rgba(148, 163, 184, 0.15)" },
+          horzLines: { color: "rgba(148, 163, 184, 0.08)" },
+        },
+        rightPriceScale: {
+          visible: true,
+          borderColor: "rgba(148, 163, 184, 0.2)",
+          scaleMargins: { top: 0.2, bottom: 0.2 },
+        },
+        timeScale: {
+          visible: true,
+          borderColor: "rgba(148, 163, 184, 0.2)",
+          timeVisible: true,
+          secondsVisible: true,
+        },
+        crosshair: {
+          mode: lib.CrosshairMode.Magnet,
+          vertLine: { color: "rgba(74, 222, 128, 0.2)", style: lib.LineStyle.Solid },
+          horzLine: { color: "rgba(74, 222, 128, 0.2)", style: lib.LineStyle.Solid },
+        },
+        autoSize: true,
+      }));
 
-    const resizeObserver = new ResizeObserver(() => {
-      chart.applyOptions({ width: containerRef.current?.clientWidth, height: containerRef.current?.clientHeight });
-    });
-    resizeObserver.observe(containerRef.current);
+      const areaSeries = chart.addAreaSeries({
+        lineColor: "rgba(74, 222, 128, 0.8)",
+        topColor: "rgba(74, 222, 128, 0.25)",
+        bottomColor: "rgba(74, 222, 128, 0.02)",
+      });
+
+      seriesRef.current = areaSeries;
+
+      resizeObserver = new ResizeObserver(() => {
+        chart.applyOptions({ width: containerRef.current?.clientWidth, height: containerRef.current?.clientHeight });
+      });
+      resizeObserver.observe(containerRef.current);
+      setLibReady(true);
+    })();
 
     return () => {
-      resizeObserver.disconnect();
-      chart.remove();
+      disposed = true;
+      resizeObserver?.disconnect();
+      resizeObserver = null;
+      if (chartRef.current) {
+        chartRef.current.remove();
+        chartRef.current = null;
+      }
       seriesRef.current = null;
-      chartRef.current = null;
+      chartLibRef.current = null;
+      supportingLinesRef.current = [];
+      supportingLevelsRef.current = [];
+      ghostTargetRefs.current = [];
+      ghostEntryRef.current = null;
+      ghostStopRef.current = null;
+      setLibReady(false);
     };
   }, []);
 
   useEffect(() => {
-    if (!seriesRef.current || data.length === 0) return;
+    if (!libReady || !seriesRef.current || data.length === 0) return;
     seriesRef.current.setData(data);
-  }, [data]);
+  }, [data, libReady]);
 
   useEffect(() => {
-    if (!seriesRef.current || lastPrice === undefined || lastPrice === null) return;
-    const series = seriesRef.current;
-    series.applyOptions({
+    if (!libReady || !seriesRef.current || lastPrice === undefined || lastPrice === null) return;
+    seriesRef.current.applyOptions({
       priceFormat: {
         type: "price",
         precision: 2,
         minMove: 0.01,
       },
     });
-  }, [lastPrice]);
+  }, [lastPrice, libReady]);
 
   useEffect(() => {
     const series = seriesRef.current;
-    if (!series) return;
+    const lib = chartLibRef.current;
+    if (!libReady || !series || !lib) return;
 
     const ensureLine = (
       ref: MutableRefObject<ReturnType<ISeriesApi<"Area">["createPriceLine"]> | null>,
@@ -150,37 +167,35 @@ export default function PriceChart({
     ensureLine(entryLineRef, entry, {
       color: "rgba(59, 130, 246, 0.7)",
       lineWidth: 2,
-      lineStyle: LineStyle.Dotted,
+      lineStyle: lib.LineStyle.Dotted,
       title: "Entry",
     });
 
     ensureLine(stopLineRef, stop, {
       color: "rgba(248, 113, 113, 0.8)",
       lineWidth: 2,
-      lineStyle: LineStyle.Solid,
+      lineStyle: lib.LineStyle.Solid,
       title: "Stop",
     });
 
     ensureLine(trailLineRef, trailingStop, {
       color: "rgba(249, 115, 22, 0.9)",
       lineWidth: 2,
-      lineStyle: LineStyle.Dashed,
+      lineStyle: lib.LineStyle.Dashed,
       title: "Trail",
     });
 
-    targetLinesRef.current.forEach((line) => {
-      series.removePriceLine(line);
-    });
+    targetLinesRef.current.forEach((line) => series.removePriceLine(line));
     targetLinesRef.current = [];
 
-    if (targets && targets.length) {
+    if (targets?.length) {
       targets.forEach((target, index) => {
         if (!Number.isFinite(target)) return;
         const line = series.createPriceLine({
-          price: target,
+          price: Number(target),
           color: "rgba(16, 185, 129, 0.7)",
           lineWidth: 1,
-          lineStyle: LineStyle.Dashed,
+          lineStyle: lib.LineStyle.Dashed,
           title: `TP${index + 1}`,
         });
         targetLinesRef.current.push(line);
@@ -191,11 +206,12 @@ export default function PriceChart({
       targetLinesRef.current.forEach((line) => series.removePriceLine(line));
       targetLinesRef.current = [];
     };
-  }, [entry, stop, trailingStop, targets]);
+  }, [entry, stop, trailingStop, targets, libReady]);
 
   useEffect(() => {
     const series = seriesRef.current;
-    if (!series) return;
+    const lib = chartLibRef.current;
+    if (!libReady || !series || !lib) return;
 
     supportingLinesRef.current.forEach((line) => {
       series.removePriceLine(line);
@@ -212,7 +228,7 @@ export default function PriceChart({
       const line = series.createPriceLine({
         price: level.price,
         color: "rgba(148, 163, 184, 0.5)",
-        lineStyle: LineStyle.Dotted,
+        lineStyle: lib.LineStyle.Dotted,
         lineWidth: 1,
         axisLabelVisible: true,
         title: level.label,
@@ -224,31 +240,31 @@ export default function PriceChart({
       supportingLinesRef.current.forEach((line) => series.removePriceLine(line));
       supportingLinesRef.current = [];
     };
-  }, [supportingLevels, showSupportingLevels, onHighlightLevel]);
+  }, [supportingLevels, showSupportingLevels, onHighlightLevel, libReady]);
 
   useEffect(() => {
     const chart = chartRef.current;
     const series = seriesRef.current;
-    if (!chart || !series || !onHighlightLevel || !supportingLevelsRef.current.length) return;
+    if (!libReady || !chart || !series || !onHighlightLevel || !supportingLevelsRef.current.length) return;
 
     const handler = (param: Parameters<IChartApi["subscribeCrosshairMove"]>[0]) => {
-      if (!param || !param.time || !param.seriesPrices) {
+      if (!param) {
         onHighlightLevel(null);
         return;
       }
-      const seriesPrice = param.seriesPrices.get(series);
-      if (typeof seriesPrice !== "number") {
+      const price = param.seriesPrices?.get(series);
+      if (typeof price !== "number") {
         onHighlightLevel(null);
         return;
       }
       const candidate = supportingLevelsRef.current.reduce<SupportingLevel | null>((closest, level) => {
-        const delta = Math.abs(level.price - seriesPrice);
-        if (!closest) return delta <= computeTolerance(level.price) ? level : null;
-        const currentDelta = Math.abs(closest.price - seriesPrice);
-        if (delta < currentDelta && delta <= computeTolerance(level.price)) {
-          return level;
+        const delta = Math.abs(level.price - price);
+        if (delta > computeTolerance(level.price)) {
+          return closest;
         }
-        return closest;
+        if (!closest) return level;
+        const currentDelta = Math.abs(closest.price - price);
+        return delta < currentDelta ? level : closest;
       }, null);
       onHighlightLevel(candidate ?? null);
     };
@@ -257,12 +273,12 @@ export default function PriceChart({
     return () => {
       chart.unsubscribeCrosshairMove(handler);
     };
-  }, [onHighlightLevel]);
+  }, [onHighlightLevel, libReady]);
 
-  // Compare/ghost overlay
   useEffect(() => {
     const series = seriesRef.current;
-    if (!series) return;
+    const lib = chartLibRef.current;
+    if (!libReady || !series || !lib) return;
 
     const clearGhost = () => {
       if (ghostEntryRef.current) {
@@ -281,34 +297,33 @@ export default function PriceChart({
 
     if (!compare) return;
 
-    const ghostColor = "rgba(148, 163, 184, 0.5)"; // slate-400 at 50%
     const ghostLabel = compare.label ? `${compare.label} ` : "Scenario ";
 
     if (Number.isFinite(compare.entry as number)) {
       ghostEntryRef.current = series.createPriceLine({
         price: Number(compare.entry),
-        color: ghostColor,
+        color: "rgba(56, 189, 248, 0.5)",
         lineWidth: 1,
-        lineStyle: LineStyle.Dotted,
+        lineStyle: lib.LineStyle.Dotted,
         title: `${ghostLabel}Entry`,
       });
     }
     if (Number.isFinite(compare.stop as number)) {
       ghostStopRef.current = series.createPriceLine({
         price: Number(compare.stop),
-        color: "rgba(244, 114, 182, 0.6)", // pink-400-ish
+        color: "rgba(248, 113, 113, 0.6)",
         lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
+        lineStyle: lib.LineStyle.Dashed,
         title: `${ghostLabel}Stop`,
       });
     }
-    (compare.targets || []).forEach((t, idx) => {
-      if (!Number.isFinite(t)) return;
+    (compare.targets || []).forEach((target, idx) => {
+      if (!Number.isFinite(target)) return;
       const line = series.createPriceLine({
-        price: Number(t),
-        color: "rgba(96, 165, 250, 0.5)", // blue-400-ish
+        price: Number(target),
+        color: "rgba(96, 165, 250, 0.5)",
         lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
+        lineStyle: lib.LineStyle.Dashed,
         title: `${ghostLabel}TP${idx + 1}`,
       });
       ghostTargetRefs.current.push(line);
@@ -317,9 +332,11 @@ export default function PriceChart({
     return () => {
       clearGhost();
     };
-  }, [JSON.stringify(compare)]);
+  }, [libReady, compare ? JSON.stringify(compare) : ""]);
 
-  return <div ref={containerRef} className="h-[360px] w-full" />;
+  const chartClass = useMemo(() => "h-[360px] w-full", []);
+
+  return <div ref={containerRef} className={chartClass} />;
 }
 
 function computeTolerance(price: number): number {
