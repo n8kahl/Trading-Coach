@@ -30,10 +30,12 @@ type TradingViewWidget = {
   activeChart(): TradingViewActiveChart;
 };
 
+type TradingViewWidgetConstructor = new (options: Record<string, unknown>) => TradingViewWidget;
+
 declare global {
   interface Window {
     TradingView?: {
-      widget: (options: Record<string, unknown>) => TradingViewWidget;
+      widget: TradingViewWidgetConstructor;
     };
   }
 }
@@ -227,7 +229,7 @@ const TradingViewChart = forwardRef<TradingViewChartHandle, TradingViewChartProp
             console.error("[tv] TradingView widget library unavailable");
             return;
           }
-          const widget = tv.widget({
+          const widget = new tv.widget({
             symbol: symbol.toUpperCase(),
             interval: resolution,
             container_id: containerId,
