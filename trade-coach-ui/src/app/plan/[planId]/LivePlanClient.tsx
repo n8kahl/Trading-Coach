@@ -11,7 +11,7 @@ import { usePlanLayers } from '@/lib/hooks/usePlanLayers';
 import { extractPrimaryLevels, extractSupportingLevels } from '@/lib/utils/layers';
 import type { SupportingLevel } from '@/lib/chart';
 import type { PlanDeltaEvent, PlanLayers, PlanSnapshot } from '@/lib/types';
-import { WS_BASE_URL } from '@/lib/env';
+import { PUBLIC_UI_BASE_URL, WS_BASE_URL } from '@/lib/env';
 
 const TIMEFRAME_OPTIONS = [
   { value: '1', label: '1m' },
@@ -41,6 +41,15 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const [nowTick, setNowTick] = React.useState(Date.now());
   const [lastBarTime, setLastBarTime] = React.useState<number | null>(null);
   const [devMode, setDevMode] = React.useState(() => process.env.NEXT_PUBLIC_DEVTOOLS === '1');
+  const [priceRefreshToken, setPriceRefreshToken] = React.useState(0);
+  const lastPriceRefreshRef = React.useRef(0);
+
+  const requestPriceRefresh = React.useCallback(() => {
+    const now = Date.now();
+    if (now - lastPriceRefreshRef.current < 4000) return;
+    lastPriceRefreshRef.current = now;
+    setPriceRefreshToken((token) => token + 1);
+  }, []);
 
   const activePlanId = plan.plan_id || planId;
 
@@ -85,6 +94,9 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         if (type === 'plan_delta') {
           const delta = event as unknown as PlanDeltaEvent;
           setPlan((prev) => mergePlanWithDelta(prev, delta));
+          if (delta.changes && (delta.changes.last_price !== undefined || delta.changes.trailing_stop !== undefined)) {
+            requestPriceRefresh();
+          }
           return;
         }
         if (type === 'plan_full') {
@@ -97,13 +109,18 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
             const inferred = normalizeTimeframeFromPlan(payloadSnapshot.plan);
             return prev || inferred;
           });
+          requestPriceRefresh();
           return;
         }
         if (type === 'plan_state') {
           return;
         }
+        if (type === 'tick' || type === 'bar') {
+          requestPriceRefresh();
+          return;
+        }
       },
-      [],
+      [requestPriceRefresh],
     ),
   );
 
@@ -144,8 +161,13 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   }, []);
 
   const handleToggleStreaming = React.useCallback(() => {
-    setStreamingEnabled((prev) => !prev);
-  }, []);
+    setStreamingEnabled((prev) => {
+      if (!prev) {
+        requestPriceRefresh();
+      }
+      return !prev;
+    });
+  }, [requestPriceRefresh]);
 
   const handleToggleSupporting = React.useCallback(() => {
     setSupportVisible((prev) => !prev);
@@ -153,7 +175,8 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
 
   const handleSelectTimeframe = React.useCallback((value: string) => {
     setTimeframe(value);
-  }, []);
+    requestPriceRefresh();
+  }, [requestPriceRefresh]);
 
   const handleSelectLevel = React.useCallback((level: SupportingLevel | null) => {
     setHighlightedLevel(level);
@@ -216,6 +239,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       }}
       theme={theme}
       devMode={!!devMode}
+      priceRefreshToken={priceRefreshToken}
     />
   );
 
@@ -336,5 +360,10 @@ function mergePlanWithDelta(prev: PlanSnapshot['plan'], event: PlanDeltaEvent): 
 function extractUiPlanLink(snapshot: PlanSnapshot): string | undefined {
   const uiBlock = (snapshot as unknown as { ui?: Record<string, unknown> }).ui;
   const link = uiBlock?.plan_link;
-  return typeof link === 'string' ? link : undefined;
+  if (typeof link === 'string' && link.trim()) {
+    return link;
+  }
+  const planId = snapshot.plan?.plan_id;
+  if (!planId) return undefined;
+  return `${PUBLIC_UI_BASE_URL}/plan/${encodeURIComponent(planId)}`;
 }

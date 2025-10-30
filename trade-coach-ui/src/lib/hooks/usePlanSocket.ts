@@ -1,85 +1,60 @@
-import { useEffect, useRef, useState } from "react";
-import { makeBackoff } from "./useBackoff";
-
-type SocketStatus = "connecting" | "connected" | "disconnected";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { getPlanStream, type SocketStatus } from "@/lib/streams/planStream";
 
 export function usePlanSocket(url: string, planId: string, onDelta: (msg: unknown) => void): SocketStatus {
-  const [status, setStatus] = useState<SocketStatus>("connecting");
-  const backoff = useRef(makeBackoff());
-  const planRef = useRef(planId);
+  const stream = useMemo(() => getPlanStream(planId, url), [planId, url]);
+  const [status, setStatus] = useState<SocketStatus>(stream.getStatus());
+  const [heartbeat, setHeartbeat] = useState<number>(() => stream.getLastHeartbeat());
+  const [derivedStatus, setDerivedStatus] = useState<SocketStatus>(stream.getStatus());
+  const listenerRef = useRef(onDelta);
 
   useEffect(() => {
-    planRef.current = planId;
-  }, [planId]);
+    listenerRef.current = onDelta;
+  }, [onDelta]);
+
+  useEffect(() => stream.onStatus(setStatus), [stream]);
+
+  useEffect(
+    () =>
+      stream.onHeartbeat((ts) => {
+        setHeartbeat(ts);
+      }),
+    [stream],
+  );
 
   useEffect(() => {
-    let closed = false;
-    let ws: WebSocket | null = null;
-    let retryTimer: number | null = null;
-     let reconnectScheduled = false;
+    const unsubscribe = stream.subscribe((payload) => {
+      listenerRef.current(payload);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [stream]);
 
-    function scheduleReconnect() {
-      if (closed) return;
-      if (reconnectScheduled) return;
-      reconnectScheduled = true;
-      setStatus("disconnected");
-      if (retryTimer != null) window.clearTimeout(retryTimer);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.close();
-        } catch {
-          /* ignore */
-        }
-      }
-      ws = null;
-      const delay = backoff.current();
-      retryTimer = window.setTimeout(() => {
-        reconnectScheduled = false;
-        connect();
-      }, delay);
-    }
-
-    function connect() {
-      if (closed) return;
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+  useEffect(() => {
+    const update = () => {
+      if (status === "disconnected") {
+        setDerivedStatus("disconnected");
         return;
       }
-      reconnectScheduled = false;
-      setStatus("connecting");
-      ws = new WebSocket(url);
-      ws.onopen = () => {
-        setStatus("connected");
-        backoff.current = makeBackoff();
-        try {
-          ws?.send(JSON.stringify({ type: "subscribe", planId: planRef.current }));
-        } catch {
-          /* ignore */
-        }
-      };
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data as string);
-          if (payload && typeof payload === "object" && payload.type === "ping") {
-            ws?.send(JSON.stringify({ type: "pong", planId: planRef.current, ts: Date.now() }));
-            return;
-          }
-          onDelta(payload);
-        } catch {
-          // ignore malformed payloads
-        }
-      };
-      ws.onerror = scheduleReconnect;
-      ws.onclose = scheduleReconnect;
-    }
-
-    connect();
-
-    return () => {
-      closed = true;
-      if (retryTimer != null) window.clearTimeout(retryTimer);
-      ws?.close();
+      if (!heartbeat) {
+        setDerivedStatus(status);
+        return;
+      }
+      const age = Date.now() - heartbeat;
+      if (age > 35_000 && status === "connected") {
+        setDerivedStatus("connecting");
+      } else {
+        setDerivedStatus(status);
+      }
     };
-  }, [url, onDelta]);
+    update();
+    if (typeof window === "undefined") return;
+    const timer = window.setInterval(update, 5_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [status, heartbeat]);
 
-  return status;
+  return derivedStatus;
 }

@@ -2,12 +2,19 @@
 
 import * as React from 'react';
 import Link from 'next/link';
+type ScanItem = {
+  id?: string | number | null;
+  planId: string;
+  symbol: string;
+  bias?: string | null;
+  reason?: string | null;
+};
 
 /**
  * Renders scan results exactly in server order.
  * No client-side sorting or fabrication.
  */
-export default function ScanList({ items }: { items: any[] }) {
+export default function ScanList({ items }: { items: ScanItem[] }) {
   if (!items || items.length === 0) {
     return (
       <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4 text-sm text-[var(--muted)]">

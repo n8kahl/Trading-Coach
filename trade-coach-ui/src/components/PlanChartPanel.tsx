@@ -1,11 +1,11 @@
 "use client";
 
 import clsx from "clsx";
-import { useMemo, useRef, useState } from "react";
-import TradingViewChart, { TradingViewChartHandle } from "@/components/TradingViewChart";
-import type { TVBar } from "@/lib/tradingview/datafeed";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import PlanPriceChart, { type ChartOverlayState, type PlanPriceChartHandle } from "@/components/PlanPriceChart";
+import { usePriceSeries } from "@/lib/hooks/usePriceSeries";
 import type { SupportingLevel } from "@/lib/chart";
-import type { PlanLayers, PlanSnapshot } from "@/lib/types";
+import type { PlanLayers, PlanSnapshot, TargetMetaEntry } from "@/lib/types";
 
 type TimeframeOption = {
   value: string;
@@ -29,6 +29,7 @@ type PlanChartPanelProps = {
   onReplayStateChange?: (state: "idle" | "playing") => void;
   devMode?: boolean;
   theme: "dark" | "light";
+  priceRefreshToken?: number;
 };
 
 function extractExecutionRule(plan: PlanSnapshot["plan"], key: string): string | null {
@@ -56,8 +57,9 @@ export default function PlanChartPanel({
   onReplayStateChange,
   devMode = false,
   theme,
+  priceRefreshToken = 0,
 }: PlanChartPanelProps) {
-  const chartHandle = useRef<TradingViewChartHandle | null>(null);
+  const chartHandle = useRef<PlanPriceChartHandle | null>(null);
   const [replayActive, setReplayActive] = useState(false);
 
   const symbol = plan.symbol?.toUpperCase() ?? "—";
@@ -70,6 +72,7 @@ export default function PlanChartPanel({
   const planAsOf = plan.session_state?.as_of ?? layers?.as_of ?? null;
   const planVersion = plan.version ?? (plan as Record<string, unknown>).version ?? null;
   const planId = plan.plan_id;
+  const priceSymbol = plan.symbol ? plan.symbol.toUpperCase() : null;
 
   const filteredLayers = useMemo(() => {
     if (!layers) return null;
@@ -91,9 +94,149 @@ export default function PlanChartPanel({
     return { ...layers, levels: filteredLevels };
   }, [layers, supportingVisible]);
 
+  const chartParams = useMemo(() => {
+    const fromCharts = plan.charts?.params;
+    const candidate =
+      (fromCharts && typeof fromCharts === "object" ? fromCharts : null) ??
+      (plan.charts_params && typeof plan.charts_params === "object" ? plan.charts_params : null);
+    if (!candidate) return {};
+    return { ...(candidate as Record<string, unknown>) };
+  }, [plan.charts?.params, plan.charts_params]);
+
+  const structuredPlan = plan.structured_plan ?? null;
+
+  const parseNumeric = (value: unknown): number | null => {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number.parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  };
+
+  const targetMeta = useMemo(
+    () => (Array.isArray(plan.target_meta) ? (plan.target_meta as TargetMetaEntry[]) : []),
+    [plan.target_meta],
+  );
+
+  const overlayTargets = useMemo(() => {
+    const planTargets =
+      Array.isArray(plan.targets) && plan.targets.length
+        ? plan.targets
+        : Array.isArray(structuredPlan?.targets)
+          ? structuredPlan.targets
+          : [];
+    return planTargets
+      .map((value, index) => {
+        const numeric = parseNumeric(value);
+        if (numeric == null) return null;
+        const meta = targetMeta[index];
+        return { price: numeric, label: meta?.label ?? `TP${index + 1}` };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  }, [plan.targets, structuredPlan?.targets, targetMeta]);
+
+  const emaPeriods = useMemo(() => {
+    const raw = chartParams["ema"] ?? chartParams["emas"] ?? chartParams["emaPeriods"];
+    if (!raw) return [];
+    if (Array.isArray(raw)) {
+      return raw
+        .map((value) => parseNumeric(value))
+        .filter((value): value is number => value != null && value > 1)
+        .map((value) => Math.round(value));
+    }
+    if (typeof raw === "string") {
+      return raw
+        .split(",")
+        .map((token) => parseNumeric(token.trim()))
+        .filter((value): value is number => value != null && value > 1)
+        .map((value) => Math.round(value));
+    }
+    const numeric = parseNumeric(raw);
+    return numeric != null && numeric > 1 ? [Math.round(numeric)] : [];
+  }, [chartParams]);
+
+  const showVWAP = useMemo(() => {
+    const raw = chartParams["vwap"] ?? chartParams["showVWAP"];
+    if (raw == null) return true;
+    if (typeof raw === "boolean") return raw;
+    if (typeof raw === "number") return raw !== 0;
+    if (typeof raw === "string") {
+      const token = raw.trim().toLowerCase();
+      if (token === "0" || token === "false" || token === "off") return false;
+      if (token === "1" || token === "true" || token === "on") return true;
+    }
+    return true;
+  }, [chartParams]);
+
+  const entryPrice = useMemo(() => {
+    const fromPlan = parseNumeric(plan.entry);
+    if (fromPlan != null) return fromPlan;
+    const structuredEntry = parseNumeric(structuredPlan?.entry?.level);
+    if (structuredEntry != null) return structuredEntry;
+    return parseNumeric(chartParams["entry"]);
+  }, [plan.entry, structuredPlan?.entry?.level, chartParams]);
+
+  const stopPrice = useMemo(() => {
+    const fromPlan = parseNumeric(plan.stop);
+    if (fromPlan != null) return fromPlan;
+    const structuredStop = parseNumeric(structuredPlan?.stop);
+    if (structuredStop != null) return structuredStop;
+    return parseNumeric(chartParams["stop"]);
+  }, [plan.stop, structuredPlan?.stop, chartParams]);
+
+  const trailingStop = useMemo(() => {
+    const direct = parseNumeric((plan as Record<string, unknown>).trailing_stop);
+    if (direct != null) return direct;
+    const details = (plan as Record<string, unknown>).details;
+    if (details && typeof details === "object") {
+      const detailStop = parseNumeric((details as Record<string, unknown>).stop);
+      if (detailStop != null) return detailStop;
+    }
+    const altTrail = parseNumeric((plan as Record<string, unknown>).trail_stop);
+    if (altTrail != null) return altTrail;
+    return (
+      parseNumeric(chartParams["trailingStop"]) ??
+      parseNumeric(chartParams["trailing_stop"]) ??
+      parseNumeric(chartParams["trail_stop"]) ??
+      parseNumeric(chartParams["trail"])
+    );
+  }, [plan, chartParams]);
+
+  const chartOverlays = useMemo<ChartOverlayState>(
+    () => ({
+      entry: entryPrice,
+      stop: stopPrice,
+      trailingStop,
+      targets: overlayTargets,
+      emaPeriods,
+      showVWAP,
+      layers: (filteredLayers ?? layers) ?? null,
+    }),
+    [entryPrice, stopPrice, trailingStop, overlayTargets, emaPeriods, showVWAP, filteredLayers, layers],
+  );
+
+  const {
+    bars: priceBars,
+    status: priceStatus,
+    error: priceError,
+    reload: reloadPriceSeries,
+  } = usePriceSeries(priceSymbol, timeframe, [planId, priceRefreshToken]);
+
+  useEffect(() => {
+    if (priceStatus === "ready" && followLive) {
+      chartHandle.current?.followLive();
+    }
+  }, [priceStatus, followLive]);
+
+  useEffect(() => {
+    if (followLive) {
+      chartHandle.current?.followLive();
+    }
+  }, [followLive]);
+
   const handleResolution = (value: string) => {
     onSelectTimeframe(value);
-    chartHandle.current?.setResolution(value);
     if (replayActive) {
       chartHandle.current?.stopReplay();
       setReplayActive(false);
@@ -140,25 +283,34 @@ export default function PlanChartPanel({
     chartHandle.current?.refreshOverlays();
   };
 
-  const handleBarsLoaded = (bars: TVBar[]) => {
-    if (!bars.length) {
-      onLastBarTimeChange(null);
-      return;
-    }
-    const lastTime = bars[bars.length - 1]?.time ?? null;
-    onLastBarTimeChange(lastTime);
-    if (followLive && lastTime != null) {
-      chartHandle.current?.followLive();
-    }
-  };
+  const handleLatestBarTime = useCallback(
+    (time: number | null) => {
+      onLastBarTimeChange(time);
+      if (followLive && time != null) {
+        chartHandle.current?.followLive();
+      }
+    },
+    [followLive, onLastBarTimeChange],
+  );
 
-  const handleRealtimeBar = (bar: TVBar) => {
-    const barTime = bar?.time ?? null;
-    onLastBarTimeChange(barTime);
-    if (followLive && barTime != null) {
-      chartHandle.current?.followLive();
-    }
-  };
+  const chartStatusMessage = useMemo(() => {
+    if (priceStatus === "loading") return "Loading price data…";
+    if (priceStatus === "error") return priceError?.message ?? "Price data unavailable";
+    if (priceStatus === "ready" && priceBars.length === 0) return "No market data available";
+    if (priceStatus === "idle" && !priceSymbol) return "Awaiting symbol…";
+    return null;
+  }, [priceStatus, priceError, priceBars.length, priceSymbol]);
+
+  useEffect(() => {
+    if (!priceSymbol || !streamingEnabled) return;
+    if (typeof window === "undefined") return;
+    const interval = window.setInterval(() => {
+      reloadPriceSeries();
+    }, 60_000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [priceSymbol, timeframe, reloadPriceSeries, streamingEnabled]);
 
   return (
     <div className="flex h-full flex-col gap-6">
@@ -245,16 +397,21 @@ export default function PlanChartPanel({
       </section>
 
       <section className="relative min-h-[360px] overflow-hidden rounded-3xl border border-neutral-800/70 bg-neutral-950/40 p-2">
-        <TradingViewChart
+        {chartStatusMessage ? (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-neutral-950/70 text-sm text-neutral-300">
+            {chartStatusMessage}
+          </div>
+        ) : null}
+        <PlanPriceChart
           ref={chartHandle}
-          symbol={symbol}
           planId={planId}
+          symbol={symbol}
           resolution={timeframe}
-          planLayers={filteredLayers}
           theme={theme}
+          data={priceBars}
+          overlays={chartOverlays}
+          onLastBarTimeChange={handleLatestBarTime}
           devMode={devMode}
-          onBarsLoaded={handleBarsLoaded}
-          onRealtimeBar={handleRealtimeBar}
         />
       </section>
 

@@ -18,9 +18,9 @@ This document captures what is live, where the sharp edges are, and the near-ter
   - `/gpt/multi-context` bundles several intervals into one response and appends a volatility regime block (ATM IV, IV rank/percentile, HV20/60/120, IV↔HV ratio). Results are cached for 30 s.
 
 - **Visualisation**
-  - `/gpt/chart-url` normalises chart params and returns a `/tv` link. It supports plan rescaling (`scale_plan`), labelled EMAs, white VWAP, entry/stop/TP lines, and overlay bands (supply/demand, liquidity pools, FVGs, anchored VWAPs).
-  - `/tv` serves TradingView Advanced Charts when bundled; otherwise, a Lightweight Charts fallback renders all overlays and plan labels. Autoscale + plan rescale keep old plans visible.
-  - `/tv-api/*` fetches bars from Polygon with a Yahoo fallback and logs window choices for debugging.
+  - `/gpt/chart-url` now returns canonical `/chart` links that the Next.js console consumes (plan id + version baked into the query string).
+  - The `/plan` console uses Lightweight Charts exclusively—plan overlays (entry, stop, trailing stop, targets, supporting levels/zones) render client-side without the Legacy TradingView widget.
+  - `/tv-api/*` fetches bars from Polygon with a Yahoo fallback and logs window choices for debugging; the console polls this endpoint via `usePriceSeries`.
 
 - **Options & contracts**
   - `/gpt/contracts` ranks Tradier option chains using liquidity gates (spread, Δ window, DTE, OI) and computes scenario P/L with plan anchors. `risk_amount` (or legacy `max_price`) only informs projections—no contract is filtered for being “too expensive.”
@@ -36,7 +36,7 @@ This document captures what is live, where the sharp edges are, and the near-ter
 ### 1.2 Recent enhancements (Oct 2025)
 
 - Replaced the stubbed scanner with plan-aware detectors and confidence scoring.
-- Added overlay parsing/rendering in `/tv` (supply/demand bands, liquidity pools, FVGs, AVWAP).
+- Migrated the plan console to Lightweight Charts (entry/stop/targets/supporting overlays rendered directly; replay + follow-live stabilised).
 - Introduced `/gpt/multi-context` with caching and volatility regime metrics.
 - Rebuilt `/gpt/contracts` with liquidity gates, scenario P/L, and tradeability scoring that ignores budget caps.
 - Hardened IV metric calculations (safe `delta` coercion, better ATM IV detection).
@@ -122,7 +122,7 @@ This document captures what is live, where the sharp edges are, and the near-ter
   - `src/scanner.py` + `src/strategy_library.py` – Strategy logic and metadata.  
   - `src/context_overlays.py` – Supply/demand, liquidity pools, FVGs, anchored VWAP calculations.  
   - `src/tradier.py` – Option chain/quote fetchers with caching.  
-  - `static/tv/` – Lightweight Charts renderer and TradingView bootstrap code.
+  - `trade-coach-ui/src/components/PlanPriceChart.tsx` – Lightweight Charts renderer used by the console (candles, overlays, replay mode).
 
 - **Docs**  
   - `README.md` – Onboarding, architecture, troubleshooting.  
@@ -171,7 +171,7 @@ Happy shipping!
 Use this when promoting to production:
 
 - [ ] Merge to `main`; CI green
-- [ ] Bump TV bundle query param in `static/tv/index.html` (forces clients to fetch latest JS)
+- [ ] Ensure Next.js client bundle hashes change on deploy (prevents stale chart assets during rollouts)
 - [ ] Deploy to Railway; confirm `/healthz` OK
 - [ ] Smoke test:
   - [ ] `/gpt/scan` returns candidates for `[AAPL, MSFT, TSLA]`
@@ -206,19 +206,19 @@ Use this when promoting to production:
 #### Immediate fix plan – streaming UI, auto-replan, and Tradier noise (Oct 2025)
 
 1. **Streaming status & chart updates**
-   - Code to review: `static/tv/tradingview-init.js` (header clock, SSE handlers, `updateRealtimeBar`), `src/agent_server.py` (heartbeat logic in `_stream_generator`, `_publish_stream_event`).
+  - Code to review: `trade-coach-ui/src/app/plan/[planId]/LivePlanClient.tsx` (status strip, token refresh, websocket handling), `src/agent_server.py` (heartbeat logic in `_stream_generator`, `_publish_stream_event`).
    - Replace the multiline warning with a compact `Streaming Data` pill (green/yellow/red) that never resizes the header; keep verbose info in a tooltip. Drive colours from heartbeat age (≤15 s green, ≤60 s yellow, otherwise red) and surface a `Follow Live` toggle so manual panning disables auto-scroll.
    - Ensure heartbeat + tick events update the last bar even on 1 m charts while respecting the user’s scroll choice.
    - Test: mock SSE via `curl -N /stream/{symbol}`; check pill colours, last price, and chart stability with follow-live off/on.
 
 2. **Confluence signals & level hygiene**
-   - Code to review: `src/agent_server.py` (`build_plan_layers`, `_plan_meta_payload`), `static/tv/tradingview-init.js` (confluence mapper, level rendering around `renderPlanPanel`).
+  - Code to review: `src/agent_server.py` (`build_plan_layers`, `_plan_meta_payload`), `trade-coach-ui/src/components/PlanPriceChart.tsx` (overlay rendering, confluence treatments).
    - Always populate `plan_layers.meta` with `confidence_factors`, structured `confluence`, and key feature flags. Map them to up to five labelled dots (MTF alignment, EMA stack, VWAP context, liquidity pools, stats, runner) and show “No confluence signals” when empty.
    - Limit chart labels to priority levels (entry/stop/TP, ORH/L, session highs/lows, VWAP). Provide a “Show more levels” toggle for advanced view.
    - Test with a noisy ticker (IREN) to confirm default view is clean and confluence updates after scenario adoption.
 
 3. **Scenario adoption & plan log UX**
-   - Code to review: `static/tv/tradingview-init.js` (`applyPlanResponse`, new `adoptScenario`), `/ws/plans/{plan_id}` event handling.
+  - Code to review: `trade-coach-ui/src/app/replay/[symbol]/ReplayClient.tsx` (scenario adoption), `/ws/plans/{plan_id}` event handling.
    - On “Adopt This Scenario”, fetch `/idea/{plan_id}`, feed it through `applyPlanResponse`, update URL params, confluence, targets, and the plan log (limit visible entries to five with scroll for history; dedupe duplicate lines). Show a toast on success.
    - Stop auto-scroll during adoption, reset the overlay state, and leave streaming active on the new plan.
    - Test by adopting each scenario type; verify details/log update instantly without page reload.

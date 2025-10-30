@@ -2,6 +2,19 @@
 
 import * as React from 'react';
 
+type PlanSummary = {
+  symbol?: string;
+  style?: string;
+  bias?: string;
+  riskReward?: number | { tp1: number } | null;
+  structure?: string | null;
+  details?: Record<string, unknown> | null;
+  targets?: Array<{ label?: string | null; price?: number | string | null }> | null;
+  checklist?: string[] | null;
+  confluence?: string | null;
+  next?: string | null;
+};
+
 /**
  * Renders a deterministic ladder view for plan numbers.
  * Absolutely no client-side fabrication or re-computation.
@@ -15,18 +28,12 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-export default function PlanSummaryCard({
-  plan,
-  collapsed,
-}: {
-  plan: any; // server-provided plan object; shape unchanged
-  collapsed?: boolean;
-}) {
+export default function PlanSummaryCard({ plan, collapsed }: { plan: PlanSummary; collapsed?: boolean }) {
   const bias = plan?.bias; // 'LONG' | 'SHORT' (from backend)
   const rr = plan?.riskReward; // number or { tp1: number } from backend
   const structure = plan?.structure; // 'INTACT' | 'INVALID'
-  const details = plan?.details || {}; // entry, stop, last, horizon (names from backend)
-  const targets = plan?.targets || []; // [{ label, price }, ...]
+  const details = (plan?.details ?? {}) as Record<string, unknown>; // entry, stop, last, horizon
+  const targets = Array.isArray(plan?.targets) ? plan.targets : []; // [{ label, price }, ...]
 
   return (
     <section
@@ -81,18 +88,20 @@ export default function PlanSummaryCard({
             )}
           </div>
 
-          {targets?.length > 0 && (
+          {targets.length > 0 && (
             <div>
               <h3 className="mb-1 text-sm text-[var(--muted)]">Targets</h3>
               <ul className="grid gap-1 font-mono">
-                {targets.map((t: any, i: number) => (
-                  <li key={`${t.label ?? i}-${t.price}`} className="flex items-center gap-2">
-                    <span className="inline-block w-12 text-xs text-[var(--muted)]">
-                      {t.label ?? `TP${i + 1}`}
-                    </span>
-                    <span>{t.price}</span>
-                  </li>
-                ))}
+                {targets.map((target, i) => {
+                  const label = target?.label ?? `TP${i + 1}`;
+                  const price = target?.price ?? '—';
+                  return (
+                    <li key={`${label ?? i}-${price}`} className="flex items-center gap-2">
+                      <span className="inline-block w-12 text-xs text-[var(--muted)]">{label}</span>
+                      <span>{price}</span>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
