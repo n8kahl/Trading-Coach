@@ -1,7 +1,7 @@
 'use client';
 
 import clsx from "clsx";
-import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { LineData } from "lightweight-charts";
 import WebviewShell from "@/components/webview/WebviewShell";
 import StatusStrip, { type StatusToken } from "@/components/webview/StatusStrip";
@@ -10,6 +10,9 @@ import PlanPanel from "@/components/webview/PlanPanel";
 import ChartContainer from "@/components/webview/ChartContainer";
 import type { PlanDeltaEvent, PlanSnapshot, StructuredPlan, SymbolTickEvent } from "@/lib/types";
 import { API_BASE_URL, WS_BASE_URL } from "@/lib/env";
+import { usePlanSocket } from "@/lib/hooks/usePlanSocket";
+import { useSymbolStream } from "@/lib/hooks/useSymbolStream";
+import { useChartUrl } from "@/lib/hooks/useChartUrl";
 import {
   normalizeChartParams,
   parsePrice,
@@ -43,6 +46,7 @@ type PlanState = {
 };
 
 const MAX_POINTS = 720;
+const NEAR_TICKS = 0.15; // ~15 cents for high-liquidity ETFs; consider making symbol-configurable
 
 function deriveInitialState(snapshot: PlanSnapshot): PlanState {
   const structured = snapshot.plan.structured_plan;
@@ -90,6 +94,9 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
   const wsStartRef = useRef<number | null>(null);
   const analysisStartRef = useRef<number | null>(now());
   const analysisMeasuredRef = useRef(false);
+  const proximityRef = useRef({ tp: false, stop: false });
+  const wsStatusRef = useRef<StatusToken>("connecting");
+  const priceStatusRef = useRef<StatusToken>("connecting");
 
   const plan = initialSnapshot.plan;
   const chartParamsRaw = useMemo(
@@ -106,6 +113,23 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
   const entryLevel = entryFromChart ?? structured?.entry?.level ?? plan.entry ?? null;
   const baseStop = stopFromChart ?? plan.stop ?? structured?.stop ?? null;
   const targets = targetsFromChart.length ? targetsFromChart : structured?.targets ?? plan.targets ?? [];
+  const direction = (structured?.direction ?? plan.bias ?? "long").toString().toLowerCase();
+  const runnerStart =
+    (structured?.runner_policy as Record<string, unknown> | undefined)?.start_after ??
+    (structured?.runner as Record<string, unknown> | undefined)?.start_after ??
+    (Array.isArray(targets) && targets.length ? targets[0] : null);
+
+  const isTrailingActive = useCallback(
+    (last: number | null | undefined): boolean => {
+      if (!Number.isFinite(last as number) || !Number.isFinite(runnerStart as number)) return false;
+      if (direction === "short") return (last as number) <= (runnerStart as number);
+      return (last as number) >= (runnerStart as number);
+    },
+    [direction, runnerStart],
+  );
+
+  const effectiveStop =
+    planState.trailingStop && isTrailingActive(planState.lastPrice) ? planState.trailingStop : baseStop ?? undefined;
 
   useEffect(() => {
     setDataAgeSeconds(computeDataAge(plan.session_state?.as_of));
@@ -124,92 +148,80 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
     const latency = extractPlanLatency(plan);
     if (latency != null) logBudget("plan:initial", latency, 800);
   }, [plan]);
+  const wsUrl = `${WS_BASE_URL}/ws/plans/${encodeURIComponent(planId)}`;
+  const handlePlanDelta = useCallback(
+    (payload: PlanDeltaEvent | null | undefined) => {
+      if (!payload || payload.t !== "plan_delta") return;
+      dispatchPlan(payload.changes);
+      const nextPlan = (payload.changes as Record<string, unknown>).next_plan_id;
+      if (typeof nextPlan === "string" && nextPlan) setNextPlanId(nextPlan);
+      if (payload.changes.note) {
+        setCoachingLog((prev) => [
+          {
+            id: `plan-${payload.changes.timestamp ?? Date.now()}`,
+            timestamp: payload.changes.timestamp ?? new Date().toISOString(),
+            message: payload.changes.note,
+            tone:
+              payload.changes.status === "invalidated" || payload.changes.status === "plan_invalidated" ? "warning" : "neutral",
+          },
+          ...prev.slice(0, 49),
+        ]);
+      }
+    },
+    [dispatchPlan, setCoachingLog, setNextPlanId],
+  );
+  const socketStatus = usePlanSocket(wsUrl, handlePlanDelta);
 
   useEffect(() => {
-    const wsUrl = `${WS_BASE_URL}/ws/plans/${encodeURIComponent(planId)}`;
-    wsStartRef.current = now();
-    const socket = new WebSocket(wsUrl);
+    const nextStatus = socketStatus as StatusToken;
+    if (nextStatus === "connecting") {
+      wsStartRef.current = now();
+    }
+    if (nextStatus === "connected" && wsStartRef.current != null) {
+      const end = now();
+      if (end != null) logBudget("ws:connect", end - wsStartRef.current, 500);
+      wsStartRef.current = null;
+    }
+    setWsStatus(nextStatus);
+    wsStatusRef.current = nextStatus;
+  }, [socketStatus]);
 
-    socket.onopen = () => {
-      setWsStatus("connected");
-      if (wsStartRef.current != null) {
-        const end = now();
-        if (end != null) logBudget("ws:connect", end - wsStartRef.current, 500);
-        wsStartRef.current = null;
-      }
-    };
-    socket.onclose = () => setWsStatus("disconnected");
-    socket.onerror = () => setWsStatus("disconnected");
-
-    socket.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data) as PlanDeltaEvent;
-        if (payload.t !== "plan_delta") return;
-        dispatchPlan(payload.changes);
-        const nextPlan = (payload.changes as Record<string, unknown>).next_plan_id;
-        if (typeof nextPlan === "string" && nextPlan) setNextPlanId(nextPlan);
-        if (payload.changes.note) {
-          setCoachingLog((prev) => [
-            {
-              id: `plan-${payload.changes.timestamp ?? Date.now()}`,
-              timestamp: payload.changes.timestamp ?? new Date().toISOString(),
-              message: payload.changes.note,
-              tone: payload.changes.status === "invalidated" || payload.changes.status === "plan_invalidated" ? "warning" : "neutral",
-            },
-            ...prev.slice(0, 49),
-          ]);
+  const streamUrl = `${API_BASE_URL}/stream/${encodeURIComponent(upperSymbol)}`;
+  const handleSymbolStream = useCallback(
+    (payload: SymbolTickEvent | null | undefined) => {
+      if (!payload) return;
+      if (payload.t === "tick") {
+        if (!analysisMeasuredRef.current && analysisStartRef.current != null) {
+          const end = now();
+          if (end != null) logBudget("analysis:first-tick", end - analysisStartRef.current, 1200);
+          analysisMeasuredRef.current = true;
         }
-      } catch (error) {
-        if (process.env.NODE_ENV !== "production") console.error("plan ws parse error", error);
+        const timestamp = Math.floor(new Date(payload.ts).getTime() / 1000);
+        setPriceSeries((prev) => {
+          const next = [...prev, { time: timestamp, value: payload.p }];
+          if (next.length > MAX_POINTS) next.splice(0, next.length - MAX_POINTS);
+          return next;
+        });
+        dispatchPlan({ last_price: payload.p });
+      } else if (payload.t === "market_status" && payload.note) {
+        setCoachingLog((prev) => [
+          {
+            id: `market-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            message: payload.note,
+            tone: payload.note.toLowerCase().includes("limited") ? "warning" : "neutral",
+          },
+          ...prev.slice(0, 49),
+        ]);
       }
-    };
-
-    return () => {
-      socket.close();
-    };
-  }, [planId]);
+    },
+    [dispatchPlan, setCoachingLog, setPriceSeries],
+  );
+  const symbolStatus = useSymbolStream(streamUrl, handleSymbolStream);
 
   useEffect(() => {
-    if (!upperSymbol) return;
-    const streamUrl = `${API_BASE_URL}/stream/${encodeURIComponent(upperSymbol)}`;
-    const source = new EventSource(streamUrl);
-
-    source.onopen = () => setPriceStatus("connected");
-    source.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data) as SymbolTickEvent;
-        if (payload.t === "tick") {
-          if (!analysisMeasuredRef.current && analysisStartRef.current != null) {
-            const end = now();
-            if (end != null) logBudget("analysis:first-tick", end - analysisStartRef.current, 1200);
-            analysisMeasuredRef.current = true;
-          }
-          const timestamp = Math.floor(new Date(payload.ts).getTime() / 1000);
-          setPriceSeries((prev) => {
-            const next = [...prev, { time: timestamp, value: payload.p }];
-            if (next.length > MAX_POINTS) next.splice(0, next.length - MAX_POINTS);
-            return next;
-          });
-          dispatchPlan({ last_price: payload.p });
-        } else if (payload.t === "market_status") {
-          setCoachingLog((prev) => [
-            {
-              id: `market-${Date.now()}`,
-              timestamp: new Date().toISOString(),
-              message: payload.note,
-              tone: payload.note.toLowerCase().includes("limited") ? "warning" : "neutral",
-            },
-            ...prev.slice(0, 49),
-          ]);
-        }
-      } catch (error) {
-        if (process.env.NODE_ENV !== "production") console.error("symbol stream error", error);
-      }
-    };
-
-    source.onerror = () => {
-      setPriceStatus("disconnected");
-      source.close();
+    const nextStatus = symbolStatus as StatusToken;
+    if (nextStatus === "disconnected" && priceStatusRef.current !== "disconnected" && upperSymbol) {
       setCoachingLog((prev) => [
         {
           id: `symbol-error-${Date.now()}`,
@@ -217,14 +229,35 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
           message: "Price stream unavailable. Check Polygon/Finnhub credentials.",
           tone: "warning",
         },
-        ...prev,
+        ...prev.slice(0, 49),
       ]);
-    };
+    }
+    setPriceStatus(nextStatus);
+    priceStatusRef.current = nextStatus;
+  }, [symbolStatus, upperSymbol]);
 
-    return () => {
-      source.close();
-    };
-  }, [upperSymbol]);
+  useEffect(() => {
+    if (!Number.isFinite(planState.lastPrice as number)) return;
+    const last = planState.lastPrice as number;
+    const tp1 = Array.isArray(targets) && targets.length ? Number(targets[0]) : null;
+    const stopLevel = typeof effectiveStop === "number" ? effectiveStop : null;
+    const tell = (message: string, tone: "positive" | "warning" | "neutral" = "neutral") =>
+      setCoachingLog((prev) => [
+        { id: `coach-${Date.now()}`, timestamp: new Date().toISOString(), message, tone },
+        ...prev.slice(0, 49),
+      ]);
+    const tracker = proximityRef.current;
+    const nearTp = tp1 != null && Math.abs(last - tp1) <= NEAR_TICKS;
+    if (nearTp && !tracker.tp) {
+      tell("TP1 approaching — prepare to scale per rules.", "positive");
+    }
+    tracker.tp = nearTp;
+    const nearStop = stopLevel != null && Math.abs(last - stopLevel) <= NEAR_TICKS;
+    if (nearStop && !tracker.stop) {
+      tell("Stop risk close — tighten or wait for confirmation.", "warning");
+    }
+    tracker.stop = nearStop;
+  }, [planState.lastPrice, effectiveStop, JSON.stringify(targets), setCoachingLog]);
 
   useEffect(() => {
     if (!showSupportingLevels) setHighlightedLevel(null);
@@ -246,7 +279,8 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
     if (window.innerWidth < 1024) setSheetOpen(true);
   }, [highlightedLevel]);
 
-  const interactiveUrl = plan.charts?.interactive ?? plan.chart_url ?? initialSnapshot.chart_url ?? null;
+  const chartLink = useChartUrl(plan);
+  const interactiveUrl = chartLink ?? initialSnapshot.chart_url ?? null;
 
   const handleThemeToggle = useCallback(() => {
     setUiTheme((prev) => (prev === "light" ? "dark" : "light"));
@@ -327,7 +361,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
           priceSeries={priceSeries}
           lastPrice={planState.lastPrice ?? undefined}
           entry={entryLevel ?? undefined}
-          stop={planState.trailingStop ?? baseStop ?? undefined}
+          stop={effectiveStop}
           trailingStop={planState.trailingStop ?? undefined}
           targets={targets}
           supportingLevels={supportingLevels}
