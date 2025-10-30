@@ -240,6 +240,12 @@ export default function PlanChartPanel({
   } = usePriceSeries(priceSymbol, timeframe, [planId, priceRefreshToken]);
 
   useEffect(() => {
+    if (!devMode) return;
+    // eslint-disable-next-line no-console
+    console.debug("[PlanChartPanel] bars", { symbol: priceSymbol, timeframe, count: priceBars.length });
+  }, [devMode, priceBars.length, priceSymbol, timeframe]);
+
+  useEffect(() => {
     if (priceStatus === "ready" && followLive) {
       chartHandle.current?.followLive();
     }
@@ -305,8 +311,12 @@ export default function PlanChartPanel({
       if (followLive && time != null) {
         chartHandle.current?.followLive();
       }
+      if (devMode) {
+        // eslint-disable-next-line no-console
+        console.debug("[PlanChartPanel] lastBarTime", { time });
+      }
     },
-    [followLive, onLastBarTimeChange],
+    [followLive, onLastBarTimeChange, devMode],
   );
 
   const chartStatusMessage = useMemo(() => {

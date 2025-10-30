@@ -222,6 +222,10 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         });
         resizeObserverRef.current.observe(containerRef.current);
         setChartReady(true);
+        if (devMode) {
+          // eslint-disable-next-line no-console
+          console.debug("[PlanPriceChart] chart ready", { symbol, planId });
+        }
       })().catch((error) => {
         if (devMode) {
           console.error("[PlanPriceChart] chart init failed", error);
@@ -296,6 +300,13 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       }));
 
       candleSeries.setData(candles);
+      if (devMode) {
+        const n = candles.length;
+        const first = n ? Number(candles[0].time) : null;
+        const last = n ? Number(candles[n - 1].time) : null;
+        // eslint-disable-next-line no-console
+        console.debug("[PlanPriceChart] setData", { count: n, first, last });
+      }
 
       const volumes: HistogramData[] = data.map((bar) => ({
         time: bar.time as Time,
@@ -309,6 +320,10 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         const lastMs = Number(last.time) * 1000;
         lastBarTimeRef.current = Number.isFinite(lastMs) ? lastMs : null;
         onLastBarTimeChange?.(lastBarTimeRef.current);
+        if (devMode) {
+          // eslint-disable-next-line no-console
+          console.debug("[PlanPriceChart] last bar", { ms: lastBarTimeRef.current });
+        }
       } else {
         lastBarTimeRef.current = null;
         onLastBarTimeChange?.(null);
@@ -330,6 +345,10 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
             chartRef.current?.timeScale().setVisibleRange({ from, to: lastTime });
           } catch {
             // noop
+          }
+          if (devMode) {
+            // eslint-disable-next-line no-console
+            console.debug("[PlanPriceChart] keep anchored", { from, to: lastTime });
           }
         }
       }
@@ -510,6 +529,10 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         }
       }
       // Do not call scrollToRealTime() here; see note above about closed markets.
+      if (devMode) {
+        // eslint-disable-next-line no-console
+        console.debug("[PlanPriceChart] followLive", { from, to: lastTime, lookbackSeconds });
+      }
     }, [data, devMode, stopReplay]);
 
     const startReplay = useCallback(() => {
