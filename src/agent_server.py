@@ -12089,6 +12089,13 @@ async def gpt_plan(
                 "plan_version": str(version),
             },
         )
+        # If PUBLIC_UI_HOST is set, tag ui=1 so /tv can redirect to UI
+        try:
+            import os as _os
+            if (_os.getenv("PUBLIC_UI_HOST") or "").strip():
+                chart_url_value = _append_query_params(chart_url_value, {"ui": "1"})
+        except Exception:
+            pass
         if is_plan_live:
             live_param_stamp = live_stamp_payload or chart_params_payload.get("last_update") if chart_params_payload else None
             if not live_param_stamp:
