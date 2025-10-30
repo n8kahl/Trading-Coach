@@ -1,5 +1,9 @@
 # `/tv` Plan Viewer Data Flow
 
+> **Deprecated**: the `/tv` route has been retired. The active console architecture is
+> documented in [`console_data_flow.md`](console_data_flow.md). This file remains for
+> historical reference only.
+
 This note traces how a canonical plan URL such as
 
 ```

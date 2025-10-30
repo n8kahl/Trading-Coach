@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useReducer, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import PriceChart from '@/components/PriceChart';
 import { API_BASE_URL, WS_BASE_URL } from '@/lib/env';
@@ -25,7 +25,7 @@ type LiveState = {
 
 function deriveInitialLive(snapshot: PlanSnapshot | null, planId: string | null): LiveState {
   const plan = snapshot?.plan;
-  const structured = plan?.structured_plan as any;
+  const structured = plan?.structured_plan ?? null;
   const entry = structured?.entry?.level ?? plan?.entry ?? null;
   const stop = plan?.stop ?? structured?.stop ?? null;
   const targets = structured?.targets?.length ? structured.targets : plan?.targets ?? [];

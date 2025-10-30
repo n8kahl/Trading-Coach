@@ -1,6 +1,7 @@
 "use client";
 import Link from 'next/link';
 import clsx from 'clsx';
+import { PUBLIC_UI_BASE_URL } from '@/lib/env';
 
 type PlanHeaderProps = {
   planId: string;
@@ -9,7 +10,8 @@ type PlanHeaderProps = {
 };
 
 export default function PlanHeader({ planId, uiUrl, theme = 'dark' }: PlanHeaderProps) {
-  const uiHref = uiUrl || `/plan/${encodeURIComponent(planId)}`;
+  const fallbackHref = `${PUBLIC_UI_BASE_URL}/plan/${encodeURIComponent(planId)}`;
+  const uiHref = uiUrl && uiUrl.trim() ? uiUrl : fallbackHref;
   const buttonClass = clsx(
     'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400',
     theme === 'light'

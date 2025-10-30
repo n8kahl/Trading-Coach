@@ -269,8 +269,11 @@ export default function PlanDetail({ plan, structured, planId }: PlanDetailProps
   const badges = plan.badges ?? structured?.badges ?? [];
   const strategyProfile = (plan.strategy_profile ?? structured?.strategy_profile) as StrategyProfile | undefined;
   const expectedDuration = (plan.expected_duration ?? structured?.expected_duration) as ExpectedDuration | undefined;
-  const riskBlock = (plan.risk_block ?? (structured as any)?.risk_block) as Record<string, unknown> | undefined;
-  const executionRules = (plan.execution_rules ?? (structured as any)?.execution_rules) as Record<string, unknown> | undefined;
+  const structuredRecord = structured && typeof structured === 'object' ? (structured as Record<string, unknown>) : null;
+  const riskBlock = (plan.risk_block as Record<string, unknown> | undefined) ?? (structuredRecord?.risk_block as Record<string, unknown> | undefined);
+  const executionRules =
+    (plan.execution_rules as Record<string, unknown> | undefined) ??
+    (structuredRecord?.execution_rules as Record<string, unknown> | undefined);
   const sourcePaths = (plan.source_paths ?? {}) as Record<string, string>;
   const optionsContracts = Array.isArray(plan.options_contracts) ? plan.options_contracts : [];
   const rejectedContracts = Array.isArray(plan.rejected_contracts) ? plan.rejected_contracts : [];

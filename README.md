@@ -30,7 +30,7 @@ See `docs/production_readiness.md` for scope, validation checks, and verificatio
 | `POST /gpt/chart-url` | Return a canonical `/chart` link (symbol, price targets, plan metadata only). | Canonicalises params; no session/market keys or inline levels when `FF_CHART_CANONICAL_V1=1`. |
 | `GET /api/v1/gpt/chart-layers` | Fetch plan-bound levels/zones/annotations for a given `plan_id`. | Drives overlays for `/chart`; layers persisted with each generated plan. |
 
-Support routes: `/tv-api/*` (TradingView datafeed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html` (static renderer), `/api/v1/gpt/chart-layers` (plan overlays).
+Support routes: `/tv-api/*` (Lightweight Charts OHLC feed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html` (static renderer), `/api/v1/gpt/chart-layers` (plan overlays).
 
 Scan responses expose additional actionability metrics (`entry_distance_pct`, `entry_distance_atr`, `bars_to_trigger`, `actionable_soon`) so clients can prioritise nearer-term setups.
 
@@ -113,8 +113,6 @@ Legacy clients can keep their payloads unchanged and simply add `X-Simulate-Open
     ├── calculations.py      # Indicator utilities (EMA/ATR/VWAP/ADX…)
     └── config.py            # Settings loader (env vars, caching)
 ```
-
-Legacy static assets for the retired `/tv` viewer remain in `static/tv/`.
 
 ---
 
@@ -274,7 +272,7 @@ See `docs/gpt_integration.md` for full schemas and sample payloads.
 | `/gpt/contracts` returns empty `best` | Liquidity filters removed everything. The service widens Δ by ±0.05 and DTE by ±2 once each; if it still returns empty there genuinely isn’t a liquid contract under the constraints. |
 | Chart missing plan bands | Ensure you pass `entry`, `stop`, and `tp` (comma separated) when calling `/gpt/chart-url`. The GPT should forward the plan payload (including `plan_id`) from `/gpt/scan`. |
 | Plan URLs stop working after restart | Configure `DB_URL`/`DATABASE_URL` with your Railway Postgres connection so plan/idea snapshots persist across deploys; otherwise the in-memory cache resets. |
-| `/chart` renders a blank chart | Confirm you are using the canonical link emitted by `/gpt/plan` (includes `plan_id` + `plan_version`) and review the viewer data flow in `docs/tv_data_flow.md`. Hard-refresh to pull the latest `tradingview-init.js`. |
+| `/chart` renders a blank chart | Confirm you are using the canonical link emitted by `/gpt/plan` (includes `plan_id` + `plan_version`) and review the live console data flow in `docs/console_data_flow.md`. Hard-refresh to invalidate any cached bundle. |
 
 Deployment is currently handled by Railway (`nixpacks.toml` + `Procfile`). Logs will show cache hits (`cached=true`) and option snapshot warnings.
 
@@ -284,7 +282,7 @@ Deployment is currently handled by Railway (`nixpacks.toml` + `Procfile`). Logs 
 
 The detailed progress log and backlog live in [`docs/progress.md`](docs/progress.md). Highlights:
 
-- **Charts:** Add `focus=plan` zooming and upgrade to TradingView overlays once the Advanced bundle is packaged.
+- **Charts:** Lightweight Charts renders entry/stop/target/supporting overlays directly in the console with server-driven `focus=plan` zooming.
 - **Contracts:** Improve IV rank by incorporating historical IV time series; expose skew/term slope.
 - **Scanning:** Persist user watchlists / plan history; expose playbook metadata for GPT explanation generation.
 - **Ops:** Optionally suppress Polygon snapshot warnings when entitlement is missing; consider Redis-based caching for multi-instance deployments.
@@ -298,7 +296,7 @@ Refer to the progress doc for the active TODO list, open questions, and a change
 
 - [`docs/gpt_integration.md`](docs/gpt_integration.md) – API schemas, GPT request examples, and contract/multi-context usage notes.
 - [`docs/progress.md`](docs/progress.md) – Chronological change log, roadmap, operational caveats.
-- [`static/tv/`](static/tv/) – Fallback chart renderer assets.
+- [`docs/console_data_flow.md`](docs/console_data_flow.md) – Trader console architecture, data fetching, overlays, and WebSocket behaviour.
 - [`tests/`](tests/) – Current unit test coverage.
 
 Happy building—and trade responsibly.

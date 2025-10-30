@@ -15,6 +15,15 @@ const DEFAULT_PUBLIC_BASE =
 
 export const PUBLIC_BASE_URL = DEFAULT_PUBLIC_BASE.replace(/\/$/, "");
 
+const DEFAULT_UI_BASE =
+  process.env.NEXT_PUBLIC_UI_BASE_URL ??
+  process.env.PUBLIC_UI_BASE_URL ??
+  process.env.NEXT_PUBLIC_UI_HOST ??
+  process.env.PUBLIC_UI_HOST ??
+  PUBLIC_BASE_URL;
+
+export const PUBLIC_UI_BASE_URL = DEFAULT_UI_BASE.replace(/\/$/, "");
+
 export function withAuthHeaders(headers: HeadersInit = {}): HeadersInit {
   if (!API_KEY_HEADER) {
     return headers;

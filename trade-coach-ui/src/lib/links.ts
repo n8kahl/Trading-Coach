@@ -1,8 +1,10 @@
+import { PUBLIC_UI_BASE_URL } from "@/lib/env";
+
 export function buildUiPlanLink(planId: string): string {
-  const base = (process.env.NEXT_PUBLIC_UI_HOST || '').replace(/\/+$/, '');
-  return `${base}/plan/${encodeURIComponent(planId)}`;
+  return `${PUBLIC_UI_BASE_URL}/plan/${encodeURIComponent(planId)}`;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function buildTvLinkFromPlan(plan: any): string | null {
   const interactive = plan?.charts?.interactive || plan?.chart?.interactive || plan?.chart_url || null;
   if (typeof interactive === 'string' && interactive) return interactive;

@@ -56,7 +56,7 @@ No backwards compatibility is required for historical plans or query parameters.
 * Return persisted `plan_layers`; if missing and flag ON, raise 404 (since we do not support reconstruction).
 
 ### 5. `/tv` Client Updates
-* Parse `plan_id` in `static/tv` (vanilla JS) and/or Next.js front-end (trade-coach-ui).
+* Parse `plan_id` in the Next.js front-end (trade-coach-ui) so deeper links remain canonical.
 * When flag ON and `plan_id` exists:
   - Fetch `/api/v1/gpt/chart-layers` and render overlays.
   - Ignore unknown query params; base charts still use canonical fields.
