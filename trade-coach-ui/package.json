@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@heroicons/react": "^2.2.0",
     "clsx": "^2.1.1",
     "lightweight-charts": "^5.0.9",
     "next": "15.5.5",
@@ -19,16 +20,16 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
+    "@testing-library/jest-dom": "^6.5.0",
+    "@testing-library/react": "^16.0.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "15.5.5",
+    "jsdom": "^24.0.0",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "@testing-library/react": "^16.0.0",
-    "@testing-library/jest-dom": "^6.5.0",
-    "jsdom": "^24.0.0",
     "vitest": "^1.6.0",
     "whatwg-fetch": "^3.6.20"
   }
