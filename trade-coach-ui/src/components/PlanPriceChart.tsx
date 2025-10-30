@@ -333,12 +333,13 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     }, []);
 
     useEffect(() => {
-      const lib = chartLibRef.current;
-      const chart = chartRef.current;
+      const lib = chartLibRef.current as any;
+      const chart = chartRef.current as any;
       if (!chart || !lib) return;
+      const layoutColorType = typeof lib?.ColorType?.Solid === "string" ? lib.ColorType.Solid : "solid";
       chart.applyOptions({
         layout: {
-          background: { type: lib.ColorType.Solid, color: theme === "light" ? SURFACE_LIGHT : SURFACE_DARK },
+          background: { type: layoutColorType, color: theme === "light" ? SURFACE_LIGHT : SURFACE_DARK },
           textColor: theme === "light" ? TEXT_LIGHT : TEXT_DARK,
         },
         grid: {
