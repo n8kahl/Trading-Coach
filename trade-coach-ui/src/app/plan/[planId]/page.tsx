@@ -5,12 +5,16 @@ import { fetchPlanSnapshot } from "@/lib/api";
 import type { PlanSnapshot } from "@/lib/types";
 import LivePlanClient from "./LivePlanClient";
 
+type PlanPageParams = {
+  planId: string;
+};
+
 type PlanPageProps = {
-  params: Promise<{ planId: string }>;
+  params: PlanPageParams;
 };
 
 export async function generateMetadata({ params }: PlanPageProps): Promise<Metadata> {
-  const { planId } = await params;
+  const { planId } = params;
   let plan: PlanSnapshot | null = null;
   try {
     const maybe = parsePlanIdFromMaybeUrl(planId);
@@ -34,7 +38,7 @@ export async function generateMetadata({ params }: PlanPageProps): Promise<Metad
 }
 
 export default async function PlanPage({ params }: PlanPageProps) {
-  const { planId } = await params;
+  const { planId } = params;
   const maybe = parsePlanIdFromMaybeUrl(planId);
   if (maybe && maybe !== planId) redirect(`/plan/${encodeURIComponent(maybe)}`);
   let snapshot: PlanSnapshot;
@@ -58,3 +62,5 @@ export default async function PlanPage({ params }: PlanPageProps) {
     />
   );
 }
+
+export const dynamic = "force-dynamic";
