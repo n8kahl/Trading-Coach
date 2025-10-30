@@ -112,8 +112,8 @@ async def test_generate_plan_extended_adds_session(monkeypatch: pytest.MonkeyPat
     assert plan["use_extended_hours"] is True
     assert plan["charts"]["params"]["session"] == "extended"
     assert plan["charts"]["params"]["range"] == "5d"
-    assert plan["charts"]["params"]["supportingLevels"] == "1"
-    assert isinstance(plan["charts"]["params"].get("levels"), str) and plan["charts"]["params"]["levels"]
+    assert "supportingLevels" not in plan["charts"]["params"]
+    assert "levels" not in plan["charts"]["params"]
     assert plan["charts"]["interactive"] == plan["chart_url"]
     ui_state_raw = plan["charts"]["params"]["ui_state"]
     parsed_state = json.loads(ui_state_raw)

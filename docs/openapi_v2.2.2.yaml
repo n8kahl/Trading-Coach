@@ -93,7 +93,7 @@ paths:
                     type: string
                     format: uri
                     example: >-
-                      https://trading-coach-production.up.railway.app/tv?center_time=latest&direction=long&ema=9,20,50&entry=251.4&focus=plan&interval=5m&levels=251.00|ORH;249.60|ORL&plan_id=TSLA-2025-10-15T153000-1&plan_version=1&range=1d&scale_plan=auto&stop=249.8&supportingLevels=1&symbol=TSLA&theme=dark&tp=253.0,254.2,255.6&ui_state=%7B%22confidence%22:0.74,%22session%22:%22live%22,%22style%22:%22intraday%22%7D&view=1D
+                      https://trading-coach-production.up.railway.app/tv?center_time=latest&direction=long&ema=9,20,50&entry=251.4&focus=plan&interval=5m&plan_id=TSLA-2025-10-15T153000-1&plan_version=1&range=1d&scale_plan=auto&stop=249.8&symbol=TSLA&theme=dark&tp=253.0,254.2,255.6&ui_state=%7B%22confidence%22:0.74,%22session%22:%22live%22,%22style%22:%22intraday%22%7D&view=1D
         '400': { description: Validation error (unknown keys or bad types) }
 
   /api/v1/gpt/chart-layers:
@@ -269,17 +269,6 @@ components:
           enum: [extended]
           nullable: true
           description: Optional hint for chart builders to highlight extended hours.
-        levels:
-          type: string
-          nullable: true
-          description: >
-            Semicolon-delimited `price|label` tokens (e.g. `429.5|ORH;427.1|VAH`)
-            that render as supporting levels on the chart.
-        supportingLevels:
-          type: string
-          enum: ["0", "1"]
-          default: "1"
-          description: Toggle for supporting level visibility. `1` keeps grey guide levels on by default.
         ui_state:
           type: string
           description: JSON blob describing session/style/confidence, e.g. `{"session":"live","confidence":0.72,"style":"intraday"}`.
@@ -783,8 +772,6 @@ components:
                 entry: { type: number, format: double }
                 stop: { type: number, format: double }
                 tp: { type: string, description: "Comma-delimited targets." }
-                levels: { type: string, description: "Semicolon-delimited price|label tokens." }
-                supportingLevels: { type: string, enum: ["0", "1"] }
                 ui_state:
                   type: string
                   description: '{"session":"live|premkt|after","confidence":0-1,"style":"intraday|scalp|swing"}'
@@ -1005,8 +992,6 @@ components:
             entry: "188.42"
             stop: "185.90"
             tp: "189.80,191.20,192.40"
-            levels: "189.20|PDH;185.90|ORL"
-            supportingLevels: "1"
             ui_state: '{"session":"live","confidence":0.78,"style":"intraday"}'
           interactive: "https://trading-coach-production.up.railway.app/tv?...&symbol=AAPL"
         options_contracts: []

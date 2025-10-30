@@ -43,15 +43,6 @@ function clampToFinite(value: number | undefined | null): number | null {
   return Number(value);
 }
 
-function encodeLevels(levels: Record<string, number> | undefined): string | undefined {
-  if (!levels) return undefined;
-  const entries = Object.entries(levels)
-    .filter(([, value]) => Number.isFinite(value))
-    .sort(([a], [b]) => a.localeCompare(b));
-  if (!entries.length) return undefined;
-  return entries.map(([label, value]) => `${value}|${label}`).join(";");
-}
-
 function computeRiskReward(entry: number | null, stop: number | null, target: number | null, direction: PlanDirection): number | null {
   if (!Number.isFinite(entry) || !Number.isFinite(stop) || !Number.isFinite(target)) {
     return null;
@@ -77,7 +68,6 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
     const stop = clampToFinite(plan.stop);
     const filteredTps = (plan.tps || []).filter((value) => Number.isFinite(value)).map((value) => Number(value));
     const emaSpans = (plan.ema || []).filter((value) => Number.isFinite(value)).map((value) => Math.trunc(Number(value)));
-    const levelsToken = encodeLevels(plan.levels);
     const tpCsv = filteredTps.length ? filteredTps.map((value) => NUMBER_FORMAT.format(value)).join(",") : undefined;
     const emaCsv = emaSpans.length ? emaSpans.join(",") : undefined;
     const centerToken =
@@ -100,10 +90,6 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
       scale_plan: scalePlan,
       theme,
     };
-    if (levelsToken) {
-      body.levels = levelsToken;
-      body.supportingLevels = "1";
-    }
 
     Object.keys(body).forEach((key) => {
       if (body[key] === undefined || body[key] === null || body[key] === "") {
@@ -118,7 +104,6 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
       signature,
       upperSymbol,
       emaSpans,
-      levelsToken,
       entry,
       stop,
       tp1: filteredTps.length ? filteredTps[0] : null,

@@ -228,10 +228,6 @@ async def plan(
         "charts_params": charts_params,
     }
 
-    levels_token = extract_supporting_levels(plan_payload)
-    if levels_token:
-        charts_params["levels"] = levels_token
-        charts_params["supportingLevels"] = "1"
     session_label = infer_session_label(route.as_of)
     style_token = normalize_style_token(plan_payload.get("style"))
     confidence_value = normalize_confidence(plan_payload.get("confidence"))

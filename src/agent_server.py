@@ -1388,7 +1388,6 @@ ALLOWED_CHART_KEYS = {
     "range",
     "theme",
     "studies",
-    "levels",
     "entry",
     "stop",
     "tp",
@@ -2153,7 +2152,6 @@ def _build_stub_chart_url(
     stop: float | None,
     targets: Sequence[float],
     interval: str,
-    levels: Sequence[str] | None = None,
 ) -> str | None:
     if entry is None or stop is None or not targets:
         return None
@@ -2168,8 +2166,6 @@ def _build_stub_chart_url(
         "center_time": "latest",
         "scale_plan": "auto",
     }
-    if levels:
-        params["levels"] = ";".join(levels)
     cache_key = f"chart:{symbol}:{direction}:{params['entry']}:{params['stop']}:{params['tp']}:{interval}"
     return _cached_chart_url(cache_key, lambda: _build_tv_chart_url(request, params))
 
@@ -2291,8 +2287,6 @@ async def _build_scan_stub_candidate(
 
         key_levels = bundle["key_levels"]
         snapshot = bundle["snapshot"]
-        level_labels = [f"{label}|{value:.2f}" for label, value in key_levels.items() if math.isfinite(value)]
-
         plan_id = None
         if plan is not None:
             plan_id = _generate_plan_slug(
@@ -2311,7 +2305,6 @@ async def _build_scan_stub_candidate(
             stop=stop,
             targets=targets,
             interval=_normalize_chart_interval(interval_hint or context.data_timeframe),
-            levels=level_labels if level_labels else None,
         )
 
         planning_snapshot: Dict[str, Any] | None = None
@@ -2708,10 +2701,8 @@ class ChartParams(BaseModel):
     runner: str | None = None
     tp_meta: str | None = None
     view: str | None = None
-    levels: str | None = None
     ema: str | None = None
     session: str | None = None
-    supportingLevels: str | None = None
     force_interval: str | None = None
     style_hint: str | None = None
     ui_state: str | None = None
@@ -6245,9 +6236,6 @@ def _planning_scan_to_page(
                 metrics,
                 {"key_levels_used": key_levels_used_payload} if key_levels_used_payload else {},
             )
-            if supporting_token:
-                chart_params["levels"] = supporting_token
-                chart_params["supportingLevels"] = "1"
             planning_snapshot["chart_params"] = chart_params
             planning_snapshot.setdefault("direction", default_direction)
         elif default_direction:
@@ -8869,10 +8857,6 @@ async def _legacy_scan(
                 level_contexts.append({"plan": signal.plan.as_dict()})
             except Exception:
                 pass
-        levels_token = _extract_levels_for_chart(plan_payload, level_contexts)
-        if levels_token:
-            chart_query["levels"] = levels_token
-        chart_query["supportingLevels"] = "1"
         chart_query["strategy"] = signal.strategy_id
         if plan_id:
             chart_query["plan_id"] = plan_id
@@ -10313,14 +10297,6 @@ async def _generate_fallback_plan(
     chart_params["last_update"] = last_update_iso
     if is_plan_live:
         chart_params["live"] = "1"
-    level_context_for_chart = {
-        "key_levels": {k: v for k, v in levels_map.items() if isinstance(v, (int, float)) and math.isfinite(v)},
-        "key_levels_used": key_levels_used or {},
-    }
-    levels_token = _extract_levels_for_chart(plan, level_context_for_chart)
-    if levels_token:
-        chart_params["levels"] = levels_token
-    chart_params["supportingLevels"] = "1"
     session_label = infer_session_label(as_of_dt)
     options_quote_session = "regular_open" if session_label == "live" else "regular_close"
     options_as_of_timestamp = as_of_dt.isoformat()
@@ -11424,6 +11400,11 @@ async def _generate_fallback_plan(
     plan_response.meta = meta_payload or None
     # Ensure /idea/{plan_id} resolves for this generated plan by storing a minimal snapshot
     try:
+        if plan_response.plan_layers:
+            try:
+                plan_block["plan_layers"] = copy.deepcopy(plan_response.plan_layers)
+            except Exception:
+                plan_block["plan_layers"] = dict(plan_response.plan_layers or {})
         plan_core = dict(plan_block or {})
         plan_core["plan_id"] = plan_id
         plan_core["version"] = 1
@@ -11436,6 +11417,11 @@ async def _generate_fallback_plan(
         if chart_params_payload:
             plan_core["charts_params"] = chart_params_payload
         plan_core["charts"] = charts_payload
+        if plan_response.plan_layers:
+            try:
+                plan_core["plan_layers"] = copy.deepcopy(plan_response.plan_layers)
+            except Exception:
+                plan_core["plan_layers"] = dict(plan_response.plan_layers or {})
         minimal_snapshot = {
             "plan": plan_core,
             "chart_url": chart_url_with_ids,
@@ -15123,8 +15109,6 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
             "theme",
             "plan_id",
             "plan_version",
-            "levels",
-            "supportingLevels",
             "force_interval",
             "ui_state",
         ):
@@ -15168,8 +15152,6 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
     if "strategy" in query:
         query["strategy"] = quote(query["strategy"], safe="|;:,.+-_() ")
-    if "levels" in data and data.get("levels"):
-        query["levels"] = quote(str(data["levels"]), safe="|;:,.+-_() ")
     if "notes" in data and data.get("notes"):
         query["notes"] = quote(str(data["notes"])[:140], safe="|;:,.+-_() ")
 
@@ -15312,19 +15294,6 @@ async def gpt_context(
         response["options"] = polygon_bundle
     plan_block = enhancements.get("plan") if isinstance(enhancements.get("plan"), Mapping) else {}
 
-    level_contexts: list[Mapping[str, Any]] = []
-    if isinstance(key_levels, Mapping) and key_levels:
-        level_contexts.append({"key_levels": key_levels})
-    if isinstance(plan_block, Mapping) and plan_block:
-        level_contexts.append(plan_block)
-        structured_nested = plan_block.get("structured_plan")
-        if isinstance(structured_nested, Mapping):
-            level_contexts.append(structured_nested)
-        target_profile_nested = plan_block.get("target_profile")
-        if isinstance(target_profile_nested, Mapping):
-            level_contexts.append(target_profile_nested)
-    levels_token = _extract_levels_for_chart(plan_block, level_contexts)
-
     chart_params = {
         "symbol": _tv_symbol(symbol),
         "interval": interval_normalized,
@@ -15334,9 +15303,6 @@ async def gpt_context(
         "vwap": "1",
         "theme": "dark",
     }
-    if levels_token:
-        chart_params["levels"] = levels_token
-    chart_params["supportingLevels"] = "1"
     response["charts"] = {"params": {key: str(value) for key, value in chart_params.items()}}
     return response
 

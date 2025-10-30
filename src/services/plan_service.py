@@ -230,10 +230,6 @@ async def generate_plan(
 
     params = charts_container.get("params") if isinstance(charts_container, dict) else None
     raw_params = dict(params) if isinstance(params, dict) else {}
-    levels_token = _extract_levels_for_chart(plan_obj)
-    if levels_token:
-        raw_params["levels"] = levels_token
-        raw_params["supportingLevels"] = "1"
     if route.extended:
         raw_params.setdefault("range", "1d")
         raw_params["session"] = "extended"

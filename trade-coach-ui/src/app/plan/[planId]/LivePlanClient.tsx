@@ -1,17 +1,29 @@
 'use client';
 
 import * as React from 'react';
-import ResponsiveShell from '@/components/ResponsiveShell';
-import StatusBanner from '@/components/StatusBanner';
-import PlanSummaryCard from '@/components/PlanSummaryCard';
+import WebviewShell from '@/components/webview/WebviewShell';
+import StatusStrip, { type StatusToken } from '@/components/webview/StatusStrip';
+import PlanPanel from '@/components/webview/PlanPanel';
 import PlanHeader from '@/components/PlanHeader';
-import ChartContainer from '@/components/webview/ChartContainer';
-import ActionDock from '@/components/ActionDock';
-import type { PlanDeltaEvent, PlanSnapshot } from '@/lib/types';
-import { WS_BASE_URL } from '@/lib/env';
+import PlanChartPanel from '@/components/PlanChartPanel';
 import { usePlanSocket } from '@/lib/hooks/usePlanSocket';
+import { usePlanLayers } from '@/lib/hooks/usePlanLayers';
+import { usePriceSeries } from '@/lib/hooks/usePriceSeries';
 import { useChartUrl } from '@/lib/hooks/useChartUrl';
-import { useLatency } from '@/lib/hooks/useLatency';
+import { extractPrimaryLevels, extractSupportingLevels } from '@/lib/utils/layers';
+import type { SupportingLevel } from '@/lib/chart';
+import type { PlanDeltaEvent, PlanLayers, PlanSnapshot } from '@/lib/types';
+import { WS_BASE_URL } from '@/lib/env';
+
+const TIMEFRAME_OPTIONS = [
+  { value: '1', label: '1m' },
+  { value: '3', label: '3m' },
+  { value: '5', label: '5m' },
+  { value: '15', label: '15m' },
+  { value: '60', label: '1h' },
+  { value: '240', label: '4h' },
+  { value: '1D', label: '1D' },
+];
 
 type LivePlanClientProps = {
   initialSnapshot: PlanSnapshot;
@@ -20,217 +32,244 @@ type LivePlanClientProps = {
 };
 
 export default function LivePlanClient({ initialSnapshot, planId, symbol }: LivePlanClientProps) {
+  const [snapshot, setSnapshot] = React.useState(initialSnapshot);
   const [plan, setPlan] = React.useState(initialSnapshot.plan);
   const [followLive, setFollowLive] = React.useState(true);
   const [streamingEnabled, setStreamingEnabled] = React.useState(true);
   const [supportVisible, setSupportVisible] = React.useState(() => extractSupportVisible(initialSnapshot.plan));
+  const [highlightedLevel, setHighlightedLevel] = React.useState<SupportingLevel | null>(null);
+  const [theme, setTheme] = React.useState<'dark' | 'light'>('dark');
+  const [layerSeed, setLayerSeed] = React.useState<PlanLayers | null>(() => extractInitialLayers(initialSnapshot));
   const [lastUpdateAt, setLastUpdateAt] = React.useState<number | undefined>(() =>
     parseTimestamp(initialSnapshot.plan.session_state?.as_of),
   );
+  const [timeframe, setTimeframe] = React.useState(() => normalizeTimeframeFromPlan(initialSnapshot.plan));
+  const [nowTick, setNowTick] = React.useState(Date.now());
 
-  const chartWrapperRef = React.useRef<HTMLDivElement | null>(null);
+  const activePlanId = plan.plan_id || planId;
+  const chartUrl = useChartUrl(plan as any);
+
+  React.useEffect(() => {
+    const interval = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  const planSocketUrl = React.useMemo(() => `${WS_BASE_URL}/ws/plans/${encodeURIComponent(activePlanId)}`, [activePlanId]);
+
   const streamingEnabledRef = React.useRef(streamingEnabled);
-
   React.useEffect(() => {
     streamingEnabledRef.current = streamingEnabled;
   }, [streamingEnabled]);
 
-  React.useEffect(() => {
-    setPlan(initialSnapshot.plan);
-    setLastUpdateAt(parseTimestamp(initialSnapshot.plan.session_state?.as_of));
-  }, [initialSnapshot]);
+  const { layers } = usePlanLayers(activePlanId, layerSeed);
 
-  const upperSymbol = React.useMemo(() => (symbol ?? plan.symbol ?? '').toUpperCase(), [symbol, plan.symbol]);
-  // Cast to satisfy PlanLike (allows undefined but not null in nested fields)
-  const chartUrl = useChartUrl(plan as any);
-  const latency = useLatency(streamingEnabled ? lastUpdateAt : undefined);
+  const chartParams = React.useMemo(() => {
+    const params = (plan.charts_params as Record<string, unknown> | undefined) ?? (plan.charts?.params as Record<
+      string,
+      unknown
+    > | undefined);
+    return params ?? {};
+  }, [plan.charts?.params, plan.charts_params]);
 
-  const handlePlanDelta = React.useCallback((payload: unknown) => {
-    if (!streamingEnabledRef.current) return;
-    if (!payload || typeof payload !== 'object') return;
-    const event = payload as PlanDeltaEvent;
-    if (event.t !== 'plan_delta') return;
-    setPlan((prev) => mergePlanWithDelta(prev, event));
-    const parsed = parseTimestamp(event.changes.timestamp);
-    setLastUpdateAt(parsed ?? Date.now());
-  }, []);
+  const seriesSymbol = React.useMemo(() => {
+    const token = typeof chartParams.symbol === 'string' ? chartParams.symbol.trim() : '';
+    if (token) return token;
+    return plan.symbol ?? symbol ?? null;
+  }, [chartParams.symbol, plan.symbol, symbol]);
 
-  const planSocketUrl = React.useMemo(() => `${WS_BASE_URL}/ws/plans/${encodeURIComponent(planId)}`, [planId]);
-  const socketStatus = usePlanSocket(planSocketUrl, handlePlanDelta);
-
-  const session = normalizeSession(plan.session_state?.status);
-  const asOfText = React.useMemo(() => formatAsOf(plan.session_state?.as_of), [plan.session_state?.as_of]);
-  const summaryPlan = React.useMemo(() => buildSummaryPlan(plan), [plan]);
-  const streamingInfo = React.useMemo(
-    () => ({
-      connected: streamingEnabled && socketStatus === 'connected',
-      latencyMs: streamingEnabled ? latency.latencyMs : undefined,
-    }),
-    [streamingEnabled, socketStatus, latency.latencyMs],
+  const { series: priceSeries, status: priceSeriesStatus, reload: reloadSeries } = usePriceSeries(
+    seriesSymbol,
+    timeframe,
+    [activePlanId],
   );
 
-  const syncChartSupport = React.useCallback(
-    (visible: boolean) => {
-      if (typeof document === 'undefined') return false;
-      const wrapper = chartWrapperRef.current;
-      if (!wrapper) return false;
-      const toggleBtn = wrapper.querySelector('button[aria-pressed]') as HTMLButtonElement | null;
-      if (!toggleBtn) return false;
-      const current = toggleBtn.getAttribute('aria-pressed') === 'true';
-      if (current === visible) return true;
-      toggleBtn.click();
-      return true;
-    },
-    [],
+  const socketStatus = usePlanSocket(
+    planSocketUrl,
+    React.useCallback(
+      (payload: unknown) => {
+        if (!streamingEnabledRef.current) return;
+        if (!payload || typeof payload !== 'object') return;
+        const message = payload as { plan_id?: string; event?: Record<string, unknown> };
+        const event = message.event;
+        if (!event || typeof event !== 'object') return;
+        const type = typeof event.t === 'string' ? event.t : null;
+        if (!type) return;
+        if (type === 'plan_delta') {
+          const delta = event as unknown as PlanDeltaEvent;
+          setPlan((prev) => mergePlanWithDelta(prev, delta));
+          const ts = parseTimestamp(delta.changes.timestamp);
+          setLastUpdateAt(ts ?? Date.now());
+          return;
+        }
+        if (type === 'plan_full') {
+          const payloadSnapshot = (event as Record<string, unknown>).payload as PlanSnapshot | undefined;
+          if (!payloadSnapshot || !payloadSnapshot.plan) return;
+          setSnapshot(payloadSnapshot);
+          setPlan(payloadSnapshot.plan);
+          setLayerSeed(extractInitialLayers(payloadSnapshot));
+          setLastUpdateAt(parseTimestamp(payloadSnapshot.plan.session_state?.as_of) ?? Date.now());
+          setTimeframe((prev) => {
+            const inferred = normalizeTimeframeFromPlan(payloadSnapshot.plan);
+            return prev || inferred;
+          });
+          reloadSeries();
+          return;
+        }
+        if (type === 'plan_state') {
+          const stateTs = parseTimestamp((event as Record<string, unknown>).timestamp);
+          if (stateTs) setLastUpdateAt(stateTs);
+        }
+      },
+      [reloadSeries],
+    ),
   );
 
-  const handleToggleSupport = React.useCallback(() => {
-    const desired = !supportVisible;
-    const synced = syncChartSupport(desired);
-    if (!synced) {
-      setSupportVisible(desired);
-    }
-  }, [supportVisible, syncChartSupport]);
+  const primaryLevels = React.useMemo(() => extractPrimaryLevels(layers), [layers]);
+  const supportingLevels = React.useMemo(() => extractSupportingLevels(layers), [layers]);
 
-  const handleSupportToggled = React.useCallback((visible: boolean) => {
-    setSupportVisible(visible);
+  const dataAgeSeconds = React.useMemo(() => {
+    if (!lastUpdateAt) return null;
+    return Math.max(0, (nowTick - lastUpdateAt) / 1000);
+  }, [lastUpdateAt, nowTick]);
+
+  const priceStatus: StatusToken = React.useMemo(() => {
+    if (!streamingEnabled) return 'disconnected';
+    return followLive ? 'connected' : 'connecting';
+  }, [followLive, streamingEnabled]);
+
+  const wsStatus = React.useMemo<StatusToken>(() => {
+    if (socketStatus === 'connected') return 'connected';
+    if (socketStatus === 'connecting') return 'connecting';
+    return 'disconnected';
+  }, [socketStatus]);
+
+  const sessionBanner = plan.session_state?.banner ?? null;
+  const riskBanner =
+    Array.isArray(plan.warnings) && plan.warnings.length ? String(plan.warnings[0]) : plan.session_state?.message ?? null;
+
+  const planTargets = React.useMemo(() => {
+    const rawTargets = Array.isArray(plan.targets) ? plan.targets : [];
+    return rawTargets.filter((value): value is number => typeof value === 'number');
+  }, [plan.targets]);
+
+  const handleToggleFollowLive = React.useCallback(() => {
+    setFollowLive((prev) => !prev);
   }, []);
 
   const handleToggleStreaming = React.useCallback(() => {
     setStreamingEnabled((prev) => !prev);
   }, []);
 
-  const handleToggleFollowLive = React.useCallback(() => {
-    setFollowLive((prev) => !prev);
+  const handleToggleSupporting = React.useCallback(() => {
+    setSupportVisible((prev) => !prev);
   }, []);
 
-  const pageTitle = React.useMemo(() => {
-    if (upperSymbol) return `${upperSymbol} Plan`;
-    return 'Plan';
-  }, [upperSymbol]);
+  const handleSelectTimeframe = React.useCallback((value: string) => {
+    setTimeframe(value);
+  }, []);
 
-  const nextStep = (plan as Record<string, unknown>).next_step as string | undefined;
-  const notes = plan.notes ?? null;
-  const warnings = Array.isArray(plan.warnings) ? plan.warnings : [];
+  const handleSelectLevel = React.useCallback((level: SupportingLevel | null) => {
+    setHighlightedLevel(level);
+  }, []);
 
-  const uiPlanLink = (initialSnapshot as any)?.ui?.plan_link ?? undefined;
+  React.useEffect(() => {
+    setTimeframe((current) => current || normalizeTimeframeFromPlan(plan));
+  }, [plan]);
+
+  const statusStrip = (
+    <StatusStrip
+      theme={theme}
+      wsStatus={wsStatus}
+      priceStatus={priceStatus}
+      dataAgeSeconds={dataAgeSeconds}
+      riskBanner={riskBanner}
+      sessionBanner={sessionBanner}
+      onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
+    />
+  );
+
+  const planPanel = (
+    <div className="flex h-full flex-col gap-4">
+      <PlanHeader
+        planId={plan.plan_id}
+        legacyUrl={chartUrl ?? undefined}
+        uiUrl={(snapshot as any)?.ui?.plan_link ?? undefined}
+        theme={theme}
+      />
+      <PlanPanel
+        plan={plan}
+        structured={plan.structured_plan ?? null}
+        badges={Array.isArray(plan.badges) ? plan.badges : undefined}
+        confidence={typeof plan.confidence === 'number' ? plan.confidence : null}
+        supportingLevels={supportingLevels}
+        highlightedLevel={highlightedLevel}
+        onSelectLevel={handleSelectLevel}
+        targetsAwaiting={planTargets.length === 0}
+        theme={theme}
+      />
+    </div>
+  );
+
+  const chartPanel = (
+    <PlanChartPanel
+      plan={plan}
+      layers={layers}
+      primaryLevels={primaryLevels}
+      supportingLevels={supportingLevels}
+      supportingVisible={supportVisible}
+      followLive={followLive}
+      streamingEnabled={streamingEnabled}
+      onToggleFollowLive={handleToggleFollowLive}
+      onToggleStreaming={handleToggleStreaming}
+      onToggleSupporting={handleToggleSupporting}
+      highlightedLevel={highlightedLevel}
+      onHighlightLevel={(level) => setHighlightedLevel(level)}
+      priceSeries={priceSeries}
+      priceSeriesStatus={priceSeriesStatus}
+      timeframe={timeframe}
+      timeframeOptions={TIMEFRAME_OPTIONS}
+      onSelectTimeframe={handleSelectTimeframe}
+      onReloadSeries={reloadSeries}
+      lastPrice={(plan as Record<string, unknown>).last_price as number | undefined}
+    />
+  );
+
   return (
-    <ResponsiveShell title={pageTitle}>
-      <PlanHeader planId={plan.plan_id} legacyUrl={chartUrl ?? undefined} uiUrl={uiPlanLink} />
-      <StatusBanner
-        session={session}
-        asOfText={asOfText}
-        message={plan.session_state?.banner ?? undefined}
-        streaming={streamingInfo}
-      />
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,2.2fr)_minmax(0,1fr)] xl:gap-6">
-        <div className="flex flex-col gap-4 xl:gap-6">
-          <div ref={chartWrapperRef}>
-            <ChartContainer
-              chartUrl={chartUrl ?? '/tv'}
-              overlays={plan.charts?.params ?? plan.charts_params ?? undefined}
-              onSupportToggled={handleSupportToggled}
-            />
-          </div>
-          <PlanContextPanel notes={notes} warnings={warnings} nextStep={nextStep} followLive={followLive} />
-        </div>
-        <div className="flex flex-col gap-4 xl:gap-6">
-          <PlanSummaryCard plan={summaryPlan} />
-          {plan.expected_duration?.label ? (
-            <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 text-sm shadow-[var(--elev-1)]">
-              <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--muted)]">Expected Duration</h3>
-              <p className="mt-2 font-medium">{plan.expected_duration.label}</p>
-              {plan.expected_duration.basis ? (
-                <p className="mt-1 text-[var(--muted)]">
-                  Basis: {plan.expected_duration.basis.join(', ')}
-                </p>
-              ) : null}
-            </section>
-          ) : null}
-        </div>
-      </div>
-      <ActionDock
-        streaming={streamingEnabled}
-        followLive={followLive}
-        supportVisible={supportVisible}
-        onToggleStreaming={handleToggleStreaming}
-        onToggleFollowLive={handleToggleFollowLive}
-        onToggleSupport={handleToggleSupport}
-      />
-    </ResponsiveShell>
+    <WebviewShell
+      theme={theme}
+      statusStrip={statusStrip}
+      chartPanel={chartPanel}
+      planPanel={planPanel}
+    />
   );
 }
 
-function PlanContextPanel({
-  notes,
-  warnings,
-  nextStep,
-  followLive,
-}: {
-  notes: string | null;
-  warnings: string[];
-  nextStep?: string;
-  followLive: boolean;
-}) {
-  const hasContent = Boolean(notes) || warnings.length > 0 || Boolean(nextStep);
-  if (!hasContent) {
-    return (
-      <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 text-sm text-[var(--muted)] shadow-[var(--elev-1)]">
-        No additional plan context provided.
-      </section>
-    );
+function normalizeTimeframeFromPlan(plan: PlanSnapshot['plan']): string {
+  const raw = (plan.charts_params as Record<string, unknown> | undefined)?.interval ?? plan.chart_timeframe ?? '5';
+  return normalizeTimeframe(raw);
+}
+
+function normalizeTimeframe(token: unknown): string {
+  const value = typeof token === 'string' ? token.trim() : '';
+  if (!value) return '5';
+  const lower = value.toLowerCase();
+  if (lower.endsWith('m')) {
+    return String(Number.parseInt(lower.replace('m', ''), 10) || 5);
   }
-  return (
-    <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 text-sm shadow-[var(--elev-1)]">
-      <div className="space-y-4">
-        {nextStep ? (
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Next Step</h3>
-            <p className="mt-1 text-sm">{nextStep}</p>
-          </div>
-        ) : null}
-        {notes ? (
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Coach Notes</h3>
-            <p className="mt-1 leading-relaxed">{notes}</p>
-          </div>
-        ) : null}
-        {warnings.length ? (
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Warnings</h3>
-            <ul className="mt-1 space-y-1">
-              {warnings.map((warning, index) => (
-                <li
-                  key={`${index}-${warning}`}
-                  className="rounded-lg bg-[var(--danger)]/10 px-3 py-2 text-sm text-[var(--danger)]"
-                >
-                  {warning}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-        <div className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-xs text-[var(--muted)]">
-          <span>Follow live updates</span>
-          <span className="font-semibold text-[var(--text)]">{followLive ? 'Enabled' : 'Paused'}</span>
-        </div>
-      </div>
-    </section>
-  );
+  if (lower.endsWith('h')) {
+    const minutes = (Number.parseInt(lower.replace('h', ''), 10) || 1) * 60;
+    return String(minutes);
+  }
+  if (lower === 'd' || lower === '1d') return '1D';
+  if (lower === 'w' || lower === '1w') return '1W';
+  return value.toUpperCase();
 }
 
-function normalizeSession(status?: string | null): 'open' | 'closed' | 'pre' {
-  const value = (status ?? '').toLowerCase();
-  if (value.includes('open')) return 'open';
-  if (value.includes('pre')) return 'pre';
-  return 'closed';
-}
-
-function formatAsOf(asOf?: string | null): string {
-  if (!asOf) return 'As of unavailable';
-  const date = new Date(asOf);
-  if (Number.isNaN(date.getTime())) return asOf;
-  return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+function extractInitialLayers(snapshot: PlanSnapshot): PlanLayers | null {
+  const planLayers = (snapshot.plan as any)?.plan_layers;
+  if (planLayers) return planLayers as PlanLayers;
+  const rootLayers = (snapshot as any)?.plan_layers;
+  return rootLayers ? (rootLayers as PlanLayers) : null;
 }
 
 function parseTimestamp(value?: string | number | null): number | undefined {
@@ -293,48 +332,4 @@ function mergePlanWithDelta(prev: PlanSnapshot['plan'], event: PlanDeltaEvent): 
   }
 
   return mutated ? next : prev;
-}
-
-function buildSummaryPlan(plan: PlanSnapshot['plan']): Record<string, unknown> {
-  const detailsSource = (plan.details ?? {}) as Record<string, unknown>;
-  const details: Record<string, unknown> = { ...detailsSource };
-
-  if (plan.entry != null && details.entry == null) {
-    details.entry = plan.entry;
-  }
-  if (plan.stop != null && details.stop == null) {
-    details.stop = plan.stop;
-  }
-  if ((plan as Record<string, unknown>).last_price != null) {
-    details.last = (plan as Record<string, unknown>).last_price;
-  }
-  if (plan.expected_duration?.label && details.horizon == null) {
-    details.horizon = plan.expected_duration.label;
-  }
-
-  const summary: Record<string, unknown> = { ...plan, details };
-
-  const riskReward = (plan as Record<string, unknown>).riskReward ?? plan.rr_to_t1 ?? null;
-  if (riskReward != null) {
-    summary.riskReward = riskReward;
-  }
-
-  const structure =
-    (plan as Record<string, unknown>).structure ??
-    (plan.structured_plan ? (plan.structured_plan.invalid ? 'INVALID' : 'INTACT') : null);
-  if (structure) {
-    summary.structure = structure;
-  }
-
-  if (Array.isArray(plan.targets)) {
-    summary.targets = plan.targets.map((target: unknown, index: number) => {
-      if (target && typeof target === 'object') return target;
-      if (typeof target === 'number') {
-        return { label: `TP${index + 1}`, price: target };
-      }
-      return target;
-    });
-  }
-
-  return summary;
 }

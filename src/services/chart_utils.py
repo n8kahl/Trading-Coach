@@ -30,10 +30,8 @@ ALLOWED_CHART_PARAM_KEYS: Set[str] = {
     "runner",
     "tp_meta",
     "view",
-    "levels",
     "ema",
     "session",
-    "supportingLevels",
     "ui_state",
 }
 

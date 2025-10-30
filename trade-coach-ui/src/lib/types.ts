@@ -58,6 +58,32 @@ export type ChartPayload = {
   interactive?: string | null;
 };
 
+export type PlanLayerLevel = {
+  price: number;
+  label?: string | null;
+  kind?: string | null;
+};
+
+export type PlanLayerZone = {
+  high?: number | null;
+  low?: number | null;
+  label?: string | null;
+  kind?: string | null;
+};
+
+export type PlanLayers = {
+  plan_id?: string | null;
+  symbol?: string;
+  interval?: string | null;
+  as_of?: string | null;
+  planning_context?: string | null;
+  precision?: number | null;
+  levels: PlanLayerLevel[];
+  zones: PlanLayerZone[];
+  annotations?: Array<Record<string, unknown>>;
+  meta?: Record<string, unknown>;
+};
+
 export type PlanSnapshot = {
   plan: {
     plan_id: string;
@@ -92,6 +118,7 @@ export type PlanSnapshot = {
     structured_plan?: StructuredPlan | null;
     target_profile?: Record<string, unknown> | null;
     [key: string]: unknown;
+    plan_layers?: PlanLayers | null;
   };
   summary?: Record<string, unknown>;
   volatility_regime?: Record<string, unknown>;
