@@ -99,15 +99,17 @@ const TradingViewChart = forwardRef<TradingViewChartHandle, TradingViewChartProp
       () => `tv-chart-${planId.replace(/[^a-zA-Z0-9]/g, "")}-${Math.random().toString(36).slice(2)}`,
       [planId],
     );
-    const widgetRef = useRef<TradingViewWidget | null>(null);
-    const chartRef = useRef<TradingViewActiveChart | null>(null);
-    const overlaysRef = useRef<TradingViewShape[]>([]);
-    const datafeedRef = useRef<TradingViewDatafeed | null>(null);
-    const lastBarTimeRef = useRef<number | null>(null);
-    const replayTimerRef = useRef<number | null>(null);
-    const replayActiveRef = useRef(false);
-    const barsCacheRef = useRef<TVBar[]>([]);
-    const [chartReady, setChartReady] = useState(false);
+  const widgetRef = useRef<TradingViewWidget | null>(null);
+  const chartRef = useRef<TradingViewActiveChart | null>(null);
+  const overlaysRef = useRef<TradingViewShape[]>([]);
+  const datafeedRef = useRef<TradingViewDatafeed | null>(null);
+  const lastBarTimeRef = useRef<number | null>(null);
+  const studiesAppliedRef = useRef(false);
+  const replayTimerRef = useRef<number | null>(null);
+  const replayActiveRef = useRef(false);
+  const barsCacheRef = useRef<TVBar[]>([]);
+  const [chartReady, setChartReady] = useState(false);
+  const [barsReady, setBarsReady] = useState(false);
 
     const applyPlanLayers = React.useCallback(
       (layers: PlanLayers | null | undefined) => {
@@ -204,6 +206,7 @@ const TradingViewChart = forwardRef<TradingViewChartHandle, TradingViewChartProp
               if (bars.length) {
                 lastBarTimeRef.current = bars[bars.length - 1].time;
               }
+              setBarsReady(bars.length > 0);
               onBarsLoaded?.(bars);
             },
             onRealtimeBar: (_, __, bar) => {
@@ -213,6 +216,7 @@ const TradingViewChart = forwardRef<TradingViewChartHandle, TradingViewChartProp
               if (!existing.length || existing[existing.length - 1].time !== bar.time) {
                 barsCacheRef.current = [...existing.slice(-600), bar];
               }
+              setBarsReady(true);
               onRealtimeBar?.(bar);
             },
           });
@@ -262,14 +266,6 @@ const TradingViewChart = forwardRef<TradingViewChartHandle, TradingViewChartProp
             if (disposed) return;
             chartRef.current = widget.activeChart();
             setChartReady(true);
-            try {
-              chartRef.current?.createStudy("VWAP", false, false);
-            } catch (error) {
-              if (devMode) {
-                console.warn("[tv] unable to add VWAP study", error);
-              }
-            }
-            applyPlanLayers(planLayers ?? null);
           });
         } catch (error) {
           console.error("[tv] widget init failed", error);
@@ -279,6 +275,7 @@ const TradingViewChart = forwardRef<TradingViewChartHandle, TradingViewChartProp
       return () => {
         disposed = true;
         setChartReady(false);
+        setBarsReady(false);
         if (replayTimerRef.current) {
           window.clearInterval(replayTimerRef.current);
           replayTimerRef.current = null;
@@ -292,6 +289,7 @@ const TradingViewChart = forwardRef<TradingViewChartHandle, TradingViewChartProp
         });
         overlaysRef.current = [];
         replayActiveRef.current = false;
+        studiesAppliedRef.current = false;
         widgetRef.current?.remove();
         widgetRef.current = null;
         chartRef.current = null;
@@ -300,9 +298,26 @@ const TradingViewChart = forwardRef<TradingViewChartHandle, TradingViewChartProp
     }, [applyPlanLayers, containerId, devMode, onBarsLoaded, onRealtimeBar, planLayers, resolution, symbol, theme]);
 
     useEffect(() => {
-      if (!chartReady) return;
+      setBarsReady(false);
+      studiesAppliedRef.current = false;
+    }, [symbol, resolution]);
+
+    useEffect(() => {
+      if (!chartReady || !barsReady) return;
+      const chart = chartRef.current;
+      if (!chart) return;
+      if (!studiesAppliedRef.current) {
+        try {
+          chart.createStudy("VWAP", false, false);
+        } catch (error) {
+          if (devMode) {
+            console.warn("[tv] unable to add VWAP study", error);
+          }
+        }
+        studiesAppliedRef.current = true;
+      }
       applyPlanLayers(planLayers ?? null);
-    }, [chartReady, applyPlanLayers, planLayers]);
+    }, [chartReady, barsReady, applyPlanLayers, planLayers, devMode]);
 
     const stopReplayInternal = React.useCallback(() => {
       replayActiveRef.current = false;
@@ -381,10 +396,13 @@ const TradingViewChart = forwardRef<TradingViewChartHandle, TradingViewChartProp
         startReplay: () => startReplayInternal(),
         stopReplay: () => stopReplayInternal(),
         followLive: () => followLiveInternal(),
-        refreshOverlays: () => applyPlanLayers(planLayers ?? null),
+        refreshOverlays: () => {
+          if (!chartReady || !barsReady) return;
+          applyPlanLayers(planLayers ?? null);
+        },
         getLastBarTime: () => lastBarTimeRef.current,
       }),
-      [applyPlanLayers, devMode, followLiveInternal, planLayers, startReplayInternal, stopReplayInternal],
+      [applyPlanLayers, barsReady, chartReady, devMode, followLiveInternal, planLayers, startReplayInternal, stopReplayInternal],
     );
 
     return <div id={containerId} className="h-[360px] w-full rounded-2xl border border-neutral-800/70" />;

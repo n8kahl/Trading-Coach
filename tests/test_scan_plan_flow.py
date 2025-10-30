@@ -114,11 +114,11 @@ def test_plan_returns_canonical_chart_url() -> None:
             "ui_state": {"style": "intraday"},
             "levels": "ORL,Session Low",
         },
-        base_url="https://example.com/tv",
+        base_url="https://example.com/chart",
     )
 
     parsed = urlsplit(url)
-    assert parsed.path in {"/tv", "/tv/"}
+    assert parsed.path in {"/chart", "/chart/"}
     params = parse_qs(parsed.query)
     assert params["symbol"] == ["NVDA"]
     assert params["entry"] == ["500.12"]

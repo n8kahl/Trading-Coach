@@ -99,6 +99,9 @@ export default function PlanChartPanel({
       setReplayActive(false);
       onReplayStateChange?.("idle");
     }
+    if (followLive) {
+      chartHandle.current?.followLive();
+    }
   };
 
   const handleReplayToggle = () => {
@@ -142,11 +145,19 @@ export default function PlanChartPanel({
       onLastBarTimeChange(null);
       return;
     }
-    onLastBarTimeChange(bars[bars.length - 1]?.time ?? null);
+    const lastTime = bars[bars.length - 1]?.time ?? null;
+    onLastBarTimeChange(lastTime);
+    if (followLive && lastTime != null) {
+      chartHandle.current?.followLive();
+    }
   };
 
   const handleRealtimeBar = (bar: TVBar) => {
-    onLastBarTimeChange(bar?.time ?? null);
+    const barTime = bar?.time ?? null;
+    onLastBarTimeChange(barTime);
+    if (followLive && barTime != null) {
+      chartHandle.current?.followLive();
+    }
   };
 
   return (

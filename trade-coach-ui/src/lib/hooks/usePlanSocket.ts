@@ -16,16 +16,35 @@ export function usePlanSocket(url: string, planId: string, onDelta: (msg: unknow
     let closed = false;
     let ws: WebSocket | null = null;
     let retryTimer: number | null = null;
+     let reconnectScheduled = false;
 
     function scheduleReconnect() {
       if (closed) return;
+      if (reconnectScheduled) return;
+      reconnectScheduled = true;
       setStatus("disconnected");
       if (retryTimer != null) window.clearTimeout(retryTimer);
-      retryTimer = window.setTimeout(connect, backoff.current());
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+      }
+      ws = null;
+      const delay = backoff.current();
+      retryTimer = window.setTimeout(() => {
+        reconnectScheduled = false;
+        connect();
+      }, delay);
     }
 
     function connect() {
       if (closed) return;
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+      reconnectScheduled = false;
       setStatus("connecting");
       ws = new WebSocket(url);
       ws.onopen = () => {

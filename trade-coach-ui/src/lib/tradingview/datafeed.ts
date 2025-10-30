@@ -52,6 +52,20 @@ type SubscriberRecord = {
   resolution: string;
 };
 
+type UdfBarsResponse = {
+  s: "ok" | "no_data" | "error";
+  t?: Array<number | string>;
+  o?: Array<number | string>;
+  h?: Array<number | string>;
+  l?: Array<number | string>;
+  c?: Array<number | string>;
+  v?: Array<number | string>;
+  nextTime?: number | string;
+  errmsg?: string;
+  symbol?: string;
+  resolution?: string;
+};
+
 const DEFAULT_RESOLUTIONS = ["1", "3", "5", "15", "30", "60", "120", "240", "1D"] as const;
 
 function resolutionToSeconds(resolution: string): number {
@@ -77,6 +91,50 @@ function buildQuery(params: Record<string, string | number | null | undefined>):
     .filter(([, value]) => value !== undefined && value !== null && value !== "")
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
     .join("&");
+}
+
+function coerceNumber(value: unknown, fallback = 0): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function parseUdfBars(payload: UdfBarsResponse): TVBar[] {
+  const times = Array.isArray(payload.t) ? payload.t : [];
+  const opens = Array.isArray(payload.o) ? payload.o : [];
+  const highs = Array.isArray(payload.h) ? payload.h : [];
+  const lows = Array.isArray(payload.l) ? payload.l : [];
+  const closes = Array.isArray(payload.c) ? payload.c : [];
+  const volumes = Array.isArray(payload.v) ? payload.v : [];
+
+  const length = times.length;
+  if (!length) {
+    return [];
+  }
+
+  const bars: TVBar[] = [];
+  for (let idx = 0; idx < length; idx += 1) {
+    const rawTime = coerceNumber(times[idx], NaN);
+    if (!Number.isFinite(rawTime)) {
+      continue;
+    }
+    const timeMs = rawTime >= 10_000_000_000 ? Math.trunc(rawTime) : Math.trunc(rawTime * 1000);
+    const bar: TVBar = {
+      time: timeMs,
+      open: coerceNumber(opens[idx], coerceNumber(opens[idx - 1], 0)),
+      high: coerceNumber(highs[idx], coerceNumber(highs[idx - 1], 0)),
+      low: coerceNumber(lows[idx], coerceNumber(lows[idx - 1], 0)),
+      close: coerceNumber(closes[idx], coerceNumber(closes[idx - 1], 0)),
+      volume: volumes.length ? coerceNumber(volumes[idx], 0) : 0,
+    };
+    bars.push(bar);
+  }
+  return bars;
 }
 
 export class TradingViewDatafeed {
@@ -144,19 +202,25 @@ export class TradingViewDatafeed {
       });
       const response = await fetch(`${this.baseUrl}/tv-api/bars?${qs}`, { cache: "no-store" });
       if (!response.ok) throw new Error(`Bars request failed (${response.status})`);
-      const payload = (await response.json()) as {
-        bars: TVBar[];
-        noData: boolean;
-        nextTime?: number;
-      };
-      const bars = Array.isArray(payload.bars)
-        ? payload.bars.map((bar) => ({
-            ...bar,
-            time: typeof bar.time === "number" ? bar.time : Number(bar.time),
-          }))
-        : [];
+      const payload = (await response.json()) as UdfBarsResponse;
+      if (!payload || !payload.s) {
+        throw new Error("Malformed bars payload");
+      }
+      if (payload.s === "error") {
+        throw new Error(payload.errmsg || "Bars request returned error");
+      }
+      const nextTimeToken =
+        payload.nextTime !== undefined && payload.nextTime !== null
+          ? coerceNumber(payload.nextTime, Number.NaN)
+          : Number.NaN;
+      const normalizedNextTime = Number.isFinite(nextTimeToken) ? Math.trunc(nextTimeToken) : undefined;
+      if (payload.s === "no_data") {
+        onResult([], { noData: true, nextTime: normalizedNextTime });
+        return;
+      }
+      const bars = parseUdfBars(payload);
       this.onBatchLoaded?.(symbolInfo.ticker || symbolInfo.name, resolution, bars);
-      onResult(bars, { noData: payload.noData ?? bars.length === 0, nextTime: payload.nextTime });
+      onResult(bars, { noData: bars.length === 0, nextTime: normalizedNextTime });
     } catch (error) {
       console.error("[datafeed] getBars error", error);
       onError(error instanceof Error ? error.message : "bars failed");
@@ -183,16 +247,15 @@ export class TradingViewDatafeed {
         });
         const response = await fetch(`${this.baseUrl}/tv-api/bars?${qs}`, { cache: "no-store" });
         if (!response.ok) return;
-        const payload = (await response.json()) as { bars: TVBar[] };
-        if (!payload.bars?.length) return;
-        const lastBar = payload.bars[payload.bars.length - 1];
-        if (!lastBar) return;
-        const normalized = {
-          ...lastBar,
-          time: typeof lastBar.time === "number" ? lastBar.time : Number(lastBar.time),
-        };
-        this.onRealtimeBar?.(symbolInfo.ticker || symbolInfo.name, resolution, normalized);
-        onRealtimeCallback(normalized);
+        const payload = (await response.json()) as UdfBarsResponse;
+        if (!payload || !payload.s || payload.s !== "ok") {
+          return;
+        }
+        const bars = parseUdfBars(payload);
+        if (!bars.length) return;
+        const lastBar = bars[bars.length - 1];
+        this.onRealtimeBar?.(symbolInfo.ticker || symbolInfo.name, resolution, lastBar);
+        onRealtimeCallback(lastBar);
       } catch (error) {
         console.warn("[datafeed] subscribeBars poll error", error);
       }

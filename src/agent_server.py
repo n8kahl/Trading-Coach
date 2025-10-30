@@ -2768,38 +2768,7 @@ app.add_middleware(ServiceHeaderMiddleware)
 
 
 
-from fastapi.responses import RedirectResponse
-import os as _os
-
-@app.get("/tv/ui")
-def tv_ui_redirect(plan_id: str) -> RedirectResponse:
-    ui_host = (_os.getenv("PUBLIC_UI_HOST") or "").rstrip("/")
-    if not ui_host:
-        raise HTTPException(status_code=404, detail="PUBLIC_UI_HOST not configured")
-    return RedirectResponse(f"{ui_host}/plan/{plan_id}", status_code=302)
-
-
-@app.get("/tv")
-def tv_root_redirect(plan_id: Optional[str] = None, ui: Optional[int] = None) -> RedirectResponse:
-    ui_host = (_os.getenv("PUBLIC_UI_HOST") or "").rstrip("/")
-    if ui == 1 and plan_id and ui_host:
-        return RedirectResponse(f"{ui_host}/plan/{plan_id}", status_code=302)
-    # Serve the legacy static viewer index when no UI redirect requested
-    return RedirectResponse("/tv/index.html", status_code=302)
-
-# Also handle the trailing-slash form '/tv/' which many links use
-@app.get("/tv/")
-def tv_root_redirect_slash(plan_id: Optional[str] = None, ui: Optional[int] = None) -> RedirectResponse:
-    ui_host = (_os.getenv("PUBLIC_UI_HOST") or "").rstrip("/")
-    if ui == 1 and plan_id and ui_host:
-        return RedirectResponse(f"{ui_host}/plan/{plan_id}", status_code=302)
-    return RedirectResponse("/tv/index.html", status_code=302)
-
 STATIC_ROOT = (Path(__file__).resolve().parent.parent / "static").resolve()
-TV_STATIC_DIR = STATIC_ROOT / "tv"
-if TV_STATIC_DIR.exists():
-    app.mount("/tv", StaticFiles(directory=str(TV_STATIC_DIR), html=True), name="tv")
-
 APP_STATIC_DIR = STATIC_ROOT / "app"
 if APP_STATIC_DIR.exists():
     app.mount("/app", StaticFiles(directory=str(APP_STATIC_DIR), html=True), name="app")
@@ -6477,7 +6446,7 @@ def _planning_scan_to_page(
 
 def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
     base_root = _resolved_base_url(request).rstrip("/")
-    base = f"{base_root}/tv/"
+    base = f"{base_root}/chart"
     query: Dict[str, str] = {}
     for key, value in params.items():
         if value is None:
@@ -6488,7 +6457,7 @@ def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
             query[key] = _tv_symbol(str(value))
         else:
             query[key] = str(value)
-    # Always tag links with ui=1 so the /tv handler can redirect to the
+    # Always tag links with ui=1 so downstream UIs can redirect to the
     # canonical UI plan page when plan_id is present.
     query.setdefault("ui", "1")
 
@@ -7147,8 +7116,8 @@ tv_api = APIRouter(prefix="/tv-api", tags=["tv"])
 
 
 @tv_api.get("/config")
-async def tv_config() -> Dict[str, Any]:
-    return {
+async def tv_config() -> JSONResponse:
+    payload = {
         "supports_search": True,
         "supports_group_request": False,
         "supports_marks": False,
@@ -7158,6 +7127,11 @@ async def tv_config() -> Dict[str, Any]:
         "exchanges": [{"value": "", "name": "TradingCoach", "desc": "Trading Coach"}],
         "symbols_types": [{"name": "All", "value": "all"}],
     }
+    response = JSONResponse(payload)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
 
 
 @tv_api.get("/symbols")
@@ -7169,22 +7143,33 @@ async def tv_symbol(symbol: str = Query(..., alias="symbol")) -> JSONResponse:
     if history is not None and not history.empty:
         last_price = float(history["close"].iloc[-1])
 
+    uppercase = symbol.upper()
     payload = {
-        "name": symbol.upper(),
-        "ticker": symbol.upper(),
-        "description": symbol.upper(),
+        "name": uppercase,
+        "ticker": uppercase,
+        "full_name": uppercase,
+        "short_name": uppercase,
+        "description": uppercase,
         "type": "stock",
         "session": "0930-1600",
         "timezone": "America/New_York",
-        "exchange": "CUSTOM",
+        "exchange": "TradingCoach",
+        "listed_exchange": "TradingCoach",
         "minmov": 1,
+        "minmov2": 0,
         "pricescale": _price_scale_for(last_price),
         "has_intraday": True,
-        "has_no_volume": False,
+        "has_daily": True,
         "has_weekly_and_monthly": True,
+        "has_fractional_volume": False,
+        "has_no_volume": False,
+        "has_seconds": False,
         "supported_resolutions": TV_SUPPORTED_RESOLUTIONS,
         "volume_precision": 0,
         "data_status": "streaming" if settings.polygon_api_key else "endofday",
+        "currency": "USD",
+        "currency_code": "USD",
+        "format": "price",
     }
     response = JSONResponse(payload)
     response.headers["Cache-Control"] = "no-store"
@@ -7234,14 +7219,9 @@ async def tv_bars(
                 resolution,
                 timeframe,
             )
-            payload = {
-                "symbol": symbol.upper(),
-                "resolution": resolution,
-                "bars": [],
-                "noData": True,
-            }
-            response = JSONResponse(payload)
+            response = JSONResponse({"s": "no_data", "symbol": symbol.upper(), "resolution": resolution})
             response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
             response.headers["Access-Control-Allow-Origin"] = "*"
             return response
 
@@ -7311,6 +7291,7 @@ async def tv_bars(
     start_ts = pd.to_datetime(start_s, unit="s", utc=True)
     end_ts = pd.to_datetime(end_s, unit="s", utc=True)
     window = history.loc[(history.index >= start_ts) & (history.index <= end_ts)]
+    next_time_ms: Optional[int] = None
 
     if window.empty:
         logger.info(
@@ -7327,42 +7308,44 @@ async def tv_bars(
                     symbol,
                     src_tf,
                 )
-                payload = {
-                    "symbol": symbol.upper(),
-                    "resolution": resolution,
-                    "bars": [],
-                    "noData": True,
-                }
-                response = JSONResponse(payload)
+                response = JSONResponse({"s": "no_data", "symbol": symbol.upper(), "resolution": resolution})
                 response.headers["Cache-Control"] = "no-store"
+                response.headers["Pragma"] = "no-cache"
                 response.headers["Access-Control-Allow-Origin"] = "*"
                 return response
-            next_time = int(earlier.index[-1].timestamp() * 1000)
-            payload = {
-                "symbol": symbol.upper(),
-                "resolution": resolution,
-                "bars": [],
-                "noData": True,
-                "nextTime": next_time,
-            }
-            response = JSONResponse(payload)
+            next_time_ms = int(earlier.index[-1].timestamp() * 1000)
+            response = JSONResponse(
+                {
+                    "s": "no_data",
+                    "symbol": symbol.upper(),
+                    "resolution": resolution,
+                    "nextTime": next_time_ms,
+                }
+            )
             response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
             response.headers["Access-Control-Allow-Origin"] = "*"
             return response
 
-    volume_values = [float(val) for val in window["volume"].tolist()] if "volume" in window.columns else [0.0] * len(window)
+    timestamps = [int(ts.timestamp() * 1000) for ts in window.index]
 
-    bars: List[Dict[str, Any]] = []
-    for idx, ts in enumerate(window.index):
-        bar = {
-            "time": int(ts.timestamp() * 1000),
-            "open": round(float(window["open"].iloc[idx]), 6),
-            "high": round(float(window["high"].iloc[idx]), 6),
-            "low": round(float(window["low"].iloc[idx]), 6),
-            "close": round(float(window["close"].iloc[idx]), 6),
-            "volume": volume_values[idx] if idx < len(volume_values) else 0.0,
-        }
-        bars.append(bar)
+    def _series_as_floats(series_name: str) -> List[float]:
+        if series_name not in window.columns:
+            return [0.0] * len(window)
+        series = window[series_name].ffill().bfill()
+        values: List[float] = []
+        for raw in series.tolist():
+            try:
+                values.append(round(float(raw), 6))
+            except Exception:
+                values.append(0.0)
+        return values
+
+    opens = _series_as_floats("open")
+    highs = _series_as_floats("high")
+    lows = _series_as_floats("low")
+    closes = _series_as_floats("close")
+    volumes = _series_as_floats("volume")
 
     try:
         logger.info(
@@ -7370,22 +7353,30 @@ async def tv_bars(
             symbol,
             resolution,
             src_tf,
-            len(bars),
+            len(timestamps),
             start_ts,
             end_ts,
-            bars[0]["time"] if bars else None,
-            bars[-1]["time"] if bars else None,
+            timestamps[0] if timestamps else None,
+            timestamps[-1] if timestamps else None,
         )
     except Exception:
         pass
-    response_payload = {
+    payload = {
+        "s": "ok" if timestamps else "no_data",
         "symbol": symbol.upper(),
         "resolution": resolution,
-        "bars": bars,
-        "noData": len(bars) == 0,
+        "t": timestamps,
+        "o": opens,
+        "h": highs,
+        "l": lows,
+        "c": closes,
+        "v": volumes,
     }
-    response = JSONResponse(response_payload)
+    if not timestamps and next_time_ms is not None:
+        payload["nextTime"] = next_time_ms
+    response = JSONResponse(payload)
     response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
     response.headers["Access-Control-Allow-Origin"] = "*"
     return response
 
@@ -12060,7 +12051,7 @@ async def gpt_plan(
     chart_params_payload: Dict[str, Any] = charts if isinstance(charts, dict) else {}
     chart_url_value: Optional[str] = charts_container.get("interactive") if isinstance(charts_container, dict) else None
 
-    # Ensure plan levels are embedded for /tv rendering even if upstream omitted them.
+    # Ensure plan levels are embedded for chart rendering even if upstream omitted them.
     entry_level = plan.get("entry")
     if isinstance(entry_level, dict):
         entry_level = entry_level.get("level")
@@ -12205,7 +12196,7 @@ async def gpt_plan(
                 "plan_version": str(version),
             },
         )
-        # Always tag ui=1 so /tv can redirect to UI
+        # Always tag ui=1 so downstream clients can redirect to the UI console
         chart_url_value = _append_query_params(chart_url_value, {"ui": "1"})
         if is_plan_live:
             live_param_stamp = live_stamp_payload or chart_params_payload.get("last_update") if chart_params_payload else None
@@ -13807,6 +13798,34 @@ async def stream_plan_ws(websocket: WebSocket, plan_id: str) -> None:
     try:
         await websocket.send_json({"type": "welcome", "planId": plan_token})
 
+        async def _await_subscribe(timeout: float = 15.0) -> None:
+            while True:
+                incoming = await asyncio.wait_for(websocket.receive_json(), timeout=timeout)
+                msg_type = str(incoming.get("type") or "").lower()
+                if msg_type == "pong":
+                    continue
+                if msg_type == "subscribe":
+                    logger.info("plan_ws_subscribe", extra={"plan_id": plan_token})
+                    await websocket.send_json({"type": "ack", "planId": plan_token})
+                    return
+                logger.debug(
+                    "plan_ws_handshake_ignore",
+                    extra={"plan_id": plan_token, "payload": incoming},
+                )
+
+        try:
+            await _await_subscribe()
+        except asyncio.TimeoutError:
+            await websocket.close(code=1008, reason="subscribe required")
+            return
+        except WebSocketDisconnect:
+            return
+        except Exception:
+            logger.exception("plan_ws_handshake_error", extra={"plan_id": plan_token})
+            with suppress(Exception):
+                await websocket.close(code=1011, reason="handshake error")
+            return
+
         try:
             snapshot = await _get_idea_snapshot(plan_token)
             await _LIVE_PLAN_ENGINE.register_snapshot(snapshot)
@@ -13856,7 +13875,7 @@ async def stream_plan_ws(websocket: WebSocket, plan_id: str) -> None:
                     if msg_type == "pong":
                         continue
                     if msg_type == "subscribe":
-                        logger.info("plan_ws_subscribe", extra={"plan_id": plan_token})
+                        logger.debug("plan_ws_resubscribe", extra={"plan_id": plan_token})
                         await websocket.send_json({"type": "ack", "planId": plan_token})
                         continue
                     logger.debug("plan_ws_client_message", extra={"plan_id": plan_token, "payload": message})
@@ -15194,7 +15213,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     )
 
     if canonical_flag:
-        tv_base = f"{(public_base or origin).rstrip('/')}/tv/"
+        chart_base = f"{(public_base or origin).rstrip('/')}/chart"
         canonical_payload: Dict[str, object] = {
             "symbol": symbol_token,
             "interval": interval_norm,
@@ -15232,7 +15251,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
         canonical_url = make_chart_url(
             canonical_payload,
-            base_url=tv_base,
+            base_url=chart_base,
             precision_map=None,
         )
         _ensure_allowed_host(canonical_url, request)
@@ -15251,7 +15270,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
         return ChartLinks(interactive=canonical_url)
 
     configured_base = (settings.chart_base_url or "").strip()
-    default_chart_base = f"{origin.rstrip('/')}/tv/"
+    default_chart_base = f"{origin.rstrip('/')}/chart"
     if configured_base:
         base = f"{configured_base.rstrip('/')}/"
     else:

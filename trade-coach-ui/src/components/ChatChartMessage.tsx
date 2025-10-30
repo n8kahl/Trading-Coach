@@ -133,7 +133,7 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
         if (aborted) return;
         const liveUrl = ensureCanonicalChartUrl(data.interactive);
         if (!liveUrl) {
-          throw new Error("chart-url response missing canonical /tv link");
+          throw new Error("chart-url response missing canonical /chart link");
         }
         setState({ status: "ready", liveUrl });
       } catch (error) {
@@ -172,7 +172,7 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
           >
             <div className="flex flex-col">
               <span className="text-sm font-semibold text-slate-100">Open interactive chart</span>
-              <span className="text-xs text-slate-400">Launch /tv with live overlays and plan levels</span>
+              <span className="text-xs text-slate-400">Launch /chart with live overlays and plan levels</span>
             </div>
             <span className="text-lg text-sky-400" aria-hidden="true">
               ↗

@@ -53,7 +53,7 @@ async def test_chart_url_endpoint_returns_tv_link(
     query = parse_qs(parsed.query)
     assert parsed.scheme == "https"
     assert parsed.netloc == "test.local"
-    assert parsed.path == "/tv/"
+    assert parsed.path == "/chart"
     assert query["symbol"] == ["SPY"]
     assert query["interval"] == ["5m"]
     assert query["range"] == ["1d"]
@@ -130,7 +130,7 @@ async def test_plan_trade_detail_contains_tv_link(
     trade_detail = plan_payload["trade_detail"]
     parsed = urlsplit(trade_detail)
     query = parse_qs(parsed.query)
-    assert parsed.path == "/tv/"
+    assert parsed.path == "/chart"
     assert query["interval"] == ["5m"]
     assert query.get("range") == ["5D"]
     assert query["ui_state"] == ['{"style":"intraday"}']
@@ -214,8 +214,15 @@ async def test_tv_api_bars_returns_ok_payload(monkeypatch: pytest.MonkeyPatch) -
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["noData"] is False
-    assert len(payload["bars"]) == rows
-    first_bar = payload["bars"][0]
-    assert "time" in first_bar and first_bar["time"] == int(index[0].timestamp() * 1000)
-    assert set(first_bar.keys()) == {"time", "open", "high", "low", "close", "volume"}
+    assert payload["s"] == "ok"
+    assert payload["symbol"] == "SPY"
+    assert payload["resolution"] == "5"
+    assert len(payload["t"]) == rows
+    assert len(payload["o"]) == rows
+    assert len(payload["h"]) == rows
+    assert len(payload["l"]) == rows
+    assert len(payload["c"]) == rows
+    assert len(payload["v"]) == rows
+    assert payload["t"][0] == int(index[0].timestamp() * 1000)
+    assert payload["o"][0] == pytest.approx(float(frame["open"].iloc[0]), rel=1e-6)
+    assert payload["c"][-1] == pytest.approx(float(frame["close"].iloc[-1]), rel=1e-6)

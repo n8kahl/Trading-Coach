@@ -37,7 +37,7 @@ describe('ScanTable', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ interactive: 'https://trading-coach-production.up.railway.app/tv?plan_id=PLAN-1' }),
+      json: async () => ({ interactive: 'https://trading-coach-production.up.railway.app/chart?plan_id=PLAN-1' }),
     }));
 
     render(<ScanTable rows={rows} />);
@@ -49,7 +49,7 @@ describe('ScanTable', () => {
     const rankCell = screen.getByText('1');
     expect(rankCell).toBeInTheDocument();
     const chartLink = screen.getByText('Open chart');
-    expect(chartLink).toHaveAttribute('href', 'https://trading-coach-production.up.railway.app/tv?plan_id=PLAN-1');
+    expect(chartLink).toHaveAttribute('href', 'https://trading-coach-production.up.railway.app/chart?plan_id=PLAN-1');
     expect(screen.getByText('~78m')).toBeInTheDocument();
   });
 
@@ -71,7 +71,7 @@ describe('ScanTable', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ interactive: 'https://evil.example.com/tv?plan_id=PLAN-3' }),
+      json: async () => ({ interactive: 'https://evil.example.com/chart?plan_id=PLAN-3' }),
     }));
 
     render(<ScanTable rows={rows} />);

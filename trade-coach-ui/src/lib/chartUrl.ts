@@ -1,5 +1,5 @@
 const CANONICAL_HOST = "trading-coach-production.up.railway.app";
-const CANONICAL_PATH_PREFIX = "/tv";
+const CANONICAL_PATH_PREFIX = "/chart";
 
 function parseUrl(candidate: string): URL | null {
   try {

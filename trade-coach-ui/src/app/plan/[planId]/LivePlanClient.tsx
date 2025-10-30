@@ -40,13 +40,25 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const [timeframe, setTimeframe] = React.useState(() => normalizeTimeframeFromPlan(initialSnapshot.plan));
   const [nowTick, setNowTick] = React.useState(Date.now());
   const [lastBarTime, setLastBarTime] = React.useState<number | null>(null);
-  const devMode = process.env.NEXT_PUBLIC_DEVTOOLS === '1';
+  const [devMode, setDevMode] = React.useState(() => process.env.NEXT_PUBLIC_DEVTOOLS === '1');
 
   const activePlanId = plan.plan_id || planId;
 
   React.useEffect(() => {
     const interval = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => window.clearInterval(interval);
+  }, []);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('dev') === '1') {
+        setDevMode(true);
+      }
+    } catch {
+      // ignore
+    }
   }, []);
 
   const planSocketUrl = React.useMemo(() => `${WS_BASE_URL}/ws/plans/${encodeURIComponent(activePlanId)}`, [activePlanId]);

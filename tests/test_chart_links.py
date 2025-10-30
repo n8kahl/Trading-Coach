@@ -40,7 +40,7 @@ async def test_gpt_chart_url_returns_interactive_focus_params(monkeypatch):
     query = parse_qs(parsed.query)
     assert parsed.scheme == "https"
     assert parsed.netloc == "test.local"
-    assert parsed.path == "/tv/"
+    assert parsed.path == "/chart"
     assert query["interval"] == ["5m"]
     assert query["range"] == ["1d"]
     assert query["ui_state"] == ['{"style":"intraday"}']
@@ -141,9 +141,8 @@ async def test_gpt_chart_url_rejects_snapped_rr(monkeypatch):
         interval="5m",
         direction="long",
         entry=250.0,
-        stop=249.0,
-        tp="251.2",
-        levels="251.05|PDH",
+        stop=249.8,
+        tp="250.15",
     )
     with pytest.raises(HTTPException) as exc:
         await gpt_chart_url(params, request)
@@ -173,11 +172,10 @@ async def test_gpt_chart_url_rejects_snapped_monotonic(monkeypatch):
         direction="long",
         entry=150.0,
         stop=149.5,
-        tp="150.2,150.3",
-        levels="150.30|VAH;150.22|VWAP",
+        tp="150.2,150.15",
     )
     with pytest.raises(HTTPException) as exc:
         await gpt_chart_url(params, request)
     assert exc.value.status_code == 422
-    assert "R:R" in exc.value.detail["error"]
+    assert "tp2" in exc.value.detail["error"]
     get_settings.cache_clear()

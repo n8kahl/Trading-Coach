@@ -7,8 +7,8 @@ describe('parsePlanIdFromMaybeUrl', () => {
     expect(parsePlanIdFromMaybeUrl(id)).toBe(id);
   });
 
-  it('parses plan_id from full tv url', () => {
-    const url = 'https://api.example.com/tv?symbol=SPY&plan_id=SPY-ABC-123&interval=5m';
+  it('parses plan_id from full chart url', () => {
+    const url = 'https://api.example.com/chart?symbol=SPY&plan_id=SPY-ABC-123&interval=5m';
     expect(parsePlanIdFromMaybeUrl(url)).toBe('SPY-ABC-123');
   });
 
@@ -16,4 +16,3 @@ describe('parsePlanIdFromMaybeUrl', () => {
     expect(parsePlanIdFromMaybeUrl('http://%zz')).toBeNull();
   });
 });
-

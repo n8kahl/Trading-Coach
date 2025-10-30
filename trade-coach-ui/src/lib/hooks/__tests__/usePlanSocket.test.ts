@@ -62,7 +62,7 @@ describe("usePlanSocket", () => {
   it("streams plan deltas and retries with backoff on failure", () => {
     const timeoutSpy = vi.spyOn(window, "setTimeout");
     const onDelta = vi.fn();
-    const { result, unmount } = renderHook(() => usePlanSocket("ws://example", onDelta));
+    const { result, unmount } = renderHook(() => usePlanSocket("ws://example", "PLAN-1", onDelta));
 
     expect(result.current).toBe("connecting");
     expect(makeBackoffMock).toHaveBeenCalledTimes(1);

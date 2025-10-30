@@ -37,7 +37,7 @@ STYLE_DEFAULTS: Dict[str, Dict[str, str]] = {
     "leaps": {"interval": "1D", "view": "1Y", "range": "6M"},
 }
 
-DEFAULT_CHART_PATH = "/tv/"
+DEFAULT_CHART_PATH = "/chart"
 
 
 def _extract_style(ui_state: Any) -> str:
@@ -128,7 +128,7 @@ def make_chart_url(
     base_url: str,
     precision_map: Dict[str, int] | None = None,
 ) -> str:
-    """Return canonical /tv URL composed from allow-listed params."""
+    """Return canonical /chart URL composed from allow-listed params."""
 
     params_dict: Dict[str, Any] = coerce_by_style(dict(params))
     params_dict.pop("style_hint", None)
