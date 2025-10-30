@@ -32,6 +32,16 @@ type PlanChartPanelProps = {
   priceRefreshToken?: number;
 };
 
+const PLAN_AS_OF_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: true,
+});
+
 function extractExecutionRule(plan: PlanSnapshot["plan"], key: string): string | null {
   const block = (plan as Record<string, unknown>).execution_rules;
   if (block && typeof block === "object" && typeof (block as Record<string, unknown>)[key] === "string") {
@@ -70,6 +80,12 @@ export default function PlanChartPanel({
   const reloadRule = extractExecutionRule(plan, "reload");
   const scaleRule = extractExecutionRule(plan, "scale");
   const planAsOf = plan.session_state?.as_of ?? layers?.as_of ?? null;
+  const planAsOfLabel = useMemo(() => {
+    if (!planAsOf) return null;
+    const date = new Date(planAsOf);
+    if (Number.isNaN(date.getTime())) return null;
+    return PLAN_AS_OF_FORMATTER.format(date);
+  }, [planAsOf]);
   const planVersion = plan.version ?? (plan as Record<string, unknown>).version ?? null;
   const planId = plan.plan_id;
   const priceSymbol = plan.symbol ? plan.symbol.toUpperCase() : null;
@@ -334,7 +350,7 @@ export default function PlanChartPanel({
               Plan {planId}
               {planVersion ? ` · v${planVersion}` : null}
             </span>
-            {planAsOf ? <span>As of {new Date(planAsOf).toLocaleString()}</span> : null}
+            {planAsOfLabel ? <span>As of {planAsOfLabel}</span> : null}
             {layers?.planning_context ? <span>{layers.planning_context.toUpperCase()}</span> : null}
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.2em] text-neutral-400">
