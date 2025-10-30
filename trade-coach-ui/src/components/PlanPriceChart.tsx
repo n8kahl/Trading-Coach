@@ -318,7 +318,20 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         hasInitialLoadRef.current = true;
         chartRef.current?.timeScale().fitContent();
       } else if (autoFollowRef.current) {
-        chartRef.current?.timeScale().scrollToRealTime();
+        // Keep the viewport anchored to the latest loaded bar.
+        // Avoid scrollToRealTime() because when markets are closed the
+        // "real time" cursor advances beyond the last bar and the chart looks empty.
+        const last = candles[candles.length - 1];
+        const lastTime = Number(last.time);
+        if (Number.isFinite(lastTime)) {
+          const lookbackSeconds = Math.max(resolutionSecondsRef.current * 120, 300);
+          const from = Math.max(lastTime - lookbackSeconds, lastTime - 60 * 60);
+          try {
+            chartRef.current?.timeScale().setVisibleRange({ from, to: lastTime });
+          } catch {
+            // noop
+          }
+        }
       }
     }, [chartReady, data, onLastBarTimeChange]);
 
@@ -496,7 +509,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           console.warn("[PlanPriceChart] followLive range failed", error);
         }
       }
-      chart.timeScale().scrollToRealTime();
+      // Do not call scrollToRealTime() here; see note above about closed markets.
     }, [data, devMode, stopReplay]);
 
     const startReplay = useCallback(() => {
