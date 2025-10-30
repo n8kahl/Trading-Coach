@@ -324,6 +324,19 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           // eslint-disable-next-line no-console
           console.log("[PlanPriceChart] last bar", { ms: lastBarTimeRef.current });
         }
+        // Force a sensible visible window to avoid blank viewports in odd cases
+        const lastSec = Number(last.time);
+        if (Number.isFinite(lastSec)) {
+          const lookbackSeconds = Math.max(resolutionSecondsRef.current * 120, 300);
+          const from = Math.max(lastSec - lookbackSeconds, lastSec - 60 * 60);
+          try {
+            chartRef.current?.timeScale().setVisibleRange({ from, to: lastSec });
+          } catch {}
+          if (devMode) {
+            // eslint-disable-next-line no-console
+            console.log("[PlanPriceChart] setData→setVisibleRange", { from, to: lastSec });
+          }
+        }
       } else {
         lastBarTimeRef.current = null;
         onLastBarTimeChange?.(null);
