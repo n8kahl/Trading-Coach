@@ -1,5 +1,5 @@
 (async function () {
-  const params = new URLSearchParams(window.location.search);
+  let params = new URLSearchParams(window.location.search);
 
   const normalizeResolution = (value) => {
     const token = (value || '').toString().trim().toLowerCase();
@@ -97,6 +97,73 @@ const normalizeReentryCues = (value) => {
     .filter(Boolean);
 };
 
+  const TRUSTED_HOST_PATTERN = /trading-coach-production\.up\.railway\.app$/;
+
+  const isTrustedHost = (url) => {
+    try {
+      const parsed = new URL(url);
+      return parsed.protocol === 'https:' && TRUSTED_HOST_PATTERN.test(parsed.host) && parsed.pathname.startsWith('/tv');
+    } catch {
+      return false;
+    }
+  };
+
+  const hasMinimumPlanBits = (p) =>
+    p.has('symbol') &&
+    p.has('interval') &&
+    p.has('direction') &&
+    p.has('entry') &&
+    p.has('stop') &&
+    p.has('tp') &&
+    p.has('ema');
+
+  const buildChartUrlRequestFromParams = (p) => {
+    const parseNumberList = (value, parser = Number) =>
+      (value || '')
+        .split(',')
+        .map((token) => parser(token.trim()))
+        .filter((num) => Number.isFinite(num));
+    const parseIntList = (value) =>
+      (value || '')
+        .split(',')
+        .map((token) => parseInt(token.trim(), 10))
+        .filter((num) => Number.isInteger(num) && num > 0);
+    const planVersionRaw = p.get('plan_version');
+    const planVersion = planVersionRaw != null ? parseInt(planVersionRaw, 10) : undefined;
+    return {
+      symbol: p.get('symbol'),
+      interval: p.get('interval'),
+      direction: p.get('direction'),
+      entry: parseNumber(p.get('entry')),
+      stop: parseNumber(p.get('stop')),
+      tp: parseNumberList(p.get('tp')),
+      ema: parseIntList(p.get('ema')),
+      focus: p.get('focus') || 'plan',
+      center_time: p.get('center_time') || 'latest',
+      scale_plan: p.get('scale_plan') || 'auto',
+      view: p.get('view') || undefined,
+      range: p.get('range') || undefined,
+      theme: p.get('theme') || undefined,
+      plan_id: p.get('plan_id') || undefined,
+      plan_version: Number.isFinite(planVersion) ? planVersion : undefined,
+      session: p.get('session') || undefined,
+      levels: p.get('levels') || undefined,
+      supportingLevels: p.get('supportingLevels') || undefined,
+      ui_state: p.get('ui_state') || undefined,
+    };
+  };
+
+  const selectScenarioStyle = (styleLower) => {
+    if (!styleLower) return;
+    const normalized = styleLower.toLowerCase();
+    const buttons = document.querySelectorAll('[data-scenario-style]');
+    buttons.forEach((btn) => {
+      if (!(btn instanceof HTMLElement)) return;
+      const matches = (btn.dataset.scenarioStyle || '').toLowerCase() === normalized;
+      btn.classList.toggle('plan-replay__button--active', matches);
+    });
+  };
+
   let planMeta = {};
   try {
     const rawPlanMeta = params.get('plan_meta');
@@ -151,6 +218,7 @@ const normalizeReentryCues = (value) => {
   const sessionBannerParam = typeof sessionBannerParamRaw === 'string' ? sessionBannerParamRaw.trim() : '';
   const liveFlag = params.get('live') === '1';
   let currentResolution = normalizeResolution(params.get('interval') || '15');
+  let currentRangeToken = (params.get('range') || '').trim().toLowerCase();
   const forceIntervalParam = params.get('force_interval') === '1';
   let parsedUiState = {};
   try {
@@ -188,11 +256,41 @@ const normalizeReentryCues = (value) => {
   const baseUrl = `${window.location.protocol}//${window.location.host}`;
   const initialPlanId = (params.get('plan_id') || '').trim() || null;
   const initialPlanVersion = (params.get('plan_version') || '').trim() || null;
+  if (!initialPlanId && hasMinimumPlanBits(params)) {
+    try {
+      const chartReq = buildChartUrlRequestFromParams(params);
+      const response = await fetch(`${baseUrl}/gpt/chart-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(chartReq),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const candidateUrl = data?.interactive;
+        if (isTrustedHost(candidateUrl)) {
+          window.history.replaceState({}, '', candidateUrl);
+          params = new URLSearchParams(window.location.search);
+        }
+      }
+    } catch (error) {
+      console.warn('canonicalization failed', error);
+    }
+  }
+  const canonicalPlanId = (params.get('plan_id') || '').trim() || null;
+  const canonicalPlanVersion = (params.get('plan_version') || '').trim() || null;
   let currentPlanId = initialPlanId;
   let currentPlanVersion = initialPlanVersion;
+  if (!currentPlanId && canonicalPlanId) {
+    currentPlanId = canonicalPlanId;
+    currentPlanVersion = canonicalPlanVersion;
+  }
+  currentResolution = normalizeResolution(params.get('interval') || currentResolution);
+  currentRangeToken = (params.get('range') || '').trim().toLowerCase();
   let planLayers = null;
   let planLayersMeta = {};
   let planZones = [];
+  let initialIdeaSnapshot = null;
+  let initialIdeaStyle = null;
   const MAX_PRIMARY_LEVELS = 6;
   const SUPPORTING_LEVEL_LIMIT = 40;
   let levelGroups = { primary: [], supplemental: [] };
@@ -235,6 +333,26 @@ const normalizeReentryCues = (value) => {
       }
     } catch (error) {
       console.warn('chart-layers fetch failed', error);
+    }
+  }
+
+  if (currentPlanId && !window.__tcInitialIdeaLoaded) {
+    try {
+      const ideaResponse = await fetch(`${baseUrl}/idea/${encodeURIComponent(currentPlanId)}`, { cache: 'no-store' });
+      if (ideaResponse.ok) {
+        const ideaPayload = await ideaResponse.json();
+        initialIdeaSnapshot = ideaPayload;
+        const styleToken =
+          (ideaPayload?.plan?.style ||
+            ideaPayload?.plan?.structured_plan?.style ||
+            ideaPayload?.style ||
+            '').toString().toLowerCase();
+        if (styleToken) {
+          initialIdeaStyle = styleToken;
+        }
+      }
+    } catch (error) {
+      console.warn('Initial idea fetch failed', error);
     }
   }
 
@@ -458,6 +576,19 @@ const headerSymbolEl = document.getElementById('header_symbol');
   const prepareNextOpenBtn = document.getElementById('prepare_next_open');
 const followLiveToggleEl = document.getElementById('follow_live_toggle');
 levelsToggleEl = document.getElementById('levels_toggle');
+  let reversalButtonEl = document.getElementById('btn_reversal');
+  if (!reversalButtonEl) {
+    const controlsContainer = document.querySelector('.plan-header__controls');
+    if (controlsContainer) {
+      reversalButtonEl = document.createElement('button');
+      reversalButtonEl.type = 'button';
+      reversalButtonEl.id = 'btn_reversal';
+      reversalButtonEl.className = 'prepare-btn';
+      reversalButtonEl.textContent = 'Reversal';
+      reversalButtonEl.setAttribute('aria-pressed', 'false');
+      controlsContainer.appendChild(reversalButtonEl);
+    }
+  }
   const planStatusNoteEl = document.getElementById('plan_status_note');
   const timeframeSwitcherEl = document.getElementById('timeframe_switcher');
   setHeaderDurationLabel();
@@ -1452,6 +1583,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
   }
   let currentMarketPhase = null;
   let streamSource = null;
+  let streamBackoffMs = 1000;
   let latestCandleData = [];
   let latestVolumeData = [];
   const DEFAULT_REPLAY_MINUTES = 10;
@@ -2021,8 +2153,28 @@ levelsToggleEl = document.getElementById('levels_toggle');
       streamSource.close();
       streamSource = null;
     }
+    const markReconnecting = () => {
+      streamingStatusState = 'warn';
+      if (streamingStatusEl) {
+        streamingStatusEl.classList.remove('streaming-pill--idle', 'streaming-pill--good', 'streaming-pill--stale');
+        streamingStatusEl.classList.add('streaming-pill--warn');
+        const label = 'Reconnecting stream…';
+        streamingStatusEl.title = label;
+        streamingStatusEl.setAttribute('aria-label', label);
+      }
+    };
+    const scheduleReconnect = () => {
+      const delay = streamBackoffMs;
+      streamBackoffMs = Math.min(streamBackoffMs * 2, 30000);
+      console.info('[stream] reconnecting in', delay, 'ms');
+      window.setTimeout(connectStream, delay);
+    };
     try {
       streamSource = new EventSource(streamUrl);
+      streamSource.onopen = () => {
+        streamBackoffMs = 1000;
+        applyStreamingStatus();
+      };
       streamSource.onmessage = (msg) => {
         try { pulsePlanLogIndicator(); } catch {}
         if (!msg?.data) return;
@@ -2064,15 +2216,17 @@ levelsToggleEl = document.getElementById('levels_toggle');
         }
       };
       streamSource.onerror = () => {
+        markReconnecting();
         if (streamSource) {
           streamSource.close();
           streamSource = null;
         }
-        window.setTimeout(connectStream, 5000);
+        scheduleReconnect();
       };
     } catch (err) {
       console.error('Stream connection failed', err);
-      window.setTimeout(connectStream, 5000);
+      markReconnecting();
+      scheduleReconnect();
     }
   };
 
@@ -2147,17 +2301,19 @@ levelsToggleEl = document.getElementById('levels_toggle');
     if (!timeframeSwitcherEl) return;
     const normalized = normalizeResolution(currentResolution);
     timeframeSwitcherEl.querySelectorAll('button.tf-btn').forEach((btn) => {
-      const token = btn.getAttribute('data-resolution') || '';
+      const token = btn.getAttribute('data-interval') || '';
       const btnNormalized = normalizeResolution(token);
       btn.classList.toggle('active', btnNormalized === normalized);
     });
   }
 
-  async function applyResolution(nextResolution) {
+  async function applyResolution(nextResolution, { rangeToken: nextRangeToken, historyMode = 'replace' } = {}) {
     const normalized = normalizeResolution(nextResolution || currentResolution);
+    const requestedRangeToken = typeof nextRangeToken === 'string' ? nextRangeToken.trim().toLowerCase() : null;
+    const nextRange = requestedRangeToken != null ? requestedRangeToken : currentRangeToken;
     if (!normalized) return;
 
-    if (normalized === currentResolution) {
+    if (normalized === currentResolution && (nextRange || '') === (currentRangeToken || '')) {
       updateTimeframeActiveButtons();
       setWatermark();
       setHeaderDurationLabel();
@@ -2165,6 +2321,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
     }
 
     currentResolution = normalized;
+    currentRangeToken = (nextRange || '').toLowerCase();
     updateTimeframeActiveButtons();
 
     const humanTf = canonicalTfLabel(currentResolution).toLowerCase();
@@ -2173,8 +2330,21 @@ levelsToggleEl = document.getElementById('levels_toggle');
     } else {
       params.delete('interval');
     }
+    if (currentRangeToken) {
+      params.set('range', currentRangeToken);
+    } else {
+      params.delete('range');
+    }
+
     const newUrl = `${window.location.pathname}?${params.toString()}`;
-    window.history.replaceState({}, '', newUrl);
+    if (historyMode === 'push') {
+      window.history.pushState({}, '', newUrl);
+    } else if (historyMode === 'replace') {
+      window.history.replaceState({}, '', newUrl);
+    }
+    if (historyMode !== 'none') {
+      params = new URLSearchParams(window.location.search);
+    }
 
     lastSecondsPerBar = Math.max(resolutionToSeconds(currentResolution), 60);
 
@@ -2189,20 +2359,42 @@ levelsToggleEl = document.getElementById('levels_toggle');
 
   function initTimeframeSwitcher() {
     if (!timeframeSwitcherEl) return;
-    const choices = ['1m', '5m', '15m', '1h', '4h', '1D'];
+    const choices = [
+      { interval: '1m', range: '1d' },
+      { interval: '5m', range: '3d' },
+      { interval: '15m', range: '5d' },
+      { interval: '1h', range: '1m' },
+      { interval: '4h', range: '3m' },
+      { interval: '1D', range: '1y' },
+    ];
     timeframeSwitcherEl.innerHTML = choices
       .map(
-        (tf) =>
-          `<button type="button" class="timeframe-button tf-btn" data-resolution="${tf}">${tf.toUpperCase()}</button>`,
+        (choice) =>
+          `<button type="button" class="timeframe-button tf-btn" data-interval="${choice.interval}" data-range="${choice.range}">${choice.interval.toUpperCase()}</button>`,
       )
       .join('');
     timeframeSwitcherEl.querySelectorAll('button.tf-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const token = btn.getAttribute('data-resolution');
-        applyResolution(token);
+      btn.addEventListener('click', async (event) => {
+        event.preventDefault();
+        const token = btn.getAttribute('data-interval');
+        const range = btn.getAttribute('data-range') || '';
+        await applyResolution(token, { rangeToken: range, historyMode: 'push' });
       });
     });
     updateTimeframeActiveButtons();
+  }
+
+  async function hydrateFromParamsAndRender() {
+    params = new URLSearchParams(window.location.search);
+    const intervalParam = params.get('interval') || currentResolution;
+    const rangeParam = (params.get('range') || '').trim().toLowerCase();
+    currentRangeToken = rangeParam;
+    currentResolution = normalizeResolution(intervalParam || currentResolution);
+    lastSecondsPerBar = Math.max(resolutionToSeconds(currentResolution), 60);
+    updateTimeframeActiveButtons();
+    setHeaderDurationLabel();
+    setWatermark();
+    await fetchBars();
   }
 
   const formatPrice = (value) => (Number.isFinite(value) ? value.toFixed(2) : '—');
@@ -2428,6 +2620,9 @@ levelsToggleEl = document.getElementById('levels_toggle');
     }
     if (headerDurationEl) {
       headerDurationEl.textContent = estimateDuration() || '';
+    }
+    if (reversalButtonEl) {
+      reversalButtonEl.setAttribute('aria-pressed', bias === 'short' ? 'true' : 'false');
     }
     updateDataMetadata();
   };
@@ -3204,6 +3399,19 @@ levelsToggleEl = document.getElementById('levels_toggle');
     return { planId: nextPlanId, planVersion: nextPlanVersion };
   };
 
+  if (initialIdeaSnapshot && !window.__tcInitialIdeaLoaded) {
+    try {
+      const snapshotPayload = initialIdeaSnapshot?.plan || initialIdeaSnapshot;
+      applyPlanResponse(snapshotPayload, { logMessage: 'Snapshot loaded' });
+      window.__tcInitialIdeaLoaded = true;
+      if (initialIdeaStyle) {
+        selectScenarioStyle(initialIdeaStyle);
+      }
+    } catch (error) {
+      console.warn('Initial idea apply failed', error);
+    }
+  }
+
   const scenarioConfig = { style: 'intraday', baseStyle: 'intraday', busy: false };
   scenarioConfig.baseStyle = (mergedPlanMeta.style || '').toLowerCase() || scenarioConfig.baseStyle;
   scenarioConfig.style = scenarioConfig.baseStyle;
@@ -3962,20 +4170,19 @@ levelsToggleEl = document.getElementById('levels_toggle');
     }
   };
 
-  const rangeTokenRaw = (params.get('range') || '').toLowerCase();
-
   const resolveSpanSeconds = () => {
     const base = resolutionToSeconds(currentResolution) * 600;
-    if (!rangeTokenRaw) return base;
+    const token = (currentRangeToken || '').toLowerCase();
+    if (!token) return base;
 
-    if (/^\d+$/.test(rangeTokenRaw)) {
-      const barsCount = parseInt(rangeTokenRaw, 10);
+    if (/^\d+$/.test(token)) {
+      const barsCount = parseInt(token, 10);
       if (Number.isFinite(barsCount) && barsCount > 0) {
         return resolutionToSeconds(currentResolution) * barsCount;
       }
     }
 
-    const match = rangeTokenRaw.match(/^(\d+)([dwmy])$/);
+    const match = token.match(/^(\d+)([dwmy])$/);
     if (match) {
       const value = parseInt(match[1], 10);
       const unit = match[2];
@@ -3986,7 +4193,7 @@ levelsToggleEl = document.getElementById('levels_toggle');
       }
     }
 
-    if (rangeTokenRaw === 'fit') {
+    if (token === 'fit') {
       return base;
     }
 
@@ -4317,6 +4524,38 @@ levelsToggleEl = document.getElementById('levels_toggle');
     forceAutoFocus = false;
   };
 
+  let reversalPending = false;
+  if (reversalButtonEl) {
+    reversalButtonEl.addEventListener('click', async (event) => {
+      event.preventDefault();
+      if (reversalPending) return;
+      reversalPending = true;
+      reversalButtonEl.disabled = true;
+      try {
+        const currentDirectionToken =
+          (mergedPlanMeta.bias || currentPlan.direction || params.get('direction') || 'long').toString().toLowerCase();
+        const nextDirection = currentDirectionToken === 'long' ? 'short' : 'long';
+        mergedPlanMeta.bias = nextDirection;
+        if (basePlan) basePlan.direction = nextDirection;
+        if (currentPlan) currentPlan.direction = nextDirection;
+        planMeta.bias = nextDirection;
+        params.set('direction', nextDirection);
+        const newUrl = `${window.location.pathname}?${params.toString()}`;
+        window.history.pushState({}, '', newUrl);
+        params = new URLSearchParams(window.location.search);
+        reversalButtonEl.setAttribute('aria-pressed', nextDirection === 'short' ? 'true' : 'false');
+        appendPlanLogEntry(`Plan flipped to ${nextDirection.toUpperCase()} bias.`, Math.floor(Date.now() / 1000), 'info');
+        renderHeader();
+        await fetchBars();
+      } catch (error) {
+        console.warn('Reversal toggle failed', error);
+      } finally {
+        reversalButtonEl.disabled = false;
+        reversalPending = false;
+      }
+    });
+  }
+
   renderHeader();
   setHeaderDurationLabel();
   initTimeframeSwitcher();
@@ -4324,6 +4563,9 @@ levelsToggleEl = document.getElementById('levels_toggle');
   fetchBars();
   connectStream();
   loadTickerInsights();
+  window.addEventListener('popstate', () => {
+    void hydrateFromParamsAndRender();
+  });
   window.addEventListener('resize', () => {
     chart.resize(container.clientWidth, container.clientHeight);
     if (planPanelEl && window.innerWidth > 1024) {

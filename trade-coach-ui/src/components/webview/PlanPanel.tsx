@@ -16,6 +16,7 @@ type PlanPanelProps = {
   highlightedLevel: SupportingLevel | null;
   onSelectLevel: (level: SupportingLevel | null) => void;
   theme?: "dark" | "light";
+  targetsAwaiting?: boolean;
 };
 
 export default function PlanPanel({
@@ -27,6 +28,7 @@ export default function PlanPanel({
   highlightedLevel,
   onSelectLevel,
   theme = "dark",
+  targetsAwaiting = false,
 }: PlanPanelProps) {
   const isLight = theme === "light";
   const entry = structured?.entry?.level ?? plan.entry ?? null;
@@ -137,6 +139,16 @@ export default function PlanPanel({
 
       <section className="space-y-3">
         <h3 className={clsx("text-xs font-semibold uppercase tracking-[0.3em]", isLight ? "text-slate-500" : "text-neutral-400")}>Targets</h3>
+        {targetsAwaiting ? (
+          <div
+            className={clsx(
+              "rounded-xl border px-3 py-2 text-xs uppercase tracking-[0.25em]",
+              isLight ? "border-amber-200/80 bg-amber-100/60 text-amber-700" : "border-amber-400/40 bg-amber-400/10 text-amber-200",
+            )}
+          >
+            Targets unavailable (awaiting updates)
+          </div>
+        ) : null}
         <ul className={clsx("space-y-2 text-sm", isLight ? "text-slate-700" : "text-neutral-200")}>
           {targets.length === 0 ? (
             <li

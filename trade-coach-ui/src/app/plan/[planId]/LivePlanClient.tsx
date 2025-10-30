@@ -325,6 +325,11 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
 
   const actionsDock = <ActionsDock onAction={handleActionsDock} theme={uiTheme} />;
 
+  const serverDeclaredTargets =
+    (Array.isArray(plan.targets) && plan.targets.length > 0) ||
+    (Array.isArray(structured?.targets) && structured.targets.length > 0);
+  const showTargetsAwaiting = serverDeclaredTargets && targets.length === 0;
+
   const planPanelProps = {
     plan,
     structured,
@@ -334,6 +339,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
     highlightedLevel,
     onSelectLevel: (level: SupportingLevel | null) => setHighlightedLevel(level),
     theme: uiTheme,
+    targetsAwaiting: showTargetsAwaiting,
   };
 
   const desktopPlanPanel = <PlanPanel {...planPanelProps} />;

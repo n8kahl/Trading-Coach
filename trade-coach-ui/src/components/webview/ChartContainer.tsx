@@ -5,6 +5,7 @@ import Link from "next/link";
 import PriceChart from "../PriceChart";
 import type { LineData } from "lightweight-charts";
 import type { SupportingLevel, ParsedUiState } from "@/lib/chart";
+import { ensureCanonicalChartUrl } from "@/lib/chartUrl";
 
 type ChartContainerProps = {
   symbol: string;
@@ -48,6 +49,25 @@ export default function ChartContainer({
   children,
 }: ChartContainerProps) {
   const isLight = uiTheme === "light";
+  let safeInteractiveUrl: string | null = null;
+  let chartLinkError = false;
+  if (interactiveUrl) {
+    const canonical = ensureCanonicalChartUrl(interactiveUrl);
+    if (canonical) {
+      try {
+        const parsed = new URL(canonical);
+        if (/[?&]plan_id=/.test(parsed.search)) {
+          safeInteractiveUrl = canonical;
+        } else {
+          chartLinkError = true;
+        }
+      } catch {
+        chartLinkError = true;
+      }
+    } else {
+      chartLinkError = true;
+    }
+  }
   const toggleClasses = showSupportingLevels
     ? isLight
       ? "border-emerald-500/50 bg-emerald-400/20 text-emerald-700 hover:bg-emerald-400/30"
@@ -108,9 +128,9 @@ export default function ChartContainer({
           >
             {showSupportingLevels ? "Hide Supporting Levels" : "Show Supporting Levels"}
           </button>
-          {interactiveUrl ? (
+          {safeInteractiveUrl ? (
             <Link
-              href={interactiveUrl}
+              href={safeInteractiveUrl}
               target="_blank"
               className={clsx(
                 "rounded-full border px-4 py-2 uppercase tracking-[0.25em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70",
@@ -121,6 +141,10 @@ export default function ChartContainer({
             >
               Open TV View
             </Link>
+          ) : chartLinkError ? (
+            <div className="rounded-full border border-rose-500/40 bg-rose-500/15 px-4 py-2 text-xs uppercase tracking-[0.25em] text-rose-200">
+              Chart link unavailable (non-canonical). Regenerate plan.
+            </div>
           ) : null}
         </div>
       </header>
