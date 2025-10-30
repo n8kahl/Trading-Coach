@@ -6461,6 +6461,15 @@ def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
             query[key] = _tv_symbol(str(value))
         else:
             query[key] = str(value)
+    # If PUBLIC_UI_HOST is configured, tag links with ui=1 so the /tv handler
+    # can optionally redirect users to the UI plan page when plan_id is present.
+    try:
+        import os as _os
+        if (_os.getenv("PUBLIC_UI_HOST") or "").strip():
+            query.setdefault("ui", "1")
+    except Exception:
+        pass
+
     if not query:
         url = base
         _ensure_allowed_host(url, request)
