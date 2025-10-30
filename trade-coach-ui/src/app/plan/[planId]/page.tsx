@@ -1,4 +1,5 @@
 import { notFound, redirect } from "next/navigation";
+import { parsePlanIdFromMaybeUrl } from '@/lib/links';
 import type { Metadata } from "next";
 import { fetchPlanSnapshot } from "@/lib/api";
 import type { PlanSnapshot } from "@/lib/types";
@@ -12,18 +13,11 @@ export async function generateMetadata({ params }: PlanPageProps): Promise<Metad
   const { planId } = await params;
   let plan: PlanSnapshot | null = null;
   try {
-    const idOrUrl = planId;
-    if (idOrUrl.startsWith('http')) {
-      try {
-        const url = new URL(idOrUrl);
-        const pid = url.searchParams.get('plan_id');
-        if (pid) {
-          // Redirect so the URL is canonical in the browser
-          redirect(`/plan/${encodeURIComponent(pid)}`);
-        }
-      } catch {}
+    const maybe = parsePlanIdFromMaybeUrl(planId);
+    if (maybe && maybe !== planId) {
+      redirect(`/plan/${encodeURIComponent(maybe)}`);
     }
-    plan = await fetchPlanSnapshot(idOrUrl);
+    plan = await fetchPlanSnapshot(maybe || planId);
   } catch {
     // ignore
   }
@@ -41,19 +35,11 @@ export async function generateMetadata({ params }: PlanPageProps): Promise<Metad
 
 export default async function PlanPage({ params }: PlanPageProps) {
   const { planId } = await params;
-  const idOrUrl = planId;
-  if (idOrUrl.startsWith('http')) {
-    try {
-      const url = new URL(idOrUrl);
-      const pid = url.searchParams.get('plan_id');
-      if (pid) redirect(`/plan/${encodeURIComponent(pid)}`);
-    } catch {
-      // fall through
-    }
-  }
+  const maybe = parsePlanIdFromMaybeUrl(planId);
+  if (maybe && maybe !== planId) redirect(`/plan/${encodeURIComponent(maybe)}`);
   let snapshot: PlanSnapshot;
   try {
-    snapshot = await fetchPlanSnapshot(idOrUrl);
+    snapshot = await fetchPlanSnapshot(maybe || planId);
   } catch (error) {
     if (process.env.NODE_ENV !== "production") {
       console.error(error);

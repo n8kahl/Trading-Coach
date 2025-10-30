@@ -19,3 +19,15 @@ export function buildTvLinkFromPlan(plan: any): string | null {
   return url.toString();
 }
 
+export function parsePlanIdFromMaybeUrl(input: string): string | null {
+  if (!input) return null;
+  if (/^https?:\/\//i.test(input)) {
+    try {
+      const u = new URL(input);
+      return u.searchParams.get('plan_id');
+    } catch {
+      return null;
+    }
+  }
+  return input;
+}

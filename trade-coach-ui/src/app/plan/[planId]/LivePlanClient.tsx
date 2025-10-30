@@ -113,9 +113,10 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
   const notes = plan.notes ?? null;
   const warnings = Array.isArray(plan.warnings) ? plan.warnings : [];
 
+  const uiPlanLink = (initialSnapshot as any)?.ui?.plan_link ?? undefined;
   return (
     <ResponsiveShell title={pageTitle}>
-      <PlanHeader planId={plan.plan_id} legacyUrl={chartUrl ?? undefined} />
+      <PlanHeader planId={plan.plan_id} legacyUrl={chartUrl ?? undefined} uiUrl={uiPlanLink} />
       <StatusBanner
         session={session}
         asOfText={asOfText}

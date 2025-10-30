@@ -1,8 +1,8 @@
 "use client";
 import Link from 'next/link';
 
-export default function PlanHeader({ planId, legacyUrl }: { planId: string; legacyUrl?: string | null }) {
-  const uiHref = `/plan/${encodeURIComponent(planId)}`;
+export default function PlanHeader({ planId, legacyUrl, uiUrl }: { planId: string; legacyUrl?: string | null; uiUrl?: string | null }) {
+  const uiHref = uiUrl || `/plan/${encodeURIComponent(planId)}`;
   return (
     <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
       <Link href={uiHref} className="rounded bg-[var(--chip)] px-2 py-1 hover:bg-[var(--border)]">Open in UI</Link>
@@ -14,4 +14,3 @@ export default function PlanHeader({ planId, legacyUrl }: { planId: string; lega
     </div>
   );
 }
-
