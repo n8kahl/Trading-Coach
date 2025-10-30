@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     finnhub_api_key: str | None = Field(None, env="FINNHUB_API_KEY")
     self_base_url: str | None = Field(None, env="SELF_API_BASE_URL")
     public_base_url: str | None = Field(None, env="PUBLIC_BASE_URL")
+    public_ui_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("PUBLIC_UI_BASE_URL", "PUBLIC_UI_HOST"),
+    )
     index_sniper_mode: bool = Field(False, env="INDEX_SNIPER_MODE")
     ff_chart_canonical_v1: bool = Field(False, env="FF_CHART_CANONICAL_V1")
     ff_layers_endpoint: bool = Field(False, env="FF_LAYERS_ENDPOINT")

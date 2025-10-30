@@ -200,6 +200,16 @@ RUNNER_K = {"scalp": 0.8, "intraday": 1.0, "swing": 1.2, "leaps": 1.5}
 GIVEBACK = {"scalp": 0.40, "intraday": 0.50, "swing": 0.55, "leaps": 0.60}
 MTF_W = {"d": 0.50, "h60": 0.30, "m15": 0.15, "m5": 0.05}
 
+def _plan_page_url(plan_id: str) -> Optional[str]:
+    try:
+        ui = get_settings().public_ui_base_url
+    except Exception:
+        ui = None
+    if not ui:
+        return None
+    ui = ui.rstrip("/")
+    return f"{ui}/plan/{plan_id}"
+
 def _infer_tick_size(price: float) -> float:
     if price >= 500:
         return 0.1
@@ -3048,6 +3058,8 @@ class PlanResponse(BaseModel):
     earnings: Dict[str, Any] | None = None
     charts_params: Dict[str, Any] | None = None
     chart_url: str | None = None
+    # Preferred deep link to the Next.js UI plan page when configured
+    plan_page: str | None = None
     chart_timeframe: str | None = None
     chart_guidance: str | None = None
     strategy_id: str | None = None
@@ -11202,6 +11214,7 @@ async def _generate_fallback_plan(
         plan_id=plan_id,
         version=1,
         trade_detail=chart_url_with_ids,
+        plan_page=_plan_page_url(plan_id),
         warnings=warnings_payload,
         planning_context="live" if is_plan_live else "frozen",
         symbol=symbol.upper(),
@@ -13158,6 +13171,7 @@ async def gpt_plan(
         plan_id=plan_id,
         version=version,
         trade_detail=trade_detail_url,
+        plan_page=_plan_page_url(plan_id),
         warnings=warnings_payload,
         planning_context=planning_context_value,
         symbol=first.get("symbol"),
