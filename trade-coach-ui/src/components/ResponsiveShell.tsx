@@ -3,6 +3,10 @@
 import * as React from 'react';
 import Link from 'next/link';
 import clsx from 'clsx';
+import * as ReactDOM from 'react';
+import { useEffect, useState } from 'react';
+import { fetchServerInfo } from '@/lib/serverInfo';
+import { API_BASE } from '@/lib/hosts';
 
 export function ResponsiveShell({
   title,
@@ -65,8 +69,41 @@ export function ResponsiveShell({
       <main id="main" role="main" className="mx-auto max-w-7xl px-3 sm:px-4 py-3">
         {children}
       </main>
+
+      <footer className="mt-6 border-t border-[var(--border)] bg-[var(--surface)]/60">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-3 sm:px-4 py-2 text-xs text-[var(--muted)]">
+          <ServerBadge />
+          <span>UI: fancytraderui</span>
+        </div>
+      </footer>
     </div>
   );
 }
 
 export default ResponsiveShell;
+
+function ServerBadge() {
+  const [label, setLabel] = useState<string>('API: resolving…');
+  useEffect(() => {
+    let alive = true;
+    fetchServerInfo()
+      .then((info) => {
+        if (!alive) return;
+        if (!info) {
+          setLabel(`API: ${new URL(API_BASE).host}`);
+          return;
+        }
+        const host = new URL(API_BASE).host;
+        const sha = (info.git_sha || 'unknown').slice(0, 7);
+        setLabel(`API: ${info.service ?? host} (${sha})`);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setLabel(`API: ${new URL(API_BASE).host}`);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return <span className="inline-block rounded bg-[var(--chip)] px-2 py-0.5">{label}</span>;
+}

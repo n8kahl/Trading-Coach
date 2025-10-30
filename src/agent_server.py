@@ -2750,10 +2750,20 @@ app.add_middleware(AllowedHostsMiddleware, allowed=get_settings().ft_allowed_hos
 app.add_middleware(SessionMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://fancytrader.up.railway.app", "http://localhost:3000", "http://127.0.0.1:3000"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class ServiceHeaderMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        resp: Response = await call_next(request)
+        resp.headers["X-Service"] = "trading-coach-production"
+        return resp
+
+
+app.add_middleware(ServiceHeaderMiddleware)
 
 
 
@@ -2775,6 +2785,21 @@ if WEBVIEW_STATIC_DIR.exists():
 async def metrics_endpoint() -> Response:
     payload, content_type = prometheus_response()
     return Response(content=payload, media_type=content_type)
+
+
+@app.get("/healthz", include_in_schema=False)
+async def healthz() -> dict:
+    return {"ok": True, "service": "trading-coach-production"}
+
+
+@app.get("/version", include_in_schema=False)
+async def version() -> dict:
+    import os
+    return {
+        "service": "trading-coach-production",
+        "git_sha": os.getenv("GIT_SHA", "unknown"),
+        "build_time": os.getenv("BUILD_TIME", "unknown"),
+    }
 
 
 @app.get("/diagnostics/enrich", include_in_schema=False)

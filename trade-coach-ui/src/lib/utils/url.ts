@@ -16,3 +16,16 @@ export function validateTvUrl(url: string): string {
     return '/tv';
   }
 }
+
+import { CHART_HOST } from '@/lib/hosts';
+
+export function safeChartUrl(u: string | null | undefined): string | null {
+  if (!u) return null;
+  try {
+    const url = new URL(u, typeof window !== 'undefined' ? window.location.origin : 'http://localhost');
+    const okHost = new URL(CHART_HOST).host;
+    return url.host === okHost ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
