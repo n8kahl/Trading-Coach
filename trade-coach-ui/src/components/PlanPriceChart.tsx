@@ -176,11 +176,21 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
 
       (async () => {
         addDbg(`[PlanPriceChart] mount: container=${!!containerRef.current}`);
-        const lib = await import("lightweight-charts");
+        const imported = await import("lightweight-charts");
         if (disposed || !containerRef.current) return;
 
+        // Handle different module shapes (ESM vs UMD default)
+        const lib: any = (imported && (imported as any).createChart)
+          ? imported
+          : (imported as any)?.default || imported;
+        const createChartFn: any = lib?.createChart;
+        if (typeof createChartFn !== "function") {
+          addDbg(`[PlanPriceChart] error: createChart not a function on module; keys=${Object.keys(imported || {}).join(',')}`);
+          return;
+        }
+
         chartLibRef.current = lib;
-        const chart = lib.createChart(containerRef.current, {
+        const chart = createChartFn(containerRef.current, {
           layout: {
             background: { type: lib.ColorType.Solid, color: theme === "light" ? SURFACE_LIGHT : SURFACE_DARK },
             textColor: theme === "light" ? TEXT_LIGHT : TEXT_DARK,
@@ -204,8 +214,12 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           },
           autoSize: true,
         });
+        if (!chart || typeof (chart as any).addCandlestickSeries !== "function") {
+          addDbg(`[PlanPriceChart] error: chart.addCandlestickSeries not a function; chartKeys=${Object.keys(chart || {}).join(',')}`);
+          return;
+        }
 
-        const candleSeries = chart.addCandlestickSeries({
+        const candleSeries = (chart as any).addCandlestickSeries({
           upColor: GREEN,
           wickUpColor: GREEN,
           borderUpColor: GREEN,
@@ -214,7 +228,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           borderDownColor: RED,
         });
 
-        const volumeSeries = chart.addHistogramSeries({
+        const volumeSeries = (chart as any).addHistogramSeries({
           priceScaleId: "",
           color: "rgba(148, 163, 184, 0.4)",
           base: 0,
