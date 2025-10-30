@@ -6461,14 +6461,9 @@ def _build_tv_chart_url(request: Request, params: Dict[str, Any]) -> str:
             query[key] = _tv_symbol(str(value))
         else:
             query[key] = str(value)
-    # If PUBLIC_UI_HOST is configured, tag links with ui=1 so the /tv handler
-    # can optionally redirect users to the UI plan page when plan_id is present.
-    try:
-        import os as _os
-        if (_os.getenv("PUBLIC_UI_HOST") or "").strip():
-            query.setdefault("ui", "1")
-    except Exception:
-        pass
+    # Always tag links with ui=1 so the /tv handler can redirect to the
+    # canonical UI plan page when plan_id is present.
+    query.setdefault("ui", "1")
 
     if not query:
         url = base
@@ -12089,13 +12084,8 @@ async def gpt_plan(
                 "plan_version": str(version),
             },
         )
-        # If PUBLIC_UI_HOST is set, tag ui=1 so /tv can redirect to UI
-        try:
-            import os as _os
-            if (_os.getenv("PUBLIC_UI_HOST") or "").strip():
-                chart_url_value = _append_query_params(chart_url_value, {"ui": "1"})
-        except Exception:
-            pass
+        # Always tag ui=1 so /tv can redirect to UI
+        chart_url_value = _append_query_params(chart_url_value, {"ui": "1"})
         if is_plan_live:
             live_param_stamp = live_stamp_payload or chart_params_payload.get("last_update") if chart_params_payload else None
             if not live_param_stamp:
