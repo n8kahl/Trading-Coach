@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { API_BASE_URL } from "@/lib/env";
+import { ensureCanonicalChartUrl } from "@/lib/chartUrl";
 
 type PlanLike = {
   charts?: { interactive?: string | null; params?: Record<string, unknown> | null };
@@ -7,11 +8,9 @@ type PlanLike = {
   charts_params?: Record<string, unknown> | null;
 };
 
-const VALID_HOST = /^https:\/\/trading-coach-production\.up\.railway\.app\/tv/;
-
 export function useChartUrl(plan: PlanLike | null | undefined): string | null {
   const direct = useMemo(
-    () => plan?.charts?.interactive ?? plan?.chart_url ?? null,
+    () => ensureCanonicalChartUrl(plan?.charts?.interactive ?? plan?.chart_url ?? null),
     [plan?.charts?.interactive, plan?.chart_url],
   );
   const [url, setUrl] = useState<string | null>(direct);
@@ -39,12 +38,8 @@ export function useChartUrl(plan: PlanLike | null | undefined): string | null {
           body: JSON.stringify(params),
         });
         const data = (await response.json()) as { interactive?: string | null };
-        const candidate = data?.interactive ?? null;
-        if (!cancelled && candidate && VALID_HOST.test(candidate)) {
-          setUrl(candidate);
-        } else if (!cancelled) {
-          setUrl(null);
-        }
+        const candidate = ensureCanonicalChartUrl(data?.interactive ?? null);
+        if (!cancelled) setUrl(candidate);
       } catch {
         if (!cancelled) setUrl(null);
       }
@@ -56,4 +51,3 @@ export function useChartUrl(plan: PlanLike | null | undefined): string | null {
 
   return url;
 }
-

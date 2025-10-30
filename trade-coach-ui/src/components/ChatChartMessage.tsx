@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { API_BASE_URL, withAuthHeaders } from "@/lib/env";
+import { ensureCanonicalChartUrl } from "@/lib/chartUrl";
 
 type PlanDirection = "long" | "short";
 
@@ -145,9 +146,9 @@ export default function ChatChartMessage({ symbol, interval, plan, focus, center
         }
         const data: ChartLinksResponse = await response.json();
         if (aborted) return;
-        const liveUrl = data.interactive;
+        const liveUrl = ensureCanonicalChartUrl(data.interactive);
         if (!liveUrl) {
-          throw new Error("chart-url response missing interactive link");
+          throw new Error("chart-url response missing canonical /tv link");
         }
         setState({ status: "ready", liveUrl });
       } catch (error) {

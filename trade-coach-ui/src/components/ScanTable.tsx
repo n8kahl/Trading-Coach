@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { API_BASE_URL, withAuthHeaders } from '@/lib/env';
+import { ensureCanonicalChartUrl } from '@/lib/chartUrl';
 
 export type ScanTableRow = {
   plan_id?: string;
@@ -58,7 +59,7 @@ async function buildChartLink(row: ScanTableRow): Promise<string | null> {
       return null;
     }
     const data = (await res.json()) as { interactive?: string };
-    return data?.interactive ?? null;
+    return ensureCanonicalChartUrl(data?.interactive ?? null);
   } catch {
     return null;
   }

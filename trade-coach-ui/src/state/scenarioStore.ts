@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { API_BASE_URL, withAuthHeaders } from '@/lib/env';
+import { ensureCanonicalChartUrl } from '@/lib/chartUrl';
 
 export type ScenarioStyle = 'scalp' | 'intraday' | 'swing' | 'reversal';
 
@@ -35,7 +36,11 @@ function readStore(symbol: string): StoreState {
   const live = localStorage.getItem(LIVE_KEY_PREFIX + symbol.toUpperCase());
   try {
     const parsed = raw ? (JSON.parse(raw) as ScenarioPlan[]) : [];
-    return { livePlanId: live || null, scenarios: parsed };
+    const sanitized = parsed.map((scenario) => ({
+      ...scenario,
+      chart_url: ensureCanonicalChartUrl(scenario.chart_url),
+    }));
+    return { livePlanId: live || null, scenarios: sanitized };
   } catch {
     return { livePlanId: live || null, scenarios: [] };
   }
@@ -60,6 +65,7 @@ export function useScenarioStore(symbol: string) {
   }, [upper, livePlanId, scenarios]);
 
   const addScenario = useCallback((plan: ScenarioPlan) => {
+    const canonicalPlan: ScenarioPlan = { ...plan, chart_url: ensureCanonicalChartUrl(plan.chart_url) };
     setState((prev) => {
       const existing = prev.scenarios.filter((s) => s.symbol === upper);
       // De-dup identical style if very recent (60s)
@@ -69,7 +75,7 @@ export function useScenarioStore(symbol: string) {
       );
       if (recentSame) return prev; // drop duplicate
       // Enforce <=3 per symbol
-      const nextScenarios = [...prev.scenarios.filter((s) => s.symbol !== upper), ...existing, plan].slice(-3);
+      const nextScenarios = [...prev.scenarios.filter((s) => s.symbol !== upper), ...existing, canonicalPlan].slice(-3);
       return { ...prev, scenarios: nextScenarios };
     });
   }, [upper]);
@@ -100,7 +106,7 @@ export function useScenarioStore(symbol: string) {
     const data = await res.json();
     const plan = data?.plan ?? data ?? {};
     const planId: string = plan.plan_id || data.plan_id;
-    const chartUrl: string | null = plan.chart_url || plan.trade_detail || data?.charts?.interactive || null;
+    const chartUrl = ensureCanonicalChartUrl(plan.chart_url || plan.trade_detail || data?.charts?.interactive || null);
     const entry: number | null = plan.entry ?? plan.structured_plan?.entry?.level ?? null;
     const stop: number | null = plan.stop ?? plan.structured_plan?.stop ?? null;
     const tps: number[] = Array.isArray(plan.targets) ? plan.targets : plan.structured_plan?.targets || [];
@@ -136,4 +142,3 @@ export function useScenarioStore(symbol: string) {
     regenerateScenario,
   }), [livePlanId, scenarios, addScenario, removeScenario, setLinked, adoptAsLive, regenerateScenario]);
 }
-

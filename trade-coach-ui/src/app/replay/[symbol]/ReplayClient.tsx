@@ -201,9 +201,13 @@ export default function ReplayClient({ symbol, initialLivePlanId, initialSnapsho
                       <span className="rounded-full bg-neutral-800/60 px-2 py-0.5 text-neutral-200">Frozen</span>
                     )}
                   </div>
-                  <Link href={s.chart_url || '#'} target="_blank" className="text-xs text-sky-300 underline">
-                    Open chart ↗
-                  </Link>
+                  {s.chart_url ? (
+                    <Link href={s.chart_url} target="_blank" className="text-xs text-sky-300 underline">
+                      Open chart ↗
+                    </Link>
+                  ) : (
+                    <span className="text-xs text-neutral-500">Chart unavailable</span>
+                  )}
                 </div>
                 <div className="flex items-center justify-between text-sm">
                   <div className="text-neutral-400">Entry</div>

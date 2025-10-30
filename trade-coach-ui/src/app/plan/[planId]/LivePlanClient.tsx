@@ -13,6 +13,7 @@ import { API_BASE_URL, WS_BASE_URL } from "@/lib/env";
 import { usePlanSocket } from "@/lib/hooks/usePlanSocket";
 import { useSymbolStream } from "@/lib/hooks/useSymbolStream";
 import { useChartUrl } from "@/lib/hooks/useChartUrl";
+import { ensureCanonicalChartUrl } from "@/lib/chartUrl";
 import {
   normalizeChartParams,
   parsePrice,
@@ -280,7 +281,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
   }, [highlightedLevel]);
 
   const chartLink = useChartUrl(plan);
-  const interactiveUrl = chartLink ?? initialSnapshot.chart_url ?? null;
+  const interactiveUrl = chartLink ?? ensureCanonicalChartUrl(initialSnapshot.chart_url) ?? null;
 
   const handleThemeToggle = useCallback(() => {
     setUiTheme((prev) => (prev === "light" ? "dark" : "light"));

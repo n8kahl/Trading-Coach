@@ -1,6 +1,7 @@
 import "server-only";
 
 import { API_BASE_URL, withAuthHeaders } from "./env";
+import { ensureCanonicalChartUrl } from "./chartUrl";
 import type { PlanSnapshot } from "./types";
 
 export async function fetchPlanSnapshot(planId: string): Promise<PlanSnapshot> {
@@ -55,7 +56,7 @@ export async function fetchPlanForSymbol(symbol: string, style?: string): Promis
       session_state: plan.session_state ?? null,
       structured_plan: structured,
     },
-    chart_url: plan.chart_url ?? plan.trade_detail ?? data?.charts?.interactive ?? null,
+    chart_url: ensureCanonicalChartUrl(plan.chart_url ?? plan.trade_detail ?? data?.charts?.interactive ?? null),
   } as PlanSnapshot;
   return snapshot;
 }
