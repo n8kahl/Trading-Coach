@@ -138,6 +138,16 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
   ({ planId, symbol, resolution, theme, data, overlays, onLastBarTimeChange, devMode = false }, ref) => {
     const debug =
       devMode || (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("dev") !== null);
+    const [debugMsgs, setDebugMsgs] = useState<string[]>([]);
+    const addDbg = useCallback(
+      (m: string) => {
+        if (!debug) return;
+        setDebugMsgs((prev) => (prev.length > 30 ? [...prev.slice(-20), m] : [...prev, m]));
+        // eslint-disable-next-line no-console
+        console.log(m);
+      },
+      [debug],
+    );
     const containerRef = useRef<HTMLDivElement | null>(null);
     const chartRef = useRef<IChartApi | null>(null);
     const chartLibRef = useRef<ChartLib | null>(null);
@@ -165,6 +175,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       let disposed = false;
 
       (async () => {
+        addDbg(`[PlanPriceChart] mount: container=${!!containerRef.current}`);
         const lib = await import("lightweight-charts");
         if (disposed || !containerRef.current) return;
 
@@ -224,14 +235,9 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         });
         resizeObserverRef.current.observe(containerRef.current);
         setChartReady(true);
-        if (debug) {
-          // eslint-disable-next-line no-console
-          console.log("[PlanPriceChart] chart ready", { symbol, planId });
-        }
+        addDbg(`[PlanPriceChart] chart ready: ${symbol} plan=${planId}`);
       })().catch((error) => {
-        if (devMode) {
-          console.error("[PlanPriceChart] chart init failed", error);
-        }
+        addDbg(`[PlanPriceChart] chart init failed: ${String(error)}`);
       });
 
       return () => {
@@ -302,12 +308,11 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       }));
 
       candleSeries.setData(candles);
-      if (debug) {
+      {
         const n = candles.length;
         const first = n ? Number(candles[0].time) : null;
         const last = n ? Number(candles[n - 1].time) : null;
-        // eslint-disable-next-line no-console
-        console.log("[PlanPriceChart] setData", { count: n, first, last });
+        addDbg(`[PlanPriceChart] setData count=${n} first=${first} last=${last}`);
       }
 
       const volumes: HistogramData[] = data.map((bar) => ({
@@ -322,10 +327,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         const lastMs = Number(last.time) * 1000;
         lastBarTimeRef.current = Number.isFinite(lastMs) ? lastMs : null;
         onLastBarTimeChange?.(lastBarTimeRef.current);
-        if (debug) {
-          // eslint-disable-next-line no-console
-          console.log("[PlanPriceChart] last bar", { ms: lastBarTimeRef.current });
-        }
+        addDbg(`[PlanPriceChart] last bar ms=${lastBarTimeRef.current}`);
         // Force a sensible visible window to avoid blank viewports in odd cases
         const lastSec = Number(last.time);
         if (Number.isFinite(lastSec)) {
@@ -334,18 +336,16 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           try {
             chartRef.current?.timeScale().setVisibleRange({ from, to: lastSec });
           } catch {}
-          if (debug) {
-            // eslint-disable-next-line no-console
-            console.log("[PlanPriceChart] setData→setVisibleRange", {
-              from,
-              to: lastSec,
-              vr: chartRef.current?.timeScale().getVisibleRange?.(),
-            });
-          }
+          addDbg(
+            `[PlanPriceChart] setData→setVisibleRange from=${from} to=${lastSec} vr=${JSON.stringify(
+              chartRef.current?.timeScale().getVisibleRange?.() ?? null,
+            )}`,
+          );
         }
       } else {
         lastBarTimeRef.current = null;
         onLastBarTimeChange?.(null);
+        addDbg(`[PlanPriceChart] no candles`);
       }
 
       if (!hasInitialLoadRef.current) {
@@ -362,17 +362,12 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           const from = Math.max(lastTime - lookbackSeconds, lastTime - 60 * 60);
           try {
             chartRef.current?.timeScale().setVisibleRange({ from, to: lastTime });
-          } catch {
-            // noop
-          }
-          if (debug) {
-            // eslint-disable-next-line no-console
-            console.log("[PlanPriceChart] keep anchored", {
-              from,
-              to: lastTime,
-              vr: chartRef.current?.timeScale().getVisibleRange?.(),
-            });
-          }
+          } catch {}
+          addDbg(
+            `[PlanPriceChart] keep anchored from=${from} to=${lastTime} vr=${JSON.stringify(
+              chartRef.current?.timeScale().getVisibleRange?.() ?? null,
+            )}`,
+          );
         }
       }
     }, [chartReady, data, onLastBarTimeChange]);
@@ -547,20 +542,14 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       try {
         chart.timeScale().setVisibleRange({ from, to: lastTime });
       } catch (error) {
-        if (devMode) {
-          console.warn("[PlanPriceChart] followLive range failed", error);
-        }
+        addDbg(`[PlanPriceChart] followLive range failed: ${String(error)}`);
       }
       // Do not call scrollToRealTime() here; see note above about closed markets.
-      if (debug) {
-        // eslint-disable-next-line no-console
-        console.log("[PlanPriceChart] followLive", {
-          from,
-          to: lastTime,
-          lookbackSeconds,
-          vr: chart.timeScale().getVisibleRange?.(),
-        });
-      }
+      addDbg(
+        `[PlanPriceChart] followLive from=${from} to=${lastTime} lookback=${lookbackSeconds} vr=${JSON.stringify(
+          chart.timeScale().getVisibleRange?.() ?? null,
+        )}`,
+      );
     }, [data, devMode, stopReplay]);
 
     const startReplay = useCallback(() => {
@@ -609,7 +598,17 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       [syncDerivedSeries, followLive, startReplay, stopReplay],
     );
 
-    return <div ref={containerRef} className="h-[360px] w-full rounded-2xl border border-neutral-800/70" data-symbol={symbol} data-plan-id={planId} />;
+    return (
+      <div ref={containerRef} className="relative h-[360px] w-full rounded-2xl border border-neutral-800/70" data-symbol={symbol} data-plan-id={planId}>
+        {debug && debugMsgs.length ? (
+          <div className="pointer-events-none absolute right-2 top-2 z-20 max-w-[50%] rounded-md bg-neutral-900/70 p-2 text-[10px] leading-snug text-neutral-200">
+            {debugMsgs.map((m, i) => (
+              <div key={i}>{m}</div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
   },
 );
 
