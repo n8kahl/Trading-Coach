@@ -55,7 +55,6 @@ export default async function PlanPage({ params }: PlanPageProps) {
     <LivePlanClient
       initialSnapshot={snapshot}
       planId={snapshot.plan.plan_id}
-      symbol={snapshot.plan.symbol}
     />
   );
 }

@@ -151,6 +151,10 @@ ENRICH_SERVICE_URL=http://localhost:8081 # Override if deploying enrichment else
 DB_URL=postgresql://user:pass@host:5432/dbname  # Optional; enables persistent idea snapshots (alias: DATABASE_URL)
 SELF_API_BASE_URL=https://trading-coach-production.up.railway.app  # Used for auto-replan callbacks
 PUBLIC_BASE_URL=https://trading-coach-production.up.railway.app    # Absolute base used for link unfurls (/tv)
+PUBLIC_UI_BASE_URL=https://localhost:3000                          # Next.js plan console origin (used for CORS)
+
+# Frontend debug toggles (trade-coach-ui)
+NEXT_PUBLIC_DEVTOOLS=0                  # Set to 1 to enable the live status overlay
 
 # Tradier (sandbox defaults shown)
 TRADIER_SANDBOX_TOKEN=XXXXXXXXXXXX
@@ -196,6 +200,30 @@ npm run start      # start the live plan console (Next.js) on $PORT
 `trade-coach-ui` renders live plan data by calling `/idea/{plan_id}` for the initial snapshot, `/ws/plans/{plan_id}` for coaching deltas, and `/stream/{symbol}` for price ticks. As you extend the TradeFollower, the UI will automatically surface trail-stop adjustments and auto-replan events.
 
 `/tv` is the canonical interactive viewer for plans and scans. Legacy Idea Page bundles have been removed; continue using the `/gpt/chart-url` surface to build shareable `/tv` links.
+
+Polygon ingestion runs inside the API process via `SymbolStreamCoordinator`. Once the first plan or scan is requested the coordinator polls Polygon on the cadence required by that resolution and republishes bars through `/tv-api/bars`. Look for `polygon_ohlcv_fetch` and `tv-api/bars OK` log lines during runtime to confirm fresh data is flowing.
+
+### Smoke test (plan console)
+
+```
+# Terminal 1 – backend
+uvicorn src.agent_server:app --reload --port 8000
+
+# Terminal 2 – frontend
+cd trade-coach-ui
+npm run dev
+
+# Once both servers are running, validate:
+1. Open http://localhost:3000/plan/<recent-plan-id>.
+2. Bars render with overlays within ~2 seconds (no blank chart, no console errors).
+3. Status pill stays green (WS connected, data age < 2 × resolution seconds).
+4. Click 1m → 3m → 5m → 15m → 1h → 4h → 1d; each resolution refreshes immediately.
+5. Click “Replay” to animate historical bars, then “Stop Replay” followed by “Follow Live” to snap back to realtime streaming.
+6. Toggle “Follow Live” off/on to pause and resume auto-scroll.
+7. Plan Details (triggers, invalidation, targets, notes) appear immediately without adopting a scenario.
+8. Backend logs show no “Polygon data is stale” spam and exactly one `/ws/plans/{id}` connection emitting `plan_ws_connect`, periodic `ping`, and `plan_ws_disconnect` on shutdown.
+9. With `NEXT_PUBLIC_DEVTOOLS=1`, the overlay in the bottom-left reports WS status, data age, and last bar timestamp.
+```
 
 ---
 

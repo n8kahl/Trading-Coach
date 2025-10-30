@@ -35,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
 from urllib.parse import urlencode, quote, urlsplit, urlunsplit, parse_qsl
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import (
@@ -4264,6 +4264,16 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
         poly = await fetch_polygon_ohlcv(candidate, timeframe)
         if poly is None or poly.empty:
             continue
+        logger.info(
+            "polygon_ohlcv_fetch",
+            extra={
+                "symbol": candidate,
+                "timeframe": timeframe,
+                "rows": len(poly),
+                "first": poly.index[0].isoformat() if not poly.empty else None,
+                "last": poly.index[-1].isoformat() if not poly.empty else None,
+            },
+        )
         if not _is_stale_frame(poly, timeframe):
             fresh_polygon = poly.copy()
             fresh_polygon.attrs["source"] = "polygon"
@@ -4276,7 +4286,16 @@ async def _load_remote_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame | None
         return fresh_polygon
 
     if stale_polygon is not None:
-        logger.warning("Polygon data is stale for %s; returning last known data.", symbol)
+        last_ts = stale_polygon.index[-1] if not stale_polygon.empty else None
+        logger.warning(
+            "Polygon data is stale for %s; returning last known data.",
+            symbol,
+            extra={
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "last_ts": last_ts.isoformat() if isinstance(last_ts, pd.Timestamp) else None,
+            },
+        )
         return stale_polygon
 
     logger.warning("No Polygon data available for %s", symbol)
@@ -7142,7 +7161,7 @@ async def tv_config() -> Dict[str, Any]:
 
 
 @tv_api.get("/symbols")
-async def tv_symbol(symbol: str = Query(..., alias="symbol")) -> Dict[str, Any]:
+async def tv_symbol(symbol: str = Query(..., alias="symbol")) -> JSONResponse:
     settings = get_settings()
     timeframe = "1"
     history = await _load_remote_ohlcv(symbol, timeframe)
@@ -7150,7 +7169,7 @@ async def tv_symbol(symbol: str = Query(..., alias="symbol")) -> Dict[str, Any]:
     if history is not None and not history.empty:
         last_price = float(history["close"].iloc[-1])
 
-    return {
+    payload = {
         "name": symbol.upper(),
         "ticker": symbol.upper(),
         "description": symbol.upper(),
@@ -7167,6 +7186,10 @@ async def tv_symbol(symbol: str = Query(..., alias="symbol")) -> Dict[str, Any]:
         "volume_precision": 0,
         "data_status": "streaming" if settings.polygon_api_key else "endofday",
     }
+    response = JSONResponse(payload)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
 
 
 @tv_api.get("/bars")
@@ -7176,7 +7199,7 @@ async def tv_bars(
     from_: Optional[int] = Query(None, alias="from"),
     to: Optional[int] = Query(None),
     range_: Optional[str] = Query(None, alias="range"),
-) -> Dict[str, Any]:
+) -> JSONResponse:
     timeframe = _resolution_to_timeframe(resolution)
     logger.info(
         "tv-api/bars request symbol=%s resolution=%s -> timeframe=%s window=%s-%s range=%s",
@@ -7211,7 +7234,16 @@ async def tv_bars(
                 resolution,
                 timeframe,
             )
-            return {"s": "no_data"}
+            payload = {
+                "symbol": symbol.upper(),
+                "resolution": resolution,
+                "bars": [],
+                "noData": True,
+            }
+            response = JSONResponse(payload)
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            return response
 
     history = history.sort_index()
     aggregate_resolution = (resolution or "").strip().upper()
@@ -7295,33 +7327,67 @@ async def tv_bars(
                     symbol,
                     src_tf,
                 )
-                return {"s": "no_data"}
-            next_time = int(earlier.index[-1].timestamp())
-            return {"s": "no_data", "nextTime": next_time}
+                payload = {
+                    "symbol": symbol.upper(),
+                    "resolution": resolution,
+                    "bars": [],
+                    "noData": True,
+                }
+                response = JSONResponse(payload)
+                response.headers["Cache-Control"] = "no-store"
+                response.headers["Access-Control-Allow-Origin"] = "*"
+                return response
+            next_time = int(earlier.index[-1].timestamp() * 1000)
+            payload = {
+                "symbol": symbol.upper(),
+                "resolution": resolution,
+                "bars": [],
+                "noData": True,
+                "nextTime": next_time,
+            }
+            response = JSONResponse(payload)
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            return response
 
     volume_values = [float(val) for val in window["volume"].tolist()] if "volume" in window.columns else [0.0] * len(window)
 
-    payload = {
-        "s": "ok",
-        "t": [int(ts.timestamp()) for ts in window.index],
-        "o": [round(float(val), 6) for val in window["open"].tolist()],
-        "h": [round(float(val), 6) for val in window["high"].tolist()],
-        "l": [round(float(val), 6) for val in window["low"].tolist()],
-        "c": [round(float(val), 6) for val in window["close"].tolist()],
-        "v": volume_values,
-    }
+    bars: List[Dict[str, Any]] = []
+    for idx, ts in enumerate(window.index):
+        bar = {
+            "time": int(ts.timestamp() * 1000),
+            "open": round(float(window["open"].iloc[idx]), 6),
+            "high": round(float(window["high"].iloc[idx]), 6),
+            "low": round(float(window["low"].iloc[idx]), 6),
+            "close": round(float(window["close"].iloc[idx]), 6),
+            "volume": volume_values[idx] if idx < len(volume_values) else 0.0,
+        }
+        bars.append(bar)
+
     try:
         logger.info(
-            "tv-api/bars OK symbol=%s src_tf=%s bars=%d window=%s-%s",
+            "tv-api/bars OK symbol=%s res=%s src_tf=%s bars=%d window_start=%s window_end=%s first_ms=%s last_ms=%s",
             symbol,
+            resolution,
             src_tf,
-            len(payload["t"]),
+            len(bars),
             start_ts,
             end_ts,
+            bars[0]["time"] if bars else None,
+            bars[-1]["time"] if bars else None,
         )
     except Exception:
         pass
-    return payload
+    response_payload = {
+        "symbol": symbol.upper(),
+        "resolution": resolution,
+        "bars": bars,
+        "noData": len(bars) == 0,
+    }
+    response = JSONResponse(response_payload)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -13699,6 +13765,7 @@ async def stream_symbol_sse(symbol: str) -> StreamingResponse:
 async def stream_symbol_ws(websocket: WebSocket, symbol: str) -> None:
     uppercase = symbol.upper()
     await websocket.accept()
+    logger.info("plan_ws_connect", extra={"plan_id": plan_token})
     await _ensure_symbol_stream(uppercase)
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
     async with _STREAM_LOCK:
@@ -13738,6 +13805,8 @@ async def stream_plan_ws(websocket: WebSocket, plan_id: str) -> None:
     async with _STREAM_LOCK:
         _PLAN_STREAM_SUBSCRIBERS.setdefault(plan_token, []).append(queue)
     try:
+        await websocket.send_json({"type": "welcome", "planId": plan_token})
+
         try:
             snapshot = await _get_idea_snapshot(plan_token)
             await _LIVE_PLAN_ENGINE.register_snapshot(snapshot)
@@ -13756,11 +13825,56 @@ async def stream_plan_ws(websocket: WebSocket, plan_id: str) -> None:
             await websocket.send_text(
                 json.dumps({"plan_id": plan_token, "event": {"t": "error", "detail": str(exc)}})
             )
-        while True:
-            payload = await queue.get()
-            await websocket.send_text(payload)
+
+        stop_event = asyncio.Event()
+
+        async def pump_queue() -> None:
+            try:
+                while not stop_event.is_set():
+                    payload = await queue.get()
+                    await websocket.send_text(payload)
+            except WebSocketDisconnect:
+                stop_event.set()
+            except Exception:
+                stop_event.set()
+
+        async def keepalive() -> None:
+            try:
+                while not stop_event.is_set():
+                    await asyncio.sleep(25)
+                    await websocket.send_json({"type": "ping", "planId": plan_token, "ts": time.time()})
+            except WebSocketDisconnect:
+                stop_event.set()
+            except Exception:
+                stop_event.set()
+
+        async def recv_loop() -> None:
+            try:
+                while not stop_event.is_set():
+                    message = await websocket.receive_json()
+                    msg_type = str(message.get("type") or "").lower()
+                    if msg_type == "pong":
+                        continue
+                    if msg_type == "subscribe":
+                        logger.info("plan_ws_subscribe", extra={"plan_id": plan_token})
+                        await websocket.send_json({"type": "ack", "planId": plan_token})
+                        continue
+                    logger.debug("plan_ws_client_message", extra={"plan_id": plan_token, "payload": message})
+            except WebSocketDisconnect:
+                stop_event.set()
+            except Exception:
+                stop_event.set()
+
+        tasks = [asyncio.create_task(pump_queue()), asyncio.create_task(keepalive()), asyncio.create_task(recv_loop())]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        stop_event.set()
+        for task in pending:
+            task.cancel()
+        for task in done:
+            if task.exception():
+                logger.debug("plan_ws_task_error", exc_info=task.exception(), extra={"plan_id": plan_token})
     except WebSocketDisconnect:
-        return
+        pass
     finally:
         async with _STREAM_LOCK:
             subscribers = _PLAN_STREAM_SUBSCRIBERS.get(plan_token, [])
@@ -13772,6 +13886,7 @@ async def stream_plan_ws(websocket: WebSocket, plan_id: str) -> None:
             await websocket.close()
         except RuntimeError:
             pass
+        logger.info("plan_ws_disconnect", extra={"plan_id": plan_token})
 
 
 @app.post("/internal/stream/push", include_in_schema=False, tags=["internal"])

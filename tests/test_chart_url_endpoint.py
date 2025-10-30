@@ -214,6 +214,8 @@ async def test_tv_api_bars_returns_ok_payload(monkeypatch: pytest.MonkeyPatch) -
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["s"] == "ok"
-    assert len(payload["t"]) == rows
-    assert all(key in payload for key in ("o", "h", "l", "c", "v"))
+    assert payload["noData"] is False
+    assert len(payload["bars"]) == rows
+    first_bar = payload["bars"][0]
+    assert "time" in first_bar and first_bar["time"] == int(index[0].timestamp() * 1000)
+    assert set(first_bar.keys()) == {"time", "open", "high", "low", "close", "volume"}

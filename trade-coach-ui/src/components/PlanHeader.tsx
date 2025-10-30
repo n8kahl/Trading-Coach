@@ -4,12 +4,11 @@ import clsx from 'clsx';
 
 type PlanHeaderProps = {
   planId: string;
-  legacyUrl?: string | null;
   uiUrl?: string | null;
   theme?: 'dark' | 'light';
 };
 
-export default function PlanHeader({ planId, legacyUrl, uiUrl, theme = 'dark' }: PlanHeaderProps) {
+export default function PlanHeader({ planId, uiUrl, theme = 'dark' }: PlanHeaderProps) {
   const uiHref = uiUrl || `/plan/${encodeURIComponent(planId)}`;
   const buttonClass = clsx(
     'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400',
@@ -23,11 +22,6 @@ export default function PlanHeader({ planId, legacyUrl, uiUrl, theme = 'dark' }:
       <Link href={uiHref} className={buttonClass}>
         Open Plan
       </Link>
-      {legacyUrl ? (
-        <a href={legacyUrl} target="_blank" rel="noreferrer" className={buttonClass}>
-          Open Chart Shell
-        </a>
-      ) : null}
     </div>
   );
 }

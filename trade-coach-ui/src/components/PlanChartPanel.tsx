@@ -1,8 +1,9 @@
 "use client";
 
 import clsx from "clsx";
-import type { LineData } from "lightweight-charts";
-import PriceChart from "@/components/PriceChart";
+import { useMemo, useRef, useState } from "react";
+import TradingViewChart, { TradingViewChartHandle } from "@/components/TradingViewChart";
+import type { TVBar } from "@/lib/tradingview/datafeed";
 import type { SupportingLevel } from "@/lib/chart";
 import type { PlanLayers, PlanSnapshot } from "@/lib/types";
 
@@ -15,48 +16,20 @@ type PlanChartPanelProps = {
   plan: PlanSnapshot["plan"];
   layers: PlanLayers | null;
   primaryLevels: SupportingLevel[];
-  supportingLevels: SupportingLevel[];
   supportingVisible: boolean;
   followLive: boolean;
   streamingEnabled: boolean;
-  onToggleFollowLive(): void;
+  onSetFollowLive(value: boolean): void;
   onToggleStreaming(): void;
   onToggleSupporting(): void;
-  highlightedLevel: SupportingLevel | null;
-  onHighlightLevel(level: SupportingLevel | null): void;
-  priceSeries: LineData[];
-  priceSeriesStatus: "idle" | "loading" | "ready" | "error";
   timeframe: string;
   timeframeOptions: TimeframeOption[];
   onSelectTimeframe(value: string): void;
-  onReloadSeries(): void;
-  lastPrice?: number | null;
+  onLastBarTimeChange(time: number | null): void;
+  onReplayStateChange?: (state: "idle" | "playing") => void;
+  devMode?: boolean;
+  theme: "dark" | "light";
 };
-
-function resolveEntry(plan: PlanSnapshot["plan"]): number | null {
-  const structured = plan.structured_plan as any;
-  if (structured?.entry?.level != null) return Number(structured.entry.level);
-  if (plan.entry != null) return Number(plan.entry);
-  return null;
-}
-
-function resolveStop(plan: PlanSnapshot["plan"]): number | null {
-  const structured = plan.structured_plan as any;
-  if (structured?.stop != null) return Number(structured.stop);
-  if (plan.stop != null) return Number(plan.stop);
-  return null;
-}
-
-function resolveTargets(plan: PlanSnapshot["plan"]): number[] {
-  if (Array.isArray(plan.targets) && plan.targets.length) {
-    return plan.targets.filter((value): value is number => typeof value === "number");
-  }
-  const structured = plan.structured_plan as any;
-  if (structured?.targets?.length) {
-    return structured.targets.filter((value: unknown): value is number => typeof value === "number");
-  }
-  return [];
-}
 
 function extractExecutionRule(plan: PlanSnapshot["plan"], key: string): string | null {
   const block = (plan as Record<string, unknown>).execution_rules;
@@ -70,30 +43,26 @@ export default function PlanChartPanel({
   plan,
   layers,
   primaryLevels,
-  supportingLevels,
   supportingVisible,
   followLive,
   streamingEnabled,
-  onToggleFollowLive,
+  onSetFollowLive,
   onToggleStreaming,
   onToggleSupporting,
-  highlightedLevel,
-  onHighlightLevel,
-  priceSeries,
-  priceSeriesStatus,
   timeframe,
   timeframeOptions,
   onSelectTimeframe,
-  onReloadSeries,
-  lastPrice,
+  onLastBarTimeChange,
+  onReplayStateChange,
+  devMode = false,
+  theme,
 }: PlanChartPanelProps) {
+  const chartHandle = useRef<TradingViewChartHandle | null>(null);
+  const [replayActive, setReplayActive] = useState(false);
+
   const symbol = plan.symbol?.toUpperCase() ?? "—";
   const style = plan.style ?? plan.structured_plan?.style ?? null;
   const session = plan.session_state?.status ?? null;
-  const entry = resolveEntry(plan);
-  const stop = resolveStop(plan);
-  const targets = resolveTargets(plan);
-  const trailingStop = (plan as Record<string, unknown>).trailing_stop ?? null;
   const triggerRule = extractExecutionRule(plan, "trigger");
   const invalidationRule = extractExecutionRule(plan, "invalidation");
   const reloadRule = extractExecutionRule(plan, "reload");
@@ -102,34 +71,82 @@ export default function PlanChartPanel({
   const planVersion = plan.version ?? (plan as Record<string, unknown>).version ?? null;
   const planId = plan.plan_id;
 
-  const renderSeries = () => {
-    if (priceSeriesStatus === "loading" && priceSeries.length === 0) {
-      return (
-        <div className="flex h-full items-center justify-center text-sm text-neutral-400">
-          Loading price history…
-        </div>
-      );
+  const filteredLayers = useMemo(() => {
+    if (!layers) return null;
+    if (supportingVisible) return layers;
+    const groups = (layers.meta?.level_groups ?? {}) as Record<string, unknown>;
+    type LevelGroupEntry = { price?: number | null };
+    const primaryEntries = Array.isArray(groups.primary)
+      ? (groups.primary as LevelGroupEntry[])
+      : [];
+    const priceSet = new Set<number>();
+    primaryEntries.forEach((entry) => {
+      if (entry && typeof entry.price === "number") {
+        priceSet.add(entry.price);
+      }
+    });
+    const filteredLevels = Array.isArray(layers.levels)
+      ? layers.levels.filter((level) => typeof level?.price === "number" && priceSet.has(level.price))
+      : [];
+    return { ...layers, levels: filteredLevels };
+  }, [layers, supportingVisible]);
+
+  const handleResolution = (value: string) => {
+    onSelectTimeframe(value);
+    chartHandle.current?.setResolution(value);
+    if (replayActive) {
+      chartHandle.current?.stopReplay();
+      setReplayActive(false);
+      onReplayStateChange?.("idle");
     }
-    if (priceSeriesStatus === "error" && priceSeries.length === 0) {
-      return (
-        <div className="flex h-full items-center justify-center text-sm text-rose-300">
-          Unable to load price history. Retry or check data feed.
-        </div>
-      );
+  };
+
+  const handleReplayToggle = () => {
+    if (replayActive) {
+      chartHandle.current?.stopReplay();
+      setReplayActive(false);
+      onReplayStateChange?.("idle");
+      chartHandle.current?.followLive();
+      onSetFollowLive(true);
+    } else {
+      chartHandle.current?.startReplay();
+      setReplayActive(true);
+      onReplayStateChange?.("playing");
+      onSetFollowLive(false);
     }
-    return (
-      <PriceChart
-        data={priceSeries}
-        lastPrice={lastPrice ?? undefined}
-        entry={entry ?? undefined}
-        stop={stop ?? undefined}
-        trailingStop={typeof trailingStop === "number" ? trailingStop : undefined}
-        targets={targets}
-        supportingLevels={supportingLevels}
-        showSupportingLevels={supportingVisible}
-        onHighlightLevel={onHighlightLevel}
-      />
-    );
+  };
+
+  const handleFollowLiveClick = () => {
+    const next = !followLive;
+    if (next) {
+      chartHandle.current?.followLive();
+    } else {
+      chartHandle.current?.stopReplay();
+      setReplayActive(false);
+      onReplayStateChange?.("idle");
+    }
+    onSetFollowLive(next);
+  };
+
+  const handleStreamingClick = () => {
+    onToggleStreaming();
+  };
+
+  const handleSupportingClick = () => {
+    onToggleSupporting();
+    chartHandle.current?.refreshOverlays();
+  };
+
+  const handleBarsLoaded = (bars: TVBar[]) => {
+    if (!bars.length) {
+      onLastBarTimeChange(null);
+      return;
+    }
+    onLastBarTimeChange(bars[bars.length - 1]?.time ?? null);
+  };
+
+  const handleRealtimeBar = (bar: TVBar) => {
+    onLastBarTimeChange(bar?.time ?? null);
   };
 
   return (
@@ -158,12 +175,17 @@ export default function PlanChartPanel({
             {layers?.planning_context ? <span>{layers.planning_context.toUpperCase()}</span> : null}
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.2em] text-neutral-400">
-            <ToggleChip label="Follow Live" active={followLive} onClick={onToggleFollowLive} />
-            <ToggleChip label="Streaming" active={streamingEnabled} onClick={onToggleStreaming} />
+            <ToggleChip label="Follow Live" active={followLive} onClick={handleFollowLiveClick} />
+            <ToggleChip label="Streaming" active={streamingEnabled} onClick={handleStreamingClick} />
             <ToggleChip
               label={supportingVisible ? "Supporting On" : "Supporting Off"}
               active={supportingVisible}
-              onClick={onToggleSupporting}
+              onClick={handleSupportingClick}
+            />
+            <ToggleChip
+              label={replayActive ? "Stop Replay" : "Replay"}
+              active={replayActive}
+              onClick={handleReplayToggle}
             />
           </div>
         </div>
@@ -172,7 +194,7 @@ export default function PlanChartPanel({
             <button
               key={option.value}
               type="button"
-              onClick={() => onSelectTimeframe(option.value)}
+              onClick={() => handleResolution(option.value)}
               className={clsx(
                 "rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
                 option.value === timeframe
@@ -183,13 +205,6 @@ export default function PlanChartPanel({
               {option.label}
             </button>
           ))}
-          <button
-            type="button"
-            onClick={onReloadSeries}
-            className="rounded-full border border-neutral-700 bg-neutral-900 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-neutral-300 transition hover:border-emerald-400/50 hover:text-emerald-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-          >
-            Refresh
-          </button>
         </div>
       </header>
 
@@ -219,7 +234,17 @@ export default function PlanChartPanel({
       </section>
 
       <section className="relative min-h-[360px] overflow-hidden rounded-3xl border border-neutral-800/70 bg-neutral-950/40 p-2">
-        {renderSeries()}
+        <TradingViewChart
+          ref={chartHandle}
+          symbol={symbol}
+          planId={planId}
+          resolution={timeframe}
+          planLayers={filteredLayers}
+          theme={theme}
+          devMode={devMode}
+          onBarsLoaded={handleBarsLoaded}
+          onRealtimeBar={handleRealtimeBar}
+        />
       </section>
 
       <section className="grid gap-4 md:grid-cols-2">
@@ -229,15 +254,6 @@ export default function PlanChartPanel({
         <PlanControlCard title="Reload" body={reloadRule} tone="amber" />
       </section>
 
-      {highlightedLevel ? (
-        <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-4 text-sm text-emerald-100">
-          <div className="flex items-center justify-between">
-            <div className="font-semibold uppercase tracking-[0.4em] text-emerald-300">{highlightedLevel.label}</div>
-            <div className="font-mono text-lg text-emerald-200">{highlightedLevel.price.toFixed(2)}</div>
-          </div>
-          <p className="mt-2 text-xs text-emerald-200/80">Hovering level — toggle supporting levels to lock view.</p>
-        </div>
-      ) : null}
     </div>
   );
 }

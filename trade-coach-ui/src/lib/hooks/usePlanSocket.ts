@@ -3,9 +3,14 @@ import { makeBackoff } from "./useBackoff";
 
 type SocketStatus = "connecting" | "connected" | "disconnected";
 
-export function usePlanSocket(url: string, onDelta: (msg: unknown) => void): SocketStatus {
+export function usePlanSocket(url: string, planId: string, onDelta: (msg: unknown) => void): SocketStatus {
   const [status, setStatus] = useState<SocketStatus>("connecting");
   const backoff = useRef(makeBackoff());
+  const planRef = useRef(planId);
+
+  useEffect(() => {
+    planRef.current = planId;
+  }, [planId]);
 
   useEffect(() => {
     let closed = false;
@@ -26,10 +31,19 @@ export function usePlanSocket(url: string, onDelta: (msg: unknown) => void): Soc
       ws.onopen = () => {
         setStatus("connected");
         backoff.current = makeBackoff();
+        try {
+          ws?.send(JSON.stringify({ type: "subscribe", planId: planRef.current }));
+        } catch {
+          /* ignore */
+        }
       };
       ws.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data as string);
+          if (payload && typeof payload === "object" && payload.type === "ping") {
+            ws?.send(JSON.stringify({ type: "pong", planId: planRef.current, ts: Date.now() }));
+            return;
+          }
           onDelta(payload);
         } catch {
           // ignore malformed payloads
@@ -50,4 +64,3 @@ export function usePlanSocket(url: string, onDelta: (msg: unknown) => void): Soc
 
   return status;
 }
-

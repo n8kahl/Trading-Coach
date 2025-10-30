@@ -8,8 +8,6 @@ import PlanHeader from '@/components/PlanHeader';
 import PlanChartPanel from '@/components/PlanChartPanel';
 import { usePlanSocket } from '@/lib/hooks/usePlanSocket';
 import { usePlanLayers } from '@/lib/hooks/usePlanLayers';
-import { usePriceSeries } from '@/lib/hooks/usePriceSeries';
-import { useChartUrl } from '@/lib/hooks/useChartUrl';
 import { extractPrimaryLevels, extractSupportingLevels } from '@/lib/utils/layers';
 import type { SupportingLevel } from '@/lib/chart';
 import type { PlanDeltaEvent, PlanLayers, PlanSnapshot } from '@/lib/types';
@@ -28,10 +26,9 @@ const TIMEFRAME_OPTIONS = [
 type LivePlanClientProps = {
   initialSnapshot: PlanSnapshot;
   planId: string;
-  symbol?: string;
 };
 
-export default function LivePlanClient({ initialSnapshot, planId, symbol }: LivePlanClientProps) {
+export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClientProps) {
   const [snapshot, setSnapshot] = React.useState(initialSnapshot);
   const [plan, setPlan] = React.useState(initialSnapshot.plan);
   const [followLive, setFollowLive] = React.useState(true);
@@ -40,14 +37,12 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
   const [highlightedLevel, setHighlightedLevel] = React.useState<SupportingLevel | null>(null);
   const [theme, setTheme] = React.useState<'dark' | 'light'>('dark');
   const [layerSeed, setLayerSeed] = React.useState<PlanLayers | null>(() => extractInitialLayers(initialSnapshot));
-  const [lastUpdateAt, setLastUpdateAt] = React.useState<number | undefined>(() =>
-    parseTimestamp(initialSnapshot.plan.session_state?.as_of),
-  );
   const [timeframe, setTimeframe] = React.useState(() => normalizeTimeframeFromPlan(initialSnapshot.plan));
   const [nowTick, setNowTick] = React.useState(Date.now());
+  const [lastBarTime, setLastBarTime] = React.useState<number | null>(null);
+  const devMode = process.env.NEXT_PUBLIC_DEVTOOLS === '1';
 
   const activePlanId = plan.plan_id || planId;
-  const chartUrl = useChartUrl(plan as any);
 
   React.useEffect(() => {
     const interval = window.setInterval(() => setNowTick(Date.now()), 1000);
@@ -63,28 +58,9 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
 
   const { layers } = usePlanLayers(activePlanId, layerSeed);
 
-  const chartParams = React.useMemo(() => {
-    const params = (plan.charts_params as Record<string, unknown> | undefined) ?? (plan.charts?.params as Record<
-      string,
-      unknown
-    > | undefined);
-    return params ?? {};
-  }, [plan.charts?.params, plan.charts_params]);
-
-  const seriesSymbol = React.useMemo(() => {
-    const token = typeof chartParams.symbol === 'string' ? chartParams.symbol.trim() : '';
-    if (token) return token;
-    return plan.symbol ?? symbol ?? null;
-  }, [chartParams.symbol, plan.symbol, symbol]);
-
-  const { series: priceSeries, status: priceSeriesStatus, reload: reloadSeries } = usePriceSeries(
-    seriesSymbol,
-    timeframe,
-    [activePlanId],
-  );
-
   const socketStatus = usePlanSocket(
     planSocketUrl,
+    activePlanId,
     React.useCallback(
       (payload: unknown) => {
         if (!streamingEnabledRef.current) return;
@@ -97,8 +73,6 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
         if (type === 'plan_delta') {
           const delta = event as unknown as PlanDeltaEvent;
           setPlan((prev) => mergePlanWithDelta(prev, delta));
-          const ts = parseTimestamp(delta.changes.timestamp);
-          setLastUpdateAt(ts ?? Date.now());
           return;
         }
         if (type === 'plan_full') {
@@ -107,35 +81,36 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
           setSnapshot(payloadSnapshot);
           setPlan(payloadSnapshot.plan);
           setLayerSeed(extractInitialLayers(payloadSnapshot));
-          setLastUpdateAt(parseTimestamp(payloadSnapshot.plan.session_state?.as_of) ?? Date.now());
           setTimeframe((prev) => {
             const inferred = normalizeTimeframeFromPlan(payloadSnapshot.plan);
             return prev || inferred;
           });
-          reloadSeries();
           return;
         }
         if (type === 'plan_state') {
-          const stateTs = parseTimestamp((event as Record<string, unknown>).timestamp);
-          if (stateTs) setLastUpdateAt(stateTs);
+          return;
         }
       },
-      [reloadSeries],
+      [],
     ),
   );
 
   const primaryLevels = React.useMemo(() => extractPrimaryLevels(layers), [layers]);
   const supportingLevels = React.useMemo(() => extractSupportingLevels(layers), [layers]);
 
+  const resolutionMs = React.useMemo(() => timeframeToMs(timeframe), [timeframe]);
   const dataAgeSeconds = React.useMemo(() => {
-    if (!lastUpdateAt) return null;
-    return Math.max(0, (nowTick - lastUpdateAt) / 1000);
-  }, [lastUpdateAt, nowTick]);
+    if (!lastBarTime) return null;
+    return Math.max(0, (nowTick - lastBarTime) / 1000);
+  }, [lastBarTime, nowTick]);
 
   const priceStatus: StatusToken = React.useMemo(() => {
     if (!streamingEnabled) return 'disconnected';
-    return followLive ? 'connected' : 'connecting';
-  }, [followLive, streamingEnabled]);
+    if (socketStatus === 'disconnected') return 'disconnected';
+    if (!lastBarTime || dataAgeSeconds == null || resolutionMs == null) return 'connecting';
+    const threshold = Math.max((resolutionMs / 1000) * 2, 30);
+    return dataAgeSeconds <= threshold ? 'connected' : 'connecting';
+  }, [streamingEnabled, socketStatus, lastBarTime, dataAgeSeconds, resolutionMs]);
 
   const wsStatus = React.useMemo<StatusToken>(() => {
     if (socketStatus === 'connected') return 'connected';
@@ -152,8 +127,8 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
     return rawTargets.filter((value): value is number => typeof value === 'number');
   }, [plan.targets]);
 
-  const handleToggleFollowLive = React.useCallback(() => {
-    setFollowLive((prev) => !prev);
+  const handleSetFollowLive = React.useCallback((value: boolean) => {
+    setFollowLive(value);
   }, []);
 
   const handleToggleStreaming = React.useCallback(() => {
@@ -190,12 +165,7 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
 
   const planPanel = (
     <div className="flex h-full flex-col gap-4">
-      <PlanHeader
-        planId={plan.plan_id}
-        legacyUrl={chartUrl ?? undefined}
-        uiUrl={(snapshot as any)?.ui?.plan_link ?? undefined}
-        theme={theme}
-      />
+      <PlanHeader planId={plan.plan_id} uiUrl={planUiLink} theme={theme} />
       <PlanPanel
         plan={plan}
         structured={plan.structured_plan ?? null}
@@ -215,32 +185,48 @@ export default function LivePlanClient({ initialSnapshot, planId, symbol }: Live
       plan={plan}
       layers={layers}
       primaryLevels={primaryLevels}
-      supportingLevels={supportingLevels}
       supportingVisible={supportVisible}
       followLive={followLive}
       streamingEnabled={streamingEnabled}
-      onToggleFollowLive={handleToggleFollowLive}
+      onSetFollowLive={handleSetFollowLive}
       onToggleStreaming={handleToggleStreaming}
       onToggleSupporting={handleToggleSupporting}
-      highlightedLevel={highlightedLevel}
-      onHighlightLevel={(level) => setHighlightedLevel(level)}
-      priceSeries={priceSeries}
-      priceSeriesStatus={priceSeriesStatus}
       timeframe={timeframe}
       timeframeOptions={TIMEFRAME_OPTIONS}
       onSelectTimeframe={handleSelectTimeframe}
-      onReloadSeries={reloadSeries}
-      lastPrice={(plan as Record<string, unknown>).last_price as number | undefined}
+      onLastBarTimeChange={setLastBarTime}
+      onReplayStateChange={(state) => {
+        if (state === 'playing') {
+          setFollowLive(false);
+        }
+      }}
+      theme={theme}
+      devMode={!!devMode}
     />
   );
 
+  const planUiLink = React.useMemo(() => extractUiPlanLink(snapshot), [snapshot]);
+
+  const debugPanel = devMode ? (
+    <div className="fixed bottom-4 left-4 z-50 rounded-lg border border-neutral-800 bg-neutral-950/85 px-4 py-3 text-xs text-neutral-200 shadow-lg">
+      <div className="font-semibold uppercase tracking-[0.2em] text-neutral-400">Dev Stats</div>
+      <div>WS: {socketStatus}</div>
+      <div>Data age: {dataAgeSeconds != null ? `${dataAgeSeconds.toFixed(1)}s` : 'n/a'}</div>
+      <div>Last bar: {lastBarTime ? new Date(lastBarTime).toLocaleTimeString() : 'n/a'}</div>
+      <div>Follow Live: {followLive ? 'yes' : 'no'}</div>
+    </div>
+  ) : null;
+
   return (
-    <WebviewShell
-      theme={theme}
-      statusStrip={statusStrip}
-      chartPanel={chartPanel}
-      planPanel={planPanel}
-    />
+    <>
+      <WebviewShell
+        theme={theme}
+        statusStrip={statusStrip}
+        chartPanel={chartPanel}
+        planPanel={planPanel}
+      />
+      {debugPanel}
+    </>
   );
 }
 
@@ -265,21 +251,22 @@ function normalizeTimeframe(token: unknown): string {
   return value.toUpperCase();
 }
 
-function extractInitialLayers(snapshot: PlanSnapshot): PlanLayers | null {
-  const planLayers = (snapshot.plan as any)?.plan_layers;
-  if (planLayers) return planLayers as PlanLayers;
-  const rootLayers = (snapshot as any)?.plan_layers;
-  return rootLayers ? (rootLayers as PlanLayers) : null;
+function timeframeToMs(resolution: string): number | null {
+  const token = resolution.toUpperCase();
+  if (token === '1D' || token === 'D') return 24 * 60 * 60 * 1000;
+  if (token === '1W' || token === 'W') return 7 * 24 * 60 * 60 * 1000;
+  const minutes = Number.parseInt(token, 10);
+  if (Number.isFinite(minutes) && minutes > 0) {
+    return minutes * 60 * 1000;
+  }
+  return null;
 }
 
-function parseTimestamp(value?: string | number | null): number | undefined {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : undefined;
-  }
-  if (!value) return undefined;
-  const ms = Date.parse(value);
-  if (Number.isNaN(ms)) return undefined;
-  return ms;
+function extractInitialLayers(snapshot: PlanSnapshot): PlanLayers | null {
+  const planLayers = snapshot.plan?.plan_layers;
+  if (planLayers) return planLayers as PlanLayers;
+  const rootLayers = (snapshot as unknown as { plan_layers?: PlanLayers }).plan_layers;
+  return rootLayers ?? null;
 }
 
 function extractSupportVisible(plan: PlanSnapshot['plan']): boolean {
@@ -332,4 +319,10 @@ function mergePlanWithDelta(prev: PlanSnapshot['plan'], event: PlanDeltaEvent): 
   }
 
   return mutated ? next : prev;
+}
+
+function extractUiPlanLink(snapshot: PlanSnapshot): string | undefined {
+  const uiBlock = (snapshot as unknown as { ui?: Record<string, unknown> }).ui;
+  const link = uiBlock?.plan_link;
+  return typeof link === 'string' ? link : undefined;
 }
