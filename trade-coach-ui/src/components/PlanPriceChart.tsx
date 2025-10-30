@@ -214,25 +214,47 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           },
           autoSize: true,
         });
-        if (!chart || typeof (chart as any).addCandlestickSeries !== "function") {
-          addDbg(`[PlanPriceChart] error: chart.addCandlestickSeries not a function; chartKeys=${Object.keys(chart || {}).join(',')}`);
+        const chartApi: any = chart as any;
+        const useUnified = typeof chartApi.addSeries === "function" && typeof chartApi.addCandlestickSeries !== "function";
+        if (!chartApi || (!useUnified && typeof chartApi.addCandlestickSeries !== "function")) {
+          addDbg(`[PlanPriceChart] error: addSeries API not found; chartKeys=${Object.keys(chartApi || {}).join(',')}`);
           return;
         }
 
-        const candleSeries = (chart as any).addCandlestickSeries({
-          upColor: GREEN,
-          wickUpColor: GREEN,
-          borderUpColor: GREEN,
-          downColor: RED,
-          wickDownColor: RED,
-          borderDownColor: RED,
-        });
+        const candleSeries = useUnified
+          ? chartApi.addSeries({ type: "Candlestick" }, {
+              upColor: GREEN,
+              wickUpColor: GREEN,
+              borderUpColor: GREEN,
+              downColor: RED,
+              wickDownColor: RED,
+              borderDownColor: RED,
+            })
+          : chartApi.addCandlestickSeries({
+              upColor: GREEN,
+              wickUpColor: GREEN,
+              borderUpColor: GREEN,
+              downColor: RED,
+              wickDownColor: RED,
+              borderDownColor: RED,
+            });
 
-        const volumeSeries = (chart as any).addHistogramSeries({
-          priceScaleId: "",
-          color: "rgba(148, 163, 184, 0.4)",
-          base: 0,
-        });
+        const volumeSeries = useUnified
+          ? chartApi.addSeries(
+              { type: "Histogram" },
+              {
+                priceScaleId: "",
+                color: "rgba(148, 163, 184, 0.4)",
+                base: 0,
+              },
+            )
+          : chartApi.addHistogramSeries({
+              priceScaleId: "",
+              color: "rgba(148, 163, 184, 0.4)",
+              base: 0,
+            });
+
+        addDbg(`[PlanPriceChart] series created via ${useUnified ? 'addSeries' : 'addCandlestickSeries'}`);
 
         volumeSeries.priceScale().applyOptions({
           scaleMargins: { top: 0.8, bottom: 0 } as PriceScaleMargins,
