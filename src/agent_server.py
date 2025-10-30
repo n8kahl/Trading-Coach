@@ -2779,7 +2779,7 @@ def tv_ui_redirect(plan_id: str) -> RedirectResponse:
 
 
 @app.get("/tv")
-def tv_root_redirect(plan_id: Optional[str] = None, ui: Optional[int] = None) -> RedirectResponse | None:
+def tv_root_redirect(plan_id: Optional[str] = None, ui: Optional[int] = None) -> RedirectResponse:
     ui_host = (_os.getenv("PUBLIC_UI_HOST") or "").rstrip("/")
     if ui == 1 and plan_id and ui_host:
         return RedirectResponse(f"{ui_host}/plan/{plan_id}", status_code=302)
