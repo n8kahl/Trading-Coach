@@ -11517,6 +11517,33 @@ async def gpt_plan(
             route=route_v2,
             app=request.app,
         )
+        # Inject UI deep-link and persist a snapshot so /idea/{plan_id} resolves immediately
+        try:
+            payload = dict(plan_payload_v2 or {})
+            plan_id_v2 = str(payload.get("plan_id") or "").strip()
+            if plan_id_v2:
+                # Add plan_page link if UI host configured
+                payload["plan_page"] = _plan_page_url(plan_id_v2)
+                # Build a minimal snapshot compatible with /idea/{plan_id}
+                charts_block = payload.get("charts") if isinstance(payload.get("charts"), dict) else {}
+                chart_url_value = payload.get("chart_url") or payload.get("trade_detail")
+                minimal_snapshot = {
+                    "plan": {
+                        "plan_id": plan_id_v2,
+                        "version": int(payload.get("version") or 1),
+                        "symbol": symbol,
+                        "style": payload.get("style"),
+                        "direction": payload.get("direction") or payload.get("bias"),
+                        "session_state": (payload.get("session_state") or {}),
+                        "charts_params": (payload.get("charts_params") or {}),
+                        "charts": charts_block or {},
+                    },
+                    "chart_url": chart_url_value,
+                }
+                await _store_idea_snapshot(plan_id_v2, minimal_snapshot)
+            plan_payload_v2 = payload
+        except Exception:
+            logger.exception("v2 plan: snapshot store/plan_page inject failed")
         response.headers["X-No-Fabrication"] = "1"
         return PlanResponse.model_validate(plan_payload_v2)
     use_market_routing = bool(getattr(settings, "gpt_market_routing_enabled", True))
