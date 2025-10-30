@@ -136,6 +136,8 @@ function toPriceLineId(base: string, value: number | string, index?: number): st
 
 const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
   ({ planId, symbol, resolution, theme, data, overlays, onLastBarTimeChange, devMode = false }, ref) => {
+    const debug =
+      devMode || (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("dev") !== null);
     const containerRef = useRef<HTMLDivElement | null>(null);
     const chartRef = useRef<IChartApi | null>(null);
     const chartLibRef = useRef<ChartLib | null>(null);
@@ -222,7 +224,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         });
         resizeObserverRef.current.observe(containerRef.current);
         setChartReady(true);
-        if (devMode) {
+        if (debug) {
           // eslint-disable-next-line no-console
           console.log("[PlanPriceChart] chart ready", { symbol, planId });
         }
@@ -300,7 +302,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       }));
 
       candleSeries.setData(candles);
-      if (devMode) {
+      if (debug) {
         const n = candles.length;
         const first = n ? Number(candles[0].time) : null;
         const last = n ? Number(candles[n - 1].time) : null;
@@ -320,7 +322,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         const lastMs = Number(last.time) * 1000;
         lastBarTimeRef.current = Number.isFinite(lastMs) ? lastMs : null;
         onLastBarTimeChange?.(lastBarTimeRef.current);
-        if (devMode) {
+        if (debug) {
           // eslint-disable-next-line no-console
           console.log("[PlanPriceChart] last bar", { ms: lastBarTimeRef.current });
         }
@@ -332,9 +334,13 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           try {
             chartRef.current?.timeScale().setVisibleRange({ from, to: lastSec });
           } catch {}
-          if (devMode) {
+          if (debug) {
             // eslint-disable-next-line no-console
-            console.log("[PlanPriceChart] setData→setVisibleRange", { from, to: lastSec });
+            console.log("[PlanPriceChart] setData→setVisibleRange", {
+              from,
+              to: lastSec,
+              vr: chartRef.current?.timeScale().getVisibleRange?.(),
+            });
           }
         }
       } else {
@@ -359,9 +365,13 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           } catch {
             // noop
           }
-          if (devMode) {
+          if (debug) {
             // eslint-disable-next-line no-console
-            console.log("[PlanPriceChart] keep anchored", { from, to: lastTime });
+            console.log("[PlanPriceChart] keep anchored", {
+              from,
+              to: lastTime,
+              vr: chartRef.current?.timeScale().getVisibleRange?.(),
+            });
           }
         }
       }
@@ -542,9 +552,14 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         }
       }
       // Do not call scrollToRealTime() here; see note above about closed markets.
-      if (devMode) {
+      if (debug) {
         // eslint-disable-next-line no-console
-        console.log("[PlanPriceChart] followLive", { from, to: lastTime, lookbackSeconds });
+        console.log("[PlanPriceChart] followLive", {
+          from,
+          to: lastTime,
+          lookbackSeconds,
+          vr: chart.timeScale().getVisibleRange?.(),
+        });
       }
     }, [data, devMode, stopReplay]);
 
