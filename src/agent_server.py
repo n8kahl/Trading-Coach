@@ -2786,6 +2786,14 @@ def tv_root_redirect(plan_id: Optional[str] = None, ui: Optional[int] = None) ->
     # Fallback to static index if no redirect requested
     return RedirectResponse("/tv/", status_code=302)
 
+# Also handle the trailing-slash form '/tv/' which many links use
+@app.get("/tv/")
+def tv_root_redirect_slash(plan_id: Optional[str] = None, ui: Optional[int] = None) -> RedirectResponse:
+    ui_host = (_os.getenv("PUBLIC_UI_HOST") or "").rstrip("/")
+    if ui == 1 and plan_id and ui_host:
+        return RedirectResponse(f"{ui_host}/plan/{plan_id}", status_code=302)
+    return RedirectResponse("/tv/", status_code=302)
+
 STATIC_ROOT = (Path(__file__).resolve().parent.parent / "static").resolve()
 TV_STATIC_DIR = STATIC_ROOT / "tv"
 if TV_STATIC_DIR.exists():
