@@ -12,8 +12,6 @@ const nextConfig = {
     const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/+$/, "");
     if (!apiBase) return [];
     return [
-      { source: "/tv", destination: `${apiBase}/tv` },
-      { source: "/tv/:path*", destination: `${apiBase}/tv/:path*` },
       { source: "/tv-api/:path*", destination: `${apiBase}/tv-api/:path*` },
     ];
   },
