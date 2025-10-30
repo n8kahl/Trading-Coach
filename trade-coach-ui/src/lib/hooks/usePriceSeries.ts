@@ -100,7 +100,7 @@ export function usePriceSeries(symbol: string | null | undefined, resolution: st
   const [status, setStatus] = useState<Status>(sanitizedSymbol ? "loading" : "idle");
   const [error, setError] = useState<Error | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
-  const debug = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("dev") === "1";
+  const debug = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("dev") !== null;
 
   const reload = useCallback(() => {
     setReloadToken((token) => token + 1);
@@ -139,7 +139,7 @@ export function usePriceSeries(symbol: string | null | undefined, resolution: st
         const url = `${API_BASE_URL}/tv-api/bars?${qs.toString()}`;
         if (debug) {
           // eslint-disable-next-line no-console
-          console.debug("[usePriceSeries] request", { url, symbol: sanitizedSymbol, resolution, from, to });
+          console.log("[usePriceSeries] request", { url, symbol: sanitizedSymbol, resolution, from, to });
         }
         const response = await fetch(url, {
           cache: "no-store",
@@ -158,7 +158,7 @@ export function usePriceSeries(symbol: string | null | undefined, resolution: st
           setStatus("ready");
           if (debug) {
             // eslint-disable-next-line no-console
-            console.debug("[usePriceSeries] payload not ok", payload);
+            console.log("[usePriceSeries] payload not ok", payload);
           }
           return;
         }
@@ -168,7 +168,7 @@ export function usePriceSeries(symbol: string | null | undefined, resolution: st
           const first = n ? Number(nextBars[0].time) : null;
           const last = n ? Number(nextBars[n - 1].time) : null;
           // eslint-disable-next-line no-console
-          console.debug("[usePriceSeries] normalized", { count: n, first, last });
+          console.log("[usePriceSeries] normalized", { count: n, first, last });
         }
         setBars((prev) => mergeBars(prev, nextBars));
         setStatus("ready");
@@ -180,7 +180,7 @@ export function usePriceSeries(symbol: string | null | undefined, resolution: st
         setStatus("error");
         if (debug) {
           // eslint-disable-next-line no-console
-          console.warn("[usePriceSeries] error", err);
+          console.log("[usePriceSeries] error", err);
         }
       }
     }

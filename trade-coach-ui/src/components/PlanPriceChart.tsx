@@ -224,7 +224,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         setChartReady(true);
         if (devMode) {
           // eslint-disable-next-line no-console
-          console.debug("[PlanPriceChart] chart ready", { symbol, planId });
+          console.log("[PlanPriceChart] chart ready", { symbol, planId });
         }
       })().catch((error) => {
         if (devMode) {
@@ -305,7 +305,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         const first = n ? Number(candles[0].time) : null;
         const last = n ? Number(candles[n - 1].time) : null;
         // eslint-disable-next-line no-console
-        console.debug("[PlanPriceChart] setData", { count: n, first, last });
+        console.log("[PlanPriceChart] setData", { count: n, first, last });
       }
 
       const volumes: HistogramData[] = data.map((bar) => ({
@@ -322,7 +322,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         onLastBarTimeChange?.(lastBarTimeRef.current);
         if (devMode) {
           // eslint-disable-next-line no-console
-          console.debug("[PlanPriceChart] last bar", { ms: lastBarTimeRef.current });
+          console.log("[PlanPriceChart] last bar", { ms: lastBarTimeRef.current });
         }
       } else {
         lastBarTimeRef.current = null;
@@ -348,7 +348,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           }
           if (devMode) {
             // eslint-disable-next-line no-console
-            console.debug("[PlanPriceChart] keep anchored", { from, to: lastTime });
+            console.log("[PlanPriceChart] keep anchored", { from, to: lastTime });
           }
         }
       }
@@ -531,7 +531,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       // Do not call scrollToRealTime() here; see note above about closed markets.
       if (devMode) {
         // eslint-disable-next-line no-console
-        console.debug("[PlanPriceChart] followLive", { from, to: lastTime, lookbackSeconds });
+        console.log("[PlanPriceChart] followLive", { from, to: lastTime, lookbackSeconds });
       }
     }, [data, devMode, stopReplay]);
 

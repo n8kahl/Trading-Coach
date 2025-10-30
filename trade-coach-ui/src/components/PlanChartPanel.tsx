@@ -242,7 +242,7 @@ export default function PlanChartPanel({
   useEffect(() => {
     if (!devMode) return;
     // eslint-disable-next-line no-console
-    console.debug("[PlanChartPanel] bars", { symbol: priceSymbol, timeframe, count: priceBars.length });
+    console.log("[PlanChartPanel] bars", { symbol: priceSymbol, timeframe, count: priceBars.length });
   }, [devMode, priceBars.length, priceSymbol, timeframe]);
 
   useEffect(() => {
@@ -313,7 +313,7 @@ export default function PlanChartPanel({
       }
       if (devMode) {
         // eslint-disable-next-line no-console
-        console.debug("[PlanChartPanel] lastBarTime", { time });
+        console.log("[PlanChartPanel] lastBarTime", { time });
       }
     },
     [followLive, onLastBarTimeChange, devMode],
@@ -426,6 +426,11 @@ export default function PlanChartPanel({
         {chartStatusMessage ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-neutral-950/70 text-sm text-neutral-300">
             {chartStatusMessage}
+          </div>
+        ) : null}
+        {devMode ? (
+          <div className="pointer-events-none absolute left-3 top-3 z-20 rounded bg-neutral-900/70 px-2 py-1 text-[10px] text-neutral-300">
+            dev: {symbol} · {timeframe} · status={priceStatus} · bars={priceBars.length}
           </div>
         ) : null}
         <PlanPriceChart
