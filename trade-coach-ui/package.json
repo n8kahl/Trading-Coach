@@ -13,11 +13,14 @@
     "@heroicons/react": "^2.2.0",
     "clsx": "^2.1.1",
     "lightningcss": "npm:lightningcss-wasm@^1.26.0",
-    "lightningcss-wasm": "^1.30.2",
+    "lightningcss-wasm": "^1.26.0",
     "lightweight-charts": "^5.0.9",
     "next": "15.5.5",
     "react": "19.1.0",
     "react-dom": "19.1.0"
+  },
+  "overrides": {
+    "lightningcss": "npm:lightningcss-wasm@^1.26.0"
   },
   "optionalDependencies": {
     "lightningcss-linux-x64-musl": "1.30.2"
