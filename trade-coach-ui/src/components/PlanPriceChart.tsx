@@ -212,8 +212,30 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         const ColorTypeSolid = (lib as any)?.ColorType?.Solid ?? 0;
         const CrosshairModeMagnet = (lib as any)?.CrosshairMode?.Magnet ?? 0;
 
-        // Create chart with minimal safe options first, then apply richer options
-        const chart = createChartFn(containerRef.current, { autoSize: true });
+        // Create chart using safest possible options; fall back across APIs
+        let chart: any = null;
+        const el = containerRef.current as HTMLDivElement;
+        const w = el.clientWidth || 800;
+        const h = el.clientHeight || 360;
+        try {
+          chart = createChartFn(el, { width: w, height: h });
+          addDbg(`[PlanPriceChart] createChart with width/height ok`);
+        } catch (e1) {
+          addDbg(`[PlanPriceChart] createChart(width/height) failed: ${String(e1)}`);
+          try {
+            const createChartEx = (lib as any)?.createChartEx || (lib as any)?.createOptionsChart;
+            if (typeof createChartEx === 'function') {
+              chart = createChartEx(el, { width: w, height: h });
+              addDbg(`[PlanPriceChart] createChartEx/createOptionsChart ok`);
+            }
+          } catch (e2) {
+            addDbg(`[PlanPriceChart] createChartEx failed: ${String(e2)}`);
+          }
+        }
+        if (!chart) {
+          addDbg(`[PlanPriceChart] error: unable to create chart; libKeys=${Object.keys(lib || {}).join(',')}`);
+          return;
+        }
 
         (chart as any).applyOptions?.({
           layout: {
