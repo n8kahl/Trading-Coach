@@ -6,7 +6,7 @@ from ..lib.data_source import DataRoute
 from ..providers.geometry import GeometryBundle, build_geometry
 from ..providers.levels import backfill_key_levels_used
 from ..providers.planner import plan as run_plan
-from ..providers.series import SeriesBundle, fetch_series
+from ..providers.series import SeriesBundle, ScaleMismatchError, fetch_series
 
 
 def _as_dict(obj: Any) -> dict[str, Any]:
@@ -95,6 +95,8 @@ async def compute_plan_with_fallback(symbol: str, route: DataRoute) -> dict[str,
     try:
         plan_obj, _, _ = await _attempt_plan(symbol, route=route)
         return plan_obj
+    except ScaleMismatchError as err:
+        return _scale_mismatch_stub(symbol, route, err)
     except Exception:
         pass
 
@@ -103,6 +105,8 @@ async def compute_plan_with_fallback(symbol: str, route: DataRoute) -> dict[str,
             plan_obj, _, _ = await _attempt_plan(symbol, route=route, mode_override="lkg")
             plan_obj.setdefault("warnings", []).append("LIVE_FALLBACK_TO_LKG")
             return plan_obj
+        except ScaleMismatchError as err:
+            return _scale_mismatch_stub(symbol, route, err)
         except Exception:
             pass
 
@@ -111,6 +115,8 @@ async def compute_plan_with_fallback(symbol: str, route: DataRoute) -> dict[str,
     try:
         series = await fetch_series([symbol], mode=route.mode, as_of=route.as_of, extended=route.extended)
         geometry = await build_geometry([symbol], series)
+    except ScaleMismatchError as err:
+        return _scale_mismatch_stub(symbol, route, err)
     except Exception:
         series = None
         geometry = None
@@ -151,3 +157,41 @@ async def compute_plan_with_fallback(symbol: str, route: DataRoute) -> dict[str,
         "use_extended_hours": route.extended,
     }
     return stub
+
+
+def _scale_mismatch_stub(symbol: str, route: DataRoute, error: ScaleMismatchError) -> dict[str, Any]:
+    key_levels = backfill_key_levels_used(symbol, None)
+    note = (
+        f"{symbol} data scale mismatch: close {error.close_value:.2f} below "
+        f"threshold {error.threshold:.2f} via {error.path}. Plan suppressed."
+    )
+    return {
+        "plan_id": f"{symbol}-SCALE-MISMATCH",
+        "version": 1,
+        "trade_detail": "",
+        "planning_context": route.planning_context,
+        "symbol": symbol,
+        "style": None,
+        "targets": [],
+        "target_meta": [],
+        "targets_meta": [],
+        "entry_candidates": [],
+        "key_levels_used": key_levels,
+        "meta": {"key_levels_used": key_levels},
+        "data_quality": {
+            "series_present": False,
+            "snapshot": {
+                "generated_at": route.as_of.isoformat(),
+                "symbol_count": 1,
+            },
+        },
+        "snap_trace": ["failure: scale_mismatch"],
+        "warnings": ["SCALE_MISMATCH"],
+        "notes": [note],
+        "planning_snapshot": {
+            "entry_anchor": None,
+            "entry_actionability": None,
+            "entry_candidates": [],
+        },
+        "use_extended_hours": route.extended,
+    }

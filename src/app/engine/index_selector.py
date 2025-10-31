@@ -11,7 +11,7 @@ import pandas as pd
 from src.contract_selector import filter_chain, pick_best_contract
 from src.tradier import TradierNotConfiguredError, fetch_option_chain_cached
 
-from .index_common import ETF_PROXIES
+from .index_common import DEFAULT_INDEX_RATIOS, ETF_PROXIES
 from .index_mode import GammaSnapshot, IndexDataHealth, IndexPlanner
 from .options_select import rules_for_symbol, score_contract
 
@@ -125,12 +125,24 @@ class IndexOptionSelector:
 
         decision.source = "ETF_PROXY"
         decision.chain = proxy_chain
-        decision.execution_proxy = {
-            "symbol": proxy_symbol,
-            "gamma": round(snapshot.gamma_current, 6) if snapshot else None,
-            "ratio": round(snapshot.spot_ratio, 6) if snapshot else None,
+        spot_ratio = None
+        if snapshot:
+            spot_ratio = round(snapshot.spot_ratio, 6)
+        elif base in DEFAULT_INDEX_RATIOS:
+            spot_ratio = DEFAULT_INDEX_RATIOS.get(base)
+        if spot_ratio is not None:
+            try:
+                spot_ratio = round(float(spot_ratio), 6)
+            except (TypeError, ValueError):
+                spot_ratio = None
+        proxy_payload = {
+            "underlying_proxy": proxy_symbol,
+            "spot_ratio": spot_ratio,
             "note": note,
         }
+        if snapshot:
+            proxy_payload["gamma"] = round(snapshot.gamma_current, 6)
+        decision.execution_proxy = proxy_payload
         if translated_targets:
             decision.diagnostics["gamma"] = translated_targets
         return contract_payload, decision
@@ -159,7 +171,7 @@ class IndexOptionSelector:
     @staticmethod
     def _fallback_note(health: IndexDataHealth | None, proxy_symbol: str) -> str:
         if not health:
-            return f"Index feeds degraded; using {proxy_symbol} proxy."
+            return f"Index feeds degraded; using {proxy_symbol} proxy. Plan levels remain in index space."
         polygon_status = next(iter(health.polygon.values()), None)
         tradier_status = next(iter(health.tradier.values()), None)
         reason_parts = []
@@ -168,7 +180,7 @@ class IndexOptionSelector:
         if tradier_status and tradier_status.status != "healthy":
             reason_parts.append(f"Tradier={tradier_status.status}")
         reason = ", ".join(reason_parts) if reason_parts else "index liquidity thin"
-        return f"Index feeds degraded ({reason}); using {proxy_symbol} proxy."
+        return f"Index feeds degraded ({reason}); using {proxy_symbol} proxy. Plan levels remain in index space."
 
 
 __all__ = ["IndexOptionSelector", "ContractsDecision"]
