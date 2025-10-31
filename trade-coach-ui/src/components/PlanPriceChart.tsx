@@ -394,13 +394,48 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       const volumeSeries = volumeSeriesRef.current;
       if (!candleSeries || !volumeSeries) return;
 
-      if (!safeData.every((bar) => bar && Number.isFinite(Number((bar as any).time)))) {
-        addDbg("[PlanPriceChart] skipped setData: found invalid bar(s)");
+      const timeCheck = safeData.every((bar) => bar && Number.isFinite(Number((bar as any).time)));
+      const candleCheck = safeData.every(
+        (bar) =>
+          bar &&
+          Number.isFinite(bar.open) &&
+          Number.isFinite(bar.high) &&
+          Number.isFinite(bar.low) &&
+          Number.isFinite(bar.close),
+      );
+      if (!timeCheck || !candleCheck) {
+        addDbg(
+          `[PlanPriceChart] skipped setData: invalid bars detected timeCheck=${timeCheck} candleCheck=${candleCheck} length=${safeData.length}`,
+        );
         safeData.forEach((bar, index) => {
-          if (!bar || !Number.isFinite(Number((bar as any).time))) {
-            addDbg(`[PlanPriceChart] bad bar at ${index}: ${JSON.stringify(bar)}`);
+          if (
+            !bar ||
+            !Number.isFinite(Number((bar as any).time)) ||
+            !Number.isFinite(bar.open) ||
+            !Number.isFinite(bar.high) ||
+            !Number.isFinite(bar.low) ||
+            !Number.isFinite(bar.close)
+          ) {
+            addDbg(
+              `[PlanPriceChart] bad bar at ${index}: ${JSON.stringify({
+                time: bar?.time,
+                open: bar?.open,
+                high: bar?.high,
+                low: bar?.low,
+                close: bar?.close,
+                volume: bar?.volume,
+              })}`,
+            );
           }
         });
+        const snapshot = safeData.slice(0, 5).map((bar) => ({
+          time: bar?.time,
+          open: bar?.open,
+          high: bar?.high,
+          low: bar?.low,
+          close: bar?.close,
+        }));
+        addDbg(`[PlanPriceChart] first bars snapshot: ${JSON.stringify(snapshot)}`);
         return;
       }
 
