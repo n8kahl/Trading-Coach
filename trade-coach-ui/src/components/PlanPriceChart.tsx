@@ -490,8 +490,10 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
 
       if (!hasInitialLoadRef.current) {
         hasInitialLoadRef.current = true;
-        chartRef.current?.timeScale().fitContent();
-      } else if (autoFollowRef.current) {
+        if (candles.length) {
+          chartRef.current?.timeScale().fitContent();
+        }
+      } else if (autoFollowRef.current && candles.length) {
         // Keep the viewport anchored to the latest loaded bar.
         // Avoid scrollToRealTime() because when markets are closed the
         // "real time" cursor advances beyond the last bar and the chart looks empty.
