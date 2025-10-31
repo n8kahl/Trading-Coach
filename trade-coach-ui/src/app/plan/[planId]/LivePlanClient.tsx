@@ -7,12 +7,18 @@ import WebviewShell from "@/components/webview/WebviewShell";
 import PlanPanel from "@/components/webview/PlanPanel";
 import PlanHeader from "@/components/PlanHeader";
 import PlanChartPanel from "@/components/PlanChartPanel";
+import CoachNote from "@/components/CoachNote";
+import HeaderMarkers from "@/components/HeaderMarkers";
+import ConfidenceBadge from "@/components/ConfidenceBadge";
 import { usePlanSocket } from "@/lib/hooks/usePlanSocket";
 import { usePlanLayers } from "@/lib/hooks/usePlanLayers";
 import { extractPrimaryLevels, extractSupportingLevels } from "@/lib/utils/layers";
 import type { SupportingLevel } from "@/lib/chart";
 import type { PlanDeltaEvent, PlanLayers, PlanSnapshot } from "@/lib/types";
 import { API_BASE_URL, PUBLIC_UI_BASE_URL, WS_BASE_URL, BUILD_SHA, withAuthHeaders } from "@/lib/env";
+import { deriveCoachMessage, resolvePlanTargets, type CoachGoal, type CoachNote as CoachNoteModel } from "@/lib/plan/coach";
+import { extractPlanLevels, resolveTrailingStop } from "@/lib/plan/levels";
+import { emitPlanEvent } from "@/lib/plan/events";
 
 const TIMEFRAME_OPTIONS = [
   { value: '1', label: '1m' },
@@ -23,6 +29,15 @@ const TIMEFRAME_OPTIONS = [
   { value: '240', label: '4h' },
   { value: '1D', label: '1D' },
 ];
+
+const HEADER_AS_OF_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  month: "short",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: true,
+});
 
 type LivePlanClientProps = {
   initialSnapshot: PlanSnapshot;
@@ -43,7 +58,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const [streamingEnabled, setStreamingEnabled] = React.useState(true);
   const [supportVisible, setSupportVisible] = React.useState(() => extractSupportVisible(initialSnapshot.plan));
   const [highlightedLevel, setHighlightedLevel] = React.useState<SupportingLevel | null>(null);
-  const [theme, setTheme] = React.useState<'dark' | 'light'>('dark');
   const [layerSeed, setLayerSeed] = React.useState<PlanLayers | null>(() => extractInitialLayers(initialSnapshot));
   const [timeframe, setTimeframe] = React.useState(() => normalizeTimeframeFromPlan(initialSnapshot.plan));
   const [nowTick, setNowTick] = React.useState(Date.now());
@@ -51,15 +65,23 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const [devMode, setDevMode] = React.useState(() => process.env.NEXT_PUBLIC_DEVTOOLS === "1");
   const [priceRefreshToken, setPriceRefreshToken] = React.useState(0);
   const [lastPlanHeartbeat, setLastPlanHeartbeat] = React.useState<number | null>(() => Date.now());
-  const [noteEpoch, setNoteEpoch] = React.useState(0);
-  const [noteAnimating, setNoteAnimating] = React.useState(false);
   const [symbolDraft, setSymbolDraft] = React.useState(() => (plan.symbol ? plan.symbol.toUpperCase() : ""));
   const [symbolSubmitting, setSymbolSubmitting] = React.useState(false);
+  const [coachNote, setCoachNote] = React.useState<CoachNoteModel>(() => ({
+    text: "Awaiting tick…",
+    goal: "neutral",
+    progressPct: 0,
+    updatedAt: Date.now(),
+  }));
+  const [activeLevelId, setActiveLevelId] = React.useState<string | null>(null);
+  const [hiddenLevelIds, setHiddenLevelIds] = React.useState<Set<string>>(() => new Set());
   const lastPriceRefreshRef = React.useRef(0);
   const lastDeltaAtRef = React.useRef(Date.now());
   const symbolRequestRef = React.useRef(0);
   const replanPendingRef = React.useRef(false);
-  const prefersReducedMotion = usePrefersReducedMotion();
+  const lastCoachGoalRef = React.useRef<CoachGoal | null>(null);
+
+  const theme = "dark" as const;
 
   const requestPriceRefresh = React.useCallback(() => {
     const now = Date.now();
@@ -249,30 +271,74 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const riskBanner =
     Array.isArray(plan.warnings) && plan.warnings.length ? String(plan.warnings[0]) : plan.session_state?.message ?? null;
 
-  const planTargets = React.useMemo(() => {
-    const rawTargets = Array.isArray(plan.targets) ? plan.targets : [];
-    return rawTargets.filter((value): value is number => typeof value === "number");
-  }, [plan.targets]);
+  const resolvedTargets = React.useMemo(() => resolvePlanTargets(plan), [plan]);
+  const planTargets = React.useMemo(() => resolvedTargets.map((target) => target.price), [resolvedTargets]);
 
   React.useEffect(() => {
     setSymbolDraft(plan.symbol ? sanitizeSymbolToken(String(plan.symbol)) : "");
   }, [plan.symbol]);
 
-  const coachNote = React.useMemo(() => {
-    const fromPlan = typeof plan.notes === "string" ? plan.notes.trim() : "";
-    const sessionState = plan.session_state as Record<string, unknown> | null | undefined;
-    const sessionNote =
-      sessionState && typeof sessionState["coach_note"] === "string"
-        ? (sessionState["coach_note"] as string).trim()
-        : "";
-    const fallbackMessage =
-      sessionState && typeof sessionState["message"] === "string" ? (sessionState["message"] as string).trim() : "";
-    return fromPlan || sessionNote || fallbackMessage || "";
+  const trailingStopValue = React.useMemo(() => resolveTrailingStop(plan), [plan]);
+
+  const levelSummary = React.useMemo(
+    () => extractPlanLevels(plan, { trailingStop: trailingStopValue }),
+    [plan, trailingStopValue],
+  );
+
+  const headerLevels = React.useMemo(
+    () =>
+      levelSummary.levels.map((level) => ({
+        ...level,
+        hidden: hiddenLevelIds.has(level.id),
+      })),
+    [levelSummary.levels, hiddenLevelIds],
+  );
+
+  const hiddenLevelIdList = React.useMemo(() => Array.from(hiddenLevelIds), [hiddenLevelIds]);
+
+  const lastPrice = React.useMemo(() => {
+    const details = (plan.details ?? {}) as Record<string, unknown>;
+    return (
+      getNumber((plan as Record<string, unknown>).last_price) ??
+      getNumber(details.last) ??
+      getNumber((plan as Record<string, unknown>).mark) ??
+      null
+    );
   }, [plan]);
 
-  const [displayCoachNote, setDisplayCoachNote] = React.useState(() => (coachNote ? coachNote : "Coach note pending"));
-  const lastCoachUpdateRef = React.useRef(coachNote ? Date.now() : 0);
-  const wsCoachNoteRef = React.useRef(coachNote);
+  React.useEffect(() => {
+    const next = deriveCoachMessage({
+      plan,
+      price: lastPrice,
+      trailingStop: levelSummary.trailingStop,
+      now: Date.now(),
+    });
+    setCoachNote((prev) => {
+      const prevProgress = Math.round(prev.progressPct);
+      const nextProgress = Math.round(next.progressPct);
+      if (prev.text === next.text && prev.goal === next.goal && prevProgress === nextProgress) {
+        return { ...next, updatedAt: prev.updatedAt };
+      }
+      return next;
+    });
+  }, [plan, lastPrice, levelSummary.trailingStop]);
+
+  React.useEffect(() => {
+    const goal = coachNote.goal;
+    if (!activePlanId) return;
+    if (goal === lastCoachGoalRef.current) return;
+    lastCoachGoalRef.current = goal;
+    if (goal === "tp_hit" || goal === "stop_hit") {
+      emitPlanEvent({
+        type: goal,
+        planId: activePlanId,
+        payload: {
+          price: lastPrice ?? null,
+          updatedAt: coachNote.updatedAt,
+        },
+      });
+    }
+  }, [coachNote.goal, coachNote.updatedAt, activePlanId, lastPrice]);
 
   const confluenceTokens = React.useMemo(() => {
     const tokens: string[] = [];
@@ -306,80 +372,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       .map((token) => token.toUpperCase());
   }, [layers?.meta?.confluence, plan]);
 
-  const parseNumeric = React.useCallback((value: unknown): number | null => {
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-    if (typeof value === "string") {
-      const parsed = Number.parseFloat(value);
-      return Number.isFinite(parsed) ? parsed : null;
-    }
-    return null;
-  }, []);
-
-  const entryPrice = React.useMemo(() => {
-    const direct = parseNumeric((plan as Record<string, unknown>).entry);
-    if (direct != null) return direct;
-    const structured = plan.structured_plan as { entry?: { level?: unknown } } | null | undefined;
-    if (structured?.entry) {
-      const structuredEntry = parseNumeric((structured.entry as Record<string, unknown>).level);
-      if (structuredEntry != null) return structuredEntry;
-    }
-    const chartsParams = plan.charts_params as Record<string, unknown> | undefined;
-    if (chartsParams) {
-      const fromParams = parseNumeric(chartsParams.entry);
-      if (fromParams != null) return fromParams;
-    }
-    return null;
-  }, [plan, parseNumeric]);
-
-  const stopPrice = React.useMemo(() => {
-    const direct = parseNumeric((plan as Record<string, unknown>).stop);
-    if (direct != null) return direct;
-    const structured = plan.structured_plan as { stop?: unknown } | null | undefined;
-    if (structured) {
-      const structuredStop = parseNumeric(structured.stop);
-      if (structuredStop != null) return structuredStop;
-    }
-    const chartsParams = plan.charts_params as Record<string, unknown> | undefined;
-    if (chartsParams) {
-      const fromParams = parseNumeric(chartsParams.stop);
-      if (fromParams != null) return fromParams;
-    }
-    return null;
-  }, [plan, parseNumeric]);
-
-  const lastPrice = React.useMemo(() => {
-    const details = (plan.details ?? {}) as Record<string, unknown>;
-    return (
-      getNumber((plan as Record<string, unknown>).last_price) ??
-      getNumber(details.last) ??
-      getNumber((plan as Record<string, unknown>).mark) ??
-      null
-    );
-  }, [plan]);
-
-  const computeCoachGuidance = React.useCallback((): string | null => {
-    if (lastPrice == null) return null;
-    if (stopPrice != null) {
-      const distanceToStop = Math.abs(lastPrice - stopPrice) / Math.max(Math.abs(stopPrice), 1);
-      if (distanceToStop <= 0.0025) {
-        return "Approaching Stop Loss";
-      }
-    }
-    const firstTarget = planTargets[0];
-    if (firstTarget != null) {
-      const distanceToTarget = Math.abs(lastPrice - firstTarget) / Math.max(Math.abs(firstTarget), 1);
-      if (distanceToTarget <= 0.0025) {
-        return "Near TP1";
-      }
-    }
-    if (entryPrice != null && stopPrice != null) {
-      if (lastPrice > Math.min(entryPrice, stopPrice) && lastPrice < Math.max(entryPrice, stopPrice)) {
-        return "Tracking between entry and stop";
-      }
-    }
-    return "Coach monitoring price action";
-  }, [entryPrice, lastPrice, planTargets, stopPrice]);
-
   const priceFormatter = React.useMemo(
     () =>
       new Intl.NumberFormat("en-US", {
@@ -396,6 +388,16 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     const match = TIMEFRAME_OPTIONS.find((item) => item.value === timeframe);
     return match?.label ?? timeframe;
   }, [timeframe]);
+  const planSymbol = plan.symbol?.toUpperCase() ?? "—";
+  const planVersion = plan.version ?? (plan as Record<string, unknown>).version ?? null;
+  const planAsOfLabel = React.useMemo(() => {
+    const asOf = plan.session_state?.as_of ?? null;
+    if (!asOf) return null;
+    const date = new Date(asOf);
+    if (Number.isNaN(date.getTime())) return null;
+    return HEADER_AS_OF_FORMATTER.format(date);
+  }, [plan.session_state?.as_of]);
+  const planIdLabel = plan.plan_id || activePlanId;
 
   const handleSymbolInputChange = React.useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -439,46 +441,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     [router, symbolDraft, symbolSubmitting],
   );
 
-  React.useEffect(() => {
-    if (!coachNote) {
-      wsCoachNoteRef.current = "";
-      return;
-    }
-    if (coachNote === wsCoachNoteRef.current) return;
-    wsCoachNoteRef.current = coachNote;
-    lastCoachUpdateRef.current = Date.now();
-    setDisplayCoachNote(coachNote);
-    setNoteEpoch((prev) => prev + 1);
-  }, [coachNote]);
-
-  React.useEffect(() => {
-    if (coachNote) return;
-    if (displayCoachNote) return;
-    lastCoachUpdateRef.current = Date.now();
-    wsCoachNoteRef.current = "";
-    setDisplayCoachNote("Coach note pending");
-    setNoteEpoch((prev) => prev + 1);
-  }, [coachNote, displayCoachNote]);
-
-  React.useEffect(() => {
-    if (typeof window === "undefined") return undefined;
-    const tick = () => {
-      const now = Date.now();
-      if (now - lastCoachUpdateRef.current < 5000) return;
-      if (wsCoachNoteRef.current) return;
-      const guidance = computeCoachGuidance();
-      if (!guidance || guidance === displayCoachNote) return;
-      lastCoachUpdateRef.current = now;
-      wsCoachNoteRef.current = "";
-      setDisplayCoachNote(guidance);
-      setNoteEpoch((prev) => prev + 1);
-    };
-    const id = window.setInterval(tick, 5000);
-    return () => {
-      window.clearInterval(id);
-    };
-  }, [computeCoachGuidance, displayCoachNote]);
-
   const handleSetFollowLive = React.useCallback((value: boolean) => {
     setFollowLive(value);
   }, []);
@@ -503,6 +465,22 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
 
   const handleSelectLevel = React.useCallback((level: SupportingLevel | null) => {
     setHighlightedLevel(level);
+  }, []);
+
+  const handleHighlightLevel = React.useCallback((levelId: string) => {
+    setActiveLevelId((prev) => (prev === levelId ? null : levelId));
+  }, []);
+
+  const handleToggleLevelVisibility = React.useCallback((levelId: string) => {
+    setHiddenLevelIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(levelId)) {
+        next.delete(levelId);
+      } else {
+        next.add(levelId);
+      }
+      return next;
+    });
   }, []);
 
   const handleLastBarTime = React.useCallback((time: number | null) => {
@@ -540,121 +518,138 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     };
   }, [requestPriceRefresh]);
 
-  React.useEffect(() => {
-    if (prefersReducedMotion) {
-      setNoteAnimating(false);
-      return;
-    }
-    setNoteAnimating(true);
-    const raf = typeof window !== "undefined" ? window.requestAnimationFrame(() => {
-      setNoteAnimating(false);
-    }) : null;
-    return () => {
-      if (raf != null) {
-        window.cancelAnimationFrame(raf);
-      }
-    };
-  }, [noteEpoch, prefersReducedMotion]);
+  const indicatorItems = React.useMemo(
+    () => [
+      { key: "plan", label: "Plan", tone: planStatusColor, title: planStatusTitle },
+      { key: "data", label: "Data", tone: dataStatusColor, title: dataStatusTitle },
+      {
+        key: "stream",
+        label: "Stream",
+        tone: streamingEnabled ? ("green" as StatusTone) : ("red" as StatusTone),
+        title: streamingEnabled ? "Streaming enabled" : "Streaming paused",
+      },
+    ],
+    [planStatusColor, planStatusTitle, dataStatusColor, dataStatusTitle, streamingEnabled],
+  );
 
   const planUiLink = React.useMemo(() => extractUiPlanLink(snapshot), [snapshot]);
 
   const statusStrip = (
-    <div className="flex flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8" role="region" aria-label="Fancy Trader status">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.25em] text-neutral-400">
-          <span className="text-sm font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
-          <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[0.68rem] text-emerald-200">
-            {plan.symbol?.toUpperCase() ?? "—"}
-          </span>
-          <form className="flex items-center gap-2" onSubmit={handleSymbolSubmit}>
-            <input
-              type="text"
-              inputMode="text"
-              autoComplete="off"
-              maxLength={6}
-              placeholder="SYM"
-              value={symbolDraft}
-              onChange={handleSymbolInputChange}
-              disabled={symbolSubmitting}
-              className="h-10 w-24 rounded-lg border border-neutral-700 bg-neutral-950/70 px-3 text-sm font-semibold uppercase tracking-[0.2em] text-neutral-100 shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-            />
-            <button
-              type="submit"
-              disabled={symbolSubmitting || !symbolDraft}
-              className={clsx(
-                "h-10 min-w-[64px] rounded-lg border px-3 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
-                symbolSubmitting || !symbolDraft
-                  ? "cursor-not-allowed border-neutral-700 bg-neutral-900/60 text-neutral-500"
-                  : "border-emerald-500/50 bg-emerald-500/15 text-emerald-100 hover:border-emerald-400 hover:text-emerald-50",
-              )}
-              aria-label="Generate plan for symbol"
-            >
-              {symbolSubmitting ? "..." : "Plan"}
-            </button>
-          </form>
-          <span className="rounded-full border border-neutral-700/50 px-2 py-0.5 text-[0.68rem] text-neutral-300">
-            {timeframeLabel}
-          </span>
-          {sessionBanner ? (
-            <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[0.68rem] text-sky-200">
-              {sessionBanner.toUpperCase()}
+    <section className="flex flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8" role="region" aria-label="Fancy Trader status">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.25em] text-neutral-400">
+            <span className="text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
+            <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-100">
+              {planSymbol}
             </span>
-          ) : null}
-          {riskBanner ? (
-            <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[0.68rem] text-amber-200">
-              {riskBanner}
+            <span className="rounded-full border border-neutral-700/60 px-2 py-0.5 text-[0.68rem] text-neutral-300">
+              {timeframeLabel}
             </span>
-          ) : null}
+            {sessionBanner ? (
+              <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[0.68rem] text-sky-200">
+                {sessionBanner.toUpperCase()}
+              </span>
+            ) : null}
+            {riskBanner ? (
+              <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[0.68rem] text-amber-200">
+                {riskBanner}
+              </span>
+            ) : null}
+            <span className="text-xs text-neutral-300">
+              Last&nbsp;
+              <span className="font-semibold text-white">{lastPriceLabel}</span>
+            </span>
+          </div>
+          <div className="flex items-end gap-5">
+            {indicatorItems.map((indicator) => (
+              <button
+                key={indicator.key}
+                type="button"
+                className="flex flex-col items-center gap-1 text-[0.62rem] font-semibold uppercase tracking-[0.3em] text-neutral-400 transition hover:text-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                aria-label={indicator.title}
+                title={indicator.title}
+              >
+                <span className="sr-only">{indicator.label}</span>
+                <StatusDot color={indicator.tone} label={`${indicator.label} status ${indicator.tone}`} />
+                <span className="hidden sm:block">{indicator.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
-        <div className="flex flex-wrap items-center gap-4 text-xs uppercase tracking-[0.2em] text-neutral-300">
-          <span className="flex items-center gap-2" title={planStatusTitle}>
-            <span>Plan</span>
-            <StatusDot color={planStatusColor} label={`Plan status ${planStatusColor}`} />
+        <form className="flex flex-wrap items-center gap-2" onSubmit={handleSymbolSubmit}>
+          <input
+            type="text"
+            inputMode="text"
+            autoComplete="off"
+            maxLength={6}
+            placeholder="SYM"
+            value={symbolDraft}
+            onChange={handleSymbolInputChange}
+            disabled={symbolSubmitting}
+            className="h-10 w-28 rounded-lg border border-neutral-700 bg-neutral-950/70 px-3 text-sm font-semibold uppercase tracking-[0.25em] text-neutral-100 shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+          />
+          <button
+            type="submit"
+            disabled={symbolSubmitting || !symbolDraft}
+            className={clsx(
+              "h-10 min-w-[72px] rounded-lg border px-4 text-xs font-semibold uppercase tracking-[0.25em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+              symbolSubmitting || !symbolDraft
+                ? "cursor-not-allowed border-neutral-700 bg-neutral-900/60 text-neutral-500"
+                : "border-emerald-500/60 bg-emerald-500/15 text-emerald-50 hover:border-emerald-400",
+            )}
+            aria-label="Generate plan for symbol"
+          >
+            {symbolSubmitting ? "..." : "Plan"}
+          </button>
+        </form>
+      </div>
+      <CoachNote note={coachNote} subdued={!streamingEnabled || dataStatusColor !== "green"} />
+      <div className="space-y-2">
+      <HeaderMarkers
+        levels={headerLevels}
+        highlightedId={activeLevelId}
+        onHighlight={handleHighlightLevel}
+        onToggleVisibility={handleToggleLevelVisibility}
+      />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[0.68rem] uppercase tracking-[0.25em] text-neutral-500">Confluence</span>
+          {confluenceTokens.length ? (
+            <div className="flex flex-wrap items-center gap-2 text-[0.68rem] text-neutral-300">
+              {confluenceTokens.map((token, index) => (
+                <span
+                  key={`${token}-${index}`}
+                  className="inline-flex items-center gap-1 rounded-md border border-neutral-800/60 bg-neutral-900/50 px-2 py-1"
+                >
+                  <span className="block h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+                  <span>{token}</span>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <span className="text-[0.68rem] text-neutral-600">No confluence noted</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-[0.68rem] uppercase tracking-[0.25em] text-neutral-500">Confidence</span>
+          <ConfidenceBadge value={plan.confidence} />
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.2em] text-neutral-400">
+        <span>
+          Plan&nbsp;
+          <span className="font-semibold text-neutral-100">{planIdLabel}</span>
+          {planVersion ? <span>&nbsp;· v{planVersion}</span> : null}
           </span>
-          <span className="flex items-center gap-2" title={dataStatusTitle}>
-            <span>Data</span>
-            <StatusDot color={dataStatusColor} label={`Data status ${dataStatusColor}`} />
-          </span>
-          <span className="text-neutral-200">
-            Last:&nbsp;
-            <span className="font-semibold text-white">{lastPriceLabel}</span>
+          {planAsOfLabel ? <span>As of {planAsOfLabel} UTC</span> : null}
+          <span>
+            Data&nbsp;
+            <span className="font-semibold text-neutral-100">{dataStatusTitle}</span>
           </span>
         </div>
       </div>
-      <div
-        className={clsx(
-          "rounded-2xl border px-3 py-3 shadow-sm sm:max-w-xl",
-          streamingEnabled ? "border-emerald-500/40 bg-emerald-500/10" : "border-neutral-700/60 bg-neutral-900/70",
-        )}
-      >
-        <span className="text-[0.62rem] uppercase tracking-[0.3em] text-emerald-200">Coach note</span>
-        <p
-          key={noteEpoch}
-          aria-live="polite"
-          className={clsx(
-            "mt-1 whitespace-pre-wrap break-words text-sm leading-snug text-neutral-100 transition duration-300 ease-out",
-            prefersReducedMotion ? "" : noteAnimating ? "opacity-0 translate-y-1" : "opacity-100 translate-y-0",
-          )}
-        >
-          {displayCoachNote}
-        </p>
-      </div>
-      <div className="flex justify-end">
-        <button
-          type="button"
-          onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
-          className={clsx(
-            "h-10 rounded-full px-4 text-xs uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
-            theme === "light"
-              ? "border border-slate-300 bg-white text-slate-700 hover:border-emerald-400 hover:text-emerald-600"
-              : "border border-neutral-700 bg-neutral-900 text-neutral-200 hover:border-emerald-400 hover:text-emerald-200",
-          )}
-          aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`}
-        >
-          {theme === "light" ? "Dark Mode" : "Light Mode"}
-        </button>
-      </div>
-    </div>
+    </section>
   );
 
   const planPanel = (
@@ -680,7 +675,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       layers={layers}
       primaryLevels={primaryLevels}
       supportingVisible={supportVisible}
-      confluenceTokens={confluenceTokens}
       followLive={followLive}
       streamingEnabled={streamingEnabled}
       onSetFollowLive={handleSetFollowLive}
@@ -698,6 +692,8 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       theme={theme}
       devMode={!!devMode}
       priceRefreshToken={priceRefreshToken}
+      highlightLevelId={activeLevelId}
+      hiddenLevelIds={hiddenLevelIdList}
     />
   );
 
@@ -853,27 +849,4 @@ function getNumber(value: unknown): number | null {
     if (Number.isFinite(parsed)) return parsed;
   }
   return null;
-}
-
-function usePrefersReducedMotion(): boolean {
-  const [prefers, setPrefers] = React.useState(false);
-
-  React.useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const update = () => setPrefers(media.matches);
-    update();
-    if (typeof media.addEventListener === "function") {
-      media.addEventListener("change", update);
-      return () => {
-        media.removeEventListener("change", update);
-      };
-    }
-    media.addListener(update);
-    return () => {
-      media.removeListener(update);
-    };
-  }, []);
-
-  return prefers;
 }

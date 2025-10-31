@@ -18,6 +18,7 @@ import type {
 import type { SupportingLevel } from "@/lib/chart";
 import type { PlanLayerLevel, PlanLayerZone, PlanLayers } from "@/lib/types";
 import type { PriceSeriesCandle } from "@/lib/hooks/usePriceSeries";
+import { fitVisibleRangeForTrade } from "@/lib/plan/chart";
 
 type ChartLib = typeof import("lightweight-charts");
 
@@ -46,6 +47,8 @@ type PlanPriceChartProps = {
   overlays: ChartOverlayState;
   onLastBarTimeChange?: (time: number | null) => void;
   devMode?: boolean;
+  highlightedLevelId?: string | null;
+  hiddenLevelIds?: string[];
 };
 
 export type PlanPriceChartHandle = {
@@ -121,7 +124,21 @@ function toPriceLineId(base: string, value: number | string, index?: number): st
 }
 
 const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
-  ({ planId, symbol, resolution: _resolution, theme, data, overlays, onLastBarTimeChange, devMode = false }, ref) => {
+  (
+    {
+      planId,
+      symbol,
+      resolution: _resolution,
+      theme,
+      data,
+      overlays,
+      onLastBarTimeChange,
+      devMode = false,
+      highlightedLevelId = null,
+      hiddenLevelIds = [],
+    },
+    ref,
+  ) => {
     const debug =
       devMode || (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("dev") !== null);
     const [debugMsgs, setDebugMsgs] = useState<string[]>([]);
@@ -141,6 +158,8 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     const emaSeriesRef = useRef<Map<number, LineSeries>>(new Map());
     const vwapSeriesRef = useRef<LineSeries | null>(null);
     const overlayLinesRef = useRef<Map<string, IPriceLine>>(new Map());
+    const highlightLineRef = useRef<IPriceLine | null>(null);
+    const highlightTimerRef = useRef<number | null>(null);
     const overlaysRef = useRef<ChartOverlayState>(overlays);
     const overlayBoundsRef = useRef<{ min: number | null; max: number | null }>({ min: null, max: null });
     const resizeObserverRef = useRef<ResizeObserver | null>(null);
@@ -158,6 +177,11 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       setIsAutoFollow(next);
     }, []);
 
+    const hiddenLevelSet = useMemo(() => {
+      const list = Array.isArray(hiddenLevelIds) ? hiddenLevelIds : [];
+      return new Set(list.filter((value): value is string => typeof value === "string" && value.length > 0));
+    }, [hiddenLevelIds]);
+
     const overlayLegendItems = useMemo(() => {
       const items: Array<{ key: string; label: string; tone: "vwap" | "ema" }> = [];
       const periods = (overlays.emaPeriods ?? [])
@@ -174,28 +198,72 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       return items;
     }, [overlays]);
 
-    const computeOverlayBounds = useCallback((overlayState: ChartOverlayState | null | undefined) => {
-      if (!overlayState) return { min: null, max: null };
-      const values: number[] = [];
-      const push = (value: number | null | undefined) => {
-        if (typeof value === "number" && Number.isFinite(value)) {
-          values.push(value);
-        }
-      };
-      push(overlayState.entry);
-      push(overlayState.stop);
-      push(overlayState.trailingStop);
-      overlayState.targets?.forEach((target) => {
-        if (target) push(target.price);
-      });
-      return values.length
-        ? { min: Math.min(...values), max: Math.max(...values) }
-        : { min: null, max: null };
-    }, []);
+    const computeOverlayBounds = useCallback(
+      (overlayState: ChartOverlayState | null | undefined, bars: PriceSeriesCandle[], hidden: Set<string>) => {
+        if (!overlayState) return { min: null, max: null };
+        const entryValue =
+          !hidden.has("plan:entry") && typeof overlayState.entry === "number" && Number.isFinite(overlayState.entry)
+            ? Number(overlayState.entry)
+            : null;
+        const stopValue =
+          !hidden.has("plan:stop") && typeof overlayState.stop === "number" && Number.isFinite(overlayState.stop)
+            ? Number(overlayState.stop)
+            : null;
+        const trailingValue =
+          !hidden.has("plan:trail") &&
+          typeof overlayState.trailingStop === "number" &&
+          Number.isFinite(overlayState.trailingStop)
+            ? Number(overlayState.trailingStop)
+            : null;
+        const targetValues = (overlayState.targets ?? [])
+          .map((target, index) => {
+            if (!target || !Number.isFinite(target.price)) return null;
+            const id = `plan:tp:${index + 1}`;
+            if (hidden.has(id)) return null;
+            return Number(target.price);
+          })
+          .filter((value): value is number => value != null);
 
-    const updateOverlayBounds = useCallback(() => {
-      overlayBoundsRef.current = computeOverlayBounds(overlaysRef.current);
-    }, [computeOverlayBounds]);
+        const stopForFit = stopValue ?? trailingValue ?? null;
+        const fitRange = fitVisibleRangeForTrade({
+          bars,
+          entry: entryValue,
+          stop: stopForFit,
+          targets: targetValues,
+        });
+
+        const candidates: number[] = [];
+        if (entryValue != null) candidates.push(entryValue);
+        if (stopValue != null) candidates.push(stopValue);
+        if (trailingValue != null && trailingValue !== stopValue) candidates.push(trailingValue);
+        candidates.push(...targetValues);
+
+        if (fitRange) {
+          let min = fitRange.min;
+          let max = fitRange.max;
+          candidates.forEach((value) => {
+            if (Number.isFinite(value)) {
+              min = Math.min(min, value);
+              max = Math.max(max, value);
+            }
+          });
+          return { min, max };
+        }
+
+        if (candidates.length) {
+          return { min: Math.min(...candidates), max: Math.max(...candidates) };
+        }
+        return { min: null, max: null };
+      },
+      [],
+    );
+
+    const updateOverlayBounds = useCallback(
+      (bars: PriceSeriesCandle[]) => {
+        overlayBoundsRef.current = computeOverlayBounds(overlaysRef.current, bars, hiddenLevelSet);
+      },
+      [computeOverlayBounds, hiddenLevelSet],
+    );
 
     const applyLogicalRange = useCallback(
       (range: LogicalRangeInput, context: string) => {
@@ -385,7 +453,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           }
           const span = Math.max(bounds.max - bounds.min, 0);
           const fallback = Math.abs(bounds.max ?? bounds.min ?? 0) * 0.001;
-          const padding = span > 0 ? span * 0.08 : Math.max(fallback, 0.5);
+          const padding = span > 0 ? span * 0.05 : Math.max(fallback, 0.5);
           const minValue = bounds.min - padding;
           const maxValue = bounds.max + padding;
           if (baseInfo?.priceRange) {
@@ -525,107 +593,90 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       if (!chartReady) return;
       const candleSeries = candleSeriesRef.current;
       const volumeSeries = volumeSeriesRef.current;
-      if (!candleSeries || !volumeSeries) return;
+      const chart = chartRef.current;
+      if (!candleSeries || !volumeSeries || !chart) return;
 
-      const timeCheck = safeData.every((bar) => bar && Number.isFinite(Number((bar as any).time)));
-      const candleCheck = safeData.every(
-        (bar) =>
-          bar &&
-          Number.isFinite(bar.open) &&
-          Number.isFinite(bar.high) &&
-          Number.isFinite(bar.low) &&
-          Number.isFinite(bar.close),
-      );
-      if (!timeCheck || !candleCheck) {
-        addDbg(
-          `[PlanPriceChart] skipped setData: invalid bars detected timeCheck=${timeCheck} candleCheck=${candleCheck} length=${safeData.length}`,
-        );
-        safeData.forEach((bar, index) => {
-          if (
-            !bar ||
-            !Number.isFinite(Number((bar as any).time)) ||
-            !Number.isFinite(bar.open) ||
-            !Number.isFinite(bar.high) ||
-            !Number.isFinite(bar.low) ||
-            !Number.isFinite(bar.close)
-          ) {
-            addDbg(
-              `[PlanPriceChart] bad bar at ${index}: ${JSON.stringify({
-                time: bar?.time,
-                open: bar?.open,
-                high: bar?.high,
-                low: bar?.low,
-                close: bar?.close,
-                volume: bar?.volume,
-              })}`,
-            );
-          }
-        });
-        const snapshot = safeData.slice(0, 5).map((bar) => ({
-          time: bar?.time,
-          open: bar?.open,
-          high: bar?.high,
-          low: bar?.low,
-          close: bar?.close,
-        }));
-        addDbg(`[PlanPriceChart] first bars snapshot: ${JSON.stringify(snapshot)}`);
-        return;
-      }
+      let rafId = 0;
+      let disposed = false;
 
-      const candles: CandlestickData[] = safeData.map((bar) => ({
-        time: bar.time as Time,
-        open: bar.open,
-        high: bar.high,
-        low: bar.low,
-        close: bar.close,
-      }));
+      const pushData = () => {
+        if (disposed) return;
 
-      candleSeries.setData(candles);
-      {
-        const n = candles.length;
-        const first = n ? Number(candles[0].time) : null;
-        const last = n ? Number(candles[n - 1].time) : null;
-        addDbg(`[PlanPriceChart] setData count=${n} first=${first} last=${last}`);
-      }
-
-      const volumes: HistogramData[] = safeData.map((bar) => ({
-        time: bar.time as Time,
-        value: Number.isFinite(bar.volume) && bar.volume != null ? bar.volume : 0,
-        color: bar.close >= bar.open ? `${GREEN}55` : `${RED}55`,
-      }));
-      volumeSeries.setData(volumes);
-
-      if (candles.length) {
-        const lastIndex = candles.length - 1;
-        const last = candles[lastIndex];
-        const lastMs = Number(last.time) * 1000;
-        lastBarTimeRef.current = Number.isFinite(lastMs) ? lastMs : null;
-        onLastBarTimeChange?.(lastBarTimeRef.current);
-        addDbg(`[PlanPriceChart] last bar ms=${lastBarTimeRef.current}`);
-        const logicalRange = {
-          from: Math.max(lastIndex - 120, 0),
-          to: lastIndex + 2,
-        };
-        const chart = chartRef.current;
-        if (!chart) {
-          addDbg("[PlanPriceChart] chart missing during range apply");
+        if (safeData.length === 0) {
+          lastBarTimeRef.current = null;
+          onLastBarTimeChange?.(null);
+          addDbg("[PlanPriceChart] no candles");
           return;
         }
-        if (!hasInitialLoadRef.current) {
-          hasInitialLoadRef.current = true;
-          if (applyLogicalRange(logicalRange, "initial")) {
-            chart.timeScale().scrollToRealTime();
-          }
-        } else if (autoFollowRef.current) {
-          if (applyLogicalRange(logicalRange, "update")) {
-            chart.timeScale().scrollToRealTime();
+
+        const timeValid = safeData.every((bar) => bar && Number.isFinite(Number((bar as any).time)));
+        const candleValid = safeData.every(
+          (bar) =>
+            bar &&
+            Number.isFinite(bar.open) &&
+            Number.isFinite(bar.high) &&
+            Number.isFinite(bar.low) &&
+            Number.isFinite(bar.close),
+        );
+        if (!timeValid || !candleValid) {
+          addDbg(
+            `[PlanPriceChart] skipped setData: invalid bars detected timeCheck=${timeValid} candleCheck=${candleValid} length=${safeData.length}`,
+          );
+          return;
+        }
+
+        const candles: CandlestickData[] = safeData.map((bar) => ({
+          time: bar.time as Time,
+          open: bar.open,
+          high: bar.high,
+          low: bar.low,
+          close: bar.close,
+        }));
+        candleSeries.setData(candles);
+        addDbg(`[PlanPriceChart] setData count=${candles.length}`);
+
+        const volumes: HistogramData[] = safeData.map((bar) => ({
+          time: bar.time as Time,
+          value: Number.isFinite(bar.volume) && bar.volume != null ? bar.volume : 0,
+          color: bar.close >= bar.open ? `${GREEN}55` : `${RED}55`,
+        }));
+        volumeSeries.setData(volumes);
+
+        const lastIndex = candles.length - 1;
+        if (lastIndex >= 0) {
+          const last = candles[lastIndex];
+          const lastMs = Number(last.time) * 1000;
+          lastBarTimeRef.current = Number.isFinite(lastMs) ? lastMs : null;
+          onLastBarTimeChange?.(lastBarTimeRef.current);
+          const logicalRange = {
+            from: Math.max(lastIndex - 120, 0),
+            to: lastIndex + 2,
+          };
+          if (!hasInitialLoadRef.current) {
+            hasInitialLoadRef.current = true;
+            if (applyLogicalRange(logicalRange, "initial")) {
+              chart.timeScale().scrollToRealTime();
+            }
+          } else if (autoFollowRef.current) {
+            if (applyLogicalRange(logicalRange, "update")) {
+              chart.timeScale().scrollToRealTime();
+            }
           }
         }
+      };
+
+      if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+        rafId = window.requestAnimationFrame(pushData);
       } else {
-        lastBarTimeRef.current = null;
-        onLastBarTimeChange?.(null);
-        addDbg(`[PlanPriceChart] no candles`);
+        pushData();
       }
+
+      return () => {
+        disposed = true;
+        if (rafId && typeof window !== "undefined" && typeof window.cancelAnimationFrame === "function") {
+          window.cancelAnimationFrame(rafId);
+        }
+      };
     }, [chartReady, safeData, onLastBarTimeChange, applyLogicalRange]);
 
     const syncDerivedSeries = useCallback(() => {
@@ -734,7 +785,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       });
 
       const entryPrice = overlayState.entry;
-      if (Number.isFinite(entryPrice ?? null)) {
+      if (!hiddenLevelSet.has("plan:entry") && Number.isFinite(entryPrice ?? null)) {
         addLevelLine("plan:entry", Number(entryPrice), {
           color: "#facc15",
           lineWidth: 2,
@@ -744,7 +795,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       }
 
       const stopPrice = overlayState.stop;
-      if (Number.isFinite(stopPrice ?? null)) {
+      if (!hiddenLevelSet.has("plan:stop") && Number.isFinite(stopPrice ?? null)) {
         addLevelLine("plan:stop", Number(stopPrice), {
           color: "#f87171",
           lineWidth: 2,
@@ -754,7 +805,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       }
 
       const trailing = overlayState.trailingStop;
-      if (Number.isFinite(trailing ?? null)) {
+      if (!hiddenLevelSet.has("plan:trail") && Number.isFinite(trailing ?? null)) {
         addLevelLine("plan:trail", Number(trailing), {
           color: "#fb923c",
           lineWidth: 2,
@@ -766,7 +817,9 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       overlayState.targets?.forEach((target, index) => {
         if (!Number.isFinite(target?.price)) return;
         const label = target?.label || `TP${index + 1}`;
-        addLevelLine(toPriceLineId("plan:tp", target.price, index), Number(target.price), {
+        const id = `plan:tp:${index + 1}`;
+        if (hiddenLevelSet.has(id)) return;
+        addLevelLine(id, Number(target.price), {
           color: "#22c55e",
           lineWidth: 1,
           lineStyle: lib.LineStyle.Dashed,
@@ -808,17 +861,97 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           });
         }
       });
-    }, [chartReady, safeData, overlays]);
+    }, [chartReady, safeData, overlays, hiddenLevelIds]);
 
     useEffect(() => {
       overlaysRef.current = overlays;
-      updateOverlayBounds();
+      updateOverlayBounds(safeData);
       syncDerivedSeries();
-    }, [overlays, syncDerivedSeries, safeData, updateOverlayBounds]);
+    }, [overlays, syncDerivedSeries, safeData, updateOverlayBounds, hiddenLevelIds]);
 
     useEffect(() => {
       syncDerivedSeries();
     }, [syncDerivedSeries]);
+
+    useEffect(() => {
+      if (!chartReady) return;
+      const candleSeries = candleSeriesRef.current;
+      const lib = chartLibRef.current;
+      if (!candleSeries || !lib) return;
+
+      if (highlightTimerRef.current != null && typeof window !== "undefined") {
+        window.clearTimeout(highlightTimerRef.current);
+        highlightTimerRef.current = null;
+      }
+      if (highlightLineRef.current) {
+        try {
+          candleSeries.removePriceLine(highlightLineRef.current);
+        } catch {
+          /* ignore */
+        }
+        highlightLineRef.current = null;
+      }
+
+      if (!highlightedLevelId || hiddenLevelSet.has(highlightedLevelId)) {
+        return;
+      }
+
+      const overlayState = overlaysRef.current;
+      let highlightPrice: number | null = null;
+      if (highlightedLevelId === "plan:entry") {
+        highlightPrice = Number.isFinite(overlayState.entry ?? null) ? Number(overlayState.entry) : null;
+      } else if (highlightedLevelId === "plan:stop") {
+        highlightPrice = Number.isFinite(overlayState.stop ?? null) ? Number(overlayState.stop) : null;
+      } else if (highlightedLevelId === "plan:trail") {
+        highlightPrice = Number.isFinite(overlayState.trailingStop ?? null) ? Number(overlayState.trailingStop) : null;
+      } else if (highlightedLevelId.startsWith("plan:tp:")) {
+        const indexToken = highlightedLevelId.split(":")[2];
+        const index = Number.parseInt(indexToken ?? "", 10);
+        if (Number.isFinite(index) && index > 0) {
+          const target = overlayState.targets?.[index - 1];
+          highlightPrice = target && Number.isFinite(target.price ?? null) ? Number(target.price) : null;
+        }
+      }
+
+      if (!Number.isFinite(highlightPrice)) return;
+
+      const line = candleSeries.createPriceLine({
+        price: Number(highlightPrice),
+        color: "#38bdf8",
+        lineWidth: 3,
+        lineStyle: lib.LineStyle.Solid,
+        axisLabelVisible: false,
+      });
+      highlightLineRef.current = line;
+
+      if (typeof window !== "undefined") {
+        highlightTimerRef.current = window.setTimeout(() => {
+          if (highlightLineRef.current === line) {
+            try {
+              candleSeries.removePriceLine(line);
+            } catch {
+              /* ignore */
+            }
+            highlightLineRef.current = null;
+          }
+        }, 1400);
+      }
+
+      return () => {
+        if (highlightTimerRef.current != null && typeof window !== "undefined") {
+          window.clearTimeout(highlightTimerRef.current);
+          highlightTimerRef.current = null;
+        }
+        if (highlightLineRef.current) {
+          try {
+            candleSeries.removePriceLine(highlightLineRef.current);
+          } catch {
+            /* ignore */
+          }
+          highlightLineRef.current = null;
+        }
+      };
+    }, [highlightedLevelId, chartReady, hiddenLevelSet]);
 
     const stopReplay = useCallback(() => {
       replayActiveRef.current = false;

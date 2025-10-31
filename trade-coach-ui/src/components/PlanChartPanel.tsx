@@ -6,6 +6,7 @@ import PlanPriceChart, { type ChartOverlayState, type PlanPriceChartHandle } fro
 import { usePriceSeries } from "@/lib/hooks/usePriceSeries";
 import type { SupportingLevel } from "@/lib/chart";
 import type { PlanLayers, PlanSnapshot, TargetMetaEntry } from "@/lib/types";
+import { subscribePlanEvents } from "@/lib/plan/events";
 
 type TimeframeOption = {
   value: string;
@@ -17,7 +18,6 @@ type PlanChartPanelProps = {
   layers: PlanLayers | null;
   primaryLevels: SupportingLevel[];
   supportingVisible: boolean;
-  confluenceTokens?: string[];
   followLive: boolean;
   streamingEnabled: boolean;
   onSetFollowLive(value: boolean): void;
@@ -31,6 +31,8 @@ type PlanChartPanelProps = {
   devMode?: boolean;
   theme: "dark" | "light";
   priceRefreshToken?: number;
+  highlightLevelId?: string | null;
+  hiddenLevelIds?: string[];
 };
 
 const PLAN_AS_OF_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -56,7 +58,6 @@ export default function PlanChartPanel({
   layers,
   primaryLevels,
   supportingVisible,
-  confluenceTokens = [],
   followLive,
   streamingEnabled,
   onSetFollowLive,
@@ -70,9 +71,12 @@ export default function PlanChartPanel({
   devMode = false,
   theme,
   priceRefreshToken = 0,
+  highlightLevelId = null,
+  hiddenLevelIds = [],
 }: PlanChartPanelProps) {
   const chartHandle = useRef<PlanPriceChartHandle | null>(null);
   const [replayActive, setReplayActive] = useState(false);
+  const [recentPlanEvent, setRecentPlanEvent] = useState<{ type: string; at: number } | null>(null);
 
   const symbol = plan.symbol?.toUpperCase() ?? "—";
   const style = plan.style ?? plan.structured_plan?.style ?? null;
@@ -91,6 +95,25 @@ export default function PlanChartPanel({
   const planVersion = plan.version ?? (plan as Record<string, unknown>).version ?? null;
   const planId = plan.plan_id;
   const priceSymbol = plan.symbol ? plan.symbol.toUpperCase() : null;
+
+  useEffect(() => {
+    if (!planId) return;
+    const unsubscribe = subscribePlanEvents(planId, (event) => {
+      if (event.type === "tp_hit" || event.type === "stop_hit") {
+        setRecentPlanEvent({ type: event.type, at: Date.now() });
+      }
+    });
+    return unsubscribe;
+  }, [planId]);
+
+  useEffect(() => {
+    if (!recentPlanEvent) return;
+    if (typeof window === "undefined") return () => undefined;
+    const timer = window.setTimeout(() => setRecentPlanEvent(null), 1500);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [recentPlanEvent]);
 
   const filteredLayers = useMemo(() => {
     if (!layers) return null;
@@ -235,28 +258,6 @@ export default function PlanChartPanel({
     );
   }, [plan, chartParams]);
 
-  const tradeMarkers = useMemo(() => {
-    const markers: Array<{ key: string; label: string; value: number; tone: "emerald" | "rose" | "amber" | "neutral" }> = [];
-    if (entryPrice != null) {
-      markers.push({ key: "entry", label: "Entry", value: entryPrice, tone: "emerald" });
-    }
-    if (stopPrice != null) {
-      markers.push({ key: "stop", label: "Stop", value: stopPrice, tone: "rose" });
-    }
-    if (trailingStop != null) {
-      markers.push({ key: "trail", label: "Trail", value: trailingStop, tone: "amber" });
-    }
-    targetDetails.forEach((detail, index) => {
-      markers.push({
-        key: `tp-${detail.label ?? `target-${index}`}-${index}`,
-        label: detail.label ?? `TP${index + 1}`,
-        value: detail.price,
-        tone: "neutral",
-      });
-    });
-    return markers;
-  }, [entryPrice, stopPrice, trailingStop, targetDetails]);
-
   const targetRationales = useMemo(
     () =>
       targetDetails
@@ -393,6 +394,9 @@ export default function PlanChartPanel({
     };
   }, [priceSymbol, timeframe, reloadPriceSeries, streamingEnabled]);
 
+  const highlightInvalidate = recentPlanEvent?.type === "stop_hit";
+  const highlightScale = recentPlanEvent?.type === "tp_hit";
+
   return (
     <div className="flex h-full flex-col gap-6">
       <header className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -455,89 +459,45 @@ export default function PlanChartPanel({
             supportingVisible ? "shadow-[0_0_25px_rgba(16,185,129,0.15)]" : "",
           )}
         >
-          <div className="flex flex-col gap-4 lg:flex-row">
-            <div className="flex-1 space-y-3">
-              <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Trade markers</h3>
-              <div className="flex flex-wrap gap-2">
-                {tradeMarkers.length ? (
-                  tradeMarkers.map((marker) => {
-                    const toneClass =
-                      marker.tone === "emerald"
-                        ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-100"
-                        : marker.tone === "rose"
-                          ? "border-rose-500/50 bg-rose-500/10 text-rose-100"
-                          : marker.tone === "amber"
-                            ? "border-amber-500/50 bg-amber-500/10 text-amber-100"
-                            : "border-neutral-800/60 bg-neutral-900/40 text-neutral-200";
-                    return (
-                      <span
-                        key={marker.key}
-                        className={clsx(
-                          "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-[0.15em]",
-                          toneClass,
-                        )}
-                      >
-                        <span>{marker.label}</span>
-                        <span className="tabular-nums text-neutral-100">{marker.value.toFixed(2)}</span>
-                      </span>
-                    );
-                  })
-                ) : (
-                  <span className="text-xs text-neutral-500">Markers unavailable</span>
-                )}
-              </div>
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div className="space-y-3">
+              <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Target notes</h3>
               {targetRationales.length ? (
-                <div className="space-y-1 text-xs leading-relaxed text-neutral-400">
+                <ul className="space-y-2 text-xs leading-relaxed text-neutral-300">
                   {targetRationales.map((detail, index) => {
                     const label = detail.label ?? `TP${index + 1}`;
                     return (
-                      <div key={`${label}-${detail.price}-rationale`} className="flex flex-wrap items-baseline gap-2">
-                        <span className="font-semibold uppercase tracking-[0.2em] text-neutral-100">{label}</span>
-                        <span>{detail.rationale}</span>
-                      </div>
+                      <li key={`${label}-${detail.price}-note`} className="space-y-1">
+                        <div className="flex flex-wrap items-baseline gap-2">
+                          <span className="font-semibold uppercase tracking-[0.2em] text-neutral-100">{label}</span>
+                          <span className="tabular-nums text-neutral-400">{detail.price.toFixed(2)}</span>
+                        </div>
+                        <p className="text-neutral-400">{detail.rationale}</p>
+                      </li>
                     );
                   })}
-                </div>
-              ) : null}
+                </ul>
+              ) : (
+                <p className="text-xs text-neutral-500">No target rationales published.</p>
+              )}
             </div>
-            <div className="flex-1 space-y-3">
-              {confluenceTokens.length ? (
-                <div className="space-y-2">
-                  <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Confluence</h3>
-                  <div className="flex flex-wrap items-center gap-2 text-[0.68rem] text-neutral-300">
-                    {confluenceTokens.map((token, index) => (
-                      <span
-                        key={`${token}-${index}`}
-                        className="inline-flex items-center gap-1 rounded-md border border-neutral-800/60 bg-neutral-900/40 px-2 py-1"
-                      >
-                        <span className="block h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
-                        <span>{token}</span>
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-              <div className="space-y-2">
-                <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Primary levels</h3>
-                {primaryLevels.length ? (
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {primaryLevels.map((level, index) => {
-                      const label = level.label ?? level.kind ?? `Level ${index + 1}`;
-                      return (
-                        <div
-                          key={`${label}-${level.price}`}
-                          className="flex items-center justify-between rounded-xl border border-neutral-800/60 bg-neutral-900/40 px-3 py-2 text-xs text-neutral-200"
-                        >
-                          <span className="uppercase tracking-[0.2em] text-neutral-500">{label}</span>
-                          <span className="font-semibold text-neutral-100">{level.price.toFixed(2)}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <p className="text-xs text-neutral-500">No primary levels published.</p>
-                )}
-              </div>
+            <div className="space-y-3">
+              <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Primary levels</h3>
+              {primaryLevels.length ? (
+                <ul className="divide-y divide-neutral-800/70 overflow-hidden rounded-xl border border-neutral-800/60 bg-neutral-900/30 text-sm">
+                  {primaryLevels.map((level, index) => {
+                    const label = level.label ?? level.kind ?? `Level ${index + 1}`;
+                    return (
+                      <li key={`${label}-${level.price}`} className="flex items-center justify-between px-3 py-2 text-neutral-200">
+                        <span className="uppercase tracking-[0.15em] text-neutral-500">{label}</span>
+                        <span className="font-semibold text-neutral-100">{level.price.toFixed(2)}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p className="text-xs text-neutral-500">No primary levels published.</p>
+              )}
             </div>
           </div>
         </div>
@@ -564,13 +524,15 @@ export default function PlanChartPanel({
           overlays={chartOverlays}
           onLastBarTimeChange={handleLatestBarTime}
           devMode={devMode}
+          highlightedLevelId={highlightLevelId}
+          hiddenLevelIds={hiddenLevelIds}
         />
       </section>
 
       <section className="grid gap-4 md:grid-cols-2">
         <PlanControlCard title="Trigger" body={triggerRule} tone="emerald" />
-        <PlanControlCard title="Invalidate" body={invalidationRule} tone="rose" />
-        <PlanControlCard title="Scale" body={scaleRule} tone="sky" />
+        <PlanControlCard title="Invalidate" body={invalidationRule} tone="rose" highlight={highlightInvalidate} />
+        <PlanControlCard title="Scale" body={scaleRule} tone="sky" highlight={highlightScale} />
         <PlanControlCard title="Reload" body={reloadRule} tone="amber" />
       </section>
 
@@ -595,7 +557,17 @@ function ToggleChip({ label, active, onClick }: { label: string; active: boolean
   );
 }
 
-function PlanControlCard({ title, body, tone }: { title: string; body: string | null; tone: "emerald" | "rose" | "sky" | "amber" }) {
+function PlanControlCard({
+  title,
+  body,
+  tone,
+  highlight = false,
+}: {
+  title: string;
+  body: string | null;
+  tone: "emerald" | "rose" | "sky" | "amber";
+  highlight?: boolean;
+}) {
   if (!body) {
     return (
       <div className="rounded-2xl border border-neutral-800/60 bg-neutral-950/30 p-4 text-sm text-neutral-400">
@@ -610,8 +582,20 @@ function PlanControlCard({ title, body, tone }: { title: string; body: string | 
     sky: "border-sky-500/40 bg-sky-500/10 text-sky-100",
     amber: "border-amber-500/40 bg-amber-500/10 text-amber-100",
   };
+  const ringMap: Record<typeof tone, string> = {
+    emerald: "ring-emerald-400/70",
+    rose: "ring-rose-400/70",
+    sky: "ring-sky-400/70",
+    amber: "ring-amber-400/70",
+  };
   return (
-    <div className={clsx("rounded-2xl border p-4 text-sm leading-relaxed", toneMap[tone])}>
+    <div
+      className={clsx(
+        "rounded-2xl border p-4 text-sm leading-relaxed transition",
+        toneMap[tone],
+        highlight && ["ring-2 ring-offset-2 ring-offset-neutral-950", ringMap[tone]],
+      )}
+    >
       <div className="text-xs font-semibold uppercase tracking-[0.3em] opacity-80">{title}</div>
       <p className="mt-2">{body}</p>
     </div>
