@@ -107,7 +107,11 @@ export default function PlanChartPanel({
     const filteredLevels = Array.isArray(layers.levels)
       ? layers.levels.filter((level) => typeof level?.price === "number" && priceSet.has(level.price))
       : [];
-    return { ...layers, levels: filteredLevels };
+    return {
+      ...layers,
+      levels: filteredLevels,
+      zones: [],
+    };
   }, [layers, supportingVisible]);
 
   const chartParams = useMemo(() => {

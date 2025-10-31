@@ -11,6 +11,7 @@ import type {
   IPriceLine,
   ISeriesApi,
   LineData,
+  LogicalRange,
   PriceScaleMargins,
   Time,
 } from "lightweight-charts";
@@ -58,6 +59,7 @@ export type PlanPriceChartHandle = {
 type CandlesSeries = ISeriesApi<"Candlestick">;
 type VolumeSeries = ISeriesApi<"Histogram">;
 type LineSeries = ISeriesApi<"Line">;
+type LogicalRangeInput = { from: number; to: number };
 
 const GREEN = "#22c55e";
 const RED = "#ef4444";
@@ -146,8 +148,15 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     const replayActiveRef = useRef(false);
     const autoFollowRef = useRef(true);
     const lastBarTimeRef = useRef<number | null>(null);
+    const suppressInteractionRef = useRef(false);
     const [chartReady, setChartReady] = useState(false);
+    const [isAutoFollow, setIsAutoFollow] = useState(true);
     const hasInitialLoadRef = useRef(false);
+
+    const setAutoFollow = useCallback((next: boolean) => {
+      autoFollowRef.current = next;
+      setIsAutoFollow(next);
+    }, []);
 
     const overlayLegendItems = useMemo(() => {
       const items: Array<{ key: string; label: string; tone: "vwap" | "ema" }> = [];
@@ -187,6 +196,64 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     const updateOverlayBounds = useCallback(() => {
       overlayBoundsRef.current = computeOverlayBounds(overlaysRef.current);
     }, [computeOverlayBounds]);
+
+    const applyLogicalRange = useCallback(
+      (range: LogicalRangeInput, context: string) => {
+        const chart = chartRef.current;
+        if (!chart) return false;
+        const timeScale = chart.timeScale();
+        suppressInteractionRef.current = true;
+        try {
+          timeScale.setVisibleLogicalRange(range as LogicalRange);
+          return true;
+        } catch (error) {
+          addDbg(`[PlanPriceChart] ${context} logical range failed: ${String(error)}`);
+          return false;
+        } finally {
+          const release = () => {
+            suppressInteractionRef.current = false;
+          };
+          if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+            window.requestAnimationFrame(release);
+          } else {
+            release();
+          }
+        }
+      },
+      [addDbg],
+    );
+
+    const applyTimeRange = useCallback(
+      (range: LogicalRangeInput, context: string) => {
+        const chart = chartRef.current;
+        if (!chart) return false;
+        const timeScale = chart.timeScale();
+        suppressInteractionRef.current = true;
+        try {
+          timeScale.setVisibleRange(range);
+          return true;
+        } catch (error) {
+          addDbg(`[PlanPriceChart] ${context} range failed: ${String(error)}`);
+          return false;
+        } finally {
+          const release = () => {
+            suppressInteractionRef.current = false;
+          };
+          if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+            window.requestAnimationFrame(release);
+          } else {
+            release();
+          }
+        }
+      },
+      [addDbg],
+    );
+
+    const markManualInteraction = useCallback(() => {
+      if (suppressInteractionRef.current) return;
+      if (!autoFollowRef.current) return;
+      setAutoFollow(false);
+    }, [setAutoFollow]);
 
 
     const safeData = useMemo(() => {
@@ -437,6 +504,24 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     }, [theme]);
 
     useEffect(() => {
+      const chart = chartRef.current;
+      if (!chart) return;
+      const timeScale = chart.timeScale();
+      const handleLogicalChange = () => {
+        markManualInteraction();
+      };
+      const handleTimeChange = () => {
+        markManualInteraction();
+      };
+      timeScale.subscribeVisibleLogicalRangeChange(handleLogicalChange);
+      timeScale.subscribeVisibleTimeRangeChange(handleTimeChange);
+      return () => {
+        timeScale.unsubscribeVisibleLogicalRangeChange(handleLogicalChange);
+        timeScale.unsubscribeVisibleTimeRangeChange(handleTimeChange);
+      };
+    }, [chartReady, markManualInteraction]);
+
+    useEffect(() => {
       if (!chartReady) return;
       const candleSeries = candleSeriesRef.current;
       const volumeSeries = volumeSeriesRef.current;
@@ -521,18 +606,19 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           from: Math.max(lastIndex - 120, 0),
           to: lastIndex + 2,
         };
+        const chart = chartRef.current;
+        if (!chart) {
+          addDbg("[PlanPriceChart] chart missing during range apply");
+          return;
+        }
         if (!hasInitialLoadRef.current) {
           hasInitialLoadRef.current = true;
-          try {
-            chartRef.current?.timeScale().setVisibleLogicalRange(logicalRange);
-          } catch (error) {
-            addDbg(`[PlanPriceChart] initial logical range failed: ${String(error)}`);
+          if (applyLogicalRange(logicalRange, "initial")) {
+            chart.timeScale().scrollToRealTime();
           }
         } else if (autoFollowRef.current) {
-          try {
-            chartRef.current?.timeScale().setVisibleLogicalRange(logicalRange);
-          } catch (error) {
-            addDbg(`[PlanPriceChart] follow logical range failed: ${String(error)}`);
+          if (applyLogicalRange(logicalRange, "update")) {
+            chart.timeScale().scrollToRealTime();
           }
         }
       } else {
@@ -540,7 +626,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         onLastBarTimeChange?.(null);
         addDbg(`[PlanPriceChart] no candles`);
       }
-    }, [chartReady, safeData, onLastBarTimeChange]);
+    }, [chartReady, safeData, onLastBarTimeChange, applyLogicalRange]);
 
     const syncDerivedSeries = useCallback(() => {
       if (!chartReady || safeData.length === 0) return;
@@ -560,27 +646,51 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         }
       });
 
+      const emaLineMarkers: Array<{ id: string; price: number; color: string; title: string }> = [];
+
       periods.slice(0, EMA_COLORS.length).forEach((period, index) => {
+        const color = EMA_COLORS[index % EMA_COLORS.length];
         let series = emaSeriesRef.current.get(period);
         if (!series) {
           series = chart.addLineSeries({
-            color: EMA_COLORS[index % EMA_COLORS.length],
+            color,
             lineWidth: 2,
           });
           emaSeriesRef.current.set(period, series);
+        } else {
+          series.applyOptions({ color, lineWidth: 2 });
         }
-        series.setData(computeEMA(safeData, period));
+        const emaData = computeEMA(safeData, period);
+        series.setData(emaData);
+        const latest = emaData[emaData.length - 1];
+        if (latest) {
+          const rounded = Math.round(period);
+          emaLineMarkers.push({
+            id: `indicator:ema:${rounded}`,
+            price: latest.value,
+            color,
+            title: `EMA ${rounded}`,
+          });
+        }
       });
 
+      let vwapMarker: { price: number } | null = null;
       if (overlayState.showVWAP) {
         if (!vwapSeriesRef.current) {
           vwapSeriesRef.current = chart.addLineSeries({
-            color: "#eab308",
+            color: "#ffffff",
             lineWidth: 2,
             lineStyle: lib.LineStyle.Solid,
           });
+        } else {
+          vwapSeriesRef.current.applyOptions({ color: "#ffffff", lineWidth: 2 });
         }
-        vwapSeriesRef.current.setData(computeVWAP(safeData));
+        const vwapData = computeVWAP(safeData);
+        vwapSeriesRef.current.setData(vwapData);
+        const vwapLatest = vwapData[vwapData.length - 1];
+        if (vwapLatest) {
+          vwapMarker = { price: vwapLatest.value };
+        }
       } else if (vwapSeriesRef.current) {
         chart.removeSeries(vwapSeriesRef.current);
         vwapSeriesRef.current = null;
@@ -604,6 +714,24 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         if (!Number.isFinite(price)) return;
         registerLine(id, { price, axisLabelVisible: true, ...opts });
       };
+
+      if (vwapMarker) {
+        addLevelLine("indicator:vwap", vwapMarker.price, {
+          color: "#ffffff",
+          lineWidth: 2,
+          lineStyle: lib.LineStyle.Solid,
+          title: "VWAP",
+        });
+      }
+
+      emaLineMarkers.forEach((marker) => {
+        addLevelLine(marker.id, marker.price, {
+          color: marker.color,
+          lineWidth: 1,
+          lineStyle: lib.LineStyle.Solid,
+          title: marker.title,
+        });
+      });
 
       const entryPrice = overlayState.entry;
       if (Number.isFinite(entryPrice ?? null)) {
@@ -703,41 +831,32 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     useEffect(() => {
       if (safeData.length === 0) {
         stopReplay();
-        autoFollowRef.current = true;
+        setAutoFollow(true);
       }
-    }, [safeData.length, stopReplay]);
+    }, [safeData.length, stopReplay, setAutoFollow]);
 
     const followLive = useCallback(() => {
       const chart = chartRef.current;
       if (!chart || safeData.length === 0) return;
       stopReplay();
-      autoFollowRef.current = true;
-      const last = safeData[safeData.length - 1];
       const lastIndex = safeData.length - 1;
-      const lastTime = Number(last.time);
-      if (!Number.isFinite(lastTime)) return;
+      const last = safeData[lastIndex];
+      if (!Number.isFinite(Number(last.time))) return;
       const logicalRange = {
         from: Math.max(lastIndex - 120, 0),
         to: lastIndex + 2,
       };
-      try {
-        chart.timeScale().setVisibleLogicalRange(logicalRange);
-      } catch (error) {
-        addDbg(`[PlanPriceChart] followLive logical range failed: ${String(error)}`);
+      setAutoFollow(true);
+      if (applyLogicalRange(logicalRange, "followLive")) {
+        chart.timeScale().scrollToRealTime();
       }
-      // Do not call scrollToRealTime() here; see note above about closed markets.
-      addDbg(
-        `[PlanPriceChart] followLive logical=${JSON.stringify(logicalRange)} vr=${JSON.stringify(
-          chart.timeScale().getVisibleLogicalRange?.() ?? null,
-        )}`,
-      );
-    }, [safeData, stopReplay]);
+    }, [safeData, stopReplay, setAutoFollow, applyLogicalRange]);
 
     const startReplay = useCallback(() => {
       const chart = chartRef.current;
       if (!chart || safeData.length < 60) return;
       stopReplay();
-      autoFollowRef.current = false;
+      setAutoFollow(false);
       replayActiveRef.current = true;
       let index = Math.max(safeData.length - 200, 0);
       const step = Math.max(1, Math.floor(safeData.length / 120));
@@ -749,7 +868,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         }
         if (safeData.length < 2) {
           stopReplay();
-          autoFollowRef.current = true;
+          setAutoFollow(true);
           return;
         }
         index += step;
@@ -760,15 +879,18 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         const end = safeData[index];
         const startIdx = Math.max(index - 120, 0);
         const start = safeData[startIdx];
-        chart.timeScale().setVisibleRange({
-          from: Number(start.time),
-          to: Number(end.time),
-        });
+        applyTimeRange(
+          {
+            from: Number(start.time),
+            to: Number(end.time),
+          },
+          "replay",
+        );
       };
 
       tick();
       replayTimerRef.current = window.setInterval(tick, 400);
-    }, [safeData, followLive, stopReplay]);
+    }, [safeData, followLive, stopReplay, setAutoFollow, applyTimeRange]);
 
     useImperativeHandle(
       ref,
@@ -817,6 +939,17 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
                 {item.label}
               </span>
             ))}
+          </div>
+        ) : null}
+        {!isAutoFollow ? (
+          <div className="pointer-events-none absolute bottom-4 right-4 z-30">
+            <button
+              type="button"
+              onClick={followLive}
+              className="pointer-events-auto rounded-full border border-emerald-500/60 bg-emerald-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-100 shadow-sm transition hover:border-emerald-400 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+            >
+              Follow Live
+            </button>
           </div>
         ) : null}
         {debug && debugMsgs.length ? (
