@@ -314,11 +314,22 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         volumeSeriesRef.current = null;
         // eslint-disable-next-line react-hooks/exhaustive-deps
         const emaSeries = emaSeriesRef.current;
-        emaSeries.forEach((series) => series.priceScale().chart()?.removeSeries(series));
+        const chart = chartRef.current;
+        emaSeries.forEach((series) => {
+          try {
+            chart?.removeSeries(series);
+          } catch {
+            /* ignore */
+          }
+        });
         emaSeries.clear();
         const vwapSeries = vwapSeriesRef.current;
         if (vwapSeries) {
-          vwapSeries.priceScale().chart()?.removeSeries(vwapSeries);
+          try {
+            chart?.removeSeries(vwapSeries);
+          } catch {
+            /* ignore */
+          }
           vwapSeriesRef.current = null;
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
