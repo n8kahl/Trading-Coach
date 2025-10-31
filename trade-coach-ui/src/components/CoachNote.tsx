@@ -9,9 +9,10 @@ type CoachNoteProps = {
   note: CoachNote;
   subdued?: boolean;
   loading?: boolean;
+  actions?: React.ReactNode;
 };
 
-export default function CoachNote({ note, subdued = false, loading = false }: CoachNoteProps) {
+export default function CoachNote({ note, subdued = false, loading = false, actions = null }: CoachNoteProps) {
   const contentRef = React.useRef<HTMLParagraphElement | null>(null);
   const [canExpand, setCanExpand] = React.useState(false);
   const [expanded, setExpanded] = React.useState(false);
@@ -54,7 +55,10 @@ export default function CoachNote({ note, subdued = false, loading = false }: Co
     >
       <div className={styles.header}>
         <span className={styles.label}>Coach Guidance</span>
-        <span className={styles.progressValue}>{progress}%</span>
+        <span className={styles.progressValue}>
+          {progress}%
+          <span className={styles.progressLabel}>Progress</span>
+        </span>
       </div>
       <div className={styles.contentWrapper}>
         <p
@@ -66,13 +70,16 @@ export default function CoachNote({ note, subdued = false, loading = false }: Co
         </p>
         {!expanded && canExpand ? <span className={styles.fade} /> : null}
       </div>
-      <div className={styles.controls}>
-        {canExpand ? (
-          <button type="button" className={styles.expandButton} onClick={handleToggle}>
-            {expanded ? "Collapse" : "Expand"}
-          </button>
-        ) : null}
-      </div>
+      {actions || canExpand ? (
+        <div className={styles.controls}>
+          {actions}
+          {canExpand ? (
+            <button type="button" className={styles.expandButton} onClick={handleToggle}>
+              {expanded ? "Collapse" : "Expand"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <div className={styles.progressBar} role="presentation">
         <div className={styles.progressIndicator} style={{ transform: `scaleX(${progressScale})` }} />
       </div>

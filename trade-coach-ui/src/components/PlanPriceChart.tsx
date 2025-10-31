@@ -109,16 +109,16 @@ function computeVWAP(bars: PriceSeriesCandle[]): LineData[] {
 function pickLevelColor(kind?: string | null): string {
   const token = (kind || "").toLowerCase();
   if (token.includes("entry")) return "#facc15";
-  if (token.includes("stop")) return "#fb7185";
+  if (token.includes("stop")) return "#ff2d55";
   if (token.includes("trail")) return "#fb923c";
   if (token.includes("target") || token.includes("tp")) return "#22c55e";
-  if (token.includes("vwap")) return "#eab308";
+  if (token.includes("vwap")) return "#ffffff";
   if (token.includes("ema")) return "#93c5fd";
   if (token.includes("vah")) return "#84cc16";
   if (token.includes("val")) return "#38bdf8";
   if (token.includes("poc")) return "#f97316";
   if (token.includes("session_high") || token.includes("high")) return "#facc15";
-  if (token.includes("session_low") || token.includes("low")) return "#fb7185";
+  if (token.includes("session_low") || token.includes("low")) return "#ff2d55";
   return "#94a3b8";
 }
 
@@ -877,7 +877,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       const stopPrice = overlayState.stop;
       if (!hiddenLevelSet.has("plan:stop") && Number.isFinite(stopPrice ?? null)) {
         addLevelLine("plan:stop", Number(stopPrice), {
-          color: "#f87171",
+          color: "#ff2d55",
           lineWidth: 2,
           lineStyle: lib.LineStyle.Solid,
           title: "Stop",

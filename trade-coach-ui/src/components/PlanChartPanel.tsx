@@ -469,40 +469,40 @@ export default function PlanChartPanel({
       <section className="space-y-4">
         <div
           className={clsx(
-            "rounded-2xl border border-neutral-800/70 bg-neutral-950/40 p-4",
+            "rounded-xl bg-neutral-950/20 p-3",
             supportingVisible ? "shadow-[0_0_25px_rgba(16,185,129,0.15)]" : "",
           )}
         >
-          <div className="grid gap-6 lg:grid-cols-2">
-            <div className="space-y-3">
+          <div className="grid gap-5 lg:grid-cols-2">
+            <div className="space-y-2.5">
               <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Target notes</h3>
               {targetRationales.length ? (
-                <ul className="space-y-2 text-xs leading-relaxed text-neutral-300">
+                <ul className="space-y-1 text-[11px] leading-relaxed text-neutral-300">
                   {targetRationales.map((detail, index) => {
                     const label = detail.label ?? `TP${index + 1}`;
                     return (
-                      <li key={`${label}-${detail.price}-note`} className="space-y-1">
-                        <div className="flex flex-wrap items-baseline gap-2">
-                          <span className="font-semibold uppercase tracking-[0.2em] text-neutral-100">{label}</span>
-                          <span className="tabular-nums text-neutral-400">{detail.price.toFixed(2)}</span>
+                      <li key={`${label}-${detail.price}-note`} className="space-y-0.5">
+                        <div className="flex flex-wrap items-baseline gap-1.5">
+                          <span className="font-semibold uppercase tracking-[0.18em] text-neutral-100">{label}</span>
+                          <span className="tabular-nums text-neutral-500">{detail.price.toFixed(2)}</span>
                         </div>
-                        <p className="text-neutral-400">{detail.rationale}</p>
+                        <p className="text-[11px] leading-snug text-neutral-400">{detail.rationale}</p>
                       </li>
                     );
                   })}
                 </ul>
               ) : (
-                <p className="text-xs text-neutral-500">No target rationales published.</p>
+                <p className="text-[11px] text-neutral-500">No target rationales published.</p>
               )}
             </div>
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Primary levels</h3>
               {primaryLevels.length ? (
-                <ul className="divide-y divide-neutral-800/70 overflow-hidden rounded-xl border border-neutral-800/60 bg-neutral-900/30 text-sm">
+                <ul className="divide-y divide-neutral-800/60 text-[11px]">
                   {primaryLevels.map((level, index) => {
                     const label = level.label ?? level.kind ?? `Level ${index + 1}`;
                     return (
-                      <li key={`${label}-${level.price}`} className="flex items-center justify-between px-3 py-2 text-neutral-200">
+                      <li key={`${label}-${level.price}`} className="flex items-center justify-between px-2 py-1.5 text-neutral-200">
                         <span className="uppercase tracking-[0.15em] text-neutral-500">{label}</span>
                         <span className="font-semibold text-neutral-100">{level.price.toFixed(2)}</span>
                       </li>
@@ -510,7 +510,7 @@ export default function PlanChartPanel({
                   })}
                 </ul>
               ) : (
-                <p className="text-xs text-neutral-500">No primary levels published.</p>
+                <p className="text-[11px] text-neutral-500">No primary levels published.</p>
               )}
             </div>
           </div>

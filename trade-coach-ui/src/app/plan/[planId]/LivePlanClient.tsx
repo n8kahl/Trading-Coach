@@ -5,7 +5,6 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import WebviewShell from "@/components/webview/WebviewShell";
 import PlanPanel from "@/components/webview/PlanPanel";
-import PlanHeader from "@/components/PlanHeader";
 import PlanChartPanel from "@/components/PlanChartPanel";
 import CoachNote from "@/components/CoachNote";
 import HeaderMarkers from "@/components/HeaderMarkers";
@@ -15,7 +14,7 @@ import { usePlanLayers } from "@/lib/hooks/usePlanLayers";
 import { extractPrimaryLevels, extractSupportingLevels } from "@/lib/utils/layers";
 import type { SupportingLevel } from "@/lib/chart";
 import type { PlanDeltaEvent, PlanLayers, PlanSnapshot } from "@/lib/types";
-import { API_BASE_URL, PUBLIC_UI_BASE_URL, WS_BASE_URL, BUILD_SHA, withAuthHeaders } from "@/lib/env";
+import { API_BASE_URL, WS_BASE_URL, BUILD_SHA, withAuthHeaders } from "@/lib/env";
 import { deriveCoachMessage, resolvePlanTargets, type CoachGoal, type CoachNote as CoachNoteModel } from "@/lib/plan/coach";
 import { extractPlanLevels, resolveTrailingStop } from "@/lib/plan/levels";
 import { emitPlanEvent } from "@/lib/plan/events";
@@ -571,8 +570,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     [planStatusTone, planStatusTitle, dataStatusTone, dataStatusTitle, streamStatusTone, streamStatusTitle],
   );
 
-  const planUiLink = React.useMemo(() => extractUiPlanLink(snapshot), [snapshot]);
-
   const handleStatusTouchStart = React.useCallback((event: React.TouchEvent<HTMLElement>) => {
     if (event.touches.length !== 1) return;
     touchStartYRef.current = event.touches[0]?.clientY ?? null;
@@ -599,99 +596,116 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       onTouchStart={handleStatusTouchStart}
       onTouchEnd={handleStatusTouchEnd}
     >
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div className="flex flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.25em] text-neutral-400">
-            <span className="text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
-            <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-100">
-              {planSymbol}
-            </span>
-            <span className="rounded-full border border-neutral-700/60 px-2 py-0.5 text-[0.68rem] text-neutral-300">
-              {timeframeLabel}
-            </span>
-            {sessionBanner ? (
-              <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[0.68rem] text-sky-200">
-                {sessionBanner.toUpperCase()}
+      {!collapsed ? (
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.25em] text-neutral-400">
+              <span className="text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
+              <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-100">
+                {planSymbol}
               </span>
-            ) : null}
-            {riskBanner ? (
-              <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[0.68rem] text-amber-200">
-                {riskBanner}
+              <span className="rounded-full border border-neutral-700/60 px-2 py-0.5 text-[0.68rem] text-neutral-300">
+                {timeframeLabel}
               </span>
-            ) : null}
-            <span className="text-xs text-neutral-300">
-              Last&nbsp;
-              <span className="font-semibold text-white">{lastPriceLabel}</span>
-            </span>
-          </div>
-          <div className="flex flex-wrap items-center gap-3 text-[0.62rem] uppercase tracking-[0.3em] text-neutral-400">
-            {indicatorItems.map((indicator) => (
+              {sessionBanner ? (
+                <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[0.68rem] text-sky-200">
+                  {sessionBanner.toUpperCase()}
+                </span>
+              ) : null}
+              {riskBanner ? (
+                <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[0.68rem] text-amber-200">
+                  {riskBanner}
+                </span>
+              ) : null}
+              <span className="text-xs text-neutral-300">
+                Last&nbsp;
+                <span className="font-semibold text-white">{lastPriceLabel}</span>
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 text-[0.62rem] uppercase tracking-[0.3em] text-neutral-400">
+              {indicatorItems.map((indicator) => (
+                <button
+                  key={indicator.key}
+                  type="button"
+                  className="flex flex-col items-center gap-1 transition hover:text-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                  aria-label={indicator.title}
+                  title={indicator.title}
+                >
+                  <span className="sr-only">{indicator.label}</span>
+                  <StatusDot color={indicator.tone} label={`${indicator.label} status ${indicator.tone}`} />
+                  <span className="hidden sm:block">{indicator.label}</span>
+                </button>
+              ))}
               <button
-                key={indicator.key}
                 type="button"
-                className="flex flex-col items-center gap-1 transition hover:text-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-                aria-label={indicator.title}
-                title={indicator.title}
+                onClick={() => {
+                  const next = !followLive;
+                  handleSetFollowLive(next);
+                }}
+                className={clsx(
+                  "rounded-full border px-3 py-1 text-[0.62rem] font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+                  followLive
+                    ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-50"
+                    : "border-neutral-700/60 bg-neutral-900/60 text-neutral-300 hover:border-emerald-400/60 hover:text-emerald-50",
+                )}
+                aria-pressed={followLive}
               >
-                <span className="sr-only">{indicator.label}</span>
-                <StatusDot color={indicator.tone} label={`${indicator.label} status ${indicator.tone}`} />
-                <span className="hidden sm:block">{indicator.label}</span>
+                Follow {followLive ? "On" : "Off"}
               </button>
-            ))}
-            <button
-              type="button"
-              onClick={() => {
-                const next = !followLive;
-                handleSetFollowLive(next);
-              }}
-              className={clsx(
-                "rounded-full border px-3 py-1 text-[0.62rem] font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
-                followLive
-                  ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-50"
-                  : "border-neutral-700/60 bg-neutral-900/60 text-neutral-300 hover:border-emerald-400/60 hover:text-emerald-50",
-              )}
-              aria-pressed={followLive}
-            >
-              Follow {followLive ? "On" : "Off"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setCollapsed((prev) => !prev)}
-              className="rounded-full border border-neutral-700/60 bg-neutral-900/60 px-3 py-1 text-[0.62rem] font-semibold uppercase tracking-[0.2em] text-neutral-200 transition hover:border-emerald-400/60 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-              aria-pressed={collapsed}
-            >
-              {collapsed ? "Expand Layout" : "Collapse"}
-            </button>
+              <button
+                type="button"
+                onClick={() => setCollapsed((prev) => !prev)}
+                className="rounded-full border border-neutral-700/60 bg-neutral-900/60 px-3 py-1 text-[0.62rem] font-semibold uppercase tracking-[0.2em] text-neutral-200 transition hover:border-emerald-400/60 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                aria-pressed={collapsed}
+              >
+                {collapsed ? "Expand Layout" : "Collapse"}
+              </button>
+            </div>
           </div>
+          <form className="flex flex-wrap items-center gap-2" onSubmit={handleSymbolSubmit}>
+            <input
+              type="text"
+              inputMode="text"
+              autoComplete="off"
+              maxLength={6}
+              placeholder="SYM"
+              value={symbolDraft}
+              onChange={handleSymbolInputChange}
+              disabled={symbolSubmitting}
+              className="h-10 w-28 rounded-lg border border-neutral-700 bg-neutral-950/70 px-3 text-sm font-semibold uppercase tracking-[0.25em] text-neutral-100 shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+            />
+            <button
+              type="submit"
+              disabled={symbolSubmitting || !symbolDraft}
+              className={clsx(
+                "h-10 min-w-[72px] rounded-lg border px-4 text-xs font-semibold uppercase tracking-[0.25em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+                symbolSubmitting || !symbolDraft
+                  ? "cursor-not-allowed border-neutral-700 bg-neutral-900/60 text-neutral-500"
+                  : "border-emerald-500/60 bg-emerald-500/15 text-emerald-50 hover:border-emerald-400",
+              )}
+              aria-label="Generate plan for symbol"
+            >
+              {symbolSubmitting ? "..." : "Plan"}
+            </button>
+          </form>
         </div>
-        <form className="flex flex-wrap items-center gap-2" onSubmit={handleSymbolSubmit}>
-          <input
-            type="text"
-            inputMode="text"
-            autoComplete="off"
-            maxLength={6}
-            placeholder="SYM"
-            value={symbolDraft}
-            onChange={handleSymbolInputChange}
-            disabled={symbolSubmitting}
-            className="h-10 w-28 rounded-lg border border-neutral-700 bg-neutral-950/70 px-3 text-sm font-semibold uppercase tracking-[0.25em] text-neutral-100 shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-          />
-          <button
-            type="submit"
-            disabled={symbolSubmitting || !symbolDraft}
-            className={clsx(
-              "h-10 min-w-[72px] rounded-lg border px-4 text-xs font-semibold uppercase tracking-[0.25em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
-              symbolSubmitting || !symbolDraft
-                ? "cursor-not-allowed border-neutral-700 bg-neutral-900/60 text-neutral-500"
-                : "border-emerald-500/60 bg-emerald-500/15 text-emerald-50 hover:border-emerald-400",
-            )}
-            aria-label="Generate plan for symbol"
-          >
-            {symbolSubmitting ? "..." : "Plan"}
-          </button>
-        </form>
-      </div>
-      <CoachNote note={coachNote} subdued={!streamingEnabled || dataStatusTone !== "green"} loading={coachLoading} />
+      ) : null}
+      <CoachNote
+        note={coachNote}
+        subdued={!streamingEnabled || dataStatusTone !== "green"}
+        loading={coachLoading}
+        actions={
+          collapsed ? (
+            <button
+              type="button"
+              onClick={() => setCollapsed(false)}
+              className="rounded-full border border-neutral-700/60 bg-neutral-900/60 px-3 py-1 text-[0.62rem] font-semibold uppercase tracking-[0.2em] text-neutral-200 transition hover:border-emerald-400/60 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+            >
+              Expand Layout
+            </button>
+          ) : null
+        }
+      />
       {!collapsed ? (
         <div className="space-y-2">
           <HeaderMarkers
@@ -745,7 +759,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
 
   const planPanel = (
     <div className="flex h-full flex-col gap-4">
-      <PlanHeader planId={plan.plan_id} uiUrl={planUiLink} theme={theme} />
       <PlanPanel
         plan={plan}
         structured={plan.structured_plan ?? null}
@@ -902,17 +915,6 @@ function mergePlanWithDelta(prev: PlanSnapshot['plan'], event: PlanDeltaEvent): 
   }
 
   return mutated ? next : prev;
-}
-
-function extractUiPlanLink(snapshot: PlanSnapshot): string | undefined {
-  const uiBlock = (snapshot as unknown as { ui?: Record<string, unknown> }).ui;
-  const link = uiBlock?.plan_link;
-  if (typeof link === 'string' && link.trim()) {
-    return link;
-  }
-  const planId = snapshot.plan?.plan_id;
-  if (!planId) return undefined;
-  return `${PUBLIC_UI_BASE_URL}/plan/${encodeURIComponent(planId)}`;
 }
 
 const STATUS_TONE_COLOR: Record<StatusTone, string> = {
