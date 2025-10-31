@@ -6,7 +6,7 @@ import PlanPriceChart, { type ChartOverlayState } from "@/components/PlanPriceCh
 import { usePriceSeries } from "@/lib/hooks/usePriceSeries";
 import { parseSupportingLevels, parseTargets } from "@/lib/chart";
 import type { PlanLayers } from "@/lib/types";
-import { PUBLIC_UI_BASE_URL } from "@/lib/env";
+const ALLOWED_RESOLUTIONS = new Set(["1", "3", "5", "15", "30", "60", "120", "240", "1D", "1W"]);
 
 function normalizeResolution(raw: string | null): string {
   if (!raw) return "5";
@@ -15,7 +15,10 @@ function normalizeResolution(raw: string | null): string {
   const upper = token.toUpperCase();
   if (upper === "D") return "1D";
   if (upper === "W") return "1W";
-  return upper;
+  if (ALLOWED_RESOLUTIONS.has(upper)) {
+    return upper;
+  }
+  return "5";
 }
 
 export default function ChartPageWrapper() {
@@ -35,7 +38,7 @@ export default function ChartPageWrapper() {
 function ChartPage() {
   const params = useSearchParams();
 
-  const { symbol, planId, resolution, theme, overlays, planLink } = useMemo(() => {
+  const { symbol, planId, resolution, theme, overlays } = useMemo(() => {
     const parseNumeric = (value: string | null): number | null => {
       if (!value) return null;
       const parsed = Number.parseFloat(value);
@@ -91,8 +94,6 @@ function ChartPage() {
         }
       : null;
 
-    const planLinkAbsolute = planParam ? `${PUBLIC_UI_BASE_URL}/plan/${encodeURIComponent(planParam)}` : null;
-
     return {
       symbol: normalizedSymbol,
       planId: planParam || normalizedSymbol,
@@ -107,7 +108,6 @@ function ChartPage() {
         showVWAP,
         layers,
       } as ChartOverlayState,
-      planLink: planLinkAbsolute,
     };
   }, [params]);
 
@@ -129,23 +129,18 @@ function ChartPage() {
       className={`min-h-screen ${theme === "light" ? "bg-slate-50 text-slate-900" : "bg-[#050709] text-neutral-100"}`}
     >
       <header
-        className="flex items-center justify-between border-b border-slate-800/60 px-6 py-4"
+        className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/60 px-6 py-4"
         style={theme === "light" ? { borderColor: "rgba(15, 23, 42, 0.1)" } : undefined}
       >
-        <div>
-          <h1 className="text-xl font-semibold tracking-[0.35em] uppercase">{symbol}</h1>
-          <p className="mt-1 text-xs uppercase tracking-[0.25em] text-neutral-400">
-            Interval {resolution}
-          </p>
+        <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.25em] text-neutral-400">
+          <span className="text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
+          <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-100">
+            {symbol}
+          </span>
+          <span className="rounded-full border border-neutral-700/60 px-2 py-0.5 text-[0.68rem] text-neutral-300">
+            Interval&nbsp;{resolution}
+          </span>
         </div>
-        {planLink ? (
-          <a
-            href={planLink}
-            className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-4 py-1 text-xs font-semibold uppercase tracking-[0.25em] text-emerald-200 transition hover:border-emerald-400 hover:text-emerald-100"
-          >
-            Open Plan Console
-          </a>
-        ) : null}
       </header>
       <main className="px-4 py-6 sm:px-6">
         <div className="mx-auto max-w-5xl rounded-3xl border border-neutral-800/70 bg-neutral-950/50 p-4 shadow-[0_0_25px_rgba(15,118,110,0.15)]">
@@ -155,7 +150,15 @@ function ChartPage() {
                 {chartStatusMessage}
               </div>
             ) : null}
-            <PlanPriceChart planId={planId} symbol={symbol} resolution={resolution} theme={theme} data={bars} overlays={overlays} />
+            <PlanPriceChart
+              planId={planId}
+              symbol={symbol}
+              resolution={resolution}
+              theme={theme}
+              data={bars}
+              overlays={overlays}
+              expanded
+            />
           </div>
         </div>
       </main>

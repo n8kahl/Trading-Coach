@@ -8,16 +8,23 @@ import PlanPanel from "@/components/webview/PlanPanel";
 import PlanChartPanel from "@/components/PlanChartPanel";
 import CoachNote from "@/components/CoachNote";
 import HeaderMarkers from "@/components/HeaderMarkers";
-import ConfidenceBadge from "@/components/ConfidenceBadge";
 import { usePlanSocket } from "@/lib/hooks/usePlanSocket";
 import { usePlanLayers } from "@/lib/hooks/usePlanLayers";
 import { extractPrimaryLevels, extractSupportingLevels } from "@/lib/utils/layers";
 import type { SupportingLevel } from "@/lib/chart";
 import type { PlanDeltaEvent, PlanLayers, PlanSnapshot } from "@/lib/types";
 import { API_BASE_URL, WS_BASE_URL, BUILD_SHA, withAuthHeaders } from "@/lib/env";
-import { deriveCoachMessage, resolvePlanTargets, type CoachGoal, type CoachNote as CoachNoteModel } from "@/lib/plan/coach";
+import {
+  deriveCoachMessage,
+  resolvePlanEntry,
+  resolvePlanStop,
+  resolvePlanTargets,
+  type CoachGoal,
+  type CoachNote as CoachNoteModel,
+} from "@/lib/plan/coach";
 import { extractPlanLevels, resolveTrailingStop } from "@/lib/plan/levels";
 import { emitPlanEvent } from "@/lib/plan/events";
+import headerStyles from "./LivePlanHeader.module.css";
 
 const TIMEFRAME_OPTIONS = [
   { value: '1', label: '1m' },
@@ -51,7 +58,6 @@ function sanitizeSymbolToken(value: string): string {
 
 export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClientProps) {
   const router = useRouter();
-  const [snapshot, setSnapshot] = React.useState(initialSnapshot);
   const [plan, setPlan] = React.useState(initialSnapshot.plan);
   const [followLive, setFollowLive] = React.useState(true);
   const [streamingEnabled, setStreamingEnabled] = React.useState(true);
@@ -66,6 +72,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const [lastPlanHeartbeat, setLastPlanHeartbeat] = React.useState<number | null>(() => Date.now());
   const [symbolDraft, setSymbolDraft] = React.useState(() => (plan.symbol ? plan.symbol.toUpperCase() : ""));
   const [symbolSubmitting, setSymbolSubmitting] = React.useState(false);
+  const [addingSetup, setAddingSetup] = React.useState(false);
   const [coachNote, setCoachNote] = React.useState<CoachNoteModel>(() => ({
     text: "Awaiting tick…",
     goal: "neutral",
@@ -139,7 +146,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         }
         const payload = (await response.json()) as PlanSnapshot;
         if (!payload?.plan) return;
-        setSnapshot(payload);
         setPlan(payload.plan);
         setLayerSeed(extractInitialLayers(payload));
         setHighlightedLevel(null);
@@ -202,8 +208,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         if (type === 'plan_full') {
           const payloadSnapshot = (event as Record<string, unknown>).payload as PlanSnapshot | undefined;
           if (!payloadSnapshot || !payloadSnapshot.plan) return;
-          setSnapshot(payloadSnapshot);
-          setPlan(payloadSnapshot.plan);
+        setPlan(payloadSnapshot.plan);
           setLayerSeed(extractInitialLayers(payloadSnapshot));
           setTimeframe((prev) => {
             const inferred = normalizeTimeframeFromPlan(payloadSnapshot.plan);
@@ -289,14 +294,52 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const riskBanner =
     Array.isArray(plan.warnings) && plan.warnings.length ? String(plan.warnings[0]) : plan.session_state?.message ?? null;
 
+  const trailingStopValue = React.useMemo(() => resolveTrailingStop(plan), [plan]);
   const resolvedTargets = React.useMemo(() => resolvePlanTargets(plan), [plan]);
   const planTargets = React.useMemo(() => resolvedTargets.map((target) => target.price), [resolvedTargets]);
+  const entryValue = React.useMemo(() => resolvePlanEntry(plan), [plan]);
+  const stopResolved = React.useMemo(() => resolvePlanStop(plan, trailingStopValue), [plan, trailingStopValue]);
+  const nextTarget = React.useMemo(() => resolvedTargets[0] ?? null, [resolvedTargets]);
+  const levelFormatter = React.useMemo(
+    () =>
+      new Intl.NumberFormat("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }),
+    [],
+  );
+  const coachMetrics = React.useMemo(() => {
+    const entries: Array<{ key: string; label: string; value: string; ariaLabel?: string }> = [];
+    if (entryValue != null) {
+      entries.push({
+        key: "entry",
+        label: "Entry",
+        value: levelFormatter.format(entryValue),
+        ariaLabel: `Entry ${levelFormatter.format(entryValue)}`,
+      });
+    }
+    if (stopResolved != null) {
+      entries.push({
+        key: "stop",
+        label: "Stop",
+        value: levelFormatter.format(stopResolved),
+        ariaLabel: `Stop ${levelFormatter.format(stopResolved)}`,
+      });
+    }
+    if (nextTarget?.price != null) {
+      entries.push({
+        key: "tp",
+        label: nextTarget.label || "TP",
+        value: levelFormatter.format(nextTarget.price),
+        ariaLabel: `${nextTarget.label || "Target"} ${levelFormatter.format(nextTarget.price)}`,
+      });
+    }
+    return entries;
+  }, [entryValue, stopResolved, nextTarget, levelFormatter]);
 
   React.useEffect(() => {
     setSymbolDraft(plan.symbol ? sanitizeSymbolToken(String(plan.symbol)) : "");
   }, [plan.symbol]);
-
-  const trailingStopValue = React.useMemo(() => resolveTrailingStop(plan), [plan]);
 
   const levelSummary = React.useMemo(
     () => extractPlanLevels(plan, { trailingStop: trailingStopValue }),
@@ -317,6 +360,12 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   React.useEffect(() => {
     setCollapsed(false);
   }, [plan.plan_id]);
+
+  React.useEffect(() => {
+    if (collapsed) {
+      setAddingSetup(false);
+    }
+  }, [collapsed]);
 
   const lastPrice = React.useMemo(() => {
     const details = (plan.details ?? {}) as Record<string, unknown>;
@@ -397,38 +446,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     }
   }, [coachNote.goal, coachNote.updatedAt, activePlanId, lastPrice]);
 
-  const confluenceTokens = React.useMemo(() => {
-    const tokens: string[] = [];
-    const layerConfluence = layers?.meta?.confluence;
-    if (Array.isArray(layerConfluence)) {
-      layerConfluence.forEach((item) => {
-        if (typeof item === "string") {
-          tokens.push(item);
-          return;
-        }
-        if (item && typeof item === "object") {
-          const label = (item as { label?: string }).label;
-          if (typeof label === "string") tokens.push(label);
-        }
-      });
-    } else if (typeof layerConfluence === "string") {
-      tokens.push(...layerConfluence.split(","));
-    }
-    if (tokens.length === 0) {
-      const planConfluence = Array.isArray((plan as Record<string, unknown>).confluence)
-        ? ((plan as Record<string, unknown>).confluence as unknown[])
-        : [];
-      planConfluence.forEach((item) => {
-        if (typeof item === "string") tokens.push(item);
-      });
-    }
-    return tokens
-      .map((token) => token.trim())
-      .filter(Boolean)
-      .slice(0, 5)
-      .map((token) => token.toUpperCase());
-  }, [layers?.meta?.confluence, plan]);
-
   const priceFormatter = React.useMemo(
     () =>
       new Intl.NumberFormat("en-US", {
@@ -486,6 +503,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         const nextPlanId: string | undefined = payload?.plan?.plan_id ?? payload?.plan_id;
         if (nextPlanId) {
           router.push(`/plan/${encodeURIComponent(nextPlanId)}`);
+          setAddingSetup(false);
         }
       } catch (error) {
         if (process.env.NODE_ENV !== "production") {
@@ -497,6 +515,9 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     },
     [router, symbolDraft, symbolSubmitting],
   );
+  const handleCancelSetup = React.useCallback(() => {
+    setAddingSetup(false);
+  }, []);
 
   const handleSetFollowLive = React.useCallback((value: boolean) => {
     setFollowLive(value);
@@ -569,6 +590,10 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     ],
     [planStatusTone, planStatusTitle, dataStatusTone, dataStatusTitle, streamStatusTone, streamStatusTitle],
   );
+  const headerStatusItems = React.useMemo(
+    () => indicatorItems.filter((item) => item.key !== "plan"),
+    [indicatorItems],
+  );
 
   const handleStatusTouchStart = React.useCallback((event: React.TouchEvent<HTMLElement>) => {
     if (event.touches.length !== 1) return;
@@ -588,6 +613,79 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     }
   }, []);
 
+  const coachLive = streamingEnabled && streamStatusTone !== "red";
+  const toneBadgeClass: Record<StatusTone, string> = {
+    green: "border-emerald-500/60 bg-emerald-500/10 text-emerald-100",
+    yellow: "border-amber-500/60 bg-amber-500/10 text-amber-100",
+    red: "border-rose-500/60 bg-rose-500/10 text-rose-100",
+  };
+
+  const renderSetupControl = (variant: "expanded" | "collapsed") => {
+    const buttonClasses = clsx(
+      "inline-flex items-center justify-center rounded-full border border-neutral-700/60 bg-neutral-900/60 text-neutral-200 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+      variant === "collapsed" ? "px-3 py-1 text-[0.58rem] font-semibold uppercase tracking-[0.22em]" : "px-3.5 py-1.5 text-[0.62rem] font-semibold uppercase tracking-[0.24em]",
+    );
+    if (!addingSetup) {
+      return (
+        <button
+          type="button"
+          className={buttonClasses}
+          onClick={() => {
+            if (variant === "collapsed") {
+              setCollapsed(false);
+            }
+            setAddingSetup(true);
+          }}
+        >
+          Add Setup
+        </button>
+      );
+    }
+    if (variant === "collapsed") {
+      return null;
+    }
+    return (
+      <form className="flex flex-wrap items-center gap-2" onSubmit={handleSymbolSubmit}>
+        <label className="sr-only" htmlFor="setup-symbol-input">
+          Symbol
+        </label>
+        <input
+          id="setup-symbol-input"
+          type="text"
+          inputMode="text"
+          autoComplete="off"
+          maxLength={6}
+          placeholder="SYM"
+          value={symbolDraft}
+          onChange={handleSymbolInputChange}
+          disabled={symbolSubmitting}
+          className="h-9 w-28 rounded-md border border-neutral-700 bg-neutral-950/70 px-3 text-[0.7rem] font-semibold uppercase tracking-[0.25em] text-neutral-100 shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+        />
+        <div className="flex items-center gap-1">
+          <button
+            type="submit"
+            disabled={symbolSubmitting || !symbolDraft}
+            className={clsx(
+              "rounded-full border px-3 py-1 text-[0.6rem] font-semibold uppercase tracking-[0.24em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+              symbolSubmitting || !symbolDraft
+                ? "cursor-not-allowed border-neutral-700/60 bg-neutral-900/60 text-neutral-500"
+                : "border-emerald-500/60 bg-emerald-500/15 text-emerald-50 hover:border-emerald-400",
+            )}
+          >
+            {symbolSubmitting ? "..." : "Find Setup"}
+          </button>
+          <button
+            type="button"
+            onClick={handleCancelSetup}
+            className="rounded-full border border-neutral-700/60 px-3 py-1 text-[0.6rem] font-semibold uppercase tracking-[0.24em] text-neutral-300 transition hover:border-neutral-500 hover:text-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
+    );
+  };
+
   const statusStrip = (
     <section
       className="flex flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8"
@@ -596,54 +694,92 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       onTouchStart={handleStatusTouchStart}
       onTouchEnd={handleStatusTouchEnd}
     >
-      {!collapsed ? (
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div className="flex flex-col gap-2">
-            <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.25em] text-neutral-400">
-              <span className="text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
-              <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-100">
-                {planSymbol}
+      {collapsed ? (
+        <div className={headerStyles.collapsedBanner}>
+          <button
+            type="button"
+            onClick={() => setCollapsed(false)}
+            className={headerStyles.collapsedButton}
+            aria-expanded="false"
+          >
+            <span className={headerStyles.collapsedDot} aria-hidden="true" />
+            <span className={headerStyles.collapsedTextWrapper}>
+              <span className={headerStyles.collapsedText}>{coachNote.text}</span>
+            </span>
+            <span className="sr-only">Expand coach guidance</span>
+            <svg
+              aria-hidden
+              className={headerStyles.collapsedChevron}
+              width="10"
+              height="10"
+              viewBox="0 0 10 10"
+              fill="none"
+            >
+              <path
+                d="M2 3.5L5 6.5L8 3.5"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+          <div className={headerStyles.collapsedActions}>{renderSetupControl("collapsed")}</div>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.25em] text-neutral-400">
+            <span className="text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
+            <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-100">
+              {planSymbol}
+            </span>
+            <span className="rounded-full border border-neutral-700/60 px-2 py-0.5 text-[0.65rem] text-neutral-300">
+              {timeframeLabel}
+            </span>
+            {sessionBanner ? (
+              <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[0.65rem] text-sky-200">
+                {sessionBanner.toUpperCase()}
               </span>
-              <span className="rounded-full border border-neutral-700/60 px-2 py-0.5 text-[0.68rem] text-neutral-300">
-                {timeframeLabel}
+            ) : null}
+            {riskBanner ? (
+              <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[0.65rem] text-amber-200">
+                {riskBanner}
               </span>
-              {sessionBanner ? (
-                <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[0.68rem] text-sky-200">
-                  {sessionBanner.toUpperCase()}
-                </span>
-              ) : null}
-              {riskBanner ? (
-                <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[0.68rem] text-amber-200">
-                  {riskBanner}
-                </span>
-              ) : null}
-              <span className="text-xs text-neutral-300">
-                Last&nbsp;
-                <span className="font-semibold text-white">{lastPriceLabel}</span>
-              </span>
-            </div>
-            <div className="flex flex-wrap items-center gap-3 text-[0.62rem] uppercase tracking-[0.3em] text-neutral-400">
-              {indicatorItems.map((indicator) => (
-                <button
+            ) : null}
+            <span className="text-xs text-neutral-300">
+              Last&nbsp;
+              <span className="font-semibold text-white">{lastPriceLabel}</span>
+            </span>
+          </div>
+          <CoachNote
+            note={coachNote}
+            subdued={!streamingEnabled || dataStatusTone !== "green"}
+            loading={coachLoading}
+            metrics={coachMetrics}
+            live={coachLive}
+          />
+          <div className="flex flex-wrap items-center gap-2 text-[0.6rem] uppercase tracking-[0.24em] text-neutral-400">
+            <div className="flex flex-wrap items-center gap-2">
+              {headerStatusItems.map((indicator) => (
+                <span
                   key={indicator.key}
-                  type="button"
-                  className="flex flex-col items-center gap-1 transition hover:text-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-                  aria-label={indicator.title}
+                  className={clsx(
+                    "inline-flex items-center gap-1 rounded-full border px-3 py-1 transition",
+                    toneBadgeClass[indicator.tone],
+                  )}
                   title={indicator.title}
                 >
-                  <span className="sr-only">{indicator.label}</span>
-                  <StatusDot color={indicator.tone} label={`${indicator.label} status ${indicator.tone}`} />
-                  <span className="hidden sm:block">{indicator.label}</span>
-                </button>
+                  <StatusDot color={indicator.tone} label={indicator.title} />
+                  <span>{indicator.label}</span>
+                </span>
               ))}
+            </div>
+            <div className="ml-auto flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  const next = !followLive;
-                  handleSetFollowLive(next);
-                }}
+                onClick={() => handleSetFollowLive(!followLive)}
                 className={clsx(
-                  "rounded-full border px-3 py-1 text-[0.62rem] font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+                  "inline-flex items-center justify-center rounded-full border px-3 py-1 text-[0.6rem] font-semibold uppercase tracking-[0.24em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
                   followLive
                     ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-50"
                     : "border-neutral-700/60 bg-neutral-900/60 text-neutral-300 hover:border-emerald-400/60 hover:text-emerald-50",
@@ -654,106 +790,63 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
               </button>
               <button
                 type="button"
-                onClick={() => setCollapsed((prev) => !prev)}
-                className="rounded-full border border-neutral-700/60 bg-neutral-900/60 px-3 py-1 text-[0.62rem] font-semibold uppercase tracking-[0.2em] text-neutral-200 transition hover:border-emerald-400/60 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-                aria-pressed={collapsed}
+                onClick={handleToggleSupporting}
+                className={clsx(
+                  "inline-flex items-center justify-center rounded-full border px-3 py-1 text-[0.6rem] font-semibold uppercase tracking-[0.24em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+                  supportVisible
+                    ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-100"
+                    : "border-neutral-700/60 bg-neutral-900/60 text-neutral-300 hover:border-emerald-400/60 hover:text-emerald-50",
+                )}
+                aria-pressed={supportVisible}
               >
-                {collapsed ? "Expand Layout" : "Collapse"}
+                Levels {supportVisible ? "On" : "Off"}
+              </button>
+              <button
+                type="button"
+                onClick={handleToggleStreaming}
+                className={clsx(
+                  "inline-flex items-center justify-center rounded-full border px-3 py-1 text-[0.6rem] font-semibold uppercase tracking-[0.24em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+                  streamingEnabled
+                    ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-100"
+                    : "border-neutral-700/60 bg-neutral-900/60 text-neutral-300 hover:border-emerald-400/60 hover:text-emerald-50",
+                )}
+                aria-pressed={streamingEnabled}
+              >
+                Stream {streamingEnabled ? "On" : "Off"}
+              </button>
+              {renderSetupControl("expanded")}
+              <button
+                type="button"
+                onClick={() => setCollapsed(true)}
+                className="inline-flex items-center justify-center rounded-full border border-neutral-700/60 bg-neutral-900/60 px-3 py-1 text-[0.6rem] font-semibold uppercase tracking-[0.24em] text-neutral-200 transition hover:border-emerald-400/60 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                aria-expanded={!collapsed}
+              >
+                Collapse
               </button>
             </div>
           </div>
-          <form className="flex flex-wrap items-center gap-2" onSubmit={handleSymbolSubmit}>
-            <input
-              type="text"
-              inputMode="text"
-              autoComplete="off"
-              maxLength={6}
-              placeholder="SYM"
-              value={symbolDraft}
-              onChange={handleSymbolInputChange}
-              disabled={symbolSubmitting}
-              className="h-10 w-28 rounded-lg border border-neutral-700 bg-neutral-950/70 px-3 text-sm font-semibold uppercase tracking-[0.25em] text-neutral-100 shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+          <div className="space-y-2">
+            <HeaderMarkers
+              levels={headerLevels}
+              highlightedId={activeLevelId}
+              onHighlight={handleHighlightLevel}
+              onToggleVisibility={handleToggleLevelVisibility}
             />
-            <button
-              type="submit"
-              disabled={symbolSubmitting || !symbolDraft}
-              className={clsx(
-                "h-10 min-w-[72px] rounded-lg border px-4 text-xs font-semibold uppercase tracking-[0.25em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
-                symbolSubmitting || !symbolDraft
-                  ? "cursor-not-allowed border-neutral-700 bg-neutral-900/60 text-neutral-500"
-                  : "border-emerald-500/60 bg-emerald-500/15 text-emerald-50 hover:border-emerald-400",
-              )}
-              aria-label="Generate plan for symbol"
-            >
-              {symbolSubmitting ? "..." : "Plan"}
-            </button>
-          </form>
-        </div>
-      ) : null}
-      <CoachNote
-        note={coachNote}
-        subdued={!streamingEnabled || dataStatusTone !== "green"}
-        loading={coachLoading}
-        actions={
-          collapsed ? (
-            <button
-              type="button"
-              onClick={() => setCollapsed(false)}
-              className="rounded-full border border-neutral-700/60 bg-neutral-900/60 px-3 py-1 text-[0.62rem] font-semibold uppercase tracking-[0.2em] text-neutral-200 transition hover:border-emerald-400/60 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-            >
-              Expand Layout
-            </button>
-          ) : null
-        }
-      />
-      {!collapsed ? (
-        <div className="space-y-2">
-          <HeaderMarkers
-            levels={headerLevels}
-            highlightedId={activeLevelId}
-            onHighlight={handleHighlightLevel}
-            onToggleVisibility={handleToggleLevelVisibility}
-          />
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[0.68rem] uppercase tracking-[0.25em] text-neutral-500">Confluence</span>
-              {confluenceTokens.length ? (
-                <div className="flex flex-wrap items-center gap-2 text-[0.68rem] text-neutral-300">
-                  {confluenceTokens.map((token, index) => (
-                    <span
-                      key={`${token}-${index}`}
-                      className="inline-flex items-center gap-1 rounded-md border border-neutral-800/60 bg-neutral-900/50 px-2 py-1"
-                    >
-                      <span className="block h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
-                      <span>{token}</span>
-                    </span>
-                  ))}
-                </div>
-              ) : (
-                <span className="text-[0.68rem] text-neutral-600">No confluence noted</span>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-[0.68rem] uppercase tracking-[0.25em] text-neutral-500">Confidence</span>
-              <ConfidenceBadge value={plan.confidence} />
+            <div className="flex flex-wrap items-center gap-3 text-[0.62rem] uppercase tracking-[0.2em] text-neutral-400">
+              <span>
+                Plan&nbsp;
+                <span className="font-semibold text-neutral-100">{planIdLabel}</span>
+                {planVersion ? <span>&nbsp;· v{planVersion}</span> : null}
+              </span>
+              {planAsOfLabel ? <span>As of {planAsOfLabel} UTC</span> : null}
+              <span>
+                Data&nbsp;
+                <span className="font-semibold text-neutral-100">{dataStatusTitle}</span>
+              </span>
             </div>
           </div>
         </div>
-      ) : null}
-      {!collapsed ? (
-        <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.2em] text-neutral-400">
-          <span>
-            Plan&nbsp;
-            <span className="font-semibold text-neutral-100">{planIdLabel}</span>
-            {planVersion ? <span>&nbsp;· v{planVersion}</span> : null}
-          </span>
-          {planAsOfLabel ? <span>As of {planAsOfLabel} UTC</span> : null}
-          <span>
-            Data&nbsp;
-            <span className="font-semibold text-neutral-100">{dataStatusTitle}</span>
-          </span>
-        </div>
-      ) : null}
+      )}
     </section>
   );
 
@@ -782,8 +875,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       followLive={followLive}
       streamingEnabled={streamingEnabled}
       onSetFollowLive={handleSetFollowLive}
-      onToggleStreaming={handleToggleStreaming}
-      onToggleSupporting={handleToggleSupporting}
       timeframe={timeframe}
       timeframeOptions={TIMEFRAME_OPTIONS}
       onSelectTimeframe={handleSelectTimeframe}

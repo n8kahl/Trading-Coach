@@ -1,0 +1,102 @@
+.collapsedBanner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.collapsedButton {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  border: 1px solid rgba(38, 38, 38, 0.55);
+  background: rgba(5, 7, 9, 0.7);
+  border-radius: 999px;
+  padding: 0.45rem 0.85rem;
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: rgba(226, 252, 239, 0.9);
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease;
+  overflow: hidden;
+}
+
+.collapsedButton:hover,
+.collapsedButton:focus-visible {
+  border-color: rgba(16, 185, 129, 0.45);
+  color: rgba(236, 253, 245, 0.95);
+  background: rgba(6, 10, 14, 0.85);
+}
+
+.collapsedButton:focus-visible {
+  outline: 2px solid rgba(52, 211, 153, 0.8);
+  outline-offset: 2px;
+}
+
+.collapsedDot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: rgba(110, 231, 183, 0.8);
+  animation: collapseDotPulse 1.6s ease-out infinite;
+  flex-shrink: 0;
+}
+
+.collapsedTextWrapper {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.collapsedText {
+  display: inline-block;
+  padding-right: 2.5rem;
+  white-space: nowrap;
+  animation: marquee 14s linear infinite;
+}
+
+.collapsedChevron {
+  font-size: 0.75rem;
+  opacity: 0.75;
+  flex-shrink: 0;
+}
+
+.collapsedActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+@keyframes marquee {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes collapseDotPulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(110, 231, 183, 0.35);
+  }
+  60% {
+    transform: scale(1.1);
+    box-shadow: 0 0 0 6px rgba(110, 231, 183, 0);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(110, 231, 183, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .collapsedText {
+    animation: none;
+  }
+  .collapsedDot {
+    animation: none;
+  }
+}

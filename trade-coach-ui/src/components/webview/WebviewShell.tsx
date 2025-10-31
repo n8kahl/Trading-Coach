@@ -55,29 +55,33 @@ export default function WebviewShell({
       >
         {statusStrip}
       </header>
-      {collapsed ? null : (
-        <main className="relative z-10 mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-6 px-4 pb-24 pt-6 sm:px-6 lg:px-10">
-          <div className="grid gap-6 lg:grid-cols-[minmax(0,1.9fr),minmax(0,1fr)]">
-            <section
-              className={clsx(
-                "min-h-[420px] rounded-3xl border p-5 backdrop-blur transition-colors duration-300",
-                surfaceMain,
-              )}
-            >
-              {chartPanel}
-            </section>
-            <aside
-              className={clsx(
-                "hidden rounded-3xl border p-5 backdrop-blur transition-colors duration-300 lg:block",
-                surfaceAside,
-              )}
-            >
-              {planPanel}
-            </aside>
-          </div>
-        </main>
-      )}
-      {!collapsed && actionsDock ? <div className="fixed bottom-6 right-6 z-30 hidden md:block">{actionsDock}</div> : null}
+      <main
+        className={clsx(
+          "relative z-10 mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-6 px-4 pb-24 pt-6 sm:px-6 lg:px-10",
+          collapsed && "pt-3 sm:pt-4",
+        )}
+        data-collapsed={collapsed ? "true" : "false"}
+      >
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1.9fr),minmax(0,1fr)]">
+          <section
+            className={clsx(
+              "min-h-[420px] rounded-3xl border p-5 backdrop-blur transition-colors duration-300",
+              surfaceMain,
+            )}
+          >
+            {chartPanel}
+          </section>
+          <aside
+            className={clsx(
+              "hidden rounded-3xl border p-5 backdrop-blur transition-colors duration-300 lg:block",
+              surfaceAside,
+            )}
+          >
+            {planPanel}
+          </aside>
+        </div>
+      </main>
+      {actionsDock ? <div className="fixed bottom-6 right-6 z-30 hidden md:block">{actionsDock}</div> : null}
       {mobileSheet}
     </div>
   );

@@ -10,9 +10,18 @@ type CoachNoteProps = {
   subdued?: boolean;
   loading?: boolean;
   actions?: React.ReactNode;
+  metrics?: Array<{ key: string; label: string; value: string; ariaLabel?: string }>;
+  live?: boolean;
 };
 
-export default function CoachNote({ note, subdued = false, loading = false, actions = null }: CoachNoteProps) {
+export default function CoachNote({
+  note,
+  subdued = false,
+  loading = false,
+  actions = null,
+  metrics = [],
+  live = true,
+}: CoachNoteProps) {
   const contentRef = React.useRef<HTMLParagraphElement | null>(null);
   const [canExpand, setCanExpand] = React.useState(false);
   const [expanded, setExpanded] = React.useState(false);
@@ -46,6 +55,19 @@ export default function CoachNote({ note, subdued = false, loading = false, acti
 
   const progress = Number.isFinite(note.progressPct) ? Math.max(0, Math.min(100, Math.round(note.progressPct))) : 0;
   const progressScale = Number.isFinite(note.progressPct) ? Math.max(0, Math.min(1, note.progressPct / 100)) : 0;
+  const filteredMetrics = React.useMemo(
+    () =>
+      metrics.filter(
+        (metric, index, list) =>
+          metric &&
+          typeof metric.label === "string" &&
+          metric.label.trim().length > 0 &&
+          typeof metric.value === "string" &&
+          metric.value.trim().length > 0 &&
+          list.findIndex((entry) => entry.key === metric.key) === index,
+      ),
+    [metrics],
+  );
 
   return (
     <section
@@ -54,10 +76,35 @@ export default function CoachNote({ note, subdued = false, loading = false, acti
       aria-atomic="true"
     >
       <div className={styles.header}>
-        <span className={styles.label}>Coach Guidance</span>
-        <span className={styles.progressValue}>
-          {progress}%
-          <span className={styles.progressLabel}>Progress</span>
+        <div className={styles.titleRow}>
+          <span
+            className={clsx(styles.liveDot, !live && styles.liveDotPaused)}
+            aria-hidden="true"
+          />
+          <span className={styles.label}>Coach Guidance</span>
+          {filteredMetrics.length ? (
+            <ul className={styles.metricList}>
+              {filteredMetrics.map((metric) => (
+                <li key={metric.key}>
+                  <span
+                    className={styles.metricPill}
+                    aria-label={metric.ariaLabel ?? `${metric.label} ${metric.value}`}
+                  >
+                    <span className={styles.metricLabel}>{metric.label}</span>
+                    <span className={styles.metricValue}>{metric.value}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+        <span
+          className={styles.progressBadge}
+          title="Progress to next objective reflects the server-reported progress toward the current coaching goal."
+          aria-label={`Progress to next objective ${progress}%`}
+        >
+          <span className={styles.progressBadgeLabel}>Progress to next objective</span>
+          <span className={styles.progressValue}>{progress}%</span>
         </span>
       </div>
       <div className={styles.contentWrapper}>

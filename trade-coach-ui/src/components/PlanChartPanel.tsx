@@ -3,6 +3,7 @@
 import clsx from "clsx";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PlanPriceChart, { type ChartOverlayState, type PlanPriceChartHandle } from "@/components/PlanPriceChart";
+import ConfidenceBadge from "@/components/ConfidenceBadge";
 import { usePriceSeries } from "@/lib/hooks/usePriceSeries";
 import type { SupportingLevel } from "@/lib/chart";
 import type { PlanLayers, PlanSnapshot, TargetMetaEntry } from "@/lib/types";
@@ -21,8 +22,6 @@ type PlanChartPanelProps = {
   followLive: boolean;
   streamingEnabled: boolean;
   onSetFollowLive(value: boolean): void;
-  onToggleStreaming(): void;
-  onToggleSupporting(): void;
   timeframe: string;
   timeframeOptions: TimeframeOption[];
   onSelectTimeframe(value: string): void;
@@ -61,8 +60,6 @@ export default function PlanChartPanel({
   followLive,
   streamingEnabled,
   onSetFollowLive,
-  onToggleStreaming,
-  onToggleSupporting,
   timeframe,
   timeframeOptions,
   onSelectTimeframe,
@@ -198,6 +195,35 @@ export default function PlanChartPanel({
       })),
     [overlayTargets, targetMeta],
   );
+
+  const confluenceTokens = useMemo(() => {
+    const tokens: string[] = [];
+    const layerConfluence = layers?.meta?.confluence;
+    if (Array.isArray(layerConfluence)) {
+      layerConfluence.forEach((item) => {
+        if (typeof item === "string") {
+          tokens.push(item);
+        } else if (item && typeof item === "object" && typeof (item as { label?: string }).label === "string") {
+          tokens.push(String((item as { label?: string }).label));
+        }
+      });
+    } else if (typeof layerConfluence === "string") {
+      tokens.push(...layerConfluence.split(","));
+    }
+    if (tokens.length === 0) {
+      const planConfluence = Array.isArray((plan as Record<string, unknown>).confluence)
+        ? ((plan as Record<string, unknown>).confluence as unknown[])
+        : [];
+      planConfluence.forEach((item) => {
+        if (typeof item === "string") tokens.push(item);
+      });
+    }
+    return tokens
+      .map((token) => token.trim())
+      .filter(Boolean)
+      .slice(0, 5)
+      .map((token) => token.toUpperCase());
+  }, [layers?.meta?.confluence, plan]);
 
 
   const emaPeriods = useMemo(() => {
@@ -350,27 +376,6 @@ export default function PlanChartPanel({
     }
   };
 
-  const handleFollowLiveClick = () => {
-    const next = !followLive;
-    if (next) {
-      chartHandle.current?.followLive();
-    } else {
-      chartHandle.current?.stopReplay();
-      setReplayActive(false);
-      onReplayStateChange?.("idle");
-    }
-    onSetFollowLive(next);
-  };
-
-  const handleStreamingClick = () => {
-    onToggleStreaming();
-  };
-
-  const handleSupportingClick = () => {
-    onToggleSupporting();
-    chartHandle.current?.refreshOverlays();
-  };
-
   const handleLatestBarTime = useCallback(
     (time: number | null) => {
       onLastBarTimeChange(time);
@@ -436,16 +441,6 @@ export default function PlanChartPanel({
             {planAsOfLabel ? <span>As of {planAsOfLabel}</span> : null}
             {layers?.planning_context ? <span>{layers.planning_context.toUpperCase()}</span> : null}
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.2em] text-neutral-400">
-            <ToggleChip label="Follow Live" active={followLive} onClick={handleFollowLiveClick} />
-            <ToggleChip label="Streaming" active={streamingEnabled} onClick={handleStreamingClick} />
-            <ToggleChip label={supportingVisible ? "Levels On" : "Levels Off"} active={supportingVisible} onClick={handleSupportingClick} />
-            <ToggleChip
-              label={replayActive ? "Stop Replay" : "Replay"}
-              active={replayActive}
-              onClick={handleReplayToggle}
-            />
-          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {timeframeOptions.map((option) => (
@@ -463,10 +458,47 @@ export default function PlanChartPanel({
               {option.label}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={handleReplayToggle}
+            className={clsx(
+              "inline-flex h-10 items-center justify-center rounded-full px-4 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+              replayActive
+                ? "border border-emerald-400/60 bg-emerald-400/15 text-emerald-200"
+                : "border border-neutral-800/60 bg-neutral-900/70 text-neutral-300 hover:border-emerald-400/40 hover:text-emerald-200",
+            )}
+            aria-pressed={replayActive}
+          >
+            {replayActive ? "Stop Replay" : "Replay"}
+          </button>
         </div>
       </header>
 
       <section className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-neutral-950/20 px-3 py-2 text-[11px] uppercase tracking-[0.24em] text-neutral-400">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="font-semibold text-neutral-300">Confluence</span>
+            {confluenceTokens.length ? (
+              <div className="flex flex-wrap items-center gap-1">
+                {confluenceTokens.map((token) => (
+                  <span
+                    key={token}
+                    className="inline-flex items-center gap-1 rounded-full border border-neutral-800/60 bg-neutral-900/60 px-2 py-0.5 text-[10px] text-neutral-200"
+                  >
+                    <span className="block h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+                    <span>{token}</span>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <span className="text-[10px] text-neutral-500">None noted</span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 text-[10px] text-neutral-300">
+            <span className="font-semibold uppercase tracking-[0.28em] text-neutral-400">Confidence</span>
+            <ConfidenceBadge value={plan.confidence} className="h-8 w-8 text-[10px]" />
+          </div>
+        </div>
         <div
           className={clsx(
             "rounded-xl bg-neutral-950/20 p-3",
@@ -563,23 +595,6 @@ export default function PlanChartPanel({
       </section>
 
     </div>
-  );
-}
-
-function ToggleChip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={clsx(
-        "inline-flex h-10 items-center justify-center rounded-full border px-4 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
-        active
-          ? "border-emerald-400/60 bg-emerald-400/10 text-emerald-200"
-          : "border-neutral-800/60 bg-neutral-900/60 text-neutral-300 hover:border-emerald-400/40 hover:text-emerald-200",
-      )}
-    >
-      {label}
-    </button>
   );
 }
 

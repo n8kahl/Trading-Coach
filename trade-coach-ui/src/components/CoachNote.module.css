@@ -1,10 +1,10 @@
 .root {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.65rem;
   background: rgba(16, 185, 129, 0.08);
   border: 1px solid rgba(16, 185, 129, 0.25);
-  border-radius: 1rem;
+  border-radius: 0.875rem;
   padding: 0.75rem 1rem;
   position: relative;
   width: 100%;
@@ -13,9 +13,33 @@
 
 .header {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   gap: 0.75rem;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  min-height: 1.5rem;
+}
+
+.liveDot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: rgba(110, 231, 183, 0.8);
+  box-shadow: 0 0 0 0 rgba(110, 231, 183, 0.4);
+  animation: livePulse 1.6s ease-out infinite;
+}
+
+.liveDotPaused {
+  background: rgba(110, 231, 183, 0.3);
+  box-shadow: none;
+  animation: none;
 }
 
 .label {
@@ -23,23 +47,65 @@
   letter-spacing: 0.3em;
   text-transform: uppercase;
   color: rgba(110, 231, 183, 0.9);
+  white-space: nowrap;
+}
+
+.metricList {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  flex-wrap: wrap;
+}
+
+.metricPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  background: rgba(15, 118, 110, 0.2);
+  font-size: 0.58rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(209, 250, 229, 0.92);
+  white-space: nowrap;
+}
+
+.metricLabel {
+  font-weight: 600;
+}
+
+.metricValue {
+  font-weight: 500;
+  color: rgba(236, 253, 245, 0.9);
+}
+
+.progressBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.25);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  font-size: 0.58rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(226, 252, 239, 0.92);
+}
+
+.progressBadgeLabel {
+  font-weight: 500;
 }
 
 .progressValue {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.35rem;
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.78rem;
+  font-weight: 700;
   color: rgba(236, 253, 245, 0.95);
-}
-
-.progressLabel {
-  font-size: 0.65rem;
-  font-weight: 500;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: rgba(148, 163, 184, 0.9);
 }
 
 .contentWrapper {
@@ -47,12 +113,12 @@
 }
 
 .content {
-  font-size: 0.9rem;
-  line-height: 1.45;
+  font-size: 0.88rem;
+  line-height: 1.5;
   color: rgba(248, 250, 252, 0.95);
   white-space: normal;
   overflow-wrap: anywhere;
-  animation: slideFadeIn 200ms ease-out;
+  animation: slideFadeIn 220ms ease-out, typeWriter 700ms steps(28) 1;
 }
 
 .contentClamped {
@@ -73,8 +139,9 @@
 .controls {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.5rem;
   justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 .expandButton {
@@ -118,6 +185,12 @@
   pointer-events: none;
 }
 
+.metricPill:focus-visible,
+.expandButton:focus-visible {
+  outline: 2px solid rgba(52, 211, 153, 0.8);
+  outline-offset: 2px;
+}
+
 @keyframes slideFadeIn {
   from {
     opacity: 0;
@@ -129,11 +202,35 @@
   }
 }
 
+@keyframes typeWriter {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
 @keyframes shimmer {
   from {
     transform: translateX(-100%);
   }
   to {
     transform: translateX(100%);
+  }
+}
+
+@keyframes livePulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(110, 231, 183, 0.45);
+  }
+  70% {
+    transform: scale(1.15);
+    box-shadow: 0 0 0 8px rgba(110, 231, 183, 0);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(110, 231, 183, 0);
   }
 }

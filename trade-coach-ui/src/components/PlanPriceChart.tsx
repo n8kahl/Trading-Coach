@@ -67,6 +67,7 @@ type CandlesSeries = ISeriesApi<"Candlestick">;
 type VolumeSeries = ISeriesApi<"Histogram">;
 type LineSeries = ISeriesApi<"Line">;
 type LogicalRangeInput = { from: number; to: number };
+type ChartContainerElement = HTMLDivElement & { __lw_attached?: boolean };
 
 const GREEN = "#22c55e";
 const RED = "#ef4444";
@@ -168,6 +169,8 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     const overlayLinesRef = useRef<Map<string, IPriceLine>>(new Map());
     const highlightLineRef = useRef<IPriceLine | null>(null);
     const highlightTimerRef = useRef<number | null>(null);
+    const manualRangeRef = useRef<LogicalRange | null>(null);
+    const overlaySyncHandleRef = useRef<number | null>(null);
     const overlaysRef = useRef<ChartOverlayState>(overlays);
     const overlayBoundsRef = useRef<{ min: number | null; max: number | null }>({ min: null, max: null });
     const resizeObserverRef = useRef<ResizeObserver | null>(null);
@@ -187,6 +190,15 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       (next: boolean, reason: string) => {
         if (followLiveRef.current === next) return;
         followLiveRef.current = next;
+        if (next) {
+          manualRangeRef.current = null;
+        } else {
+          const chart = chartRef.current;
+          const range = chart?.timeScale().getVisibleLogicalRange();
+          if (range) {
+            manualRangeRef.current = { from: range.from, to: range.to };
+          }
+        }
         if (!isControlledFollowLive) {
           setInternalFollowLive(next);
         }
@@ -349,6 +361,13 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
 
     const markManualInteraction = useCallback(() => {
       if (suppressInteractionRef.current) return;
+      const chart = chartRef.current;
+      if (chart) {
+        const range = chart.timeScale().getVisibleLogicalRange();
+        if (range) {
+          manualRangeRef.current = { from: range.from, to: range.to };
+        }
+      }
       if (!followLiveRef.current) return;
       setFollowLive(false, "manual-range");
     }, [setFollowLive]);
@@ -381,6 +400,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       let disposed = false;
       const pointerEvents: Array<keyof HTMLElementEventMap> = ["wheel", "mousedown", "touchstart", "pointerdown"];
       let pointerCleanup: (() => void) | null = null;
+      const containerForCleanup = containerRef.current as ChartContainerElement | null;
 
       (async () => {
         addDbg(`[PlanPriceChart] mount: container=${!!containerRef.current}`);
@@ -388,16 +408,19 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         if (disposed || !containerRef.current) return;
 
         // Handle different module shapes (ESM vs UMD default)
-        const lib: any = (imported && (imported as any).createChart)
-          ? imported
-          : (imported as any)?.default || imported;
-        const createChartFn: any = lib?.createChart;
-        if (typeof createChartFn !== "function") {
+        type ModuleShape = Partial<ChartLib> & { default?: ChartLib };
+        const moduleShape = imported as ModuleShape;
+        const resolvedLib =
+          typeof moduleShape.createChart === "function"
+            ? (moduleShape as ChartLib)
+            : moduleShape.default;
+        if (!resolvedLib || typeof resolvedLib.createChart !== "function") {
           addDbg(`[PlanPriceChart] error: createChart not a function on module; keys=${Object.keys(imported || {}).join(',')}`);
           return;
         }
 
-        chartLibRef.current = lib;
+        chartLibRef.current = resolvedLib;
+        const createChartFn = resolvedLib.createChart;
 
         // Wait for container to have non-zero size to avoid internal asserts
         const waitForSize = async () => {
@@ -417,18 +440,18 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         const size = await waitForSize();
         addDbg(`[PlanPriceChart] container size w=${size.w} h=${size.h}`);
 
-        const ColorTypeSolid = (lib as any)?.ColorType?.Solid ?? "solid";
-        const CrosshairModeMagnet = (lib as any)?.CrosshairMode?.Magnet ?? "magnet";
+        const colorTypeSolid = resolvedLib.ColorType?.Solid ?? "solid";
+        const crosshairModeMagnet = resolvedLib.CrosshairMode?.Magnet ?? "magnet";
 
         // Create chart preferring autosize (legacy/stable path), then fallback to width/height
-        let chart: any = null;
-        const el = containerRef.current as HTMLDivElement;
+        let chart: IChartApi | null = null;
+        const el = containerRef.current as ChartContainerElement;
         // StrictMode guard to prevent double init
-        if ((el as any).__lw_attached) {
+        if (el.__lw_attached) {
           addDbg(`[PlanPriceChart] init skipped: container already has a chart`);
           return;
         }
-        (el as any).__lw_attached = true;
+        el.__lw_attached = true;
 
         const w = el.clientWidth || 800;
         const h = el.clientHeight || 360;
@@ -441,14 +464,14 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           addDbg(`[PlanPriceChart] createChart width/height ok`);
         }
         if (!chart) {
-          addDbg(`[PlanPriceChart] error: unable to create chart; libKeys=${Object.keys(lib || {}).join(',')}`);
+          addDbg(`[PlanPriceChart] error: unable to create chart; libKeys=${Object.keys(resolvedLib || {}).join(',')}`);
           return;
         }
 
-        const layoutColorType = typeof ColorTypeSolid === "string" ? ColorTypeSolid : "solid";
-        const crosshairMode = typeof CrosshairModeMagnet === "string" ? CrosshairModeMagnet : 1;
+        const layoutColorType = typeof colorTypeSolid === "string" ? colorTypeSolid : "solid";
+        const crosshairMode = typeof crosshairModeMagnet === "string" ? crosshairModeMagnet : 1;
 
-        (chart as any).applyOptions?.({
+        chart.applyOptions({
           layout: {
             background: { type: layoutColorType, color: theme === "light" ? SURFACE_LIGHT : SURFACE_DARK },
             textColor: theme === "light" ? TEXT_LIGHT : TEXT_DARK,
@@ -471,11 +494,6 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
             secondsVisible: true,
           },
         });
-        const chartApi: any = chart as any;
-        if (!chartApi || typeof chartApi.addCandlestickSeries !== "function" || typeof chartApi.addHistogramSeries !== "function") {
-          addDbg(`[PlanPriceChart] error: legacy series APIs not available; chartKeys=${Object.keys(chartApi || {}).join(',')}`);
-          return;
-        }
 
         const autoscaleProvider: AutoscaleInfoProvider = (baseImplementation) => {
           const baseInfo = baseImplementation();
@@ -595,16 +613,18 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         chartRef.current?.remove();
         chartRef.current = null;
         chartLibRef.current = null;
-        if (containerRef.current) delete (containerRef.current as any).__lw_attached;
+        if (containerForCleanup) {
+          delete containerForCleanup.__lw_attached;
+        }
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     useEffect(() => {
-      const lib = chartLibRef.current as any;
-      const chart = chartRef.current as any;
+      const lib = chartLibRef.current;
+      const chart = chartRef.current;
       if (!chart || !lib) return;
-      const layoutColorType = typeof lib?.ColorType?.Solid === "string" ? lib.ColorType.Solid : "solid";
+      const layoutColorType = typeof lib.ColorType?.Solid === "string" ? lib.ColorType.Solid : "solid";
       chart.applyOptions({
         layout: {
           background: { type: layoutColorType, color: theme === "light" ? SURFACE_LIGHT : SURFACE_DARK },
@@ -654,17 +674,29 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       const pushData = () => {
         if (disposed) return;
 
+        const timeScale = chart.timeScale();
+
         if (safeData.length === 0) {
           seriesMetaRef.current = null;
           volumeMetaRef.current = null;
           overlayBoundsRef.current = { min: null, max: null };
           lastBarTimeRef.current = null;
+          manualRangeRef.current = null;
           onLastBarTimeChange?.(null);
           addDbg("[PlanPriceChart] no candles");
           return;
         }
 
-        const timeValid = safeData.every((bar) => bar && Number.isFinite(Number((bar as any).time)));
+        const timeValid = safeData.every((bar) => {
+          if (!bar) return false;
+          const timeValue = bar.time;
+          if (typeof timeValue === "number") return Number.isFinite(timeValue);
+          if (typeof timeValue === "string") {
+            const parsed = Number.parseFloat(timeValue);
+            return Number.isFinite(parsed);
+          }
+          return false;
+        });
         const candleValid = safeData.every(
           (bar) =>
             bar &&
@@ -695,25 +727,36 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         }));
 
         const lastIndex = candles.length - 1;
-        if (lastIndex < 0) {
-          return;
-        }
+        if (lastIndex < 0) return;
 
         const firstTime = Number(candles[0].time);
         const lastTime = Number(candles[lastIndex].time);
         const prevMeta = seriesMetaRef.current;
+        const prevLength = prevMeta?.length ?? 0;
+        const appendedCount = prevMeta ? candles.length - prevLength : candles.length;
+        const prevLastTime = prevMeta?.last ?? Number.NEGATIVE_INFINITY;
+        const appended = prevMeta != null && lastTime > prevLastTime;
+
         const shouldReset =
           !prevMeta ||
           candles.length <= 2 ||
           !Number.isFinite(firstTime) ||
           !Number.isFinite(lastTime) ||
           firstTime < prevMeta.first ||
-          candles.length < prevMeta.length - 5;
+          candles.length < prevLength ||
+          appendedCount > 4;
 
         if (shouldReset) {
           candleSeries.setData(candles);
           volumeSeries.setData(volumes);
           addDbg(`[PlanPriceChart] setData count=${candles.length}`);
+        } else if (appended && appendedCount > 0) {
+          for (let i = Math.max(prevLength, 0); i < candles.length; i += 1) {
+            candleSeries.update(candles[i]);
+            if (volumes[i]) {
+              volumeSeries.update(volumes[i]);
+            }
+          }
         } else {
           candleSeries.update(candles[lastIndex]);
           volumeSeries.update(volumes[volumes.length - 1]);
@@ -727,7 +770,8 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         onLastBarTimeChange?.(lastBarTimeRef.current);
         updateOverlayBounds(safeData);
 
-        if (lastBarTimeRef.current != null && followLiveRef.current) {
+        if (followLiveRef.current) {
+          manualRangeRef.current = null;
           const logicalRange = {
             from: Math.max(lastIndex - 120, 0),
             to: lastIndex + 2,
@@ -735,11 +779,23 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           if (!hasInitialLoadRef.current) {
             hasInitialLoadRef.current = true;
             if (applyLogicalRange(logicalRange, "initial")) {
-              chart.timeScale().scrollToRealTime();
+              timeScale.scrollToRealTime();
             }
-          } else {
-            if (applyLogicalRange(logicalRange, "update")) {
-              chart.timeScale().scrollToRealTime();
+          } else if (appended) {
+            if (applyLogicalRange(logicalRange, "append")) {
+              timeScale.scrollToRealTime();
+            }
+          }
+        } else {
+          const preserved =
+            manualRangeRef.current ??
+            timeScale.getVisibleLogicalRange();
+          if (preserved) {
+            if (applyLogicalRange({ from: preserved.from, to: preserved.to }, "manual-preserve")) {
+              const updatedRange = timeScale.getVisibleLogicalRange();
+              if (updatedRange) {
+                manualRangeRef.current = { from: updatedRange.from, to: updatedRange.to };
+              }
             }
           }
         }
@@ -757,7 +813,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           window.cancelAnimationFrame(rafId);
         }
       };
-    }, [chartReady, safeData, onLastBarTimeChange, applyLogicalRange, updateOverlayBounds]);
+    }, [chartReady, safeData, onLastBarTimeChange, applyLogicalRange, updateOverlayBounds, addDbg]);
 
     const syncDerivedSeries = useCallback(() => {
       if (!chartReady || safeData.length === 0) return;
@@ -781,15 +837,25 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
 
       periods.slice(0, EMA_COLORS.length).forEach((period, index) => {
         const color = EMA_COLORS[index % EMA_COLORS.length];
+        const labelBg = `${color}33`;
         let series = emaSeriesRef.current.get(period);
+        const baseOptions = {
+          color,
+          lineWidth: 2,
+          priceLineVisible: true,
+          priceLineColor: color,
+          lastValueVisible: true,
+          lastValueLabel: {
+            background: labelBg,
+            borderColor: color,
+            textColor: theme === "light" ? "#0f172a" : "#f8fafc",
+          },
+        } as const;
         if (!series) {
-          series = chart.addLineSeries({
-            color,
-            lineWidth: 2,
-          });
+          series = chart.addLineSeries(baseOptions);
           emaSeriesRef.current.set(period, series);
         } else {
-          series.applyOptions({ color, lineWidth: 2 });
+          series.applyOptions(baseOptions);
         }
         const emaData = computeEMA(safeData, period);
         series.setData(emaData);
@@ -812,9 +878,29 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
             color: "#ffffff",
             lineWidth: 2,
             lineStyle: lib.LineStyle.Solid,
+            priceLineVisible: true,
+            priceLineColor: "#ffffff",
+            lastValueVisible: true,
+            lastValueLabel: {
+              background: theme === "light" ? "rgba(15,23,42,0.85)" : "rgba(248,250,252,0.12)",
+              borderColor: "rgba(255,255,255,0.8)",
+              textColor: theme === "light" ? "#f8fafc" : "#0f172a",
+            },
           });
         } else {
-          vwapSeriesRef.current.applyOptions({ color: "#ffffff", lineWidth: 2 });
+          vwapSeriesRef.current.applyOptions({
+            color: "#ffffff",
+            lineWidth: 2,
+            lineStyle: lib.LineStyle.Solid,
+            priceLineVisible: true,
+            priceLineColor: "#ffffff",
+            lastValueVisible: true,
+            lastValueLabel: {
+              background: theme === "light" ? "rgba(15,23,42,0.85)" : "rgba(248,250,252,0.12)",
+              borderColor: "rgba(255,255,255,0.8)",
+              textColor: theme === "light" ? "#f8fafc" : "#0f172a",
+            },
+          });
         }
         const vwapData = computeVWAP(safeData);
         vwapSeriesRef.current.setData(vwapData);
@@ -880,7 +966,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           color: "#ff2d55",
           lineWidth: 2,
           lineStyle: lib.LineStyle.Solid,
-          title: "Stop",
+          title: "Stop Loss",
         });
       }
 
@@ -945,17 +1031,40 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           });
         }
       });
-    }, [chartReady, safeData, overlays, hiddenLevelIds, showExpandedLevels]);
+    }, [chartReady, safeData, hiddenLevelSet, showExpandedLevels, theme]);
+
+    const scheduleSyncDerivedSeries = useCallback(() => {
+      if (!chartReady) return;
+      if (typeof window === "undefined") {
+        syncDerivedSeries();
+        return;
+      }
+      if (overlaySyncHandleRef.current != null) return;
+      overlaySyncHandleRef.current = window.requestAnimationFrame(() => {
+        overlaySyncHandleRef.current = null;
+        syncDerivedSeries();
+      });
+    }, [chartReady, syncDerivedSeries]);
 
     useEffect(() => {
       overlaysRef.current = overlays;
       updateOverlayBounds(safeData);
-      syncDerivedSeries();
-    }, [overlays, syncDerivedSeries, safeData, updateOverlayBounds, hiddenLevelIds, showExpandedLevels]);
+      scheduleSyncDerivedSeries();
+    }, [overlays, scheduleSyncDerivedSeries, safeData, updateOverlayBounds]);
 
     useEffect(() => {
-      syncDerivedSeries();
-    }, [syncDerivedSeries]);
+      scheduleSyncDerivedSeries();
+    }, [scheduleSyncDerivedSeries]);
+
+    useEffect(
+      () => () => {
+        if (overlaySyncHandleRef.current != null && typeof window !== "undefined") {
+          window.cancelAnimationFrame(overlaySyncHandleRef.current);
+          overlaySyncHandleRef.current = null;
+        }
+      },
+      [],
+    );
 
     useEffect(() => {
       if (!chartReady) return;
@@ -1116,6 +1225,10 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         startReplay: () => startReplay(),
         stopReplay: () => stopReplay(),
         refreshOverlays: () => {
+          if (overlaySyncHandleRef.current != null && typeof window !== "undefined") {
+            window.cancelAnimationFrame(overlaySyncHandleRef.current);
+            overlaySyncHandleRef.current = null;
+          }
           syncDerivedSeries();
         },
         getLastBarTime: () => lastBarTimeRef.current,
