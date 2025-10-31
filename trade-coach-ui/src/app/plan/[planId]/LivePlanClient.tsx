@@ -1,17 +1,17 @@
-'use client';
+"use client";
 
-import * as React from 'react';
-import WebviewShell from '@/components/webview/WebviewShell';
-import StatusStrip, { type StatusToken } from '@/components/webview/StatusStrip';
-import PlanPanel from '@/components/webview/PlanPanel';
-import PlanHeader from '@/components/PlanHeader';
-import PlanChartPanel from '@/components/PlanChartPanel';
-import { usePlanSocket } from '@/lib/hooks/usePlanSocket';
-import { usePlanLayers } from '@/lib/hooks/usePlanLayers';
-import { extractPrimaryLevels, extractSupportingLevels } from '@/lib/utils/layers';
-import type { SupportingLevel } from '@/lib/chart';
-import type { PlanDeltaEvent, PlanLayers, PlanSnapshot } from '@/lib/types';
-import { PUBLIC_UI_BASE_URL, WS_BASE_URL, BUILD_SHA } from '@/lib/env';
+import clsx from "clsx";
+import * as React from "react";
+import WebviewShell from "@/components/webview/WebviewShell";
+import PlanPanel from "@/components/webview/PlanPanel";
+import PlanHeader from "@/components/PlanHeader";
+import PlanChartPanel from "@/components/PlanChartPanel";
+import { usePlanSocket } from "@/lib/hooks/usePlanSocket";
+import { usePlanLayers } from "@/lib/hooks/usePlanLayers";
+import { extractPrimaryLevels, extractSupportingLevels } from "@/lib/utils/layers";
+import type { SupportingLevel } from "@/lib/chart";
+import type { PlanDeltaEvent, PlanLayers, PlanSnapshot } from "@/lib/types";
+import { PUBLIC_UI_BASE_URL, WS_BASE_URL, BUILD_SHA } from "@/lib/env";
 
 const TIMEFRAME_OPTIONS = [
   { value: '1', label: '1m' },
@@ -28,6 +28,8 @@ type LivePlanClientProps = {
   planId: string;
 };
 
+type StatusTone = "green" | "yellow" | "red";
+
 export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClientProps) {
   const [snapshot, setSnapshot] = React.useState(initialSnapshot);
   const [plan, setPlan] = React.useState(initialSnapshot.plan);
@@ -40,9 +42,14 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const [timeframe, setTimeframe] = React.useState(() => normalizeTimeframeFromPlan(initialSnapshot.plan));
   const [nowTick, setNowTick] = React.useState(Date.now());
   const [lastBarTime, setLastBarTime] = React.useState<number | null>(null);
-  const [devMode, setDevMode] = React.useState(() => process.env.NEXT_PUBLIC_DEVTOOLS === '1');
+  const [devMode, setDevMode] = React.useState(() => process.env.NEXT_PUBLIC_DEVTOOLS === "1");
   const [priceRefreshToken, setPriceRefreshToken] = React.useState(0);
+  const [lastPlanHeartbeat, setLastPlanHeartbeat] = React.useState<number | null>(() => Date.now());
+  const [noteEpoch, setNoteEpoch] = React.useState(0);
+  const [noteAnimating, setNoteAnimating] = React.useState(false);
   const lastPriceRefreshRef = React.useRef(0);
+  const lastDeltaAtRef = React.useRef(Date.now());
+  const prefersReducedMotion = usePrefersReducedMotion();
 
   const requestPriceRefresh = React.useCallback(() => {
     const now = Date.now();
@@ -52,6 +59,11 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   }, []);
 
   const activePlanId = plan.plan_id || planId;
+  const markPlanHeartbeat = React.useCallback(() => {
+    const now = Date.now();
+    lastDeltaAtRef.current = now;
+    setLastPlanHeartbeat(now);
+  }, []);
 
   React.useEffect(() => {
     const interval = window.setInterval(() => setNowTick(Date.now()), 1000);
@@ -88,9 +100,10 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         if (!payload || typeof payload !== 'object') return;
         const message = payload as { plan_id?: string; event?: Record<string, unknown> };
         const event = message.event;
-        if (!event || typeof event !== 'object') return;
-        const type = typeof event.t === 'string' ? event.t : null;
+        if (!event || typeof event !== "object") return;
+        const type = typeof event.t === "string" ? event.t : null;
         if (!type) return;
+        markPlanHeartbeat();
         if (type === 'plan_delta') {
           const delta = event as unknown as PlanDeltaEvent;
           setPlan((prev) => mergePlanWithDelta(prev, delta));
@@ -112,15 +125,15 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
           requestPriceRefresh();
           return;
         }
-        if (type === 'plan_state') {
+        if (type === "plan_state") {
           return;
         }
-        if (type === 'tick' || type === 'bar') {
+        if (type === "tick" || type === "bar") {
           requestPriceRefresh();
           return;
         }
       },
-      [requestPriceRefresh],
+      [requestPriceRefresh, markPlanHeartbeat],
     ),
   );
 
@@ -133,19 +146,31 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     return Math.max(0, (nowTick - lastBarTime) / 1000);
   }, [lastBarTime, nowTick]);
 
-  const priceStatus: StatusToken = React.useMemo(() => {
-    if (!streamingEnabled) return 'disconnected';
-    if (socketStatus === 'disconnected') return 'disconnected';
-    if (!lastBarTime || dataAgeSeconds == null || resolutionMs == null) return 'connecting';
-    const threshold = Math.max((resolutionMs / 1000) * 2, 30);
-    return dataAgeSeconds <= threshold ? 'connected' : 'connecting';
-  }, [streamingEnabled, socketStatus, lastBarTime, dataAgeSeconds, resolutionMs]);
+  const planHeartbeatAgeSeconds = React.useMemo(() => {
+    if (!lastPlanHeartbeat) return null;
+    return Math.max(0, (nowTick - lastPlanHeartbeat) / 1000);
+  }, [lastPlanHeartbeat, nowTick]);
 
-  const wsStatus = React.useMemo<StatusToken>(() => {
-    if (socketStatus === 'connected') return 'connected';
-    if (socketStatus === 'connecting') return 'connecting';
-    return 'disconnected';
-  }, [socketStatus]);
+  const resolutionSeconds = React.useMemo(() => {
+    if (resolutionMs == null) return null;
+    return Math.max(1, Math.round(resolutionMs / 1000));
+  }, [resolutionMs]);
+
+  const planStatusColor = React.useMemo<StatusTone>(() => {
+    if (socketStatus === "disconnected") return "red";
+    if (planHeartbeatAgeSeconds == null) return "yellow";
+    if (planHeartbeatAgeSeconds <= 15) return "green";
+    if (planHeartbeatAgeSeconds <= 60) return "yellow";
+    return "red";
+  }, [socketStatus, planHeartbeatAgeSeconds]);
+
+  const dataStatusColor = React.useMemo<StatusTone>(() => {
+    if (!streamingEnabled) return "red";
+    if (dataAgeSeconds == null || resolutionSeconds == null) return "yellow";
+    if (dataAgeSeconds <= resolutionSeconds * 2) return "green";
+    if (dataAgeSeconds <= resolutionSeconds * 6) return "yellow";
+    return "red";
+  }, [streamingEnabled, dataAgeSeconds, resolutionSeconds]);
 
   const sessionBanner = plan.session_state?.banner ?? null;
   const riskBanner =
@@ -153,8 +178,79 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
 
   const planTargets = React.useMemo(() => {
     const rawTargets = Array.isArray(plan.targets) ? plan.targets : [];
-    return rawTargets.filter((value): value is number => typeof value === 'number');
+    return rawTargets.filter((value): value is number => typeof value === "number");
   }, [plan.targets]);
+
+  const coachNote = React.useMemo(() => {
+    const fromPlan = typeof plan.notes === "string" ? plan.notes.trim() : "";
+    const sessionState = plan.session_state as Record<string, unknown> | null | undefined;
+    const sessionNote =
+      sessionState && typeof sessionState["coach_note"] === "string"
+        ? (sessionState["coach_note"] as string).trim()
+        : "";
+    const fallbackMessage =
+      sessionState && typeof sessionState["message"] === "string" ? (sessionState["message"] as string).trim() : "";
+    return fromPlan || sessionNote || fallbackMessage || "";
+  }, [plan]);
+
+  const confluenceTokens = React.useMemo(() => {
+    const tokens: string[] = [];
+    const layerConfluence = layers?.meta?.confluence;
+    if (Array.isArray(layerConfluence)) {
+      layerConfluence.forEach((item) => {
+        if (typeof item === "string") {
+          tokens.push(item);
+          return;
+        }
+        if (item && typeof item === "object") {
+          const label = (item as { label?: string }).label;
+          if (typeof label === "string") tokens.push(label);
+        }
+      });
+    } else if (typeof layerConfluence === "string") {
+      tokens.push(...layerConfluence.split(","));
+    }
+    if (tokens.length === 0) {
+      const planConfluence = Array.isArray((plan as Record<string, unknown>).confluence)
+        ? ((plan as Record<string, unknown>).confluence as unknown[])
+        : [];
+      planConfluence.forEach((item) => {
+        if (typeof item === "string") tokens.push(item);
+      });
+    }
+    return tokens
+      .map((token) => token.trim())
+      .filter(Boolean)
+      .slice(0, 5)
+      .map((token) => token.toUpperCase());
+  }, [layers?.meta?.confluence, plan]);
+
+  const lastPrice = React.useMemo(() => {
+    const details = (plan.details ?? {}) as Record<string, unknown>;
+    return (
+      getNumber((plan as Record<string, unknown>).last_price) ??
+      getNumber(details.last) ??
+      getNumber((plan as Record<string, unknown>).mark) ??
+      null
+    );
+  }, [plan]);
+
+  const priceFormatter = React.useMemo(
+    () =>
+      new Intl.NumberFormat("en-US", {
+        style: "currency",
+        currency: "USD",
+        maximumFractionDigits: 2,
+        minimumFractionDigits: 2,
+      }),
+    [],
+  );
+
+  const lastPriceLabel = lastPrice != null ? priceFormatter.format(lastPrice) : "—";
+  const timeframeLabel = React.useMemo(() => {
+    const match = TIMEFRAME_OPTIONS.find((item) => item.value === timeframe);
+    return match?.label ?? timeframe;
+  }, [timeframe]);
 
   const handleSetFollowLive = React.useCallback((value: boolean) => {
     setFollowLive(value);
@@ -182,22 +278,152 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     setHighlightedLevel(level);
   }, []);
 
+  const handleLastBarTime = React.useCallback((time: number | null) => {
+    setLastBarTime(time);
+    if (time != null) {
+      lastDeltaAtRef.current = Date.now();
+    }
+  }, []);
+
   React.useEffect(() => {
     setTimeframe((current) => current || normalizeTimeframeFromPlan(plan));
   }, [plan]);
 
+  React.useEffect(() => {
+    markPlanHeartbeat();
+  }, [markPlanHeartbeat]);
+
+  React.useEffect(() => {
+    if (socketStatus === "connected") {
+      markPlanHeartbeat();
+    }
+  }, [socketStatus, markPlanHeartbeat]);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const interval = window.setInterval(() => {
+      if (!streamingEnabledRef.current) return;
+      const now = Date.now();
+      if (now - lastDeltaAtRef.current >= 5000) {
+        requestPriceRefresh();
+      }
+    }, 5000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [requestPriceRefresh]);
+
+  React.useEffect(() => {
+    setNoteEpoch((prev) => prev + 1);
+  }, [coachNote]);
+
+  React.useEffect(() => {
+    if (prefersReducedMotion) {
+      setNoteAnimating(false);
+      return;
+    }
+    setNoteAnimating(true);
+    const timer = window.setTimeout(() => {
+      setNoteAnimating(false);
+    }, 450);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [noteEpoch, prefersReducedMotion]);
+
   const planUiLink = React.useMemo(() => extractUiPlanLink(snapshot), [snapshot]);
 
   const statusStrip = (
-    <StatusStrip
-      theme={theme}
-      wsStatus={wsStatus}
-      priceStatus={priceStatus}
-      dataAgeSeconds={dataAgeSeconds}
-      riskBanner={riskBanner}
-      sessionBanner={sessionBanner}
-      onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
-    />
+    <div className="flex flex-col gap-3 px-4 py-4 sm:px-6 lg:px-8" role="region" aria-label="Fancy Trader status">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.25em] text-neutral-400">
+          <span className="text-sm font-semibold tracking-[0.35em] text-emerald-300">Fancy Trader</span>
+          <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[0.68rem] text-emerald-200">
+            {plan.symbol?.toUpperCase() ?? "—"}
+          </span>
+          <span className="rounded-full border border-neutral-700/50 px-2 py-0.5 text-[0.68rem] text-neutral-300">
+            {timeframeLabel}
+          </span>
+          {sessionBanner ? (
+            <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[0.68rem] text-sky-200">
+              {sessionBanner.toUpperCase()}
+            </span>
+          ) : null}
+          {riskBanner ? (
+            <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[0.68rem] text-amber-200">
+              {riskBanner}
+            </span>
+          ) : null}
+        </div>
+        <div className="flex flex-wrap items-center gap-3 text-[0.68rem] uppercase tracking-[0.25em] text-neutral-300">
+          <span className="flex items-center gap-2">
+            Plan
+            <StatusDot color={planStatusColor} label={`Plan status ${planStatusColor}`} />
+          </span>
+          <span className="flex items-center gap-2">
+            Data
+            <StatusDot color={dataStatusColor} label={`Data status ${dataStatusColor}`} />
+          </span>
+          <span className="text-neutral-200">
+            Last:&nbsp;
+            <span className="font-semibold text-white">{lastPriceLabel}</span>
+          </span>
+        </div>
+      </div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        {confluenceTokens.length ? (
+          <div className="flex items-center gap-2 text-[0.62rem] uppercase tracking-[0.35em] text-neutral-400">
+            <span className="text-neutral-500">Confluence</span>
+            <div className="flex items-center gap-2">
+              {confluenceTokens.map((token, index) => (
+                <span key={`${token}-${index}`} className="flex items-center gap-1">
+                  <span className="block h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+                  <span className="text-neutral-300">{token}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        <div
+          className={clsx(
+            "flex min-h-[2.5rem] max-w-full items-center gap-2 overflow-hidden rounded-2xl border px-3 py-2 text-sm leading-tight text-neutral-100 shadow-sm sm:max-w-[380px]",
+            streamingEnabled ? "border-emerald-500/40 bg-emerald-500/10" : "border-neutral-700/60 bg-neutral-900/70",
+          )}
+        >
+          <span className="text-[0.62rem] uppercase tracking-[0.3em] text-emerald-200">Coach note</span>
+          <div className="relative flex-1 overflow-hidden">
+            <div
+              key={noteEpoch}
+              className={clsx(
+                "truncate text-neutral-200",
+                prefersReducedMotion
+                  ? ""
+                  : noteAnimating
+                    ? "translate-y-0 opacity-100 transition-transform duration-300 ease-out"
+                    : "translate-y-0 opacity-100",
+              )}
+            >
+              {coachNote || "Coach note pending"}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="flex justify-end pt-1">
+        <button
+          type="button"
+          onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
+          className={clsx(
+            "rounded-full px-3 py-1 text-xs uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+            theme === "light"
+              ? "border border-slate-300 bg-white text-slate-700 hover:border-emerald-400 hover:text-emerald-600"
+              : "border border-neutral-700 bg-neutral-900 text-neutral-200 hover:border-emerald-400 hover:text-emerald-200",
+          )}
+          aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`}
+        >
+          {theme === "light" ? "Dark Mode" : "Light Mode"}
+        </button>
+      </div>
+    </div>
   );
 
   const planPanel = (
@@ -231,7 +457,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       timeframe={timeframe}
       timeframeOptions={TIMEFRAME_OPTIONS}
       onSelectTimeframe={handleSelectTimeframe}
-      onLastBarTimeChange={setLastBarTime}
+      onLastBarTimeChange={handleLastBarTime}
       onReplayStateChange={(state) => {
         if (state === 'playing') {
           setFollowLive(false);
@@ -367,4 +593,55 @@ function extractUiPlanLink(snapshot: PlanSnapshot): string | undefined {
   const planId = snapshot.plan?.plan_id;
   if (!planId) return undefined;
   return `${PUBLIC_UI_BASE_URL}/plan/${encodeURIComponent(planId)}`;
+}
+
+const STATUS_TONE_COLOR: Record<StatusTone, string> = {
+  green: "#34d399",
+  yellow: "#f59e0b",
+  red: "#ef4444",
+};
+
+export function StatusDot({ color, label, className }: { color: StatusTone; label: string; className?: string }) {
+  return (
+    <span className={clsx("inline-flex h-2 w-2 items-center justify-center", className)}>
+      <span
+        aria-label={label}
+        role="status"
+        className="block h-2 w-2 rounded-full"
+        style={{ backgroundColor: STATUS_TONE_COLOR[color] }}
+      />
+    </span>
+  );
+}
+
+function getNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function usePrefersReducedMotion(): boolean {
+  const [prefers, setPrefers] = React.useState(false);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setPrefers(media.matches);
+    update();
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", update);
+      return () => {
+        media.removeEventListener("change", update);
+      };
+    }
+    media.addListener(update);
+    return () => {
+      media.removeListener(update);
+    };
+  }, []);
+
+  return prefers;
 }

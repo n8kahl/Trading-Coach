@@ -152,6 +152,16 @@ export default function PlanChartPanel({
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
   }, [plan.targets, structuredPlan?.targets, targetMeta]);
 
+  const targetDetails = useMemo<Array<{ label?: string | null; price: number; rationale: string | null }>>(
+    () =>
+      overlayTargets.map((target, index) => ({
+        ...target,
+        rationale: extractTargetRationale(targetMeta[index]),
+      })),
+    [overlayTargets, targetMeta],
+  );
+
+
   const emaPeriods = useMemo(() => {
     const raw = chartParams["ema"] ?? chartParams["emas"] ?? chartParams["emaPeriods"];
     if (!raw) return [];
@@ -219,6 +229,47 @@ export default function PlanChartPanel({
     );
   }, [plan, chartParams]);
 
+  const tradeMarkers = useMemo(() => {
+    const markers: Array<{ key: string; label: string; value: number; tone: "emerald" | "rose" | "amber" | "neutral" }> = [];
+    if (entryPrice != null) {
+      markers.push({ key: "entry", label: "Entry", value: entryPrice, tone: "emerald" });
+    }
+    if (stopPrice != null) {
+      markers.push({ key: "stop", label: "Stop", value: stopPrice, tone: "rose" });
+    }
+    if (trailingStop != null) {
+      markers.push({ key: "trail", label: "Trail", value: trailingStop, tone: "amber" });
+    }
+    targetDetails.forEach((detail, index) => {
+      markers.push({
+        key: `tp-${detail.label ?? `target-${index}`}-${index}`,
+        label: detail.label ?? `TP${index + 1}`,
+        value: detail.price,
+        tone: "neutral",
+      });
+    });
+    return markers;
+  }, [entryPrice, stopPrice, trailingStop, targetDetails]);
+
+  const targetRationales = useMemo(
+    () =>
+      targetDetails
+        .map((detail) => {
+          if (typeof detail.rationale === "string") {
+            const trimmed = detail.rationale.trim();
+            if (trimmed.length > 0) {
+              return { ...detail, rationale: trimmed };
+            }
+          }
+          return null;
+        })
+        .filter(
+          (detail): detail is { label?: string | null; price: number; rationale: string } =>
+            detail !== null,
+        ),
+    [targetDetails],
+  );
+
   const chartOverlays = useMemo<ChartOverlayState>(
     () => ({
       entry: entryPrice,
@@ -241,7 +292,6 @@ export default function PlanChartPanel({
 
   useEffect(() => {
     if (!devMode) return;
-    // eslint-disable-next-line no-console
     console.log("[PlanChartPanel] bars", { symbol: priceSymbol, timeframe, count: priceBars.length });
   }, [devMode, priceBars.length, priceSymbol, timeframe]);
 
@@ -312,7 +362,6 @@ export default function PlanChartPanel({
         chartHandle.current?.followLive();
       }
       if (devMode) {
-        // eslint-disable-next-line no-console
         console.log("[PlanChartPanel] lastBarTime", { time });
       }
     },
@@ -366,11 +415,7 @@ export default function PlanChartPanel({
           <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.2em] text-neutral-400">
             <ToggleChip label="Follow Live" active={followLive} onClick={handleFollowLiveClick} />
             <ToggleChip label="Streaming" active={streamingEnabled} onClick={handleStreamingClick} />
-            <ToggleChip
-              label={supportingVisible ? "Supporting On" : "Supporting Off"}
-              active={supportingVisible}
-              onClick={handleSupportingClick}
-            />
+            <ToggleChip label={supportingVisible ? "Levels On" : "Levels Off"} active={supportingVisible} onClick={handleSupportingClick} />
             <ToggleChip
               label={replayActive ? "Stop Replay" : "Replay"}
               active={replayActive}
@@ -400,29 +445,59 @@ export default function PlanChartPanel({
       <section className="space-y-3">
         <div
           className={clsx(
-            "rounded-2xl border border-neutral-800/70 bg-neutral-950/40 p-3 text-xs uppercase tracking-[0.25em] text-neutral-400",
+            "space-y-3 rounded-2xl border border-neutral-800/70 bg-neutral-950/40 p-3",
             supportingVisible ? "shadow-[0_0_25px_rgba(16,185,129,0.15)]" : "",
           )}
         >
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="text-neutral-500">Primary levels:</span>
-            {primaryLevels.length === 0 ? (
-              <span className="text-neutral-500">None persisted</span>
-            ) : (
-              primaryLevels.map((level) => (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-300">
+            {tradeMarkers.length ? (
+              tradeMarkers.map((marker) => (
                 <span
-                  key={`${level.label}-${level.price}`}
-                  className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-emerald-200"
+                  key={marker.key}
+                  className={clsx(
+                    "rounded-md border px-2 py-0.5 uppercase tracking-[0.15em]",
+                    marker.tone === "emerald"
+                      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
+                      : marker.tone === "rose"
+                        ? "border-rose-500/40 bg-rose-500/10 text-rose-100"
+                        : marker.tone === "amber"
+                          ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+                          : "border-neutral-700/60 bg-neutral-900/40 text-neutral-200",
+                  )}
                 >
-                  {level.label} {level.price.toFixed(2)}
+                  {marker.label} {marker.value.toFixed(2)}
                 </span>
               ))
+            ) : (
+              <span className="text-neutral-500">Trade markers unavailable</span>
+            )}
+          </div>
+          {targetRationales.length ? (
+            <div className="space-y-1 text-[0.7rem] leading-snug text-neutral-400">
+              {targetRationales.map((detail) => (
+                <div key={`${detail.label}-${detail.price}-rationale`} className="flex flex-wrap items-baseline gap-2">
+                  <span className="font-semibold uppercase tracking-[0.2em] text-neutral-100">{detail.label}</span>
+                  <span className="text-neutral-400">{detail.rationale}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <div className="text-xs text-neutral-400">
+            <span className="mr-2 text-neutral-500">Primary levels:</span>
+            {primaryLevels.length ? (
+              primaryLevels.map((level) => (
+                <span key={`${level.label}-${level.price}`} className="mr-3">
+                  <span className="text-neutral-300">{level.label}</span> {level.price.toFixed(2)}
+                </span>
+              ))
+            ) : (
+              <span className="text-neutral-500">None</span>
             )}
           </div>
         </div>
       </section>
 
-      <section className="relative min-h-[360px] overflow-hidden rounded-3xl border border-neutral-800/70 bg-neutral-950/40 p-2">
+      <section className="relative min-h-[65vh] overflow-hidden rounded-3xl border border-neutral-800/70 bg-neutral-950/40 p-2 md:min-h-[460px]">
         {chartStatusMessage ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-neutral-950/70 text-sm text-neutral-300">
             {chartStatusMessage}
@@ -495,4 +570,25 @@ function PlanControlCard({ title, body, tone }: { title: string; body: string | 
       <p className="mt-2">{body}</p>
     </div>
   );
+}
+
+function extractTargetRationale(meta: TargetMetaEntry | undefined): string | null {
+  if (!meta) return null;
+  const record = meta as Record<string, unknown>;
+  const candidateKeys = ["rationale", "reason", "context", "note", "summary", "basis", "basis_label", "snap_tag", "tag"];
+  for (const key of candidateKeys) {
+    const value = record[key];
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed) return trimmed;
+    }
+    if (Array.isArray(value)) {
+      const joined = value
+        .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+        .filter(Boolean)
+        .join(" · ");
+      if (joined) return joined;
+    }
+  }
+  return null;
 }

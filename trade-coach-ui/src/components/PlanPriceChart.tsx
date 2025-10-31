@@ -1,7 +1,10 @@
 "use client";
 
+import clsx from "clsx";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import type {
+  AutoscaleInfo,
+  AutoscaleInfoProvider,
   CandlestickData,
   HistogramData,
   IChartApi,
@@ -67,25 +70,6 @@ const GRID_LIGHT = "rgba(148, 163, 184, 0.25)";
 
 const EMA_COLORS = ["#93c5fd", "#f97316", "#a855f7", "#14b8a6"];
 
-function resolutionToSeconds(resolution: string): number {
-  const token = resolution.trim().toUpperCase();
-  if (!token) return 60;
-  if (token.endsWith("D")) {
-    const days = Number.parseInt(token.replace("D", ""), 10);
-    return Number.isFinite(days) && days > 0 ? days * 24 * 60 * 60 : 24 * 60 * 60;
-  }
-  if (token.endsWith("W")) {
-    const weeks = Number.parseInt(token.replace("W", ""), 10);
-    return Number.isFinite(weeks) && weeks > 0 ? weeks * 7 * 24 * 60 * 60 : 7 * 24 * 60 * 60;
-  }
-  if (token.endsWith("H")) {
-    const hours = Number.parseInt(token.replace("H", ""), 10);
-    return Number.isFinite(hours) && hours > 0 ? hours * 60 * 60 : 60 * 60;
-  }
-  const minutes = Number.parseInt(token, 10);
-  return Number.isFinite(minutes) && minutes > 0 ? minutes * 60 : 60;
-}
-
 function computeEMA(bars: PriceSeriesCandle[], length: number): LineData[] {
   if (!Number.isFinite(length) || length <= 1 || bars.length === 0) return [];
   let ema = bars[0]?.close ?? 0;
@@ -135,7 +119,7 @@ function toPriceLineId(base: string, value: number | string, index?: number): st
 }
 
 const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
-  ({ planId, symbol, resolution, theme, data, overlays, onLastBarTimeChange, devMode = false }, ref) => {
+  ({ planId, symbol, resolution: _resolution, theme, data, overlays, onLastBarTimeChange, devMode = false }, ref) => {
     const debug =
       devMode || (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("dev") !== null);
     const [debugMsgs, setDebugMsgs] = useState<string[]>([]);
@@ -143,7 +127,6 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       (m: string) => {
         if (!debug) return;
         setDebugMsgs((prev) => (prev.length > 30 ? [...prev.slice(-20), m] : [...prev, m]));
-        // eslint-disable-next-line no-console
         console.log(m);
       },
       [debug],
@@ -157,6 +140,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     const vwapSeriesRef = useRef<LineSeries | null>(null);
     const overlayLinesRef = useRef<Map<string, IPriceLine>>(new Map());
     const overlaysRef = useRef<ChartOverlayState>(overlays);
+    const overlayBoundsRef = useRef<{ min: number | null; max: number | null }>({ min: null, max: null });
     const resizeObserverRef = useRef<ResizeObserver | null>(null);
     const replayTimerRef = useRef<number | null>(null);
     const replayActiveRef = useRef(false);
@@ -164,19 +148,54 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     const lastBarTimeRef = useRef<number | null>(null);
     const [chartReady, setChartReady] = useState(false);
     const hasInitialLoadRef = useRef(false);
-    const resolutionSecondsRef = useRef(resolutionToSeconds(resolution));
 
-    useEffect(() => {
-      resolutionSecondsRef.current = resolutionToSeconds(resolution);
-    }, [resolution]);
+    const overlayLegendItems = useMemo(() => {
+      const items: Array<{ key: string; label: string; tone: "vwap" | "ema" }> = [];
+      const periods = (overlays.emaPeriods ?? [])
+        .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 1)
+        .map((value) => Math.round(value))
+        .sort((a, b) => a - b);
+      const uniquePeriods = Array.from(new Set(periods));
+      if (overlays.showVWAP !== false) {
+        items.push({ key: "vwap", label: "VWAP", tone: "vwap" });
+      }
+      if (uniquePeriods.length) {
+        items.push({ key: "ema", label: `EMA ${uniquePeriods.join("/")}`, tone: "ema" });
+      }
+      return items;
+    }, [overlays]);
+
+    const computeOverlayBounds = useCallback((overlayState: ChartOverlayState | null | undefined) => {
+      if (!overlayState) return { min: null, max: null };
+      const values: number[] = [];
+      const push = (value: number | null | undefined) => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          values.push(value);
+        }
+      };
+      push(overlayState.entry);
+      push(overlayState.stop);
+      push(overlayState.trailingStop);
+      overlayState.targets?.forEach((target) => {
+        if (target) push(target.price);
+      });
+      return values.length
+        ? { min: Math.min(...values), max: Math.max(...values) }
+        : { min: null, max: null };
+    }, []);
+
+    const updateOverlayBounds = useCallback(() => {
+      overlayBoundsRef.current = computeOverlayBounds(overlaysRef.current);
+    }, [computeOverlayBounds]);
+
 
     const safeData = useMemo(() => {
       if (!Array.isArray(data)) return [];
       return data.filter((bar): bar is PriceSeriesCandle => {
         if (!bar) return false;
-        const time = Number((bar as any).time);
+        const timeValue = typeof bar.time === "number" ? bar.time : Number(bar.time);
         return (
-          Number.isFinite(time) &&
+          Number.isFinite(timeValue) &&
           Number.isFinite(bar.open) &&
           Number.isFinite(bar.high) &&
           Number.isFinite(bar.low) &&
@@ -291,6 +310,34 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           return;
         }
 
+        const autoscaleProvider: AutoscaleInfoProvider = (baseImplementation) => {
+          const baseInfo = baseImplementation();
+          const bounds = overlayBoundsRef.current;
+          if (bounds.min == null || bounds.max == null) {
+            return baseInfo;
+          }
+          const span = Math.max(bounds.max - bounds.min, 0);
+          const fallback = Math.abs(bounds.max ?? bounds.min ?? 0) * 0.001;
+          const padding = span > 0 ? span * 0.08 : Math.max(fallback, 0.5);
+          const minValue = bounds.min - padding;
+          const maxValue = bounds.max + padding;
+          if (baseInfo?.priceRange) {
+            return {
+              ...baseInfo,
+              priceRange: {
+                minValue: Math.min(baseInfo.priceRange.minValue, minValue),
+                maxValue: Math.max(baseInfo.priceRange.maxValue, maxValue),
+              },
+            } satisfies AutoscaleInfo;
+          }
+          return {
+            priceRange: {
+              minValue,
+              maxValue,
+            },
+          } satisfies AutoscaleInfo;
+        };
+
         const candleSeries = chartApi.addCandlestickSeries({
           upColor: GREEN,
           wickUpColor: GREEN,
@@ -298,6 +345,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           downColor: RED,
           wickDownColor: RED,
           borderDownColor: RED,
+          autoscaleInfoProvider: autoscaleProvider,
         });
 
         const volumeSeries = chartApi.addHistogramSeries({
@@ -463,54 +511,34 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       volumeSeries.setData(volumes);
 
       if (candles.length) {
-        const last = candles[candles.length - 1];
+        const lastIndex = candles.length - 1;
+        const last = candles[lastIndex];
         const lastMs = Number(last.time) * 1000;
         lastBarTimeRef.current = Number.isFinite(lastMs) ? lastMs : null;
         onLastBarTimeChange?.(lastBarTimeRef.current);
         addDbg(`[PlanPriceChart] last bar ms=${lastBarTimeRef.current}`);
-        // Force a sensible visible window to avoid blank viewports in odd cases
-        const lastSec = Number(last.time);
-        if (Number.isFinite(lastSec)) {
-          const lookbackSeconds = Math.max(resolutionSecondsRef.current * 120, 300);
-          const from = Math.max(lastSec - lookbackSeconds, lastSec - 60 * 60);
+        const logicalRange = {
+          from: Math.max(lastIndex - 120, 0),
+          to: lastIndex + 2,
+        };
+        if (!hasInitialLoadRef.current) {
+          hasInitialLoadRef.current = true;
           try {
-            chartRef.current?.timeScale().setVisibleRange({ from, to: lastSec });
-          } catch {}
-          addDbg(
-            `[PlanPriceChart] setData→setVisibleRange from=${from} to=${lastSec} vr=${JSON.stringify(
-              chartRef.current?.timeScale().getVisibleRange?.() ?? null,
-            )}`,
-          );
+            chartRef.current?.timeScale().setVisibleLogicalRange(logicalRange);
+          } catch (error) {
+            addDbg(`[PlanPriceChart] initial logical range failed: ${String(error)}`);
+          }
+        } else if (autoFollowRef.current) {
+          try {
+            chartRef.current?.timeScale().setVisibleLogicalRange(logicalRange);
+          } catch (error) {
+            addDbg(`[PlanPriceChart] follow logical range failed: ${String(error)}`);
+          }
         }
       } else {
         lastBarTimeRef.current = null;
         onLastBarTimeChange?.(null);
         addDbg(`[PlanPriceChart] no candles`);
-      }
-
-      if (!hasInitialLoadRef.current) {
-        hasInitialLoadRef.current = true;
-        if (candles.length) {
-          chartRef.current?.timeScale().fitContent();
-        }
-      } else if (autoFollowRef.current && candles.length) {
-        // Keep the viewport anchored to the latest loaded bar.
-        // Avoid scrollToRealTime() because when markets are closed the
-        // "real time" cursor advances beyond the last bar and the chart looks empty.
-        const last = candles[candles.length - 1];
-        const lastTime = Number(last.time);
-        if (Number.isFinite(lastTime)) {
-          const lookbackSeconds = Math.max(resolutionSecondsRef.current * 120, 300);
-          const from = Math.max(lastTime - lookbackSeconds, lastTime - 60 * 60);
-          try {
-            chartRef.current?.timeScale().setVisibleRange({ from, to: lastTime });
-          } catch {}
-          addDbg(
-            `[PlanPriceChart] keep anchored from=${from} to=${lastTime} vr=${JSON.stringify(
-              chartRef.current?.timeScale().getVisibleRange?.() ?? null,
-            )}`,
-          );
-        }
       }
     }, [chartReady, safeData, onLastBarTimeChange]);
 
@@ -656,8 +684,9 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
 
     useEffect(() => {
       overlaysRef.current = overlays;
+      updateOverlayBounds();
       syncDerivedSeries();
-    }, [overlays, syncDerivedSeries, safeData]);
+    }, [overlays, syncDerivedSeries, safeData, updateOverlayBounds]);
 
     useEffect(() => {
       syncDerivedSeries();
@@ -684,19 +713,22 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       stopReplay();
       autoFollowRef.current = true;
       const last = safeData[safeData.length - 1];
+      const lastIndex = safeData.length - 1;
       const lastTime = Number(last.time);
       if (!Number.isFinite(lastTime)) return;
-      const lookbackSeconds = Math.max(resolutionSecondsRef.current * 120, 300);
-      const from = Math.max(lastTime - lookbackSeconds, lastTime - 60 * 60);
+      const logicalRange = {
+        from: Math.max(lastIndex - 120, 0),
+        to: lastIndex + 2,
+      };
       try {
-        chart.timeScale().setVisibleRange({ from, to: lastTime });
+        chart.timeScale().setVisibleLogicalRange(logicalRange);
       } catch (error) {
-        addDbg(`[PlanPriceChart] followLive range failed: ${String(error)}`);
+        addDbg(`[PlanPriceChart] followLive logical range failed: ${String(error)}`);
       }
       // Do not call scrollToRealTime() here; see note above about closed markets.
       addDbg(
-        `[PlanPriceChart] followLive from=${from} to=${lastTime} lookback=${lookbackSeconds} vr=${JSON.stringify(
-          chart.timeScale().getVisibleRange?.() ?? null,
+        `[PlanPriceChart] followLive logical=${JSON.stringify(logicalRange)} vr=${JSON.stringify(
+          chart.timeScale().getVisibleLogicalRange?.() ?? null,
         )}`,
       );
     }, [safeData, stopReplay]);
@@ -753,9 +785,42 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     );
 
     return (
-      <div ref={containerRef} className="relative h-[360px] w-full rounded-2xl border border-neutral-800/70" data-symbol={symbol} data-plan-id={planId}>
+      <div
+        ref={containerRef}
+        className="relative h-full min-h-[360px] w-full rounded-2xl border border-neutral-800/70"
+        data-symbol={symbol}
+        data-plan-id={planId}
+        data-resolution={_resolution}
+      >
+        {overlayLegendItems.length ? (
+          <div
+            className={clsx(
+              "pointer-events-none absolute left-4 top-4 z-20 flex flex-wrap items-center gap-2 rounded-lg px-3 py-2 text-[0.68rem] font-semibold",
+              theme === "light"
+                ? "bg-white/85 text-slate-700 shadow-sm"
+                : "bg-neutral-950/70 text-neutral-200 backdrop-blur",
+            )}
+          >
+            {overlayLegendItems.map((item) => (
+              <span
+                key={item.key}
+                className={clsx(
+                  item.tone === "ema"
+                    ? theme === "light"
+                      ? "text-sky-700"
+                      : "text-sky-200"
+                    : theme === "light"
+                      ? "text-slate-800"
+                      : "text-neutral-100",
+                )}
+              >
+                {item.label}
+              </span>
+            ))}
+          </div>
+        ) : null}
         {debug && debugMsgs.length ? (
-          <div className="pointer-events-none absolute right-2 top-2 z-20 max-w-[50%] rounded-md bg-neutral-900/70 p-2 text-[10px] leading-snug text-neutral-200">
+          <div className="pointer-events-none absolute right-3 top-3 z-30 max-w-[50%] rounded-md bg-neutral-900/70 p-2 text-[10px] leading-snug text-neutral-200">
             {debugMsgs.map((m, i) => (
               <div key={i}>{m}</div>
             ))}
