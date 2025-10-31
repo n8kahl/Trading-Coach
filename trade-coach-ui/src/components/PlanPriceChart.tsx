@@ -372,7 +372,21 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       const volumeSeries = volumeSeriesRef.current;
       if (!candleSeries || !volumeSeries) return;
 
-      const candles: CandlestickData[] = data.map((bar) => ({
+      const safeBars = Array.isArray(data)
+        ? data.filter((bar) =>
+            !!bar &&
+            typeof (bar as any).time !== "undefined" &&
+            Number.isFinite(Number((bar as any).time)) &&
+            Number.isFinite(bar.open) &&
+            Number.isFinite(bar.high) &&
+            Number.isFinite(bar.low) &&
+            Number.isFinite(bar.close),
+          )
+        : [];
+      if (debug && safeBars.length !== data.length) {
+        addDbg(`[PlanPriceChart] filtered invalid bars: in=${data.length} out=${safeBars.length}`);
+      }
+      const candles: CandlestickData[] = safeBars.map((bar) => ({
         time: bar.time as Time,
         open: bar.open,
         high: bar.high,
@@ -388,7 +402,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         addDbg(`[PlanPriceChart] setData count=${n} first=${first} last=${last}`);
       }
 
-      const volumes: HistogramData[] = data.map((bar) => ({
+      const volumes: HistogramData[] = safeBars.map((bar) => ({
         time: bar.time as Time,
         value: Number.isFinite(bar.volume) && bar.volume != null ? bar.volume : 0,
         color: bar.close >= bar.open ? `${GREEN}55` : `${RED}55`,
