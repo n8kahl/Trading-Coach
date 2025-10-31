@@ -620,7 +620,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     useEffect(() => {
       overlaysRef.current = overlays;
       syncDerivedSeries();
-    }, [overlays, syncDerivedSeries]);
+    }, [overlays, syncDerivedSeries, safeData]);
 
     useEffect(() => {
       syncDerivedSeries();
@@ -633,6 +633,13 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         replayTimerRef.current = null;
       }
     }, []);
+
+    useEffect(() => {
+      if (safeData.length === 0) {
+        stopReplay();
+        autoFollowRef.current = true;
+      }
+    }, [safeData.length, stopReplay]);
 
     const followLive = useCallback(() => {
       const chart = chartRef.current;
