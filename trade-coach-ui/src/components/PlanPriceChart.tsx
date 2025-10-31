@@ -523,7 +523,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           } satisfies AutoscaleInfo;
         };
 
-        const candleSeries = chartApi.addCandlestickSeries({
+        const candleSeries = chart.addCandlestickSeries({
           upColor: GREEN,
           wickUpColor: GREEN,
           borderUpColor: GREEN,
@@ -533,7 +533,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           autoscaleInfoProvider: autoscaleProvider,
         });
 
-        const volumeSeries = chartApi.addHistogramSeries({
+        const volumeSeries = chart.addHistogramSeries({
           priceScaleId: "",
           color: "rgba(148, 163, 184, 0.4)",
         });
