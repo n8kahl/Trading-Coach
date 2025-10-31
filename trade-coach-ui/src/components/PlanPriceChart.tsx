@@ -170,6 +170,28 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       resolutionSecondsRef.current = resolutionToSeconds(resolution);
     }, [resolution]);
 
+    const safeData = useMemo(() => {
+      if (!Array.isArray(data)) return [];
+      return data.filter((bar): bar is PriceSeriesCandle => {
+        if (!bar) return false;
+        const time = Number((bar as any).time);
+        return (
+          Number.isFinite(time) &&
+          Number.isFinite(bar.open) &&
+          Number.isFinite(bar.high) &&
+          Number.isFinite(bar.low) &&
+          Number.isFinite(bar.close)
+        );
+      });
+    }, [data]);
+
+    useEffect(() => {
+      if (!debug || !Array.isArray(data)) return;
+      if (safeData.length !== data.length) {
+        addDbg(`[PlanPriceChart] filtered invalid bars: in=${data.length} out=${safeData.length}`);
+      }
+    }, [debug, data, safeData, addDbg]);
+
     useEffect(() => {
       if (!containerRef.current || chartRef.current) return;
       let disposed = false;
@@ -372,21 +394,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       const volumeSeries = volumeSeriesRef.current;
       if (!candleSeries || !volumeSeries) return;
 
-      const safeBars = Array.isArray(data)
-        ? data.filter((bar) =>
-            !!bar &&
-            typeof (bar as any).time !== "undefined" &&
-            Number.isFinite(Number((bar as any).time)) &&
-            Number.isFinite(bar.open) &&
-            Number.isFinite(bar.high) &&
-            Number.isFinite(bar.low) &&
-            Number.isFinite(bar.close),
-          )
-        : [];
-      if (debug && safeBars.length !== data.length) {
-        addDbg(`[PlanPriceChart] filtered invalid bars: in=${data.length} out=${safeBars.length}`);
-      }
-      const candles: CandlestickData[] = safeBars.map((bar) => ({
+      const candles: CandlestickData[] = safeData.map((bar) => ({
         time: bar.time as Time,
         open: bar.open,
         high: bar.high,
@@ -402,7 +410,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         addDbg(`[PlanPriceChart] setData count=${n} first=${first} last=${last}`);
       }
 
-      const volumes: HistogramData[] = safeBars.map((bar) => ({
+      const volumes: HistogramData[] = safeData.map((bar) => ({
         time: bar.time as Time,
         value: Number.isFinite(bar.volume) && bar.volume != null ? bar.volume : 0,
         color: bar.close >= bar.open ? `${GREEN}55` : `${RED}55`,
@@ -457,10 +465,10 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           );
         }
       }
-    }, [chartReady, data, onLastBarTimeChange]);
+    }, [chartReady, safeData, onLastBarTimeChange]);
 
     const syncDerivedSeries = useCallback(() => {
-      if (!chartReady || data.length === 0) return;
+      if (!chartReady || safeData.length === 0) return;
       const lib = chartLibRef.current;
       const chart = chartRef.current;
       const candleSeries = candleSeriesRef.current;
@@ -486,7 +494,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           });
           emaSeriesRef.current.set(period, series);
         }
-        series.setData(computeEMA(data, period));
+        series.setData(computeEMA(safeData, period));
       });
 
       if (overlayState.showVWAP) {
@@ -497,7 +505,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
             lineStyle: lib.LineStyle.Solid,
           });
         }
-        vwapSeriesRef.current.setData(computeVWAP(data));
+        vwapSeriesRef.current.setData(computeVWAP(safeData));
       } else if (vwapSeriesRef.current) {
         chart.removeSeries(vwapSeriesRef.current);
         vwapSeriesRef.current = null;
@@ -597,7 +605,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           });
         }
       });
-    }, [chartReady, data]);
+    }, [chartReady, safeData]);
 
     useEffect(() => {
       overlaysRef.current = overlays;
@@ -618,10 +626,10 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
 
     const followLive = useCallback(() => {
       const chart = chartRef.current;
-      if (!chart || !data.length) return;
+      if (!chart || !safeData.length) return;
       stopReplay();
       autoFollowRef.current = true;
-      const last = data[data.length - 1];
+      const last = safeData[safeData.length - 1];
       const lastTime = Number(last.time);
       if (!Number.isFinite(lastTime)) return;
       const lookbackSeconds = Math.max(resolutionSecondsRef.current * 120, 300);
@@ -637,16 +645,16 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           chart.timeScale().getVisibleRange?.() ?? null,
         )}`,
       );
-    }, [data, devMode, stopReplay]);
+    }, [safeData, stopReplay]);
 
     const startReplay = useCallback(() => {
       const chart = chartRef.current;
-      if (!chart || data.length < 60) return;
+      if (!chart || safeData.length < 60) return;
       stopReplay();
       autoFollowRef.current = false;
       replayActiveRef.current = true;
-      let index = Math.max(data.length - 200, 0);
-      const step = Math.max(1, Math.floor(data.length / 120));
+      let index = Math.max(safeData.length - 200, 0);
+      const step = Math.max(1, Math.floor(safeData.length / 120));
 
       const tick = () => {
         if (!replayActiveRef.current || !chart) {
@@ -654,13 +662,13 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           return;
         }
         index += step;
-        if (index >= data.length) {
+        if (index >= safeData.length) {
           followLive();
           return;
         }
-        const end = data[index];
+        const end = safeData[index];
         const startIdx = Math.max(index - 120, 0);
-        const start = data[startIdx];
+        const start = safeData[startIdx];
         chart.timeScale().setVisibleRange({
           from: Number(start.time),
           to: Number(end.time),
@@ -669,7 +677,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
 
       tick();
       replayTimerRef.current = window.setInterval(tick, 400);
-    }, [data, followLive, stopReplay]);
+    }, [safeData, followLive, stopReplay]);
 
     useImperativeHandle(
       ref,
