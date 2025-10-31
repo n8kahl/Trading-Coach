@@ -31,6 +31,10 @@ type LivePlanClientProps = {
 
 type StatusTone = "green" | "yellow" | "red";
 
+function sanitizeSymbolToken(value: string): string {
+  return value.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 6);
+}
+
 export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClientProps) {
   const router = useRouter();
   const [snapshot, setSnapshot] = React.useState(initialSnapshot);
@@ -251,8 +255,8 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   }, [plan.targets]);
 
   React.useEffect(() => {
-    setSymbolDraft(plan.symbol ? sanitizeSymbolInput(plan.symbol) : "");
-  }, [plan.symbol, sanitizeSymbolInput]);
+    setSymbolDraft(plan.symbol ? sanitizeSymbolToken(String(plan.symbol)) : "");
+  }, [plan.symbol]);
 
   const coachNote = React.useMemo(() => {
     const fromPlan = typeof plan.notes === "string" ? plan.notes.trim() : "";
@@ -393,19 +397,17 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     return match?.label ?? timeframe;
   }, [timeframe]);
 
-  const sanitizeSymbolInput = React.useCallback((value: string) => value.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 6), []);
-
   const handleSymbolInputChange = React.useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
-      setSymbolDraft(sanitizeSymbolInput(event.target.value));
+      setSymbolDraft(sanitizeSymbolToken(event.target.value));
     },
-    [sanitizeSymbolInput],
+    [],
   );
 
   const handleSymbolSubmit = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      const token = sanitizeSymbolInput(symbolDraft);
+      const token = sanitizeSymbolToken(symbolDraft);
       if (!token || symbolSubmitting) return;
       const now = Date.now();
       if (now - symbolRequestRef.current < 300) return;
@@ -434,7 +436,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         setSymbolSubmitting(false);
       }
     },
-    [router, sanitizeSymbolInput, symbolDraft, symbolSubmitting],
+    [router, symbolDraft, symbolSubmitting],
   );
 
   React.useEffect(() => {
