@@ -394,6 +394,16 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       const volumeSeries = volumeSeriesRef.current;
       if (!candleSeries || !volumeSeries) return;
 
+      if (!safeData.every((bar) => bar && Number.isFinite(Number((bar as any).time))))) {
+        addDbg("[PlanPriceChart] skipped setData: found invalid bar(s)");
+        safeData.forEach((bar, index) => {
+          if (!bar || !Number.isFinite(Number((bar as any).time))) {
+            addDbg(`[PlanPriceChart] bad bar at ${index}: ${JSON.stringify(bar)}`);
+          }
+        });
+        return;
+      }
+
       const candles: CandlestickData[] = safeData.map((bar) => ({
         time: bar.time as Time,
         open: bar.open,
@@ -605,7 +615,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
           });
         }
       });
-    }, [chartReady, safeData]);
+    }, [chartReady, safeData, overlays]);
 
     useEffect(() => {
       overlaysRef.current = overlays;
@@ -626,7 +636,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
 
     const followLive = useCallback(() => {
       const chart = chartRef.current;
-      if (!chart || !safeData.length) return;
+      if (!chart || safeData.length === 0) return;
       stopReplay();
       autoFollowRef.current = true;
       const last = safeData[safeData.length - 1];
@@ -659,6 +669,11 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       const tick = () => {
         if (!replayActiveRef.current || !chart) {
           stopReplay();
+          return;
+        }
+        if (safeData.length < 2) {
+          stopReplay();
+          autoFollowRef.current = true;
           return;
         }
         index += step;
