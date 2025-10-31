@@ -296,7 +296,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
 
   const trailingStopValue = React.useMemo(() => resolveTrailingStop(plan), [plan]);
   const resolvedTargets = React.useMemo(() => resolvePlanTargets(plan), [plan]);
-  const planTargets = React.useMemo(() => resolvedTargets.map((target) => target.price), [resolvedTargets]);
   const entryValue = React.useMemo(() => resolvePlanEntry(plan), [plan]);
   const stopResolved = React.useMemo(() => resolvePlanStop(plan, trailingStopValue), [plan, trailingStopValue]);
   const nextTarget = React.useMemo(() => resolvedTargets[0] ?? null, [resolvedTargets]);
@@ -854,13 +853,9 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     <div className="flex h-full flex-col gap-4">
       <PlanPanel
         plan={plan}
-        structured={plan.structured_plan ?? null}
-        badges={Array.isArray(plan.badges) ? plan.badges : undefined}
-        confidence={typeof plan.confidence === 'number' ? plan.confidence : null}
         supportingLevels={supportingLevels}
         highlightedLevel={highlightedLevel}
         onSelectLevel={handleSelectLevel}
-        targetsAwaiting={planTargets.length === 0}
         theme={theme}
       />
     </div>

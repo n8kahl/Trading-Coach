@@ -166,12 +166,21 @@ export function resolvePlanTargets(plan: PlanSnapshot["plan"]): Array<{ price: n
   const targetMeta = Array.isArray(plan.target_meta)
     ? (plan.target_meta as Array<{ label?: string | null; price?: number | null }>)
     : [];
+  const toPrice = (value: unknown): number | null => {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number.parseFloat(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
+  };
   return targetsRaw
     .map((value, index) => {
-      if (!isFiniteNumber(value)) return null;
+      const numeric = toPrice(value);
+      if (numeric == null) return null;
       const meta = targetMeta[index];
       const label = typeof meta?.label === "string" && meta.label.trim() ? meta.label.trim() : `TP${index + 1}`;
-      return { price: value as number, label };
+      return { price: numeric, label };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 }
