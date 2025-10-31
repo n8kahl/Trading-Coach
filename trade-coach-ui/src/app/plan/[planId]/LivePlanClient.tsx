@@ -2,6 +2,7 @@
 
 import clsx from "clsx";
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import WebviewShell from "@/components/webview/WebviewShell";
 import PlanPanel from "@/components/webview/PlanPanel";
 import PlanHeader from "@/components/PlanHeader";
@@ -11,7 +12,7 @@ import { usePlanLayers } from "@/lib/hooks/usePlanLayers";
 import { extractPrimaryLevels, extractSupportingLevels } from "@/lib/utils/layers";
 import type { SupportingLevel } from "@/lib/chart";
 import type { PlanDeltaEvent, PlanLayers, PlanSnapshot } from "@/lib/types";
-import { PUBLIC_UI_BASE_URL, WS_BASE_URL, BUILD_SHA } from "@/lib/env";
+import { API_BASE_URL, PUBLIC_UI_BASE_URL, WS_BASE_URL, BUILD_SHA, withAuthHeaders } from "@/lib/env";
 
 const TIMEFRAME_OPTIONS = [
   { value: '1', label: '1m' },
@@ -31,6 +32,7 @@ type LivePlanClientProps = {
 type StatusTone = "green" | "yellow" | "red";
 
 export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClientProps) {
+  const router = useRouter();
   const [snapshot, setSnapshot] = React.useState(initialSnapshot);
   const [plan, setPlan] = React.useState(initialSnapshot.plan);
   const [followLive, setFollowLive] = React.useState(true);
@@ -47,8 +49,12 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const [lastPlanHeartbeat, setLastPlanHeartbeat] = React.useState<number | null>(() => Date.now());
   const [noteEpoch, setNoteEpoch] = React.useState(0);
   const [noteAnimating, setNoteAnimating] = React.useState(false);
+  const [symbolDraft, setSymbolDraft] = React.useState(() => (plan.symbol ? plan.symbol.toUpperCase() : ""));
+  const [symbolSubmitting, setSymbolSubmitting] = React.useState(false);
   const lastPriceRefreshRef = React.useRef(0);
   const lastDeltaAtRef = React.useRef(Date.now());
+  const symbolRequestRef = React.useRef(0);
+  const replanPendingRef = React.useRef(false);
   const prefersReducedMotion = usePrefersReducedMotion();
 
   const requestPriceRefresh = React.useCallback(() => {
@@ -91,6 +97,48 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
 
   const { layers } = usePlanLayers(activePlanId, layerSeed);
 
+  const refreshPlanSnapshot = React.useCallback(
+    async (targetPlanId: string) => {
+      if (!targetPlanId) return;
+      try {
+        const response = await fetch(`${API_BASE_URL}/idea/${encodeURIComponent(targetPlanId)}`, {
+          headers: withAuthHeaders({ Accept: "application/json" }),
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(`refreshPlanSnapshot failed (${response.status})`);
+        }
+        const payload = (await response.json()) as PlanSnapshot;
+        if (!payload?.plan) return;
+        setSnapshot(payload);
+        setPlan(payload.plan);
+        setLayerSeed(extractInitialLayers(payload));
+        setHighlightedLevel(null);
+        setTimeframe((prev) => prev || normalizeTimeframeFromPlan(payload.plan));
+        setLastPlanHeartbeat(Date.now());
+        lastDeltaAtRef.current = Date.now();
+        setSymbolDraft(payload.plan.symbol ? payload.plan.symbol.toUpperCase() : "");
+        requestPriceRefresh();
+      } catch (error) {
+        if (process.env.NODE_ENV !== "production") {
+          console.error("[LivePlanClient] refreshPlanSnapshot", error);
+        }
+      }
+    },
+    [requestPriceRefresh],
+  );
+
+  const queueReplan = React.useCallback(
+    (targetPlanId: string | null | undefined) => {
+      if (!targetPlanId || replanPendingRef.current) return;
+      replanPendingRef.current = true;
+      refreshPlanSnapshot(targetPlanId).finally(() => {
+        replanPendingRef.current = false;
+      });
+    },
+    [refreshPlanSnapshot],
+  );
+
   const socketStatus = usePlanSocket(
     planSocketUrl,
     activePlanId,
@@ -106,7 +154,17 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         markPlanHeartbeat();
         if (type === 'plan_delta') {
           const delta = event as unknown as PlanDeltaEvent;
-          setPlan((prev) => mergePlanWithDelta(prev, delta));
+          setPlan((prev) => {
+            const merged = mergePlanWithDelta(prev, delta);
+            if (merged !== prev) {
+              const statusChange = typeof delta.changes?.status === "string" ? delta.changes.status.toLowerCase() : null;
+              if (statusChange === "invalid") {
+                const targetPlanId = merged.plan_id || prev.plan_id || activePlanId;
+                queueReplan(targetPlanId ?? activePlanId);
+              }
+            }
+            return merged;
+          });
           if (delta.changes && (delta.changes.last_price !== undefined || delta.changes.trailing_stop !== undefined)) {
             requestPriceRefresh();
           }
@@ -122,6 +180,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
             const inferred = normalizeTimeframeFromPlan(payloadSnapshot.plan);
             return prev || inferred;
           });
+          setSymbolDraft(payloadSnapshot.plan.symbol ? payloadSnapshot.plan.symbol.toUpperCase() : "");
           requestPriceRefresh();
           return;
         }
@@ -133,7 +192,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
           return;
         }
       },
-      [requestPriceRefresh, markPlanHeartbeat],
+      [activePlanId, queueReplan, requestPriceRefresh, markPlanHeartbeat],
     ),
   );
 
@@ -172,6 +231,16 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     return "red";
   }, [streamingEnabled, dataAgeSeconds, resolutionSeconds]);
 
+  const planStatusTitle = React.useMemo(() => {
+    if (planHeartbeatAgeSeconds == null) return "Plan heartbeat pending";
+    return `Last heartbeat ${planHeartbeatAgeSeconds.toFixed(1)}s ago`;
+  }, [planHeartbeatAgeSeconds]);
+
+  const dataStatusTitle = React.useMemo(() => {
+    if (dataAgeSeconds == null) return "Price data pending";
+    return `Last price update ${dataAgeSeconds.toFixed(1)}s ago`;
+  }, [dataAgeSeconds]);
+
   const sessionBanner = plan.session_state?.banner ?? null;
   const riskBanner =
     Array.isArray(plan.warnings) && plan.warnings.length ? String(plan.warnings[0]) : plan.session_state?.message ?? null;
@@ -180,6 +249,10 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     const rawTargets = Array.isArray(plan.targets) ? plan.targets : [];
     return rawTargets.filter((value): value is number => typeof value === "number");
   }, [plan.targets]);
+
+  React.useEffect(() => {
+    setSymbolDraft(plan.symbol ? sanitizeSymbolInput(plan.symbol) : "");
+  }, [plan.symbol, sanitizeSymbolInput]);
 
   const coachNote = React.useMemo(() => {
     const fromPlan = typeof plan.notes === "string" ? plan.notes.trim() : "";
@@ -192,6 +265,10 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       sessionState && typeof sessionState["message"] === "string" ? (sessionState["message"] as string).trim() : "";
     return fromPlan || sessionNote || fallbackMessage || "";
   }, [plan]);
+
+  const [displayCoachNote, setDisplayCoachNote] = React.useState(() => (coachNote ? coachNote : "Coach note pending"));
+  const lastCoachUpdateRef = React.useRef(coachNote ? Date.now() : 0);
+  const wsCoachNoteRef = React.useRef(coachNote);
 
   const confluenceTokens = React.useMemo(() => {
     const tokens: string[] = [];
@@ -225,6 +302,47 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       .map((token) => token.toUpperCase());
   }, [layers?.meta?.confluence, plan]);
 
+  const parseNumeric = React.useCallback((value: unknown): number | null => {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number.parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  }, []);
+
+  const entryPrice = React.useMemo(() => {
+    const direct = parseNumeric((plan as Record<string, unknown>).entry);
+    if (direct != null) return direct;
+    const structured = plan.structured_plan as { entry?: { level?: unknown } } | null | undefined;
+    if (structured?.entry) {
+      const structuredEntry = parseNumeric((structured.entry as Record<string, unknown>).level);
+      if (structuredEntry != null) return structuredEntry;
+    }
+    const chartsParams = plan.charts_params as Record<string, unknown> | undefined;
+    if (chartsParams) {
+      const fromParams = parseNumeric(chartsParams.entry);
+      if (fromParams != null) return fromParams;
+    }
+    return null;
+  }, [plan, parseNumeric]);
+
+  const stopPrice = React.useMemo(() => {
+    const direct = parseNumeric((plan as Record<string, unknown>).stop);
+    if (direct != null) return direct;
+    const structured = plan.structured_plan as { stop?: unknown } | null | undefined;
+    if (structured) {
+      const structuredStop = parseNumeric(structured.stop);
+      if (structuredStop != null) return structuredStop;
+    }
+    const chartsParams = plan.charts_params as Record<string, unknown> | undefined;
+    if (chartsParams) {
+      const fromParams = parseNumeric(chartsParams.stop);
+      if (fromParams != null) return fromParams;
+    }
+    return null;
+  }, [plan, parseNumeric]);
+
   const lastPrice = React.useMemo(() => {
     const details = (plan.details ?? {}) as Record<string, unknown>;
     return (
@@ -234,6 +352,29 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       null
     );
   }, [plan]);
+
+  const computeCoachGuidance = React.useCallback((): string | null => {
+    if (lastPrice == null) return null;
+    if (stopPrice != null) {
+      const distanceToStop = Math.abs(lastPrice - stopPrice) / Math.max(Math.abs(stopPrice), 1);
+      if (distanceToStop <= 0.0025) {
+        return "Approaching Stop Loss";
+      }
+    }
+    const firstTarget = planTargets[0];
+    if (firstTarget != null) {
+      const distanceToTarget = Math.abs(lastPrice - firstTarget) / Math.max(Math.abs(firstTarget), 1);
+      if (distanceToTarget <= 0.0025) {
+        return "Near TP1";
+      }
+    }
+    if (entryPrice != null && stopPrice != null) {
+      if (lastPrice > Math.min(entryPrice, stopPrice) && lastPrice < Math.max(entryPrice, stopPrice)) {
+        return "Tracking between entry and stop";
+      }
+    }
+    return "Coach monitoring price action";
+  }, [entryPrice, lastPrice, planTargets, stopPrice]);
 
   const priceFormatter = React.useMemo(
     () =>
@@ -251,6 +392,90 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     const match = TIMEFRAME_OPTIONS.find((item) => item.value === timeframe);
     return match?.label ?? timeframe;
   }, [timeframe]);
+
+  const sanitizeSymbolInput = React.useCallback((value: string) => value.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 6), []);
+
+  const handleSymbolInputChange = React.useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      setSymbolDraft(sanitizeSymbolInput(event.target.value));
+    },
+    [sanitizeSymbolInput],
+  );
+
+  const handleSymbolSubmit = React.useCallback(
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const token = sanitizeSymbolInput(symbolDraft);
+      if (!token || symbolSubmitting) return;
+      const now = Date.now();
+      if (now - symbolRequestRef.current < 300) return;
+      symbolRequestRef.current = now;
+      setSymbolSubmitting(true);
+      try {
+        const response = await fetch(`${API_BASE_URL}/gpt/plan`, {
+          method: "POST",
+          headers: withAuthHeaders({ "Content-Type": "application/json", Accept: "application/json" }),
+          body: JSON.stringify({ symbol: token }),
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(`symbol plan failed (${response.status})`);
+        }
+        const payload = await response.json();
+        const nextPlanId: string | undefined = payload?.plan?.plan_id ?? payload?.plan_id;
+        if (nextPlanId) {
+          router.push(`/plan/${encodeURIComponent(nextPlanId)}`);
+        }
+      } catch (error) {
+        if (process.env.NODE_ENV !== "production") {
+          console.error("[LivePlanClient] symbol submit", error);
+        }
+      } finally {
+        setSymbolSubmitting(false);
+      }
+    },
+    [router, sanitizeSymbolInput, symbolDraft, symbolSubmitting],
+  );
+
+  React.useEffect(() => {
+    if (!coachNote) {
+      wsCoachNoteRef.current = "";
+      return;
+    }
+    if (coachNote === wsCoachNoteRef.current) return;
+    wsCoachNoteRef.current = coachNote;
+    lastCoachUpdateRef.current = Date.now();
+    setDisplayCoachNote(coachNote);
+    setNoteEpoch((prev) => prev + 1);
+  }, [coachNote]);
+
+  React.useEffect(() => {
+    if (coachNote) return;
+    if (displayCoachNote) return;
+    lastCoachUpdateRef.current = Date.now();
+    wsCoachNoteRef.current = "";
+    setDisplayCoachNote("Coach note pending");
+    setNoteEpoch((prev) => prev + 1);
+  }, [coachNote, displayCoachNote]);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const tick = () => {
+      const now = Date.now();
+      if (now - lastCoachUpdateRef.current < 5000) return;
+      if (wsCoachNoteRef.current) return;
+      const guidance = computeCoachGuidance();
+      if (!guidance || guidance === displayCoachNote) return;
+      lastCoachUpdateRef.current = now;
+      wsCoachNoteRef.current = "";
+      setDisplayCoachNote(guidance);
+      setNoteEpoch((prev) => prev + 1);
+    };
+    const id = window.setInterval(tick, 5000);
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [computeCoachGuidance, displayCoachNote]);
 
   const handleSetFollowLive = React.useCallback((value: boolean) => {
     setFollowLive(value);
@@ -314,33 +539,57 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   }, [requestPriceRefresh]);
 
   React.useEffect(() => {
-    setNoteEpoch((prev) => prev + 1);
-  }, [coachNote]);
-
-  React.useEffect(() => {
     if (prefersReducedMotion) {
       setNoteAnimating(false);
       return;
     }
     setNoteAnimating(true);
-    const timer = window.setTimeout(() => {
+    const raf = typeof window !== "undefined" ? window.requestAnimationFrame(() => {
       setNoteAnimating(false);
-    }, 450);
+    }) : null;
     return () => {
-      window.clearTimeout(timer);
+      if (raf != null) {
+        window.cancelAnimationFrame(raf);
+      }
     };
   }, [noteEpoch, prefersReducedMotion]);
 
   const planUiLink = React.useMemo(() => extractUiPlanLink(snapshot), [snapshot]);
 
   const statusStrip = (
-    <div className="flex flex-col gap-3 px-4 py-4 sm:px-6 lg:px-8" role="region" aria-label="Fancy Trader status">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.25em] text-neutral-400">
-          <span className="text-sm font-semibold tracking-[0.35em] text-emerald-300">Fancy Trader</span>
-          <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[0.68rem] text-emerald-200">
+    <div className="flex flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8" role="region" aria-label="Fancy Trader status">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.25em] text-neutral-400">
+          <span className="text-sm font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
+          <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[0.68rem] text-emerald-200">
             {plan.symbol?.toUpperCase() ?? "—"}
           </span>
+          <form className="flex items-center gap-2" onSubmit={handleSymbolSubmit}>
+            <input
+              type="text"
+              inputMode="text"
+              autoComplete="off"
+              maxLength={6}
+              placeholder="SYM"
+              value={symbolDraft}
+              onChange={handleSymbolInputChange}
+              disabled={symbolSubmitting}
+              className="h-10 w-24 rounded-lg border border-neutral-700 bg-neutral-950/70 px-3 text-sm font-semibold uppercase tracking-[0.2em] text-neutral-100 shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+            />
+            <button
+              type="submit"
+              disabled={symbolSubmitting || !symbolDraft}
+              className={clsx(
+                "h-10 min-w-[64px] rounded-lg border px-3 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+                symbolSubmitting || !symbolDraft
+                  ? "cursor-not-allowed border-neutral-700 bg-neutral-900/60 text-neutral-500"
+                  : "border-emerald-500/50 bg-emerald-500/15 text-emerald-100 hover:border-emerald-400 hover:text-emerald-50",
+              )}
+              aria-label="Generate plan for symbol"
+            >
+              {symbolSubmitting ? "..." : "Plan"}
+            </button>
+          </form>
           <span className="rounded-full border border-neutral-700/50 px-2 py-0.5 text-[0.68rem] text-neutral-300">
             {timeframeLabel}
           </span>
@@ -355,13 +604,13 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
             </span>
           ) : null}
         </div>
-        <div className="flex flex-wrap items-center gap-3 text-[0.68rem] uppercase tracking-[0.25em] text-neutral-300">
-          <span className="flex items-center gap-2">
-            Plan
+        <div className="flex flex-wrap items-center gap-4 text-xs uppercase tracking-[0.2em] text-neutral-300">
+          <span className="flex items-center gap-2" title={planStatusTitle}>
+            <span>Plan</span>
             <StatusDot color={planStatusColor} label={`Plan status ${planStatusColor}`} />
           </span>
-          <span className="flex items-center gap-2">
-            Data
+          <span className="flex items-center gap-2" title={dataStatusTitle}>
+            <span>Data</span>
             <StatusDot color={dataStatusColor} label={`Data status ${dataStatusColor}`} />
           </span>
           <span className="text-neutral-200">
@@ -370,50 +619,30 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
           </span>
         </div>
       </div>
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        {confluenceTokens.length ? (
-          <div className="flex items-center gap-2 text-[0.62rem] uppercase tracking-[0.35em] text-neutral-400">
-            <span className="text-neutral-500">Confluence</span>
-            <div className="flex items-center gap-2">
-              {confluenceTokens.map((token, index) => (
-                <span key={`${token}-${index}`} className="flex items-center gap-1">
-                  <span className="block h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
-                  <span className="text-neutral-300">{token}</span>
-                </span>
-              ))}
-            </div>
-          </div>
-        ) : null}
-        <div
+      <div
+        className={clsx(
+          "rounded-2xl border px-3 py-3 shadow-sm sm:max-w-xl",
+          streamingEnabled ? "border-emerald-500/40 bg-emerald-500/10" : "border-neutral-700/60 bg-neutral-900/70",
+        )}
+      >
+        <span className="text-[0.62rem] uppercase tracking-[0.3em] text-emerald-200">Coach note</span>
+        <p
+          key={noteEpoch}
+          aria-live="polite"
           className={clsx(
-            "flex min-h-[2.5rem] max-w-full items-center gap-2 overflow-hidden rounded-2xl border px-3 py-2 text-sm leading-tight text-neutral-100 shadow-sm sm:max-w-[380px]",
-            streamingEnabled ? "border-emerald-500/40 bg-emerald-500/10" : "border-neutral-700/60 bg-neutral-900/70",
+            "mt-1 whitespace-pre-wrap break-words text-sm leading-snug text-neutral-100 transition duration-300 ease-out",
+            prefersReducedMotion ? "" : noteAnimating ? "opacity-0 translate-y-1" : "opacity-100 translate-y-0",
           )}
         >
-          <span className="text-[0.62rem] uppercase tracking-[0.3em] text-emerald-200">Coach note</span>
-          <div className="relative flex-1 overflow-hidden">
-            <div
-              key={noteEpoch}
-              className={clsx(
-                "truncate text-neutral-200",
-                prefersReducedMotion
-                  ? ""
-                  : noteAnimating
-                    ? "translate-y-0 opacity-100 transition-transform duration-300 ease-out"
-                    : "translate-y-0 opacity-100",
-              )}
-            >
-              {coachNote || "Coach note pending"}
-            </div>
-          </div>
-        </div>
+          {displayCoachNote}
+        </p>
       </div>
-      <div className="flex justify-end pt-1">
+      <div className="flex justify-end">
         <button
           type="button"
           onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
           className={clsx(
-            "rounded-full px-3 py-1 text-xs uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+            "h-10 rounded-full px-4 text-xs uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
             theme === "light"
               ? "border border-slate-300 bg-white text-slate-700 hover:border-emerald-400 hover:text-emerald-600"
               : "border border-neutral-700 bg-neutral-900 text-neutral-200 hover:border-emerald-400 hover:text-emerald-200",
@@ -449,6 +678,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       layers={layers}
       primaryLevels={primaryLevels}
       supportingVisible={supportVisible}
+      confluenceTokens={confluenceTokens}
       followLive={followLive}
       streamingEnabled={streamingEnabled}
       onSetFollowLive={handleSetFollowLive}

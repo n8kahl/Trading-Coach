@@ -17,6 +17,7 @@ type PlanChartPanelProps = {
   layers: PlanLayers | null;
   primaryLevels: SupportingLevel[];
   supportingVisible: boolean;
+  confluenceTokens?: string[];
   followLive: boolean;
   streamingEnabled: boolean;
   onSetFollowLive(value: boolean): void;
@@ -55,6 +56,7 @@ export default function PlanChartPanel({
   layers,
   primaryLevels,
   supportingVisible,
+  confluenceTokens = [],
   followLive,
   streamingEnabled,
   onSetFollowLive,
@@ -434,7 +436,7 @@ export default function PlanChartPanel({
               type="button"
               onClick={() => handleResolution(option.value)}
               className={clsx(
-                "rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+                "inline-flex h-10 items-center justify-center rounded-full px-4 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
                 option.value === timeframe
                   ? "border border-emerald-400/60 bg-emerald-400/10 text-emerald-200"
                   : "border border-neutral-800/60 bg-neutral-900/70 text-neutral-300 hover:border-emerald-400/40 hover:text-emerald-200",
@@ -446,62 +448,102 @@ export default function PlanChartPanel({
         </div>
       </header>
 
-      <section className="space-y-3">
+      <section className="space-y-4">
         <div
           className={clsx(
-            "space-y-3 rounded-2xl border border-neutral-800/70 bg-neutral-950/40 p-3",
+            "rounded-2xl border border-neutral-800/70 bg-neutral-950/40 p-4",
             supportingVisible ? "shadow-[0_0_25px_rgba(16,185,129,0.15)]" : "",
           )}
         >
-          <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-300">
-            {tradeMarkers.length ? (
-              tradeMarkers.map((marker) => (
-                <span
-                  key={marker.key}
-                  className={clsx(
-                    "rounded-md border px-2 py-0.5 uppercase tracking-[0.15em]",
-                    marker.tone === "emerald"
-                      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
-                      : marker.tone === "rose"
-                        ? "border-rose-500/40 bg-rose-500/10 text-rose-100"
-                        : marker.tone === "amber"
-                          ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
-                          : "border-neutral-700/60 bg-neutral-900/40 text-neutral-200",
-                  )}
-                >
-                  {marker.label} {marker.value.toFixed(2)}
-                </span>
-              ))
-            ) : (
-              <span className="text-neutral-500">Trade markers unavailable</span>
-            )}
-          </div>
-          {targetRationales.length ? (
-            <div className="space-y-1 text-[0.7rem] leading-snug text-neutral-400">
-              {targetRationales.map((detail) => (
-                <div key={`${detail.label}-${detail.price}-rationale`} className="flex flex-wrap items-baseline gap-2">
-                  <span className="font-semibold uppercase tracking-[0.2em] text-neutral-100">{detail.label}</span>
-                  <span className="text-neutral-400">{detail.rationale}</span>
+          <div className="flex flex-col gap-4 lg:flex-row">
+            <div className="flex-1 space-y-3">
+              <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Trade markers</h3>
+              <div className="flex flex-wrap gap-2">
+                {tradeMarkers.length ? (
+                  tradeMarkers.map((marker) => {
+                    const toneClass =
+                      marker.tone === "emerald"
+                        ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-100"
+                        : marker.tone === "rose"
+                          ? "border-rose-500/50 bg-rose-500/10 text-rose-100"
+                          : marker.tone === "amber"
+                            ? "border-amber-500/50 bg-amber-500/10 text-amber-100"
+                            : "border-neutral-800/60 bg-neutral-900/40 text-neutral-200";
+                    return (
+                      <span
+                        key={marker.key}
+                        className={clsx(
+                          "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-[0.15em]",
+                          toneClass,
+                        )}
+                      >
+                        <span>{marker.label}</span>
+                        <span className="tabular-nums text-neutral-100">{marker.value.toFixed(2)}</span>
+                      </span>
+                    );
+                  })
+                ) : (
+                  <span className="text-xs text-neutral-500">Markers unavailable</span>
+                )}
+              </div>
+              {targetRationales.length ? (
+                <div className="space-y-1 text-xs leading-relaxed text-neutral-400">
+                  {targetRationales.map((detail, index) => {
+                    const label = detail.label ?? `TP${index + 1}`;
+                    return (
+                      <div key={`${label}-${detail.price}-rationale`} className="flex flex-wrap items-baseline gap-2">
+                        <span className="font-semibold uppercase tracking-[0.2em] text-neutral-100">{label}</span>
+                        <span>{detail.rationale}</span>
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
+              ) : null}
             </div>
-          ) : null}
-          <div className="text-xs text-neutral-400">
-            <span className="mr-2 text-neutral-500">Primary levels:</span>
-            {primaryLevels.length ? (
-              primaryLevels.map((level) => (
-                <span key={`${level.label}-${level.price}`} className="mr-3">
-                  <span className="text-neutral-300">{level.label}</span> {level.price.toFixed(2)}
-                </span>
-              ))
-            ) : (
-              <span className="text-neutral-500">None</span>
-            )}
+            <div className="flex-1 space-y-3">
+              {confluenceTokens.length ? (
+                <div className="space-y-2">
+                  <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Confluence</h3>
+                  <div className="flex flex-wrap items-center gap-2 text-[0.68rem] text-neutral-300">
+                    {confluenceTokens.map((token, index) => (
+                      <span
+                        key={`${token}-${index}`}
+                        className="inline-flex items-center gap-1 rounded-md border border-neutral-800/60 bg-neutral-900/40 px-2 py-1"
+                      >
+                        <span className="block h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+                        <span>{token}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              <div className="space-y-2">
+                <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Primary levels</h3>
+                {primaryLevels.length ? (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {primaryLevels.map((level, index) => {
+                      const label = level.label ?? level.kind ?? `Level ${index + 1}`;
+                      return (
+                        <div
+                          key={`${label}-${level.price}`}
+                          className="flex items-center justify-between rounded-xl border border-neutral-800/60 bg-neutral-900/40 px-3 py-2 text-xs text-neutral-200"
+                        >
+                          <span className="uppercase tracking-[0.2em] text-neutral-500">{label}</span>
+                          <span className="font-semibold text-neutral-100">{level.price.toFixed(2)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-xs text-neutral-500">No primary levels published.</p>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </section>
 
-      <section className="relative min-h-[65vh] overflow-hidden rounded-3xl border border-neutral-800/70 bg-neutral-950/40 p-2 md:min-h-[460px]">
+      <section className="relative min-h-[60vh] overflow-hidden rounded-3xl border border-neutral-800/70 bg-neutral-950/40 p-2 md:min-h-[520px]">
         {chartStatusMessage ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-neutral-950/70 text-sm text-neutral-300">
             {chartStatusMessage}
@@ -542,7 +584,7 @@ function ToggleChip({ label, active, onClick }: { label: string; active: boolean
       type="button"
       onClick={onClick}
       className={clsx(
-        "rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+        "inline-flex h-10 items-center justify-center rounded-full border px-4 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
         active
           ? "border-emerald-400/60 bg-emerald-400/10 text-emerald-200"
           : "border-neutral-800/60 bg-neutral-900/60 text-neutral-300 hover:border-emerald-400/40 hover:text-emerald-200",
