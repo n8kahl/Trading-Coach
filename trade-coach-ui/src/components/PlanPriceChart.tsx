@@ -394,7 +394,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       const volumeSeries = volumeSeriesRef.current;
       if (!candleSeries || !volumeSeries) return;
 
-      if (!safeData.every((bar) => bar && Number.isFinite(Number((bar as any).time))))) {
+      if (!safeData.every((bar) => bar && Number.isFinite(Number((bar as any).time)))) {
         addDbg("[PlanPriceChart] skipped setData: found invalid bar(s)");
         safeData.forEach((bar, index) => {
           if (!bar || !Number.isFinite(Number((bar as any).time))) {
