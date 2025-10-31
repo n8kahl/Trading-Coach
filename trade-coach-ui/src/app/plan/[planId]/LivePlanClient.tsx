@@ -73,13 +73,17 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     progressPct: 0,
     updatedAt: Date.now(),
   }));
+  const [coachLoading, setCoachLoading] = React.useState(false);
   const [activeLevelId, setActiveLevelId] = React.useState<string | null>(null);
   const [hiddenLevelIds, setHiddenLevelIds] = React.useState<Set<string>>(() => new Set());
+  const [collapsed, setCollapsed] = React.useState(false);
   const lastPriceRefreshRef = React.useRef(0);
   const lastDeltaAtRef = React.useRef(Date.now());
   const symbolRequestRef = React.useRef(0);
   const replanPendingRef = React.useRef(false);
   const lastCoachGoalRef = React.useRef<CoachGoal | null>(null);
+  const lastCoachUpdateRef = React.useRef<number>(Date.now());
+  const touchStartYRef = React.useRef<number | null>(null);
 
   const theme = "dark" as const;
 
@@ -241,7 +245,21 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     return Math.max(1, Math.round(resolutionMs / 1000));
   }, [resolutionMs]);
 
-  const planStatusColor = React.useMemo<StatusTone>(() => {
+  const planStatusTone = React.useMemo<StatusTone>(() => {
+    const statusValue = ((plan as Record<string, unknown>).status ?? plan.session_state?.status ?? "") as string;
+    const normalized = typeof statusValue === "string" ? statusValue.toLowerCase() : "";
+    if (!normalized) return "yellow";
+    if (normalized.includes("invalid") || normalized.includes("closed") || normalized.includes("cancel")) return "red";
+    if (normalized.includes("pending") || normalized.includes("watch") || normalized.includes("prep")) return "yellow";
+    return "green";
+  }, [plan]);
+
+  const planStatusTitle = React.useMemo(() => {
+    const statusValue = ((plan as Record<string, unknown>).status ?? plan.session_state?.status ?? "") as string;
+    return statusValue ? `Plan status ${statusValue}` : "Plan status unavailable";
+  }, [plan]);
+
+  const streamStatusTone = React.useMemo<StatusTone>(() => {
     if (socketStatus === "disconnected") return "red";
     if (planHeartbeatAgeSeconds == null) return "yellow";
     if (planHeartbeatAgeSeconds <= 15) return "green";
@@ -249,18 +267,19 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     return "red";
   }, [socketStatus, planHeartbeatAgeSeconds]);
 
-  const dataStatusColor = React.useMemo<StatusTone>(() => {
+  const streamStatusTitle = React.useMemo(() => {
+    if (socketStatus === "disconnected") return "Stream disconnected";
+    if (planHeartbeatAgeSeconds == null) return "Stream heartbeat pending";
+    return `Last stream ${planHeartbeatAgeSeconds.toFixed(1)}s ago`;
+  }, [planHeartbeatAgeSeconds, socketStatus]);
+
+  const dataStatusTone = React.useMemo<StatusTone>(() => {
     if (!streamingEnabled) return "red";
     if (dataAgeSeconds == null || resolutionSeconds == null) return "yellow";
     if (dataAgeSeconds <= resolutionSeconds * 2) return "green";
     if (dataAgeSeconds <= resolutionSeconds * 6) return "yellow";
     return "red";
   }, [streamingEnabled, dataAgeSeconds, resolutionSeconds]);
-
-  const planStatusTitle = React.useMemo(() => {
-    if (planHeartbeatAgeSeconds == null) return "Plan heartbeat pending";
-    return `Last heartbeat ${planHeartbeatAgeSeconds.toFixed(1)}s ago`;
-  }, [planHeartbeatAgeSeconds]);
 
   const dataStatusTitle = React.useMemo(() => {
     if (dataAgeSeconds == null) return "Price data pending";
@@ -296,6 +315,10 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
 
   const hiddenLevelIdList = React.useMemo(() => Array.from(hiddenLevelIds), [hiddenLevelIds]);
 
+  React.useEffect(() => {
+    setCollapsed(false);
+  }, [plan.plan_id]);
+
   const lastPrice = React.useMemo(() => {
     const details = (plan.details ?? {}) as Record<string, unknown>;
     return (
@@ -306,22 +329,57 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     );
   }, [plan]);
 
-  React.useEffect(() => {
-    const next = deriveCoachMessage({
+  const computeCoachMessage = React.useCallback(() => {
+    return deriveCoachMessage({
       plan,
       price: lastPrice,
       trailingStop: levelSummary.trailingStop,
       now: Date.now(),
     });
-    setCoachNote((prev) => {
-      const prevProgress = Math.round(prev.progressPct);
-      const nextProgress = Math.round(next.progressPct);
-      if (prev.text === next.text && prev.goal === next.goal && prevProgress === nextProgress) {
-        return { ...next, updatedAt: prev.updatedAt };
-      }
-      return next;
-    });
   }, [plan, lastPrice, levelSummary.trailingStop]);
+
+  const applyCoachMessage = React.useCallback(
+    (reason: string) => {
+      const next = computeCoachMessage();
+      const finishLoading = () => {
+        if (typeof window === "undefined") {
+          setCoachLoading(false);
+          return;
+        }
+        window.setTimeout(() => setCoachLoading(false), 220);
+      };
+      setCoachNote((prev) => {
+        const prevProgress = Math.round(prev.progressPct);
+        const nextProgress = Math.round(next.progressPct);
+        if (prev.text === next.text && prev.goal === next.goal && prevProgress === nextProgress) {
+          if (reason !== "initial") {
+            lastCoachUpdateRef.current = Date.now();
+            finishLoading();
+          }
+          return { ...next, updatedAt: prev.updatedAt };
+        }
+        lastCoachUpdateRef.current = next.updatedAt;
+        finishLoading();
+        return next;
+      });
+    },
+    [computeCoachMessage],
+  );
+
+  React.useEffect(() => {
+    applyCoachMessage("initial");
+  }, [applyCoachMessage]);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const interval = window.setInterval(() => {
+      setCoachLoading(true);
+      applyCoachMessage("cadence");
+    }, 5000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [applyCoachMessage]);
 
   React.useEffect(() => {
     const goal = coachNote.goal;
@@ -504,38 +562,43 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     }
   }, [socketStatus, markPlanHeartbeat]);
 
-  React.useEffect(() => {
-    if (typeof window === "undefined") return undefined;
-    const interval = window.setInterval(() => {
-      if (!streamingEnabledRef.current) return;
-      const now = Date.now();
-      if (now - lastDeltaAtRef.current >= 5000) {
-        requestPriceRefresh();
-      }
-    }, 5000);
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [requestPriceRefresh]);
-
   const indicatorItems = React.useMemo(
     () => [
-      { key: "plan", label: "Plan", tone: planStatusColor, title: planStatusTitle },
-      { key: "data", label: "Data", tone: dataStatusColor, title: dataStatusTitle },
-      {
-        key: "stream",
-        label: "Stream",
-        tone: streamingEnabled ? ("green" as StatusTone) : ("red" as StatusTone),
-        title: streamingEnabled ? "Streaming enabled" : "Streaming paused",
-      },
+      { key: "plan", label: "Plan", tone: planStatusTone, title: planStatusTitle },
+      { key: "data", label: "Data", tone: dataStatusTone, title: dataStatusTitle },
+      { key: "stream", label: "Stream", tone: streamStatusTone, title: streamStatusTitle },
     ],
-    [planStatusColor, planStatusTitle, dataStatusColor, dataStatusTitle, streamingEnabled],
+    [planStatusTone, planStatusTitle, dataStatusTone, dataStatusTitle, streamStatusTone, streamStatusTitle],
   );
 
   const planUiLink = React.useMemo(() => extractUiPlanLink(snapshot), [snapshot]);
 
+  const handleStatusTouchStart = React.useCallback((event: React.TouchEvent<HTMLElement>) => {
+    if (event.touches.length !== 1) return;
+    touchStartYRef.current = event.touches[0]?.clientY ?? null;
+  }, []);
+
+  const handleStatusTouchEnd = React.useCallback((event: React.TouchEvent<HTMLElement>) => {
+    if (touchStartYRef.current == null) return;
+    const endY = event.changedTouches[0]?.clientY ?? touchStartYRef.current;
+    const delta = endY - touchStartYRef.current;
+    touchStartYRef.current = null;
+    if (delta < -60) {
+      setCollapsed(true);
+    }
+    if (delta > 60) {
+      setCollapsed(false);
+    }
+  }, []);
+
   const statusStrip = (
-    <section className="flex flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8" role="region" aria-label="Fancy Trader status">
+    <section
+      className="flex flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8"
+      role="region"
+      aria-label="Fancy Trader status"
+      onTouchStart={handleStatusTouchStart}
+      onTouchEnd={handleStatusTouchEnd}
+    >
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.25em] text-neutral-400">
@@ -561,12 +624,12 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
               <span className="font-semibold text-white">{lastPriceLabel}</span>
             </span>
           </div>
-          <div className="flex items-end gap-5">
+          <div className="flex flex-wrap items-center gap-3 text-[0.62rem] uppercase tracking-[0.3em] text-neutral-400">
             {indicatorItems.map((indicator) => (
               <button
                 key={indicator.key}
                 type="button"
-                className="flex flex-col items-center gap-1 text-[0.62rem] font-semibold uppercase tracking-[0.3em] text-neutral-400 transition hover:text-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                className="flex flex-col items-center gap-1 transition hover:text-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
                 aria-label={indicator.title}
                 title={indicator.title}
               >
@@ -575,6 +638,30 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
                 <span className="hidden sm:block">{indicator.label}</span>
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => {
+                const next = !followLive;
+                handleSetFollowLive(next);
+              }}
+              className={clsx(
+                "rounded-full border px-3 py-1 text-[0.62rem] font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+                followLive
+                  ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-50"
+                  : "border-neutral-700/60 bg-neutral-900/60 text-neutral-300 hover:border-emerald-400/60 hover:text-emerald-50",
+              )}
+              aria-pressed={followLive}
+            >
+              Follow {followLive ? "On" : "Off"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setCollapsed((prev) => !prev)}
+              className="rounded-full border border-neutral-700/60 bg-neutral-900/60 px-3 py-1 text-[0.62rem] font-semibold uppercase tracking-[0.2em] text-neutral-200 transition hover:border-emerald-400/60 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+              aria-pressed={collapsed}
+            >
+              {collapsed ? "Expand Layout" : "Collapse"}
+            </button>
           </div>
         </div>
         <form className="flex flex-wrap items-center gap-2" onSubmit={handleSymbolSubmit}>
@@ -604,43 +691,47 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
           </button>
         </form>
       </div>
-      <CoachNote note={coachNote} subdued={!streamingEnabled || dataStatusColor !== "green"} />
-      <div className="space-y-2">
-      <HeaderMarkers
-        levels={headerLevels}
-        highlightedId={activeLevelId}
-        onHighlight={handleHighlightLevel}
-        onToggleVisibility={handleToggleLevelVisibility}
-      />
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[0.68rem] uppercase tracking-[0.25em] text-neutral-500">Confluence</span>
-          {confluenceTokens.length ? (
-            <div className="flex flex-wrap items-center gap-2 text-[0.68rem] text-neutral-300">
-              {confluenceTokens.map((token, index) => (
-                <span
-                  key={`${token}-${index}`}
-                  className="inline-flex items-center gap-1 rounded-md border border-neutral-800/60 bg-neutral-900/50 px-2 py-1"
-                >
-                  <span className="block h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
-                  <span>{token}</span>
-                </span>
-              ))}
+      <CoachNote note={coachNote} subdued={!streamingEnabled || dataStatusTone !== "green"} loading={coachLoading} />
+      {!collapsed ? (
+        <div className="space-y-2">
+          <HeaderMarkers
+            levels={headerLevels}
+            highlightedId={activeLevelId}
+            onHighlight={handleHighlightLevel}
+            onToggleVisibility={handleToggleLevelVisibility}
+          />
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[0.68rem] uppercase tracking-[0.25em] text-neutral-500">Confluence</span>
+              {confluenceTokens.length ? (
+                <div className="flex flex-wrap items-center gap-2 text-[0.68rem] text-neutral-300">
+                  {confluenceTokens.map((token, index) => (
+                    <span
+                      key={`${token}-${index}`}
+                      className="inline-flex items-center gap-1 rounded-md border border-neutral-800/60 bg-neutral-900/50 px-2 py-1"
+                    >
+                      <span className="block h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+                      <span>{token}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-[0.68rem] text-neutral-600">No confluence noted</span>
+              )}
             </div>
-          ) : (
-            <span className="text-[0.68rem] text-neutral-600">No confluence noted</span>
-          )}
+            <div className="flex items-center gap-2">
+              <span className="text-[0.68rem] uppercase tracking-[0.25em] text-neutral-500">Confidence</span>
+              <ConfidenceBadge value={plan.confidence} />
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-[0.68rem] uppercase tracking-[0.25em] text-neutral-500">Confidence</span>
-          <ConfidenceBadge value={plan.confidence} />
-        </div>
-      </div>
-      <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.2em] text-neutral-400">
-        <span>
-          Plan&nbsp;
-          <span className="font-semibold text-neutral-100">{planIdLabel}</span>
-          {planVersion ? <span>&nbsp;· v{planVersion}</span> : null}
+      ) : null}
+      {!collapsed ? (
+        <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.2em] text-neutral-400">
+          <span>
+            Plan&nbsp;
+            <span className="font-semibold text-neutral-100">{planIdLabel}</span>
+            {planVersion ? <span>&nbsp;· v{planVersion}</span> : null}
           </span>
           {planAsOfLabel ? <span>As of {planAsOfLabel} UTC</span> : null}
           <span>
@@ -648,7 +739,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
             <span className="font-semibold text-neutral-100">{dataStatusTitle}</span>
           </span>
         </div>
-      </div>
+      ) : null}
     </section>
   );
 
@@ -686,7 +777,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       onLastBarTimeChange={handleLastBarTime}
       onReplayStateChange={(state) => {
         if (state === 'playing') {
-          setFollowLive(false);
+          handleSetFollowLive(false);
         }
       }}
       theme={theme}
@@ -715,6 +806,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         statusStrip={statusStrip}
         chartPanel={chartPanel}
         planPanel={planPanel}
+        collapsed={collapsed}
       />
       {debugPanel}
     </>

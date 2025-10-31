@@ -2,10 +2,10 @@
 
 import clsx from "clsx";
 import { useMemo } from "react";
-import ConfidenceSurface from "./ConfidenceSurface";
 import ConfluenceOverlay from "./ConfluenceOverlay";
 import type { SupportingLevel } from "@/lib/chart";
 import type { Badge, PlanSnapshot, StructuredPlan, TargetMetaEntry } from "@/lib/types";
+import ConfidenceBadge from "@/components/ConfidenceBadge";
 
 type PlanPanelProps = {
   plan: PlanSnapshot["plan"];
@@ -135,7 +135,49 @@ export default function PlanPanel({
         </div>
       </header>
 
-      <ConfidenceSurface confidence={confidence} components={confidenceComponents} theme={theme} />
+      <section
+        className={clsx(
+          "rounded-2xl border p-3 text-sm",
+          isLight ? "border-slate-200 bg-white" : "border-neutral-800/70 bg-neutral-950/50",
+        )}
+      >
+        <div className="flex flex-wrap items-center gap-3">
+          <ConfidenceBadge value={confidence ?? null} />
+          <div className="flex flex-wrap gap-2 text-[0.68rem] uppercase tracking-[0.25em] text-neutral-400">
+            {confidenceComponents.length ? (
+              confidenceComponents.map((component) => (
+                <span
+                  key={component.label}
+                  className={clsx(
+                    "rounded-full border px-2 py-0.5",
+                    isLight ? "border-slate-200 text-slate-600" : "border-neutral-700/70 text-neutral-300",
+                  )}
+                >
+                  {component.label}
+                  {component.value != null ? <span className="ml-1 text-neutral-400">· {component.value}</span> : null}
+                </span>
+              ))
+            ) : (
+              <span className={clsx(isLight ? "text-slate-400" : "text-neutral-500")}>Confidence inputs pending</span>
+            )}
+          </div>
+        </div>
+        {confluence.length ? (
+          <div className="mt-3 flex flex-wrap gap-2 text-[0.68rem] uppercase tracking-[0.25em] text-neutral-300">
+            {confluence.slice(0, 6).map((token, index) => (
+              <span
+                key={`${token}-${index}`}
+                className={clsx(
+                  "rounded-md border px-2 py-1",
+                  isLight ? "border-slate-200 bg-slate-50 text-slate-600" : "border-neutral-700 bg-neutral-900 text-neutral-200",
+                )}
+              >
+                {token}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </section>
 
       <section className="space-y-3">
         <h3 className={clsx("text-xs font-semibold uppercase tracking-[0.3em]", isLight ? "text-slate-500" : "text-neutral-400")}>Targets</h3>
@@ -176,12 +218,19 @@ export default function PlanPanel({
                     </span>
                     {meta?.snap_tag ? <span className={clsx("ml-2 text-xs", isLight ? "text-slate-400" : "text-neutral-500")}>{meta.snap_tag}</span> : null}
                   </div>
-                  <div className="text-right">
-                    <div className={clsx("font-semibold", isLight ? "text-emerald-600" : "text-emerald-300")}>{target.toFixed(2)}</div>
-                    {meta?.prob_touch_calibrated != null ? (
-                      <div className={clsx("text-xs", isLight ? "text-slate-400" : "text-neutral-400")}>{Math.round(meta.prob_touch_calibrated * 100)}% touch</div>
-                    ) : null}
-                  </div>
+                    <div className="text-right">
+                      <div className={clsx("font-semibold", isLight ? "text-emerald-600" : "text-emerald-300")}>{target.toFixed(2)}</div>
+                      {meta?.prob_touch_calibrated != null ? (
+                        <div className={clsx("text-xs", isLight ? "text-slate-400" : "text-neutral-400")}>
+                          {Math.round(meta.prob_touch_calibrated * 100)}% touch
+                        </div>
+                      ) : null}
+                      {extractTpReason(meta) ? (
+                        <div className={clsx("mt-1 text-xs leading-snug", isLight ? "text-slate-500" : "text-neutral-400")}>
+                          {extractTpReason(meta)}
+                        </div>
+                      ) : null}
+                    </div>
                 </li>
               );
             })
@@ -282,6 +331,26 @@ function getNumber(value: unknown): number | null {
   if (typeof value === "string") {
     const num = Number.parseFloat(value);
     if (Number.isFinite(num)) return num;
+  }
+  return null;
+}
+
+function extractTpReason(meta?: TargetMetaEntry): string | null {
+  if (!meta) return null;
+  const record = meta as Record<string, unknown>;
+  if (Array.isArray(record.tp_reasons)) {
+    const tokens = (record.tp_reasons as unknown[])
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter(Boolean);
+    if (tokens.length) return tokens.join(" · ");
+  }
+  const fallbackKeys = ["tp_reason", "reason", "rationale", "context", "note"];
+  for (const key of fallbackKeys) {
+    const value = record[key];
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed) return trimmed;
+    }
   }
   return null;
 }

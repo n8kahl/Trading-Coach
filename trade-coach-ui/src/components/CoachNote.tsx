@@ -8,9 +8,10 @@ import type { CoachNote } from "@/lib/plan/coach";
 type CoachNoteProps = {
   note: CoachNote;
   subdued?: boolean;
+  loading?: boolean;
 };
 
-export default function CoachNote({ note, subdued = false }: CoachNoteProps) {
+export default function CoachNote({ note, subdued = false, loading = false }: CoachNoteProps) {
   const contentRef = React.useRef<HTMLParagraphElement | null>(null);
   const [canExpand, setCanExpand] = React.useState(false);
   const [expanded, setExpanded] = React.useState(false);
@@ -47,7 +48,7 @@ export default function CoachNote({ note, subdued = false }: CoachNoteProps) {
 
   return (
     <section
-      className={clsx(styles.root, subdued && "border-neutral-700/40 bg-neutral-900/80")}
+      className={clsx(styles.root, subdued && "border-neutral-700/40 bg-neutral-900/80", loading && styles.loading)}
       aria-live="polite"
       aria-atomic="true"
     >

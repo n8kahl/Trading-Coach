@@ -7,6 +7,7 @@
   border-radius: 1rem;
   padding: 0.75rem 1rem;
   position: relative;
+  width: 100%;
 }
 
 .header {
@@ -37,8 +38,8 @@
   font-size: 0.9rem;
   line-height: 1.45;
   color: rgba(248, 250, 252, 0.95);
-  white-space: pre-wrap;
-  word-break: break-word;
+  white-space: normal;
+  overflow-wrap: anywhere;
   animation: slideFadeIn 200ms ease-out;
 }
 
@@ -91,6 +92,20 @@
   transition: transform 200ms ease-out;
 }
 
+.loading {
+  overflow: hidden;
+}
+
+.loading::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(120deg, transparent 0%, rgba(16, 185, 129, 0.45) 50%, transparent 100%);
+  opacity: 0.35;
+  animation: shimmer 1.2s linear infinite;
+  pointer-events: none;
+}
+
 @keyframes slideFadeIn {
   from {
     opacity: 0;
@@ -99,5 +114,14 @@
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
   }
 }

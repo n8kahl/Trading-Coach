@@ -77,6 +77,7 @@ export default function PlanChartPanel({
   const chartHandle = useRef<PlanPriceChartHandle | null>(null);
   const [replayActive, setReplayActive] = useState(false);
   const [recentPlanEvent, setRecentPlanEvent] = useState<{ type: string; at: number } | null>(null);
+  const [chartExpanded, setChartExpanded] = useState(false);
 
   const symbol = plan.symbol?.toUpperCase() ?? "—";
   const style = plan.style ?? plan.structured_plan?.style ?? null;
@@ -114,6 +115,14 @@ export default function PlanChartPanel({
       window.clearTimeout(timer);
     };
   }, [recentPlanEvent]);
+
+  const previousFollowLiveRef = useRef(followLive);
+  useEffect(() => {
+    if (!previousFollowLiveRef.current && followLive) {
+      chartHandle.current?.followLive();
+    }
+    previousFollowLiveRef.current = followLive;
+  }, [followLive]);
 
   const filteredLayers = useMemo(() => {
     if (!layers) return null;
@@ -397,6 +406,11 @@ export default function PlanChartPanel({
   const highlightInvalidate = recentPlanEvent?.type === "stop_hit";
   const highlightScale = recentPlanEvent?.type === "tp_hit";
 
+  const chartSectionClass = clsx(
+    "relative overflow-hidden rounded-3xl border border-neutral-800/70 bg-neutral-950/40 p-2 transition-all duration-300",
+    chartExpanded ? "chart-expanded min-h-[75vh] md:min-h-[80vh]" : "chart-default min-h-[60vh] md:min-h-[520px]",
+  );
+
   return (
     <div className="flex h-full flex-col gap-6">
       <header className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -503,7 +517,15 @@ export default function PlanChartPanel({
         </div>
       </section>
 
-      <section className="relative min-h-[60vh] overflow-hidden rounded-3xl border border-neutral-800/70 bg-neutral-950/40 p-2 md:min-h-[520px]">
+      <section className={chartSectionClass}>
+        <button
+          type="button"
+          onClick={() => setChartExpanded((prev) => !prev)}
+          className="absolute right-4 top-4 z-30 rounded-full border border-neutral-700/60 bg-neutral-900/70 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-neutral-200 transition hover:border-emerald-400 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+          aria-pressed={chartExpanded}
+        >
+          {chartExpanded ? "Collapse" : "Expand"}
+        </button>
         {chartStatusMessage ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-neutral-950/70 text-sm text-neutral-300">
             {chartStatusMessage}
@@ -524,6 +546,10 @@ export default function PlanChartPanel({
           overlays={chartOverlays}
           onLastBarTimeChange={handleLatestBarTime}
           devMode={devMode}
+          followLive={followLive}
+          onFollowLiveChange={onSetFollowLive}
+          levelsExpanded={supportingVisible}
+          expanded={chartExpanded}
           highlightedLevelId={highlightLevelId}
           hiddenLevelIds={hiddenLevelIds}
         />
