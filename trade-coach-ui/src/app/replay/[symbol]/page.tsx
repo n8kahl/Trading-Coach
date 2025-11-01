@@ -1,25 +1,22 @@
-import type { Metadata } from 'next';
-import ReplayClient from './ReplayClient';
-import { fetchPlanForSymbol } from '@/lib/api';
+import type { Metadata } from "next";
+import ReplayClient from "./ReplayClient";
+import { fetchSimulatedPlan } from "@/lib/api";
 
 type ReplayPageProps = {
-  params: Promise<{ symbol: string }>;
+  params: { symbol: string };
 };
 
 export async function generateMetadata({ params }: ReplayPageProps): Promise<Metadata> {
-  const { symbol } = await params;
+  const symbol = params.symbol;
   return {
-    title: `${symbol.toUpperCase()} · Market Replay`,
-    description: `Market Replay with Live and Scenario plans for ${symbol.toUpperCase()}.`,
+    title: `${symbol.toUpperCase()} · Simulated Dojo`,
+    description: `Simulated live market dojo for ${symbol.toUpperCase()}.`,
   };
 }
 
 export default async function ReplayPage({ params }: ReplayPageProps) {
-  const { symbol } = await params;
-  const initialSnapshot = await fetchPlanForSymbol(symbol).catch(() => null);
-  const latestPlanId = initialSnapshot?.plan?.plan_id ?? null;
+  const symbol = params.symbol;
+  const snapshot = await fetchSimulatedPlan(symbol).catch(() => null);
 
-  return (
-    <ReplayClient symbol={symbol} initialLivePlanId={latestPlanId} initialSnapshot={initialSnapshot} />
-  );
+  return <ReplayClient symbol={symbol} initialSnapshot={snapshot} />;
 }

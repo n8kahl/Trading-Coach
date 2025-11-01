@@ -7,6 +7,7 @@ type WebviewShellProps = {
   statusStrip: ReactNode;
   chartPanel: ReactNode;
   planPanel: ReactNode;
+  watchlistPanel?: ReactNode;
   actionsDock?: ReactNode;
   mobileSheet?: ReactNode;
   className?: string;
@@ -18,6 +19,7 @@ export default function WebviewShell({
   statusStrip,
   chartPanel,
   planPanel,
+  watchlistPanel,
   actionsDock,
   mobileSheet,
   className,
@@ -31,6 +33,7 @@ export default function WebviewShell({
   const surfaceAside = isLight
     ? "border-slate-200 bg-white/85 shadow-slate-200/30"
     : "border-neutral-800/70 bg-neutral-950/40 shadow-emerald-500/5";
+  const hasWatchlist = Boolean(watchlistPanel);
 
   return (
     <div
@@ -62,7 +65,19 @@ export default function WebviewShell({
         )}
         data-collapsed={collapsed ? "true" : "false"}
       >
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1.9fr),minmax(0,1fr)]">
+        <div
+          className={clsx(
+            "grid gap-6",
+            hasWatchlist
+              ? "lg:grid-cols-[minmax(0,1.05fr),minmax(0,1.9fr),minmax(0,1fr)]"
+              : "lg:grid-cols-[minmax(0,1.9fr),minmax(0,1fr)]",
+          )}
+        >
+          {hasWatchlist ? (
+            <div className="hidden lg:block">
+              {watchlistPanel}
+            </div>
+          ) : null}
           <section
             className={clsx(
               "min-h-[420px] rounded-3xl border p-5 backdrop-blur transition-colors duration-300",

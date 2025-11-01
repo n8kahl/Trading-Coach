@@ -1,264 +1,441 @@
-'use client';
+"use client";
 
-import { useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
-import PriceChart from '@/components/PriceChart';
-import { API_BASE_URL, WS_BASE_URL } from '@/lib/env';
-import type { PlanDeltaEvent, PlanSnapshot, SymbolTickEvent } from '@/lib/types';
-import { useScenarioStore, type ScenarioStyle } from '@/state/scenarioStore';
+import clsx from "clsx";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import PlanPriceChart, { type ChartOverlayState } from "@/components/PlanPriceChart";
+import PlanPanel from "@/components/webview/PlanPanel";
+import type { SupportingLevel } from "@/lib/chart";
+import type { PlanLayers, PlanSnapshot } from "@/lib/types";
+import { extractPrimaryLevels, extractSupportingLevels } from "@/lib/utils/layers";
+import { extractPlanLevels, resolveTrailingStop } from "@/lib/plan/levels";
+import { resolvePlanEntry, resolvePlanStop, resolvePlanTargets } from "@/lib/plan/coach";
+import { usePriceSeries, type PriceBar } from "@/lib/hooks/usePriceSeries";
+import { API_BASE_URL, withAuthHeaders } from "@/lib/env";
+import { useChartUrl } from "@/lib/hooks/useChartUrl";
+
+const TIMEFRAME_OPTIONS = [
+  { value: "1", label: "1m" },
+  { value: "3", label: "3m" },
+  { value: "5", label: "5m" },
+  { value: "15", label: "15m" },
+  { value: "60", label: "1h" },
+  { value: "240", label: "4h" },
+  { value: "1D", label: "1D" },
+];
+
+const PLAYBACK_SPEEDS = [0.5, 1, 2, 4]; // bars per second
 
 type ReplayClientProps = {
   symbol: string;
-  initialLivePlanId: string | null;
   initialSnapshot: PlanSnapshot | null;
 };
 
-type LiveState = {
-  planId: string | null;
-  status: string;
-  rr?: number | null;
-  lastPrice?: number | null;
-  entry?: number | null;
-  stop?: number | null;
-  targets?: number[];
-};
+type SessionInfo = PlanSnapshot["plan"]["session_state"] | null;
 
-function deriveInitialLive(snapshot: PlanSnapshot | null, planId: string | null): LiveState {
-  const plan = snapshot?.plan;
-  const structured = plan?.structured_plan ?? null;
-  const entry = structured?.entry?.level ?? plan?.entry ?? null;
-  const stop = plan?.stop ?? structured?.stop ?? null;
-  const targets = structured?.targets?.length ? structured.targets : plan?.targets ?? [];
-  return {
-    planId: planId ?? plan?.plan_id ?? null,
-    status: structured?.invalid ? 'invalid' : 'planned',
-    rr: plan?.rr_to_t1 ?? null,
-    lastPrice: entry ?? null,
-    entry,
-    stop,
-    targets,
-  };
+type PriceSeriesCandle = PriceBar;
+
+function normalizeTimeframeFromPlan(plan: PlanSnapshot["plan"]): string {
+  const raw = (plan.charts_params as Record<string, unknown> | undefined)?.interval ?? plan.chart_timeframe ?? "5";
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return "5";
+  const lower = value.toLowerCase();
+  if (lower.endsWith("m")) {
+    const minutes = Number.parseInt(lower.replace("m", ""), 10);
+    return Number.isFinite(minutes) && minutes > 0 ? String(minutes) : "5";
+  }
+  if (lower.endsWith("h")) {
+    const hours = Number.parseInt(lower.replace("h", ""), 10);
+    return Number.isFinite(hours) && hours > 0 ? String(hours * 60) : "60";
+  }
+  if (lower === "d" || lower === "1d") return "1D";
+  if (lower === "w" || lower === "1w") return "1W";
+  const numeric = Number.parseInt(lower, 10);
+  return Number.isFinite(numeric) && numeric > 0 ? String(numeric) : "5";
 }
 
-export default function ReplayClient({ symbol, initialLivePlanId, initialSnapshot }: ReplayClientProps) {
-  const upperSymbol = symbol.toUpperCase();
-  const [live, setLive] = useState<LiveState>(() => deriveInitialLive(initialSnapshot, initialLivePlanId));
-  const [priceSeries, setPriceSeries] = useState<{ time: number; value: number }[]>([]);
-  const { livePlanId, scenarios, adoptAsLive, regenerateScenario, removeScenario, setLinked } = useScenarioStore(symbol);
-  const activeLivePlanId = livePlanId || live.planId;
+function formatSessionStatus(session: SessionInfo): string {
+  if (!session?.status) return "Status unknown";
+  return session.status;
+}
 
-  // Subscribe to live plan deltas
-  useEffect(() => {
-    if (!activeLivePlanId) return;
-    const wsUrl = `${WS_BASE_URL}/ws/plans/${encodeURIComponent(activeLivePlanId)}`;
-    const socket = new WebSocket(wsUrl);
-    socket.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data) as PlanDeltaEvent;
-        if (payload.t !== 'plan_delta') return;
-        setLive((prev) => ({
-          ...prev,
-          status: payload.changes.status || prev.status,
-          rr: payload.changes.rr_to_t1 ?? prev.rr,
-          lastPrice: payload.changes.last_price ?? prev.lastPrice,
-        }));
-        // Live invalidated => offer regen for linked scenarios
-        if (payload.changes.status === 'invalidated' || payload.changes.status === 'plan_invalidated') {
-          scenarios
-            .filter((s) => s.linked_to_live)
-            .forEach(async (s) => {
-              try {
-                const next = await regenerateScenario(s.scenario_style || 'intraday', activeLivePlanId);
-                // Replace old card by deleting; addScenario already appended new one in regenerate
-                removeScenario(s.plan_id);
-                console.debug('telemetry', { t: 'scenario_regenerated', symbol: upperSymbol, style: s.scenario_style });
-              } catch (e) {
-                console.warn('linked scenario regen failed', e);
-              }
-            });
-        }
-      } catch (e) {
-        console.warn('ws parse', e);
+function formatAsOf(session: SessionInfo): string {
+  if (!session?.as_of) return "—";
+  const date = new Date(session.as_of);
+  if (!Number.isFinite(date.getTime())) return "—";
+  const tz = session.tz || "America/New_York";
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: tz,
+    timeZoneName: "short",
+  }).format(date);
+}
+
+function formatTimestamp(value: PriceSeriesCandle | null, tz?: string | null): string {
+  if (!value) return "—";
+  const time = typeof value.time === "number" ? value.time * 1000 : Number(value.time) * 1000;
+  if (!Number.isFinite(time)) return "—";
+  const date = new Date(time);
+  if (!Number.isFinite(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+    timeZone: tz || "America/New_York",
+  }).format(date);
+}
+
+function percentLabel(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  return `${Math.round(value * 100)}%`;
+}
+
+export default function ReplayClient({ symbol, initialSnapshot }: ReplayClientProps) {
+  const plan = initialSnapshot?.plan ?? null;
+
+  if (!plan) {
+    return (
+      <div className="px-6 py-12 text-center text-sm text-[color:var(--tc-neutral-400)]">
+        Simulated plan unavailable for {symbol.toUpperCase()}.
+      </div>
+    );
+  }
+
+  const initialLayers = (plan.plan_layers as PlanLayers | undefined) ?? null;
+  const [planLayers, setPlanLayers] = useState<PlanLayers | null>(initialLayers);
+  const [supportVisible, setSupportVisible] = useState(true);
+  const [highlightedLevel, setHighlightedLevel] = useState<SupportingLevel | null>(null);
+  const [timeframe, setTimeframe] = useState(() => normalizeTimeframeFromPlan(plan));
+  const [playbackIndex, setPlaybackIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const session = plan.session_state ?? null;
+  const chartUrl = useChartUrl(plan);
+
+  const trailingStopValue = useMemo(() => resolveTrailingStop(plan), [plan]);
+  const levelSummary = useMemo(() => extractPlanLevels(plan, { trailingStop: trailingStopValue }), [plan, trailingStopValue]);
+
+  const primaryLevels = useMemo(() => extractPrimaryLevels(planLayers), [planLayers]);
+  const supportingLevels = useMemo(() => extractSupportingLevels(planLayers), [planLayers]);
+
+  const filteredLayers = useMemo(() => {
+    if (!planLayers) return null;
+    if (supportVisible) return planLayers;
+    const groups = (planLayers.meta?.level_groups ?? {}) as Record<string, unknown>;
+    type LevelGroupEntry = { price?: number | null };
+    const primaryEntries = Array.isArray(groups.primary) ? (groups.primary as LevelGroupEntry[]) : [];
+    const primarySet = new Set<number>();
+    primaryEntries.forEach((entry) => {
+      if (entry && typeof entry.price === "number") {
+        primarySet.add(entry.price);
       }
-    };
-    return () => socket.close();
-  }, [activeLivePlanId, regenerateScenario, removeScenario, scenarios, upperSymbol]);
+    });
+    const filteredLevelsList = Array.isArray(planLayers.levels)
+      ? planLayers.levels.filter((level) => typeof level?.price === "number" && primarySet.has(level.price))
+      : [];
+    return {
+      ...planLayers,
+      levels: filteredLevelsList,
+      zones: [],
+    } as PlanLayers;
+  }, [planLayers, supportVisible]);
 
-  // Price stream for symbol
   useEffect(() => {
-    const url = `${API_BASE_URL}/stream/${encodeURIComponent(upperSymbol)}`;
-    const sse = new EventSource(url);
-    sse.onmessage = (event) => {
+    if (!plan.plan_id) return;
+    const controller = new AbortController();
+    let cancelled = false;
+    (async () => {
       try {
-        const payload = JSON.parse(event.data) as SymbolTickEvent;
-        if (payload.t === 'tick') {
-          const ts = Math.floor(new Date(payload.ts).getTime() / 1000);
-          setPriceSeries((prev) => {
-            const next = [...prev, { time: ts, value: payload.p }];
-            if (next.length > 720) next.splice(0, next.length - 720);
-            return next;
-          });
-          setLive((prev) => ({ ...prev, lastPrice: payload.p }));
+        const qs = new URLSearchParams({ plan_id: plan.plan_id });
+        const res = await fetch(`${API_BASE_URL}/api/v1/gpt/chart-layers?${qs.toString()}`, {
+          cache: "no-store",
+          signal: controller.signal,
+          headers: withAuthHeaders({ Accept: "application/json" }),
+        });
+        if (!res.ok) return;
+        const payload = (await res.json()) as PlanLayers;
+        if (!cancelled) {
+          setPlanLayers(payload ?? null);
         }
-      } catch {}
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        if (process.env.NODE_ENV !== "production") {
+          console.warn("[ReplayClient] layers fetch failed", error);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
     };
-    sse.onerror = () => sse.close();
-    return () => sse.close();
-  }, [upperSymbol]);
+  }, [plan.plan_id]);
 
-  const [style, setStyle] = useState<ScenarioStyle>('intraday');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const overlayTargets = useMemo(() => resolvePlanTargets(plan), [plan]);
+  const entryPrice = useMemo(() => resolvePlanEntry(plan), [plan]);
+  const stopPrice = useMemo(() => resolvePlanStop(plan, trailingStopValue), [plan, trailingStopValue]);
 
-  const generate = async () => {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await regenerateScenario(style, activeLivePlanId || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Generation failed');
-    } finally {
-      setBusy(false);
+  const chartOverlays = useMemo<ChartOverlayState>(() => ({
+    entry: entryPrice,
+    stop: stopPrice,
+    trailingStop: trailingStopValue,
+    targets: overlayTargets,
+    layers: (supportVisible ? planLayers : filteredLayers) ?? null,
+  }), [entryPrice, stopPrice, trailingStopValue, overlayTargets, filteredLayers, planLayers, supportVisible]);
+
+  const symbolToken = plan.symbol ?? symbol;
+  const {
+    bars: priceBars,
+    status: priceStatus,
+    error: priceError,
+    reload: reloadSeries,
+  } = usePriceSeries(symbolToken, timeframe, [plan.plan_id]);
+
+  useEffect(() => {
+    setPlaybackIndex(0);
+    setIsPlaying(false);
+  }, [timeframe, priceBars.length]);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+    if (priceBars.length === 0) return;
+    const intervalMs = Math.max(75, Math.round(1000 / playbackSpeed));
+    const timer = window.setInterval(() => {
+      setPlaybackIndex((prev) => {
+        if (prev >= priceBars.length - 1) {
+          window.clearInterval(timer);
+          setIsPlaying(false);
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, intervalMs);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [isPlaying, playbackSpeed, priceBars.length]);
+
+  const maxIndex = Math.max(0, priceBars.length - 1);
+  useEffect(() => {
+    if (playbackIndex > maxIndex) {
+      setPlaybackIndex(maxIndex);
     }
-  };
+  }, [maxIndex, playbackIndex]);
 
-  const [compareId, setCompareId] = useState<string | null>(null);
-  const comparePlan = useMemo(() => scenarios.find((s) => s.plan_id === compareId) || null, [scenarios, compareId]);
+  const currentBar = priceBars.length ? priceBars[Math.min(playbackIndex, maxIndex)] : null;
+  const displayBars = useMemo(() => {
+    if (!priceBars.length) return [] as PriceSeriesCandle[];
+    return priceBars.slice(0, Math.min(playbackIndex + 1, priceBars.length));
+  }, [priceBars, playbackIndex]);
+
+  const timelineProgress = maxIndex === 0 ? 0 : (playbackIndex / maxIndex) * 100;
+
+  const handleToggleSupport = useCallback(() => {
+    setSupportVisible((prev) => !prev);
+  }, []);
+
+  const handleSelectLevel = useCallback((level: SupportingLevel | null) => {
+    setHighlightedLevel(level);
+  }, []);
+
+  const handleSetPlaybackIndex = useCallback((value: number) => {
+    const next = Number.isFinite(value) ? Math.max(0, Math.min(value, maxIndex)) : 0;
+    setPlaybackIndex(next);
+  }, [maxIndex]);
+
+  const handleStep = useCallback((delta: number) => {
+    setPlaybackIndex((prev) => {
+      const next = Math.max(0, Math.min(prev + delta, maxIndex));
+      return next;
+    });
+  }, [maxIndex]);
+
+  const banner = plan.session_state?.banner ?? null;
+  const objectiveMeta = planLayers?.meta?.next_objective as Record<string, unknown> | undefined;
+  const objectiveProgress = typeof objectiveMeta?.progress === "number" ? objectiveMeta.progress : null;
+
+  const statusMessage = useMemo(() => {
+    if (priceError) return "Price data unavailable";
+    if (priceStatus === "loading") return "Loading price history…";
+    if (priceStatus === "error") return "Failed to load price data";
+    if (!priceBars.length) return "Waiting for historical data";
+    return null;
+  }, [priceStatus, priceError, priceBars.length]);
 
   return (
-    <div className="space-y-8 px-6 py-10 sm:px-10">
-      <header className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <div className="text-xs uppercase tracking-[0.3em] text-neutral-400">Market Replay</div>
-          <h1 className="mt-1 text-3xl font-semibold text-white">{upperSymbol} · Live + Scenarios</h1>
-          <p className="mt-1 text-sm text-neutral-400">Live plan auto-updates; scenarios are frozen snapshots unless linked.</p>
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-8 sm:px-6 lg:px-10">
+      <header className="flex flex-col gap-4 rounded-3xl border border-[color:var(--tc-border-subtle)] bg-[color:var(--tc-surface-primary)]/90 p-5 backdrop-blur">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="text-xs uppercase tracking-[0.3em] text-[color:var(--tc-neutral-400)]">Simulated Dojo</div>
+            <h1 className="text-2xl font-semibold text-[color:var(--tc-neutral-50)]">{symbolToken.toUpperCase()}</h1>
+            {banner ? (
+              <p className="text-sm text-[color:var(--tc-neutral-300)]">{banner}</p>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-2 text-sm text-[color:var(--tc-neutral-300)]">
+            <span>{formatSessionStatus(session)}</span>
+            <span className="inline-flex items-center gap-1 rounded-full border border-[color:var(--tc-border-subtle)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[color:var(--tc-neutral-200)]">
+              As of {formatAsOf(session)}
+            </span>
+            {chartUrl ? (
+              <a
+                href={chartUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center rounded-full border border-[color:var(--tc-chip-emerald-border)] bg-[color:var(--tc-chip-emerald-surface)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.22em] text-[color:var(--tc-emerald-200)] transition hover:border-[color:var(--tc-emerald-400)] hover:text-[color:var(--tc-emerald-100)]"
+              >
+                Canonical Chart ↗
+              </a>
+            ) : null}
+          </div>
         </div>
-        {activeLivePlanId ? (
-          <Link href={`/plan/${encodeURIComponent(activeLivePlanId)}`} className="text-sm text-sky-300 underline">
-            Open Live Console ↗
-          </Link>
-        ) : null}
+        <div className="flex flex-wrap items-center gap-3 text-xs text-[color:var(--tc-neutral-400)]">
+          <span>Objective progress: {percentLabel(objectiveProgress)}</span>
+          <span>Playback bar {priceBars.length ? playbackIndex + 1 : 0}/{priceBars.length}</span>
+          <span>Timestamp: {formatTimestamp(currentBar, session?.tz)}</span>
+        </div>
       </header>
 
-      <section className="rounded-3xl border border-neutral-800/80 bg-neutral-900/50 p-6 backdrop-blur">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="text-sm font-medium text-neutral-400">Live price</div>
-            <div className="mt-1 text-3xl font-semibold text-emerald-300">{live.lastPrice ? live.lastPrice.toFixed(2) : '—'}</div>
+      <section className="relative rounded-3xl border border-[color:var(--tc-border-subtle)] bg-[color:var(--tc-surface-muted)]/90 p-4 backdrop-blur">
+        {statusMessage ? (
+          <div className="absolute inset-0 z-10 flex items-center justify-center rounded-3xl bg-[color:var(--tc-surface-primary)]/85 text-sm text-[color:var(--tc-neutral-200)]">
+            {statusMessage}
           </div>
+        ) : null}
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            {(['scalp','intraday','swing','reversal'] as ScenarioStyle[]).map((opt) => (
-              <button
-                key={opt}
-                type="button"
-                onClick={() => setStyle(opt)}
-                disabled={opt === 'reversal'}
-                className={`rounded-full px-3 py-1 text-sm ${style===opt? 'bg-sky-500/20 text-sky-200 border border-sky-500/40':'bg-neutral-800/60 text-neutral-200 border border-neutral-700/60'} ${opt==='reversal'?'opacity-50 cursor-not-allowed':''}`}
-                title={opt==='reversal' ? 'Reversal strategy gated until server support' : ''}
-              >
-                {opt.charAt(0).toUpperCase() + opt.slice(1)}
-              </button>
-            ))}
+            <label className="text-xs uppercase tracking-[0.22em] text-[color:var(--tc-neutral-400)]" htmlFor="dojo-timeframe">
+              Timeframe
+            </label>
+            <select
+              id="dojo-timeframe"
+              value={timeframe}
+              onChange={(event) => setTimeframe(event.target.value)}
+              className="rounded-full border border-[color:var(--tc-border-subtle)] bg-[color:var(--tc-surface-primary)] px-3 py-1 text-xs text-[color:var(--tc-neutral-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--tc-emerald-400)]"
+            >
+              {TIMEFRAME_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-[color:var(--tc-neutral-400)]">
             <button
               type="button"
-              onClick={generate}
-              disabled={busy}
-              className="rounded-full border border-emerald-400/60 bg-emerald-400/10 px-4 py-2 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-400/20 disabled:opacity-60"
+              onClick={() => reloadSeries()}
+              className="rounded-full border border-[color:var(--tc-border-subtle)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.22em] text-[color:var(--tc-neutral-200)] transition hover:border-[color:var(--tc-emerald-400)] hover:text-[color:var(--tc-emerald-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--tc-emerald-400)]"
             >
-              {busy ? 'Generating…' : 'Generate Plan'}
+              Refresh Bars
+            </button>
+            <button
+              type="button"
+              onClick={handleToggleSupport}
+              className={clsx(
+                "rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.22em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--tc-emerald-400)]",
+                supportVisible
+                  ? "border-[color:var(--tc-chip-emerald-border)] bg-[color:var(--tc-chip-emerald-surface)] text-[color:var(--tc-emerald-200)]"
+                  : "border-[color:var(--tc-border-subtle)] bg-[color:var(--tc-surface-primary)] text-[color:var(--tc-neutral-300)]",
+              )}
+            >
+              Levels {supportVisible ? "On" : "Off"}
             </button>
           </div>
         </div>
-        <div className="mt-6 overflow-hidden rounded-2xl border border-neutral-800/70 bg-neutral-950/40">
-          <PriceChart
-            data={priceSeries}
-            lastPrice={live.lastPrice ?? undefined}
-            entry={live.entry}
-            stop={live.stop}
-            targets={live.targets}
-            compare={comparePlan ? { entry: comparePlan.entry ?? undefined, stop: comparePlan.stop ?? undefined, targets: comparePlan.tps ?? [], label: 'Scenario' } : null}
-          />
+        <PlanPriceChart
+          planId={plan.plan_id}
+          symbol={symbolToken}
+          resolution={timeframe}
+          theme="dark"
+          data={displayBars}
+          overlays={chartOverlays}
+          onLastBarTimeChange={() => {}}
+          levelsExpanded={supportVisible}
+        />
+        <div className="mt-4 space-y-3">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setIsPlaying((prev) => !prev)}
+              className="rounded-full border border-[color:var(--tc-chip-emerald-border)] bg-[color:var(--tc-chip-emerald-surface)] px-4 py-1 text-xs font-semibold uppercase tracking-[0.22em] text-[color:var(--tc-emerald-200)] transition hover:border-[color:var(--tc-emerald-400)] hover:text-[color:var(--tc-emerald-100)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--tc-emerald-400)]"
+            >
+              {isPlaying ? "Pause" : "Play"}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleStep(-1)}
+              className="rounded-full border border-[color:var(--tc-border-subtle)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.22em] text-[color:var(--tc-neutral-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--tc-emerald-400)]"
+            >
+              Step −1
+            </button>
+            <button
+              type="button"
+              onClick={() => handleStep(1)}
+              className="rounded-full border border-[color:var(--tc-border-subtle)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.22em] text-[color:var(--tc-neutral-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--tc-emerald-400)]"
+            >
+              Step +1
+            </button>
+            <div className="flex items-center gap-2">
+              <span className="text-xs uppercase tracking-[0.2em] text-[color:var(--tc-neutral-400)]">Speed</span>
+              <select
+                value={playbackSpeed}
+                onChange={(event) => setPlaybackSpeed(Number(event.target.value) || 1)}
+                className="rounded-full border border-[color:var(--tc-border-subtle)] bg-[color:var(--tc-surface-primary)] px-2 py-1 text-xs text-[color:var(--tc-neutral-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--tc-emerald-400)]"
+              >
+                {PLAYBACK_SPEEDS.map((speed) => (
+                  <option key={speed} value={speed}>
+                    {speed}×
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={0}
+              max={maxIndex}
+              value={playbackIndex}
+              onChange={(event) => handleSetPlaybackIndex(Number(event.target.value))}
+              className="w-full accent-[color:var(--tc-emerald-400)]"
+            />
+            <span className="w-16 text-right text-xs text-[color:var(--tc-neutral-400)]">{Math.round(timelineProgress)}%</span>
+          </div>
         </div>
-        {error && <p className="mt-3 text-sm text-rose-300">{error}</p>}
       </section>
 
-      <section className="space-y-4">
-        <h2 className="text-xs font-semibold uppercase tracking-[0.3em] text-neutral-400">Scenarios</h2>
-        {scenarios.length === 0 ? (
-          <p className="text-sm text-neutral-400">No scenarios yet. Choose a style and generate a plan.</p>
-        ) : (
-          <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {scenarios.map((s) => (
-              <li key={s.plan_id} className="rounded-2xl border border-neutral-800/70 bg-neutral-900/60 p-4">
-                <div className="mb-2 flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="rounded-full bg-neutral-800/80 px-2 py-0.5 text-neutral-200">Scenario</span>
-                    <span className="rounded-full bg-sky-800/40 px-2 py-0.5 text-sky-200">{s.scenario_style}</span>
-                    {s.plan_id === activeLivePlanId ? (
-                      <span className="rounded-full bg-emerald-800/40 px-2 py-0.5 text-emerald-200">Live</span>
-                    ) : (
-                      <span className="rounded-full bg-neutral-800/60 px-2 py-0.5 text-neutral-200">Frozen</span>
-                    )}
-                  </div>
-                  {s.chart_url ? (
-                    <Link href={s.chart_url} target="_blank" className="text-xs text-sky-300 underline">
-                      Open chart ↗
-                    </Link>
-                  ) : (
-                    <span className="text-xs text-neutral-500">Chart unavailable</span>
-                  )}
-                </div>
-                <div className="flex items-center justify-between text-sm">
-                  <div className="text-neutral-400">Entry</div>
-                  <div className="font-mono text-neutral-100">{s.entry?.toFixed(2) ?? '—'}</div>
-                </div>
-                <div className="mt-1 flex items-center justify-between text-sm">
-                  <div className="text-neutral-400">Stop</div>
-                  <div className="font-mono text-rose-200">{s.stop?.toFixed(2) ?? '—'}</div>
-                </div>
-                <div className="mt-1 flex items-center justify-between text-sm">
-                  <div className="text-neutral-400">TPs</div>
-                  <div className="font-mono text-emerald-200">{(s.tps||[]).slice(0,3).map(v=>v.toFixed(2)).join(', ') || '—'}</div>
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => setCompareId(s.plan_id === compareId ? null : s.plan_id)}
-                    className={`rounded-full px-3 py-1 ${compareId===s.plan_id?'bg-sky-500/20 text-sky-200 border border-sky-500/40':'bg-neutral-800/60 text-neutral-200 border border-neutral-700/60'}`}
-                  >
-                    {compareId === s.plan_id ? 'Hide Compare' : 'Compare'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { adoptAsLive(s.plan_id); console.debug('telemetry', { t: 'scenario_adopted' }); }}
-                    className="rounded-full border border-emerald-400/60 bg-emerald-400/10 px-3 py-1 text-emerald-200"
-                  >
-                    Adopt as Live
-                  </button>
-                  <button
-                    type="button"
-                    onClick={async () => { await regenerateScenario(s.scenario_style || 'intraday', activeLivePlanId || null); console.debug('telemetry', { t: 'scenario_regenerated' }); }}
-                    className="rounded-full border border-amber-400/60 bg-amber-400/10 px-3 py-1 text-amber-200"
-                  >
-                    Regenerate
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { removeScenario(s.plan_id); console.debug('telemetry', { t: 'scenario_deleted' }); }}
-                    className="rounded-full border border-rose-400/60 bg-rose-400/10 px-3 py-1 text-rose-200"
-                  >
-                    Delete
-                  </button>
-                  <label className="ml-auto flex items-center gap-2 text-neutral-300">
-                    <input type="checkbox" checked={!!s.linked_to_live} onChange={(e)=> setLinked(s.plan_id, e.target.checked)} />
-                    <span>Link to Live</span>
-                  </label>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
+      <section className="grid gap-6 lg:grid-cols-[minmax(0,1.4fr),minmax(0,1fr)]">
+        <div className="space-y-4 rounded-3xl border border-[color:var(--tc-border-subtle)] bg-[color:var(--tc-surface-primary)]/90 p-5 backdrop-blur">
+          <h2 className="text-xs font-semibold uppercase tracking-[0.3em] text-[color:var(--tc-neutral-400)]">Plan Overview</h2>
+          <PlanPanel
+            plan={plan}
+            supportingLevels={supportingLevels}
+            highlightedLevel={highlightedLevel}
+            onSelectLevel={handleSelectLevel}
+            theme="dark"
+          />
+        </div>
+        <div className="space-y-4 rounded-3xl border border-[color:var(--tc-border-subtle)] bg-[color:var(--tc-surface-primary)]/90 p-5 backdrop-blur">
+          <h2 className="text-xs font-semibold uppercase tracking-[0.3em] text-[color:var(--tc-neutral-400)]">Primary Levels</h2>
+          {primaryLevels.length ? (
+            <ul className="space-y-2 text-sm text-[color:var(--tc-neutral-100)]">
+              {primaryLevels.map((level) => (
+                <li key={`${level.label}-${level.price}`} className="flex items-center justify-between rounded-xl border border-[color:var(--tc-border-subtle)] bg-[color:var(--tc-surface-muted)]/80 px-3 py-2">
+                  <span className="text-xs uppercase tracking-[0.24em] text-[color:var(--tc-neutral-400)]">{level.label ?? level.kind ?? "Level"}</span>
+                  <span className="font-semibold text-[color:var(--tc-neutral-50)]">{level.price.toFixed(2)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-[color:var(--tc-neutral-400)]">No primary levels provided.</p>
+          )}
+        </div>
       </section>
     </div>
   );

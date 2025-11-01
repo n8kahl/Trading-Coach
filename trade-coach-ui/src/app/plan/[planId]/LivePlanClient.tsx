@@ -6,24 +6,17 @@ import { useRouter } from "next/navigation";
 import WebviewShell from "@/components/webview/WebviewShell";
 import PlanPanel from "@/components/webview/PlanPanel";
 import PlanChartPanel from "@/components/PlanChartPanel";
-import CoachNote from "@/components/CoachNote";
 import HeaderMarkers from "@/components/HeaderMarkers";
+import { WatchlistRail, WatchlistDrawer, useWatchlist } from "@/features/watchlist";
+import { PlanInsightsSheet } from "@/features/plan";
+import { CoachPanel } from "@/features/coach";
 import SessionChip from "@/components/SessionChip";
 import ObjectiveProgress from "@/components/ObjectiveProgress";
 import { extractPrimaryLevels, extractSupportingLevels } from "@/lib/utils/layers";
 import type { SupportingLevel } from "@/lib/chart";
 import type { PlanLayers, PlanSnapshot } from "@/lib/types";
 import { API_BASE_URL, BUILD_SHA, withAuthHeaders } from "@/lib/env";
-import {
-  deriveCoachMessage,
-  resolvePlanEntry,
-  resolvePlanStop,
-  resolvePlanTargets,
-  type CoachGoal,
-  type CoachNote as CoachNoteModel,
-} from "@/lib/plan/coach";
 import { extractPlanLevels, resolveTrailingStop } from "@/lib/plan/levels";
-import { emitPlanEvent } from "@/lib/plan/events";
 import { useStore } from "@/store/useStore";
 import { wsMux, type ConnectionState } from "@/lib/wsMux";
 import { useChartUrl } from "@/lib/hooks/useChartUrl";
@@ -69,6 +62,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const setSession = useStore((state) => state.setSession);
   const setConnection = useStore((state) => state.setConnection);
   const connectionState = useStore((state) => state.connection);
+  const wsStats = useStore((state) => state.wsStats);
   const initialLayers = React.useMemo(() => extractInitialLayers(initialSnapshot), [initialSnapshot]);
   const plan = planState ?? initialSnapshot.plan;
   const layers = planLayersState ?? initialLayers;
@@ -77,6 +71,15 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const coachConnectionStatus = connectionState.coach;
   const chartUrl = useChartUrl(plan);
   const coachPulse = useStore((state) => state.coach);
+  const {
+    items: watchlistItems,
+    status: watchlistStatus,
+    error: watchlistError,
+    lastUpdated: watchlistUpdated,
+    refresh: refreshWatchlist,
+  } = useWatchlist();
+  const [watchlistOpen, setWatchlistOpen] = React.useState(false);
+  const [insightsOpen, setInsightsOpen] = React.useState(false);
   const [followLive, setFollowLive] = React.useState(true);
   const [streamingEnabled, setStreamingEnabled] = React.useState(true);
   const [supportVisible, setSupportVisible] = React.useState(() => extractSupportVisible(initialSnapshot.plan));
@@ -90,13 +93,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const [symbolDraft, setSymbolDraft] = React.useState(() => (plan.symbol ? plan.symbol.toUpperCase() : ""));
   const [symbolSubmitting, setSymbolSubmitting] = React.useState(false);
   const [addingSetup, setAddingSetup] = React.useState(false);
-  const [coachNote, setCoachNote] = React.useState<CoachNoteModel>(() => ({
-    text: "Awaiting tick…",
-    goal: "neutral",
-    progressPct: 0,
-    updatedAt: Date.now(),
-  }));
-  const [coachLoading, setCoachLoading] = React.useState(false);
   const [activeLevelId, setActiveLevelId] = React.useState<string | null>(null);
   const [hiddenLevelIds, setHiddenLevelIds] = React.useState<Set<string>>(() => new Set());
   const [collapsed, setCollapsed] = React.useState(false);
@@ -104,8 +100,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const lastDeltaAtRef = React.useRef(Date.now());
   const symbolRequestRef = React.useRef(0);
   const replanPendingRef = React.useRef(false);
-  const lastCoachGoalRef = React.useRef<CoachGoal | null>(null);
-  const lastCoachUpdateRef = React.useRef<number>(Date.now());
   const touchStartYRef = React.useRef<number | null>(null);
 
   const theme = "dark" as const;
@@ -437,64 +431,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     Array.isArray(plan.warnings) && plan.warnings.length ? String(plan.warnings[0]) : plan.session_state?.message ?? null;
 
   const trailingStopValue = React.useMemo(() => resolveTrailingStop(plan), [plan]);
-  const resolvedTargets = React.useMemo(() => resolvePlanTargets(plan), [plan]);
-  const entryValue = React.useMemo(() => resolvePlanEntry(plan), [plan]);
-  const stopResolved = React.useMemo(() => resolvePlanStop(plan, trailingStopValue), [plan, trailingStopValue]);
-  const nextTarget = React.useMemo(() => resolvedTargets[0] ?? null, [resolvedTargets]);
-  const levelFormatter = React.useMemo(
-    () =>
-      new Intl.NumberFormat("en-US", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      }),
-    [],
-  );
-  const coachMetrics = React.useMemo(() => {
-    const entries: Array<{ key: string; label: string; value: string; ariaLabel?: string }> = [];
-    const coachDiff = coachPulse.diff;
-    if (entryValue != null) {
-      entries.push({
-        key: "entry",
-        label: "Entry",
-        value: levelFormatter.format(entryValue),
-        ariaLabel: `Entry ${levelFormatter.format(entryValue)}`,
-      });
-    }
-    if (stopResolved != null) {
-      entries.push({
-        key: "stop",
-        label: "Stop",
-        value: levelFormatter.format(stopResolved),
-        ariaLabel: `Stop ${levelFormatter.format(stopResolved)}`,
-      });
-    }
-    if (nextTarget?.price != null) {
-      entries.push({
-        key: "tp",
-        label: nextTarget.label || "TP",
-        value: levelFormatter.format(nextTarget.price),
-        ariaLabel: `${nextTarget.label || "Target"} ${levelFormatter.format(nextTarget.price)}`,
-      });
-    }
-    if (coachDiff?.waiting_for) {
-      entries.push({
-        key: "waiting",
-        label: "Waiting",
-        value: coachDiff.waiting_for.replace(/_/g, " "),
-        ariaLabel: `Waiting for ${coachDiff.waiting_for}`,
-      });
-    }
-    if (coachDiff?.risk_cue) {
-      entries.push({
-        key: "risk",
-        label: "Risk Cue",
-        value: coachDiff.risk_cue.replace(/_/g, " "),
-        ariaLabel: `Risk cue ${coachDiff.risk_cue}`,
-      });
-    }
-    return entries;
-  }, [entryValue, stopResolved, nextTarget, levelFormatter, coachPulse.diff]);
-
   React.useEffect(() => {
     setSymbolDraft(plan.symbol ? sanitizeSymbolToken(String(plan.symbol)) : "");
   }, [plan.symbol]);
@@ -517,6 +453,8 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
 
   React.useEffect(() => {
     setCollapsed(false);
+    setWatchlistOpen(false);
+    setInsightsOpen(false);
   }, [plan.plan_id]);
 
   React.useEffect(() => {
@@ -535,88 +473,16 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     );
   }, [plan]);
 
-  const computeCoachMessage = React.useCallback(() => {
-    return deriveCoachMessage({
-      plan,
-      price: lastPrice,
-      trailingStop: levelSummary.trailingStop,
-      now: Date.now(),
-    });
-  }, [plan, lastPrice, levelSummary.trailingStop]);
-
-  React.useEffect(() => {
-    if (!coachPulse.diff) return;
-    const base = computeCoachMessage();
-    const progress = coachPulse.diff.objective_progress?.progress;
-    const progressPct = progress != null && Number.isFinite(progress) ? Math.round(Math.max(0, Math.min(1, progress)) * 100) : base.progressPct;
-    setCoachNote({
-      text: coachPulse.diff.next_action ?? coachPulse.diff.waiting_for ?? base.text,
-      goal: base.goal,
-      progressPct,
-      updatedAt: Date.now(),
-    });
-    setCoachLoading(false);
-  }, [coachPulse.diff, computeCoachMessage]);
-
-  const applyCoachMessage = React.useCallback(
-    (reason: string) => {
-      const next = computeCoachMessage();
-      const finishLoading = () => {
-        if (typeof window === "undefined") {
-          setCoachLoading(false);
-          return;
-        }
-        window.setTimeout(() => setCoachLoading(false), 220);
-      };
-      setCoachNote((prev) => {
-        const prevProgress = Math.round(prev.progressPct);
-        const nextProgress = Math.round(next.progressPct);
-        if (prev.text === next.text && prev.goal === next.goal && prevProgress === nextProgress) {
-          if (reason !== "initial") {
-            lastCoachUpdateRef.current = Date.now();
-            finishLoading();
-          }
-          return { ...next, updatedAt: prev.updatedAt };
-        }
-        lastCoachUpdateRef.current = next.updatedAt;
-        finishLoading();
-        return next;
-      });
-    },
-    [computeCoachMessage],
-  );
-
-  React.useEffect(() => {
-    applyCoachMessage("initial");
-  }, [applyCoachMessage]);
-
-  React.useEffect(() => {
-    if (coachPulse.diff || typeof window === "undefined") return undefined;
-    const interval = window.setInterval(() => {
-      setCoachLoading(true);
-      applyCoachMessage("cadence");
-    }, 5000);
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [applyCoachMessage, coachPulse.diff]);
-
-  React.useEffect(() => {
-    const goal = coachNote.goal;
-    if (!activePlanId) return;
-    if (goal === lastCoachGoalRef.current) return;
-    lastCoachGoalRef.current = goal;
-    if (goal === "tp_hit" || goal === "stop_hit") {
-      emitPlanEvent({
-        type: goal,
-        planId: activePlanId,
-        payload: {
-          price: lastPrice ?? null,
-          updatedAt: coachNote.updatedAt,
-        },
-      });
+  const coachActionText = React.useMemo(() => {
+    const diff = coachPulse.diff;
+    if (diff?.next_action && diff.next_action.trim()) {
+      return diff.next_action.trim();
     }
-  }, [coachNote.goal, coachNote.updatedAt, activePlanId, lastPrice]);
+    if (diff?.waiting_for) {
+      return diff.waiting_for.replace(/[_-]/g, " ");
+    }
+    return "Awaiting guidance…";
+  }, [coachPulse.diff]);
 
   const priceFormatter = React.useMemo(
     () =>
@@ -796,7 +662,6 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     }
   }, []);
 
-  const coachLive = streamingEnabled && coachConnectionStatus === "connected" && (!!coachPulse.planId ? coachPulse.planId === plan.plan_id : true);
   const toneBadgeClass: Record<StatusTone, string> = {
     green: "border-emerald-500/60 bg-emerald-500/10 text-emerald-100",
     yellow: "border-amber-500/60 bg-amber-500/10 text-amber-100",
@@ -887,7 +752,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
           >
             <span className={headerStyles.collapsedDot} aria-hidden="true" />
             <span className={headerStyles.collapsedTextWrapper}>
-              <span className={headerStyles.collapsedText}>{coachNote.text}</span>
+            <span className={headerStyles.collapsedText}>{coachActionText}</span>
             </span>
             <span className="sr-only">Expand coach guidance</span>
             <svg
@@ -934,13 +799,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
               <span className="font-semibold text-white">{lastPriceLabel}</span>
             </span>
           </div>
-          <CoachNote
-            note={coachNote}
-            subdued={!streamingEnabled || dataStatusTone !== "green"}
-            loading={coachLoading}
-            metrics={coachMetrics}
-            live={coachLive}
-          />
+          <CoachPanel plan={plan} layers={layers} />
           <div className="flex flex-col gap-3 md:flex-row md:items-start">
             <SessionChip />
             <div className="min-w-[220px] flex-1">
@@ -964,6 +823,24 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
               ))}
             </div>
             <div className="ml-auto flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setWatchlistOpen(true)}
+                className="inline-flex items-center justify-center rounded-full border border-neutral-700/60 bg-neutral-900/60 px-3 py-1 text-[0.6rem] font-semibold uppercase tracking-[0.24em] text-neutral-200 transition hover:border-emerald-400/60 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 md:hidden"
+                aria-haspopup="dialog"
+                aria-expanded={watchlistOpen}
+              >
+                Watchlist
+              </button>
+              <button
+                type="button"
+                onClick={() => setInsightsOpen(true)}
+                className="inline-flex items-center justify-center rounded-full border border-neutral-700/60 bg-neutral-900/60 px-3 py-1 text-[0.6rem] font-semibold uppercase tracking-[0.24em] text-neutral-200 transition hover:border-emerald-400/60 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 md:hidden"
+                aria-haspopup="dialog"
+                aria-expanded={insightsOpen}
+              >
+                Insights
+              </button>
               <button
                 type="button"
                 onClick={() => handleSetFollowLive(!followLive)}
@@ -1097,11 +974,50 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       <div className="font-semibold uppercase tracking-[0.2em] text-neutral-400">Dev Stats</div>
       <div>Bundle: {BUILD_SHA ? BUILD_SHA.slice(0, 7) : 'n/a'}</div>
       <div>WS: {planConnectionStatus}</div>
+      <div>WS uptime: {(wsStats.plan.uptimeMs / 1000).toFixed(1)}s · reconnects {wsStats.plan.reconnects}</div>
       <div>Data age: {dataAgeSeconds != null ? `${dataAgeSeconds.toFixed(1)}s` : 'n/a'}</div>
       <div>Last bar: {lastBarTime ? new Date(lastBarTime).toLocaleTimeString() : 'n/a'}</div>
       <div>Follow Live: {followLive ? 'yes' : 'no'}</div>
     </div>
   ) : null;
+
+  const watchlistPanel = (
+    <WatchlistRail
+      items={watchlistItems}
+      status={watchlistStatus}
+      error={watchlistError}
+      lastUpdated={watchlistUpdated}
+      onRefresh={refreshWatchlist}
+    />
+  );
+
+  const handleWatchlistSelect = React.useCallback(
+    (planUrl: string) => {
+      setWatchlistOpen(false);
+      router.push(planUrl);
+    },
+    [router],
+  );
+
+  const mobileSheets = (
+    <>
+      <WatchlistDrawer
+        open={watchlistOpen}
+        onClose={() => setWatchlistOpen(false)}
+        items={watchlistItems}
+        status={watchlistStatus}
+        error={watchlistError}
+        onSelect={handleWatchlistSelect}
+      />
+      <PlanInsightsSheet
+        plan={plan}
+        layers={layers}
+        trailingStop={levelSummary.trailingStop ?? null}
+        open={insightsOpen}
+        onOpenChange={setInsightsOpen}
+      />
+    </>
+  );
 
   return (
     <>
@@ -1110,7 +1026,9 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         statusStrip={statusStrip}
         chartPanel={chartPanel}
         planPanel={planPanel}
+        watchlistPanel={watchlistPanel}
         collapsed={collapsed}
+        mobileSheet={mobileSheets}
       />
       {debugPanel}
     </>

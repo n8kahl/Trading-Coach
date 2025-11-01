@@ -1,10 +1,49 @@
 "use client";
 
 import { create } from "zustand";
-import type { BarsEvt, CoachPulse, Event, PlanDelta, ConnectionState } from "@/lib/wsMux";
+import type { BarsEvt, CoachPulse, Event, PlanDelta, ConnectionKind, ConnectionState } from "@/lib/wsMux";
 import type { PlanLayers, PlanSnapshot } from "@/lib/types";
 
 type SessionInfo = CoachPulse["session"] & { status: string } | null;
+
+export type WatchlistItem = {
+  plan_id: string;
+  symbol: string;
+  style?: string | null;
+  plan_url: string;
+  chart_url: string | null;
+  actionable_soon: boolean | null;
+  entry_distance_pct: number | null;
+  entry_distance_atr: number | null;
+  bars_to_trigger: number | null;
+  meta?: Record<string, unknown>;
+  raw: Record<string, unknown>;
+};
+
+type WatchlistStatus = "idle" | "loading" | "ready" | "error";
+
+type WatchlistSlice = {
+  watchlist: {
+    items: WatchlistItem[];
+    status: WatchlistStatus;
+    lastUpdated: number | null;
+    error: string | null;
+  };
+  setWatchlist(items: WatchlistItem[]): void;
+  setWatchlistStatus(status: WatchlistStatus, error?: string | null): void;
+};
+
+type WsStatsEntry = {
+  uptimeMs: number;
+  lastConnectedAt: number | null;
+  reconnects: number;
+  everConnected: boolean;
+};
+
+type ObservabilitySlice = {
+  wsStats: Record<ConnectionKind, WsStatsEntry>;
+  resetWsStats(kind?: ConnectionKind): void;
+};
 
 type SessionSlice = {
   session: SessionInfo;
@@ -37,6 +76,7 @@ type CoachSlice = {
     planId: string | null;
     lastPulseTs: string | null;
     diff: CoachPulse["diff"] | null;
+    timeline: Array<{ ts: string; diff: CoachPulse["diff"] }>;
   };
   applyCoachPulse(pulse: CoachPulse): void;
 };
@@ -51,7 +91,9 @@ type StoreState = SessionSlice &
   PlanSlice &
   OverlaySlice &
   CoachSlice &
-  UiSlice & {
+  UiSlice &
+  WatchlistSlice &
+  ObservabilitySlice & {
     applyEvent(event: Event): void;
     bootstrap(snapshot: PlanSnapshot, layers: PlanLayers | null): void;
     reset(): void;
@@ -111,19 +153,31 @@ export const useStore = create<StoreState>((set, get) => ({
   barsBySymbol: {},
   lastBarAt: {},
   plan: null,
-  planId: null,
-  planVersion: 0,
-  lastPlanEventAt: null,
-  planLayers: null,
+    planId: null,
+    planVersion: 0,
+    lastPlanEventAt: null,
+    planLayers: null,
   coach: {
     planId: null,
     lastPulseTs: null,
     diff: null,
+    timeline: [],
   },
   connection: {
     plan: "idle",
     bars: "idle",
     coach: "idle",
+  },
+  watchlist: {
+    items: [],
+    status: "idle",
+    lastUpdated: null,
+    error: null,
+  },
+  wsStats: {
+    plan: { uptimeMs: 0, lastConnectedAt: null, reconnects: 0, everConnected: false },
+    bars: { uptimeMs: 0, lastConnectedAt: null, reconnects: 0, everConnected: false },
+    coach: { uptimeMs: 0, lastConnectedAt: null, reconnects: 0, everConnected: false },
   },
 
   setSession(session) {
@@ -153,6 +207,29 @@ export const useStore = create<StoreState>((set, get) => ({
         },
       };
     });
+  },
+
+  setWatchlist(items) {
+    set((state) => ({
+      watchlist: {
+        ...state.watchlist,
+        items,
+        status: "ready",
+        lastUpdated: Date.now(),
+        error: null,
+      },
+    }));
+  },
+
+  setWatchlistStatus(status, error = null) {
+    set((state) => ({
+      watchlist: {
+        ...state.watchlist,
+        status,
+        error,
+        lastUpdated: status === "ready" ? Date.now() : state.watchlist.lastUpdated,
+      },
+    }));
   },
 
   hydratePlan(plan) {
@@ -272,12 +349,21 @@ export const useStore = create<StoreState>((set, get) => ({
         get().patchObjective(metaPatch);
       }
     }
-    set(() => {
+    set((state) => {
+      const samePlan = state.coach.planId === pulse.plan_id;
+      let timeline = state.coach.timeline;
+      if (pulse.diff) {
+        const base = samePlan ? timeline.slice(-19) : [];
+        timeline = [...base, { ts: pulse.ts, diff: pulse.diff }];
+      } else if (!samePlan) {
+        timeline = [];
+      }
       const updates: Partial<StoreState> = {
         coach: {
           planId: pulse.plan_id,
           lastPulseTs: pulse.ts,
           diff: pulse.diff,
+          timeline,
         },
       };
       if (pulse.session) {
@@ -290,12 +376,56 @@ export const useStore = create<StoreState>((set, get) => ({
   setConnection(kind, stateValue) {
     set((state) => {
       if (state.connection[kind] === stateValue) return state;
+      const now = Date.now();
+      const currentStats = state.wsStats[kind];
+      let { uptimeMs, lastConnectedAt, reconnects, everConnected } = currentStats;
+      if (stateValue === "connected") {
+        if (lastConnectedAt == null) {
+          if (everConnected) {
+            reconnects += 1;
+          }
+          lastConnectedAt = now;
+          everConnected = true;
+        }
+      } else if (lastConnectedAt != null) {
+        uptimeMs += now - lastConnectedAt;
+        lastConnectedAt = null;
+      }
       return {
         connection: {
           ...state.connection,
           [kind]: stateValue,
         },
+        wsStats: {
+          ...state.wsStats,
+          [kind]: {
+            uptimeMs,
+            lastConnectedAt,
+            reconnects,
+            everConnected,
+          },
+        },
       };
+    });
+  },
+
+  resetWsStats(kind?: ConnectionKind) {
+    const base: WsStatsEntry = { uptimeMs: 0, lastConnectedAt: null, reconnects: 0, everConnected: false };
+    if (kind) {
+      set((state) => ({
+        wsStats: {
+          ...state.wsStats,
+          [kind]: { ...base },
+        },
+      }));
+      return;
+    }
+    set({
+      wsStats: {
+        plan: { ...base },
+        bars: { ...base },
+        coach: { ...base },
+      },
     });
   },
 
@@ -323,6 +453,12 @@ export const useStore = create<StoreState>((set, get) => ({
       session: session ? { ...session } : null,
       planLayers: layers,
       lastPlanEventAt: Date.now(),
+      coach: {
+        planId: planBlock?.plan_id ?? null,
+        lastPulseTs: null,
+        diff: null,
+        timeline: [],
+      },
     });
   },
 
@@ -340,11 +476,23 @@ export const useStore = create<StoreState>((set, get) => ({
         planId: null,
         lastPulseTs: null,
         diff: null,
+        timeline: [],
       },
       connection: {
         plan: "idle",
         bars: "idle",
         coach: "idle",
+      },
+      watchlist: {
+        items: [],
+        status: "idle",
+        lastUpdated: null,
+        error: null,
+      },
+      wsStats: {
+        plan: { uptimeMs: 0, lastConnectedAt: null, reconnects: 0, everConnected: false },
+        bars: { uptimeMs: 0, lastConnectedAt: null, reconnects: 0, everConnected: false },
+        coach: { uptimeMs: 0, lastConnectedAt: null, reconnects: 0, everConnected: false },
       },
     });
   },

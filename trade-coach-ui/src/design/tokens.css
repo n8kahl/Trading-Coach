@@ -1,0 +1,51 @@
+:root {
+  /* Neutrals */
+  --tc-neutral-50: #f8fafc;
+  --tc-neutral-100: #e2e8f0;
+  --tc-neutral-200: #cbd5f5;
+  --tc-neutral-300: #94a3b8;
+  --tc-neutral-400: #7b8caa;
+  --tc-neutral-500: #64748b;
+  --tc-neutral-600: #4b5568;
+  --tc-neutral-700: #374151;
+  --tc-neutral-800: #1f2937;
+  --tc-neutral-900: #111827;
+  --tc-neutral-950: #05070b;
+
+  /* Emerald scale */
+  --tc-emerald-200: #bbf7d0;
+  --tc-emerald-300: #86efac;
+  --tc-emerald-400: #34d399;
+  --tc-emerald-500: #10b981;
+  --tc-emerald-600: #059669;
+
+  /* Amber scale */
+  --tc-amber-200: #fde68a;
+  --tc-amber-300: #fcd34d;
+  --tc-amber-400: #f59e0b;
+  --tc-amber-500: #d97706;
+
+  /* Red scale */
+  --tc-red-200: #fecaca;
+  --tc-red-300: #fca5a5;
+  --tc-red-400: #f87171;
+  --tc-red-500: #ef4444;
+
+  /* Surfaces & overlays */
+  --tc-surface-primary: rgba(9, 12, 19, 0.94);
+  --tc-surface-muted: rgba(15, 23, 42, 0.88);
+  --tc-surface-raised: rgba(17, 24, 39, 0.92);
+  --tc-border-strong: rgba(148, 163, 184, 0.28);
+  --tc-border-subtle: rgba(51, 65, 85, 0.45);
+  --tc-shadow-soft: 0 20px 45px rgba(2, 6, 23, 0.55);
+
+  /* Chips */
+  --tc-chip-emerald-surface: rgba(16, 185, 129, 0.14);
+  --tc-chip-emerald-border: rgba(52, 211, 153, 0.5);
+  --tc-chip-amber-surface: rgba(245, 158, 11, 0.16);
+  --tc-chip-amber-border: rgba(234, 179, 8, 0.45);
+  --tc-chip-red-surface: rgba(248, 113, 113, 0.16);
+  --tc-chip-red-border: rgba(248, 113, 113, 0.4);
+  --tc-chip-neutral-surface: rgba(148, 163, 184, 0.18);
+  --tc-chip-neutral-border: rgba(148, 163, 184, 0.4);
+}

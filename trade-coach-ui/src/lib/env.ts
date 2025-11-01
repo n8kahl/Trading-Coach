@@ -10,6 +10,11 @@ export const WS_BASE_URL = explicitWsBase
 
 export const API_KEY_HEADER = process.env.NEXT_PUBLIC_BACKEND_API_KEY ?? process.env.TRADE_COACH_API_KEY ?? "";
 
+export const WATCHLIST_UNIVERSE = process.env.NEXT_PUBLIC_WATCHLIST_UNIVERSE ?? "SPY_LIQUID";
+export const WATCHLIST_STYLE = process.env.NEXT_PUBLIC_WATCHLIST_STYLE ?? "intraday";
+const WATCHLIST_LIMIT_RAW = Number.parseInt(process.env.NEXT_PUBLIC_WATCHLIST_LIMIT ?? "20", 10);
+export const WATCHLIST_LIMIT = Number.isFinite(WATCHLIST_LIMIT_RAW) && WATCHLIST_LIMIT_RAW > 0 ? WATCHLIST_LIMIT_RAW : 20;
+
 const DEFAULT_PUBLIC_BASE =
   process.env.NEXT_PUBLIC_PUBLIC_BASE_URL ?? process.env.PUBLIC_BASE_URL ?? process.env.NEXT_PUBLIC_BASE_URL ?? API_BASE_URL;
 

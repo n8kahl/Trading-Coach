@@ -833,5 +833,10 @@ async def test_gpt_plan_simulated_open_retains_geometry(monkeypatch):
     assert response.options_note is not None
     assert response.plan.get("tp_reasons"), "plan payload should include tp_reasons"
     assert response.plan.get("confluence_tags"), "plan payload should include confluence tags"
+    session_state = response.plan.get("session_state")
+    assert session_state, "session_state should be present on simulated plan"
+    assert session_state.get("simulated"), "session_state should indicate simulated open"
+    assert session_state.get("banner") == "Simulated live — analysis as of 2025-02-10 20:00 ET"
+    assert session_state.get("as_of") == "2025-02-10T20:00:00-05:00"
 
     get_settings.cache_clear()

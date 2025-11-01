@@ -61,3 +61,29 @@ export async function fetchPlanForSymbol(symbol: string, style?: string): Promis
   } as PlanSnapshot;
   return snapshot;
 }
+
+export async function fetchSimulatedPlan(symbol: string): Promise<PlanSnapshot | null> {
+  const body = {
+    symbol: symbol.toUpperCase(),
+    simulate_open: true,
+  };
+  const response = await fetch(`${API_BASE}/gpt/plan`, {
+    method: "POST",
+    headers: withAuthHeaders({
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-Simulate-Open": "1",
+    }),
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch simulated plan (${response.status})`);
+  }
+  const payload = await response.json();
+  const planId: string | undefined = payload?.plan?.plan_id ?? payload?.plan_id;
+  if (!planId) {
+    return null;
+  }
+  return fetchPlanSnapshot(planId);
+}
