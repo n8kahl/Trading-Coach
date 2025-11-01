@@ -94,7 +94,12 @@ function mergeBars(existing: PriceBar[], incoming: PriceBar[]): PriceBar[] {
   return Array.from(merged.values()).sort((a, b) => Number(a.time) - Number(b.time));
 }
 
-export function usePriceSeries(symbol: string | null | undefined, resolution: string, deps: unknown[] = []) {
+export function usePriceSeries(
+  symbol: string | null | undefined,
+  resolution: string,
+  deps: unknown[] = [],
+  liveBars?: PriceBar[] | null,
+) {
   const sanitizedSymbol = sanitizeSymbol(symbol);
   const [bars, setBars] = useState<PriceBar[]>([]);
   const [status, setStatus] = useState<Status>(sanitizedSymbol ? "loading" : "idle");
@@ -194,14 +199,19 @@ export function usePriceSeries(symbol: string | null | undefined, resolution: st
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sanitizedSymbol, resolution, reloadToken, ...deps]);
 
+  const combinedBars = useMemo(
+    () => (liveBars && liveBars.length ? mergeBars(bars, liveBars) : bars),
+    [bars, liveBars],
+  );
+
   return useMemo(
     () => ({
-      bars,
+      bars: combinedBars,
       status,
       error,
       reload,
     }),
-    [bars, status, error, reload],
+    [combinedBars, status, error, reload],
   );
 }
 

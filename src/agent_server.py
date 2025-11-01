@@ -107,7 +107,14 @@ from .app.engine.execution_profiles import ExecutionContext as PlanExecutionCont
 from .app.engine.options_select import score_contract, best_contract_example
 from .app.middleware import SessionMiddleware, get_session
 from .app.routers.session import router as session_router
-from .app.services import parse_session_as_of, make_chart_url, build_plan_layers, get_precision, coerce_by_style
+from .app.services import (
+    parse_session_as_of,
+    make_chart_url,
+    build_plan_layers,
+    compute_next_objective_meta,
+    get_precision,
+    coerce_by_style,
+)
 from .app.providers.macro import get_event_window
 from .app.providers.universe import load_universe
 from .context_overlays import compute_context_overlays
@@ -6838,6 +6845,364 @@ def _load_calibrations_from_settings() -> None:
             "calibration tables loaded",
             extra={"source": _CALIBRATION_SOURCE, "tables": len(store.to_payload())},
         )
+
+
+class CoachPulseState:
+    __slots__ = (
+        "plan_id",
+        "symbol",
+        "plan",
+        "plan_layers",
+        "direction",
+        "last_price",
+        "precision",
+        "session",
+        "last_mtf_score",
+        "last_vwap_side",
+        "last_entry_distance",
+        "last_objective_state",
+    )
+
+    def __init__(self, plan_id: str, snapshot: Mapping[str, Any]):
+        self.plan_id = plan_id
+        self.symbol = ""
+        self.plan: Dict[str, Any] = {}
+        self.plan_layers: Dict[str, Any] = {}
+        self.direction: Optional[str] = None
+        self.last_price: Optional[float] = None
+        self.precision: int = 2
+        self.session: Dict[str, Any] = {}
+        self.last_mtf_score: Optional[int] = None
+        self.last_vwap_side: Optional[str] = None
+        self.last_entry_distance: Optional[float] = None
+        self.last_objective_state: Optional[str] = None
+        self.apply_snapshot(snapshot)
+
+    def apply_snapshot(self, snapshot: Mapping[str, Any]) -> None:
+        payload = snapshot or {}
+        plan_block = payload.get("plan")
+        if not isinstance(plan_block, Mapping):
+            plan_block = payload if isinstance(payload, Mapping) else {}
+        self.plan = dict(plan_block)
+        plan_layers = payload.get("plan_layers")
+        if not isinstance(plan_layers, Mapping):
+            plan_layers = self.plan.get("plan_layers")
+        self.plan_layers = dict(plan_layers) if isinstance(plan_layers, Mapping) else {}
+
+        symbol_token = str(self.plan.get("symbol") or "").upper()
+        if symbol_token:
+            self.symbol = symbol_token
+
+        direction_token = self.plan.get("direction") or self.plan.get("bias")
+        if isinstance(direction_token, str):
+            normalized = direction_token.strip().lower()
+            if normalized in {"long", "short"}:
+                self.direction = normalized
+
+        price_snapshot = self.plan.get("price")
+        if isinstance(price_snapshot, Mapping):
+            last_price_candidate = _safe_number(price_snapshot.get("close"))
+            if last_price_candidate is not None:
+                self.last_price = last_price_candidate
+
+        meta_block = self.plan_layers.get("meta") if isinstance(self.plan_layers, Mapping) else {}
+        internal_meta = meta_block.get("_next_objective_internal") if isinstance(meta_block, Mapping) else {}
+        if isinstance(internal_meta, Mapping):
+            price_candidate = _safe_number(internal_meta.get("last_price"))
+            if price_candidate is not None:
+                self.last_price = price_candidate
+            mtf_score_candidate = internal_meta.get("mtf_score")
+            if isinstance(mtf_score_candidate, (int, float)):
+                self.last_mtf_score = int(mtf_score_candidate)
+            vwap_side_candidate = internal_meta.get("vwap_side")
+            if isinstance(vwap_side_candidate, str):
+                self.last_vwap_side = vwap_side_candidate
+            entry_dist_candidate = _safe_number(internal_meta.get("entry_distance_pct"))
+            if entry_dist_candidate is not None:
+                self.last_entry_distance = entry_dist_candidate
+
+        precision_candidate = None
+        if isinstance(self.plan_layers, Mapping):
+            precision_candidate = self.plan_layers.get("precision")
+        try:
+            precision_value = int(precision_candidate) if precision_candidate is not None else None
+        except (TypeError, ValueError):
+            precision_value = None
+        if precision_value is None:
+            precision_value = get_precision(self.symbol or self.plan.get("symbol"))
+        self.precision = max(0, int(precision_value or 2))
+        self.session = self._resolve_session(payload)
+
+    def apply_plan_event(self, envelope: Mapping[str, Any]) -> bool:
+        if not isinstance(envelope, Mapping):
+            return False
+        event = envelope.get("event")
+        payload = event if isinstance(event, Mapping) else envelope
+        event_type = str(payload.get("t") or "").lower()
+        changed = False
+
+        if event_type == "plan_full":
+            plan_payload = payload.get("payload")
+            if isinstance(plan_payload, Mapping):
+                self.apply_snapshot(plan_payload)
+                changed = True
+        elif event_type == "plan_delta":
+            changes = payload.get("changes")
+            if isinstance(changes, Mapping):
+                last_price_candidate = _safe_number(changes.get("last_price"))
+                if last_price_candidate is not None and last_price_candidate != self.last_price:
+                    self.last_price = last_price_candidate
+                    changed = True
+                waiting_token = changes.get("waiting_for")
+                if isinstance(waiting_token, str) and waiting_token.strip():
+                    self.plan["waiting_for"] = waiting_token.strip()
+                    changed = True
+                entry_status_payload = changes.get("entry_status")
+                if isinstance(entry_status_payload, Mapping):
+                    meta = self.plan.setdefault("meta", {})
+                    if isinstance(meta, Mapping):
+                        meta["entry_status"] = entry_status_payload
+                        changed = True
+        elif event_type == "plan_full_snapshot":
+            snapshot_payload = payload.get("snapshot")
+            if isinstance(snapshot_payload, Mapping):
+                self.apply_snapshot(snapshot_payload)
+                changed = True
+        return changed
+
+    def apply_symbol_event(self, envelope: Mapping[str, Any]) -> bool:
+        if not isinstance(envelope, Mapping):
+            return False
+        event = envelope.get("event")
+        if not isinstance(event, Mapping):
+            return False
+        event_type = str(event.get("t") or "").lower()
+        price_candidate: Optional[float] = None
+        if event_type == "tick":
+            price_candidate = _safe_number(event.get("p"))
+        elif event_type == "bar":
+            price_candidate = _safe_number(event.get("close"))
+        elif event_type == "plan_full":
+            return self.apply_plan_event({"event": event})
+        if price_candidate is not None and price_candidate != self.last_price:
+            self.last_price = price_candidate
+            return True
+        return False
+
+    def build_pulse(self) -> Optional[Dict[str, Any]]:
+        plan_context = self.plan or {}
+        key_levels = plan_context.get("key_levels") if isinstance(plan_context, Mapping) else None
+        overlays = plan_context.get("context_overlays") if isinstance(plan_context, Mapping) else None
+        interval_token = None
+        if isinstance(self.plan_layers, Mapping):
+            interval_token = self.plan_layers.get("interval")
+        if interval_token is None and isinstance(plan_context, Mapping):
+            interval_token = plan_context.get("interval")
+
+        meta_payload = compute_next_objective_meta(
+            symbol=self.symbol,
+            plan=plan_context,
+            direction=self.direction,
+            last_price=self.last_price,
+            key_levels=key_levels if isinstance(key_levels, Mapping) else None,
+            overlays=overlays if isinstance(overlays, Mapping) else None,
+            precision=self.precision,
+            interval=str(interval_token) if interval_token is not None else None,
+        )
+        if not meta_payload:
+            return None
+        public_meta = {
+            key: value for key, value in meta_payload.items() if not (isinstance(key, str) and key.startswith("_"))
+        }
+        internal_meta = {
+            key[1:]: value for key, value in meta_payload.items() if isinstance(key, str) and key.startswith("_")
+        }
+
+        state_token = str(public_meta.get("state") or "").lower()
+        if state_token:
+            self.last_objective_state = state_token
+
+        progress_value = public_meta.get("progress")
+        if progress_value is not None:
+            try:
+                progress_value = float(progress_value)
+            except (TypeError, ValueError):
+                progress_value = None
+        if isinstance(progress_value, float):
+            progress_value = max(0.0, min(1.0, progress_value))
+        else:
+            progress_value = 0.0
+
+        objective_price = _safe_number(public_meta.get("objective_price"))
+        entry_distance_pct = _safe_number(internal_meta.get("entry_distance_pct"))
+        if entry_distance_pct is None and objective_price and self.last_price is not None and objective_price != 0:
+            entry_distance_pct = abs(self.last_price - objective_price) / abs(objective_price)
+        if entry_distance_pct is not None:
+            self.last_entry_distance = entry_distance_pct
+
+        mtf_score = internal_meta.get("mtf_score")
+        mtf_delta = 0
+        if isinstance(mtf_score, (int, float)):
+            mtf_score_int = int(mtf_score)
+            if self.last_mtf_score is not None:
+                mtf_delta = mtf_score_int - self.last_mtf_score
+            self.last_mtf_score = mtf_score_int
+
+        vwap_side = internal_meta.get("vwap_side")
+        if isinstance(vwap_side, str) and vwap_side:
+            self.last_vwap_side = vwap_side
+        vwap_side_output = self.last_vwap_side
+
+        meta_block = self.plan.get("meta") if isinstance(self.plan, Mapping) else {}
+        entry_status_state = None
+        if isinstance(meta_block, Mapping):
+            entry_status_payload = meta_block.get("entry_status")
+            if isinstance(entry_status_payload, Mapping):
+                entry_status_state = str(entry_status_payload.get("state") or "").lower() or None
+
+        waiting_token, next_action_text = self._resolve_waiting(vwap_side_output, state_token)
+        risk_cue = self._resolve_risk_cue(state_token, entry_status_state, mtf_delta)
+
+        objective_progress = {
+            "progress": progress_value,
+            "entry_distance_pct": round(entry_distance_pct, 4) if entry_distance_pct is not None else None,
+        }
+
+        confluence_delta = {"mtf": mtf_delta, "vwap_side": vwap_side_output}
+
+        diff_payload = {
+            "next_action": next_action_text,
+            "waiting_for": waiting_token,
+            "risk_cue": risk_cue,
+            "confluence_delta": confluence_delta,
+            "objective_progress": objective_progress,
+        }
+
+        session_payload = self.session or {
+            "status": "unknown",
+            "as_of": None,
+            "next_open": None,
+            "tz": "America/New_York",
+        }
+
+        return {
+            "diff": diff_payload,
+            "session": session_payload,
+        }
+
+    def _resolve_session(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        candidates: List[Mapping[str, Any]] = []
+        plan_block = payload.get("plan") if isinstance(payload, Mapping) else None
+        if isinstance(plan_block, Mapping):
+            session_state = plan_block.get("session_state")
+            if isinstance(session_state, Mapping):
+                candidates.append(session_state)
+            session_block = plan_block.get("session")
+            if isinstance(session_block, Mapping):
+                candidates.append(session_block)
+        summary_block = payload.get("summary") if isinstance(payload, Mapping) else None
+        if isinstance(summary_block, Mapping):
+            summary_session = summary_block.get("session_state")
+            if isinstance(summary_session, Mapping):
+                candidates.append(summary_session)
+        for candidate in candidates:
+            status_val = str(candidate.get("status") or "").strip()
+            if not status_val:
+                continue
+            return {
+                "status": status_val,
+                "as_of": candidate.get("as_of"),
+                "next_open": candidate.get("next_open"),
+                "tz": candidate.get("tz") or candidate.get("timezone") or "America/New_York",
+            }
+        if self.session:
+            return self.session
+        return {"status": "unknown", "as_of": None, "next_open": None, "tz": "America/New_York"}
+
+    def _resolve_waiting(self, vwap_side: Optional[str], objective_state: Optional[str]) -> Tuple[str, str]:
+        waiting_sources: List[str] = []
+        if isinstance(self.plan, Mapping):
+            candidate = self.plan.get("waiting_for")
+            if isinstance(candidate, str) and candidate.strip():
+                waiting_sources.append(candidate.strip())
+            meta_block = self.plan.get("meta")
+            if isinstance(meta_block, Mapping):
+                meta_wait = meta_block.get("waiting_for")
+                if isinstance(meta_wait, str) and meta_wait.strip():
+                    waiting_sources.append(meta_wait.strip())
+        waiting_text = waiting_sources[0] if waiting_sources else ""
+        token = self._tokenize_wait(waiting_text) if waiting_text else ""
+        if not token:
+            token = self._fallback_wait_token(vwap_side, objective_state)
+            waiting_text = ""
+        next_action = self._format_next_action(token, waiting_text)
+        return token, next_action
+
+    def _tokenize_wait(self, text: str) -> str:
+        normalized = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")
+        if not normalized:
+            return ""
+        parts = normalized.split("_")
+        tokens: List[str] = []
+        for part in parts:
+            if not part:
+                continue
+            upper_part = part.upper()
+            if upper_part in {"VWAP", "AVWAP"}:
+                tokens.append(upper_part)
+            else:
+                tokens.append(part.lower())
+        return "_".join(tokens)
+
+    def _fallback_wait_token(self, vwap_side: Optional[str], objective_state: Optional[str]) -> str:
+        if self.direction == "long":
+            return "1m_close_above_VWAP"
+        if self.direction == "short":
+            return "1m_close_below_VWAP"
+        if vwap_side:
+            return f"monitor_{vwap_side.lower()}_vwap"
+        if objective_state:
+            return f"monitor_{objective_state}"
+        return "monitor_price_action"
+
+    def _format_next_action(self, token: str, waiting_text: str) -> str:
+        if waiting_text:
+            stripped = waiting_text.strip()
+            if stripped.lower().startswith("wait"):
+                return stripped
+            return f"Wait for {stripped}"
+        parts = token.split("_")
+        readable_parts: List[str] = []
+        for part in parts:
+            if part.upper() in {"VWAP", "AVWAP"}:
+                readable_parts.append(part.upper())
+            elif part.lower() in {"1m", "5m", "15m", "60m"}:
+                readable_parts.append(part.lower())
+            else:
+                readable_parts.append(part.capitalize())
+        readable = " ".join(readable_parts)
+        if readable.lower().startswith("wait"):
+            return readable
+        return f"Wait for {readable}"
+
+    def _resolve_risk_cue(self, objective_state: Optional[str], entry_status_state: Optional[str], mtf_delta: int) -> str:
+        if entry_status_state == "late":
+            return "entry_window_missed"
+        if entry_status_state == "triggered":
+            return "manage_open_risk"
+        if entry_status_state == "waiting":
+            return "confirmation_pending"
+        if objective_state == "cooldown":
+            return "momentum_extended"
+        if objective_state == "invalid":
+            return "await_inputs"
+        if mtf_delta < 0:
+            return "mtf_softening"
+        if self.last_entry_distance is not None and self.last_entry_distance > 0.02:
+            return "distance_elevated"
+        return "spread_widening"
+
+
 async def _symbol_stream_emit(symbol: str, event: Dict[str, Any]) -> None:
     await _ingest_stream_event(symbol, event)
 
@@ -13906,6 +14271,249 @@ async def stream_plan_ws(websocket: WebSocket, plan_id: str) -> None:
         except RuntimeError:
             pass
         logger.info("plan_ws_disconnect", extra={"plan_id": plan_token})
+
+
+@app.websocket("/ws/coach/{plan_id}")
+async def coach_ws(websocket: WebSocket, plan_id: str) -> None:
+    plan_token = (plan_id or "").strip()
+    if not plan_token:
+        await websocket.close(code=1008, reason="plan_id required")
+        return
+
+    settings = get_settings()
+    api_key = settings.backend_api_key
+    if api_key:
+        expected = f"Bearer {api_key}"
+        auth_tokens: list[str] = []
+        auth_header = websocket.headers.get("authorization")
+        if auth_header:
+            auth_tokens.append(auth_header.strip())
+        protocol_header = websocket.headers.get("sec-websocket-protocol")
+        if protocol_header:
+            protocol_tokens = [token.strip() for token in protocol_header.split(",") if token.strip()]
+            auth_tokens.extend(protocol_tokens)
+        if expected not in auth_tokens:
+            await websocket.close(code=1008, reason="unauthorized")
+            return
+
+    await websocket.accept()
+    user_id = websocket.headers.get("x-user-id")
+    logger.info("coach_ws_connect", extra={"plan_id": plan_token, "user_id": user_id})
+
+    try:
+        snapshot = await _get_idea_snapshot(plan_token)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else "snapshot unavailable"
+        await websocket.send_json({"t": "error", "plan_id": plan_token, "status": exc.status_code, "detail": detail})
+        with suppress(Exception):
+            await websocket.close(code=1008 if exc.status_code in {400, 404} else 1011, reason=str(detail))
+        return
+    except Exception:
+        logger.exception("coach_ws_snapshot_failed", extra={"plan_id": plan_token})
+        with suppress(Exception):
+            await websocket.close(code=1011, reason="snapshot error")
+        return
+
+    state = CoachPulseState(plan_token, snapshot)
+    if not state.symbol:
+        with suppress(Exception):
+            await websocket.close(code=1011, reason="plan missing symbol")
+        return
+
+    symbol = state.symbol
+    await _ensure_symbol_stream(symbol)
+
+    symbol_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=5)
+    plan_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=5)
+
+    async with _STREAM_LOCK:
+        _STREAM_SUBSCRIBERS.setdefault(symbol, []).append(symbol_queue)
+        _PLAN_STREAM_SUBSCRIBERS.setdefault(plan_token, []).append(plan_queue)
+
+    pending_event = asyncio.Event()
+    stop_event = asyncio.Event()
+    pending_event.set()
+    last_activity = time.monotonic()
+
+    def _mark_activity() -> None:
+        nonlocal last_activity
+        last_activity = time.monotonic()
+
+    async def plan_listener() -> None:
+        try:
+            while not stop_event.is_set():
+                payload = await plan_queue.get()
+                _mark_activity()
+                try:
+                    message = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, Mapping):
+                    continue
+                try:
+                    changed = state.apply_plan_event(message)
+                except Exception:
+                    logger.exception("coach_ws_plan_event_error", extra={"plan_id": plan_token})
+                    continue
+                if changed:
+                    pending_event.set()
+        except asyncio.CancelledError:
+            pass
+        except WebSocketDisconnect:
+            stop_event.set()
+        except Exception:
+            logger.exception("coach_ws_plan_listener_error", extra={"plan_id": plan_token})
+            stop_event.set()
+
+    async def symbol_listener() -> None:
+        try:
+            while not stop_event.is_set():
+                payload = await symbol_queue.get()
+                _mark_activity()
+                try:
+                    message = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, Mapping):
+                    continue
+                try:
+                    changed = state.apply_symbol_event(message)
+                except Exception:
+                    logger.exception("coach_ws_symbol_event_error", extra={"plan_id": plan_token})
+                    continue
+                if changed:
+                    pending_event.set()
+        except asyncio.CancelledError:
+            pass
+        except WebSocketDisconnect:
+            stop_event.set()
+        except Exception:
+            logger.exception("coach_ws_symbol_listener_error", extra={"plan_id": plan_token})
+            stop_event.set()
+
+    async def send_loop() -> None:
+        last_emit = 0.0
+        try:
+            while not stop_event.is_set():
+                await pending_event.wait()
+                pending_event.clear()
+                now = time.monotonic()
+                elapsed = now - last_emit
+                if elapsed < 0.5:
+                    delay = 0.5 - elapsed
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                        if stop_event.is_set():
+                            break
+                    except asyncio.TimeoutError:
+                        pass
+                pulse_payload = state.build_pulse()
+                if not pulse_payload:
+                    continue
+                message = {
+                    "t": "coach_pulse",
+                    "plan_id": plan_token,
+                    "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "diff": pulse_payload["diff"],
+                    "session": pulse_payload["session"],
+                }
+                await websocket.send_json(message)
+                last_emit = time.monotonic()
+                _mark_activity()
+        except asyncio.CancelledError:
+            pass
+        except WebSocketDisconnect:
+            stop_event.set()
+        except Exception:
+            logger.exception("coach_ws_send_error", extra={"plan_id": plan_token})
+            stop_event.set()
+
+    async def heartbeat_loop() -> None:
+        try:
+            while not stop_event.is_set():
+                await asyncio.sleep(15.0)
+                await websocket.send_json({"t": "ping", "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")})
+        except asyncio.CancelledError:
+            pass
+        except WebSocketDisconnect:
+            stop_event.set()
+        except Exception:
+            logger.exception("coach_ws_ping_error", extra={"plan_id": plan_token})
+            stop_event.set()
+
+    async def idle_watchdog() -> None:
+        try:
+            while not stop_event.is_set():
+                await asyncio.sleep(5.0)
+                if time.monotonic() - last_activity >= 60.0:
+                    with suppress(Exception):
+                        await websocket.close(code=1001, reason="idle timeout")
+                    stop_event.set()
+                    break
+        except asyncio.CancelledError:
+            pass
+        except WebSocketDisconnect:
+            stop_event.set()
+        except Exception:
+            logger.exception("coach_ws_idle_watchdog_error", extra={"plan_id": plan_token})
+            stop_event.set()
+
+    async def recv_loop() -> None:
+        try:
+            while not stop_event.is_set():
+                try:
+                    message = await websocket.receive_json()
+                except (json.JSONDecodeError, ValueError):
+                    logger.debug("coach_ws_nonjson_message", extra={"plan_id": plan_token})
+                    continue
+                msg_type = str(message.get("t") or message.get("type") or "").lower()
+                if msg_type == "pong":
+                    _mark_activity()
+                    continue
+                logger.debug("coach_ws_client_message", extra={"plan_id": plan_token, "payload": message})
+        except asyncio.CancelledError:
+            pass
+        except WebSocketDisconnect:
+            stop_event.set()
+        except Exception:
+            logger.exception("coach_ws_recv_error", extra={"plan_id": plan_token})
+            stop_event.set()
+
+    tasks = [
+        asyncio.create_task(plan_listener()),
+        asyncio.create_task(symbol_listener()),
+        asyncio.create_task(send_loop()),
+        asyncio.create_task(heartbeat_loop()),
+        asyncio.create_task(idle_watchdog()),
+        asyncio.create_task(recv_loop()),
+    ]
+
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stop_event.set()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with suppress(Exception):
+                await task
+
+        async with _STREAM_LOCK:
+            symbol_subscribers = _STREAM_SUBSCRIBERS.get(symbol, [])
+            if symbol_queue in symbol_subscribers:
+                symbol_subscribers.remove(symbol_queue)
+            if not symbol_subscribers:
+                _STREAM_SUBSCRIBERS.pop(symbol, None)
+            plan_subscribers = _PLAN_STREAM_SUBSCRIBERS.get(plan_token, [])
+            if plan_queue in plan_subscribers:
+                plan_subscribers.remove(plan_queue)
+            if not plan_subscribers:
+                _PLAN_STREAM_SUBSCRIBERS.pop(plan_token, None)
+
+        with suppress(Exception):
+            await websocket.close()
+
+        logger.info("coach_ws_disconnect", extra={"plan_id": plan_token, "user_id": user_id})
 
 
 @app.post("/internal/stream/push", include_in_schema=False, tags=["internal"])

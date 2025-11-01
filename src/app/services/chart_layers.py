@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+import math
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .precision import get_price_precision
 
@@ -45,6 +46,535 @@ def _pick_level(name: str, key_levels: Mapping[str, Any]) -> Optional[float]:
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _normalize_direction(
+    direction: str | None,
+    *,
+    plan: Mapping[str, Any] | None = None,
+) -> Optional[str]:
+    for candidate in (direction,):
+        if isinstance(candidate, str):
+            token = candidate.strip().lower()
+            if token in {"long", "short"}:
+                return token
+    if isinstance(plan, Mapping):
+        for key in ("direction", "bias"):
+            value = plan.get(key)
+            if isinstance(value, str):
+                token = value.strip().lower()
+                if token in {"long", "short"}:
+                    return token
+    return None
+
+
+def _resolve_nested(plan: Mapping[str, Any] | None, path: Sequence[str]) -> Any:
+    node: Any = plan
+    for key in path:
+        if not isinstance(node, Mapping):
+            return None
+        node = node.get(key)
+    return node
+
+
+def _resolve_entry(plan: Mapping[str, Any] | None) -> Optional[float]:
+    if not isinstance(plan, Mapping):
+        return None
+    entry_candidate = plan.get("entry")
+    if isinstance(entry_candidate, Mapping):
+        entry_candidate = entry_candidate.get("level") or entry_candidate.get("price")
+    entry = _coerce_float(entry_candidate)
+    if entry is not None:
+        return entry
+    structured = plan.get("structured_plan")
+    if isinstance(structured, Mapping):
+        structured_entry = structured.get("entry")
+        if isinstance(structured_entry, Mapping):
+            level = _coerce_float(structured_entry.get("level"))
+            if level is not None:
+                return level
+    target_profile = plan.get("target_profile")
+    if isinstance(target_profile, Mapping):
+        candidate = _coerce_float(target_profile.get("entry"))
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def _extract_atr(plan: Mapping[str, Any] | None) -> Optional[float]:
+    if not isinstance(plan, Mapping):
+        return None
+    candidates: List[Any] = [
+        plan.get("atr_used"),
+        plan.get("atr"),
+        plan.get("atr_value"),
+        plan.get("remaining_atr"),
+    ]
+    structured = plan.get("structured_plan")
+    if isinstance(structured, Mapping):
+        candidates.extend([structured.get("atr_used"), structured.get("atr"), structured.get("remaining_atr")])
+        strategy_profile = structured.get("strategy_profile")
+        if isinstance(strategy_profile, Mapping):
+            candidates.append(strategy_profile.get("atr_used"))
+    target_profile = plan.get("target_profile")
+    if isinstance(target_profile, Mapping):
+        candidates.append(target_profile.get("atr_used"))
+    planning_snapshot = plan.get("planning_snapshot")
+    if isinstance(planning_snapshot, Mapping):
+        candidates.extend(
+            [
+                planning_snapshot.get("atr_used"),
+                planning_snapshot.get("atr"),
+            ]
+        )
+    for candidate in candidates:
+        atr_val = _coerce_float(candidate)
+        if atr_val is not None and atr_val > 0:
+            return atr_val
+    return None
+
+
+def _collect_numeric_points(plan: Mapping[str, Any] | None) -> List[float]:
+    if not isinstance(plan, Mapping):
+        return []
+    values: List[float] = []
+
+    for key in ("entry", "stop", "invalid"):
+        val = plan.get(key)
+        if isinstance(val, Mapping):
+            val = val.get("level") or val.get("price")
+        numeric = _coerce_float(val)
+        if numeric is not None:
+            values.append(numeric)
+
+    targets = plan.get("targets")
+    if isinstance(targets, Sequence):
+        for target in targets:
+            candidate = target
+            if isinstance(target, Mapping):
+                candidate = target.get("price") or target.get("level") or target.get("target")
+            numeric = _coerce_float(candidate)
+            if numeric is not None:
+                values.append(numeric)
+
+    key_levels = plan.get("key_levels")
+    if isinstance(key_levels, Mapping):
+        for value in key_levels.values():
+            numeric = _coerce_float(value)
+            if numeric is not None:
+                values.append(numeric)
+
+    planning_snapshot = plan.get("planning_snapshot")
+    if isinstance(planning_snapshot, Mapping):
+        for key in ("entry", "stop", "tp1", "tp2"):
+            numeric = _coerce_float(planning_snapshot.get(key))
+            if numeric is not None:
+                values.append(numeric)
+
+    return values
+
+
+def _collect_overlay_points(overlays: Mapping[str, Any] | None) -> List[float]:
+    if not isinstance(overlays, Mapping):
+        return []
+    values: List[float] = []
+    volume_profile = overlays.get("volume_profile")
+    if isinstance(volume_profile, Mapping):
+        for key in ("vwap", "vah", "val", "poc"):
+            numeric = _coerce_float(volume_profile.get(key))
+            if numeric is not None:
+                values.append(numeric)
+    liquidity_pools = overlays.get("liquidity_pools")
+    if isinstance(liquidity_pools, Sequence):
+        for pool in liquidity_pools:
+            level = None
+            if isinstance(pool, Mapping):
+                level = pool.get("level")
+            numeric = _coerce_float(level)
+            if numeric is not None:
+                values.append(numeric)
+    supply_zones = overlays.get("supply_zones")
+    demand_zones = overlays.get("demand_zones")
+    for collection in (supply_zones, demand_zones):
+        if not isinstance(collection, Sequence):
+            continue
+        for zone in collection:
+            if isinstance(zone, Mapping):
+                low = _coerce_float(zone.get("low"))
+                high = _coerce_float(zone.get("high"))
+                if low is not None:
+                    values.append(low)
+                if high is not None:
+                    values.append(high)
+    fib_levels = overlays.get("fib_levels")
+    if isinstance(fib_levels, Mapping):
+        for branch in ("up", "down"):
+            branch_map = fib_levels.get(branch)
+            if isinstance(branch_map, Mapping):
+                for value in branch_map.values():
+                    numeric = _coerce_float(value)
+                    if numeric is not None:
+                        values.append(numeric)
+    avwap = overlays.get("avwap")
+    if isinstance(avwap, Mapping):
+        for value in avwap.values():
+            numeric = _coerce_float(value)
+            if numeric is not None:
+                values.append(numeric)
+    return values
+
+
+def _min_positive_step(values: Sequence[float]) -> Optional[float]:
+    if not values:
+        return None
+    unique = sorted({round(val, 6) for val in values if math.isfinite(val)})
+    if len(unique) < 2:
+        return None
+    min_step: Optional[float] = None
+    for idx in range(1, len(unique)):
+        delta = unique[idx] - unique[idx - 1]
+        if delta <= 0:
+            continue
+        if delta < 1e-6:
+            continue
+        if min_step is None or delta < min_step:
+            min_step = delta
+    return min_step
+
+
+def _resolve_tick_size(
+    plan: Mapping[str, Any] | None,
+    key_levels: Mapping[str, Any] | None,
+    overlays: Mapping[str, Any] | None,
+    *,
+    precision: int,
+) -> float:
+    candidates: List[float] = []
+    if isinstance(plan, Mapping):
+        for token in ("tick_size", "tick"):
+            val = _coerce_float(plan.get(token))
+            if val is not None and val > 0:
+                candidates.append(val)
+        nested_paths = [
+            ("meta", "tick_size"),
+            ("planning_snapshot", "tick_size"),
+            ("planning_snapshot", "tick"),
+            ("planning_snapshot", "runner_policy", "tick_size"),
+            ("target_profile", "tick_size"),
+            ("target_profile", "meta", "tick_size"),
+            ("target_profile", "runner_policy", "tick_size"),
+            ("structured_plan", "tick_size"),
+            ("structured_plan", "tick"),
+            ("structured_plan", "runner", "tick_size"),
+        ]
+        for path in nested_paths:
+            candidate = _resolve_nested(plan, path)
+            numeric = _coerce_float(candidate)
+            if numeric is not None and numeric > 0:
+                candidates.append(numeric)
+    if candidates:
+        return min(candidates)
+
+    numeric_points: List[float] = []
+    numeric_points.extend(_collect_numeric_points(plan))
+    if isinstance(key_levels, Mapping):
+        for value in key_levels.values():
+            numeric = _coerce_float(value)
+            if numeric is not None:
+                numeric_points.append(numeric)
+    numeric_points.extend(_collect_overlay_points(overlays))
+
+    inferred = _min_positive_step(numeric_points)
+    if inferred is not None and inferred > 0:
+        return inferred
+
+    if precision < 0:
+        return 0.01
+    tick = 10 ** (-precision)
+    # Guard against over-rounding for coarse instruments (precision=0 -> tick=1)
+    if precision > 0:
+        tick = round(tick, precision + 2)
+    return max(tick, 1e-4)
+
+
+def _normalize_timeframe(interval: str | None) -> str:
+    token = (interval or "").strip().lower()
+    mapping = {
+        "1": "1m",
+        "1m": "1m",
+        "3": "1m",
+        "3m": "1m",
+        "5": "5m",
+        "5m": "5m",
+        "10": "5m",
+        "10m": "5m",
+        "15": "15m",
+        "15m": "15m",
+        "30": "15m",
+        "30m": "15m",
+        "45": "60m",
+        "45m": "60m",
+        "60": "60m",
+        "60m": "60m",
+        "65m": "60m",
+        "1h": "60m",
+        "2h": "60m",
+        "240": "60m",
+        "240m": "60m",
+        "1d": "1D",
+        "d": "1D",
+        "day": "1D",
+    }
+    if token in mapping:
+        return mapping[token]
+    if token.endswith("m") and token[:-1].isdigit():
+        minutes = int(token[:-1])
+        if minutes <= 2:
+            return "1m"
+        if minutes <= 7:
+            return "5m"
+        if minutes <= 30:
+            return "15m"
+        return "60m"
+    if token.endswith("h"):
+        return "60m"
+    return "5m"
+
+
+def _progress_for_price(last_price: Optional[float], band_low: float, band_high: float, half_width: float) -> float:
+    if last_price is None or not math.isfinite(last_price) or half_width <= 0:
+        return 0.0
+    if band_low <= last_price <= band_high:
+        return 1.0
+    if last_price < band_low:
+        distance = band_low - last_price
+    else:
+        distance = last_price - band_high
+    progress = 1.0 - (distance / half_width)
+    return max(0.0, min(1.0, progress))
+
+
+def _state_for_price(direction: Optional[str], last_price: Optional[float], band_low: float, band_high: float) -> str:
+    if direction not in {"long", "short"} or last_price is None or not math.isfinite(last_price):
+        return "invalid"
+    if direction == "long":
+        if last_price < band_low:
+            return "arming"
+        if last_price <= band_high:
+            return "ready"
+        return "cooldown"
+    # direction == "short"
+    if last_price > band_high:
+        return "arming"
+    if last_price >= band_low:
+        return "ready"
+    return "cooldown"
+
+
+def _unique_tokens(values: Iterable[Any]) -> List[str]:
+    tokens: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        if text not in seen:
+            seen.add(text)
+            tokens.append(text)
+    return tokens
+
+
+def _extract_confluence(
+    plan: Mapping[str, Any] | None,
+    meta: Mapping[str, Any] | None,
+) -> List[str]:
+    sources: List[str] = []
+    if isinstance(meta, Mapping):
+        for key in ("confluence", "confluence_tags"):
+            payload = meta.get(key)
+            if isinstance(payload, (list, tuple)):
+                sources.extend(str(item) for item in payload if item)
+    if isinstance(plan, Mapping):
+        plan_confluence = plan.get("confluence_tags") or plan.get("confluence")
+        if isinstance(plan_confluence, (list, tuple)):
+            sources.extend(str(item) for item in plan_confluence if item)
+        structured = plan.get("structured_plan")
+        if isinstance(structured, Mapping):
+            structured_conf = structured.get("confluence_tags") or structured.get("confluence")
+            if isinstance(structured_conf, (list, tuple)):
+                sources.extend(str(item) for item in structured_conf if item)
+    return _unique_tokens(sources)
+
+
+def _mtf_alignment_info(plan: Mapping[str, Any] | None, direction: Optional[str]) -> Optional[Dict[str, int]]:
+    if direction not in {"long", "short"}:
+        return None
+    mtf_sources = [
+        ("mtf_analysis",),
+        ("structured_plan", "mtf_analysis"),
+        ("structured_plan", "strategy_profile", "mtf_analysis"),
+        ("strategy_profile", "mtf_analysis"),
+    ]
+    mtf_data: Mapping[str, Any] | None = None
+    if isinstance(plan, Mapping):
+        for path in mtf_sources:
+            candidate = _resolve_nested(plan, path)
+            if isinstance(candidate, Mapping) and candidate:
+                mtf_data = candidate
+                break
+    if not isinstance(mtf_data, Mapping):
+        return None
+    aligned = 0
+    opposed = 0
+    total = 0
+    for frame in mtf_data.values():
+        if not isinstance(frame, Mapping):
+            continue
+        trend = str(frame.get("trend") or "").strip().lower()
+        if not trend:
+            continue
+        total += 1
+        if direction == "long":
+            if any(token in trend for token in ("bull", "up", "long", "positive")):
+                aligned += 1
+            elif any(token in trend for token in ("bear", "down", "short", "negative")):
+                opposed += 1
+        else:
+            if any(token in trend for token in ("bear", "down", "short", "negative")):
+                aligned += 1
+            elif any(token in trend for token in ("bull", "up", "long", "positive")):
+                opposed += 1
+    return {"score": aligned - opposed, "aligned": aligned, "opposed": opposed, "total": total}
+
+
+def _resolve_vwap(plan: Mapping[str, Any] | None, overlays: Mapping[str, Any] | None) -> Optional[float]:
+    if isinstance(overlays, Mapping):
+        volume_profile = overlays.get("volume_profile")
+        if isinstance(volume_profile, Mapping):
+            numeric = _coerce_float(volume_profile.get("vwap"))
+            if numeric is not None:
+                return numeric
+    if isinstance(plan, Mapping):
+        for path in (
+            ("context_overlays", "volume_profile", "vwap"),
+            ("price", "vwap"),
+            ("prices", "vwap"),
+            ("context", "vwap"),
+            ("indicators", "vwap"),
+            ("meta", "vwap"),
+        ):
+            candidate = _resolve_nested(plan, path)
+            numeric = _coerce_float(candidate)
+            if numeric is not None:
+                return numeric
+    return None
+
+
+def _vwap_side(last_price: Optional[float], vwap_value: Optional[float], tick_size: float) -> Optional[str]:
+    if last_price is None or vwap_value is None:
+        return None
+    if not math.isfinite(last_price) or not math.isfinite(vwap_value):
+        return None
+    threshold = tick_size * 0.5 if tick_size > 0 else 0.0
+    if last_price >= vwap_value + threshold:
+        return "above"
+    if last_price <= vwap_value - threshold:
+        return "below"
+    return "above" if last_price >= vwap_value else "below"
+
+
+def compute_next_objective_meta(
+    *,
+    symbol: str,
+    plan: Mapping[str, Any] | None,
+    direction: str | None,
+    last_price: Optional[float],
+    key_levels: Mapping[str, Any] | None,
+    overlays: Mapping[str, Any] | None,
+    precision: int,
+    interval: str | None,
+) -> Optional[Dict[str, Any]]:
+    entry_price = _resolve_entry(plan)
+    direction_token = _normalize_direction(direction, plan=plan)
+    if entry_price is None or direction_token is None:
+        return None
+
+    tick_size = _resolve_tick_size(plan, key_levels, overlays, precision=precision)
+    atr_used = _extract_atr(plan)
+    atr_component = (0.05 * atr_used) if isinstance(atr_used, (int, float)) and atr_used and atr_used > 0 else 0.0
+    tick_component = tick_size * 2 if tick_size and tick_size > 0 else 0.0
+    half_width = max(atr_component, tick_component)
+    if half_width <= 0:
+        half_width = max(tick_size if tick_size > 0 else 0.01, 0.01)
+    band_low = entry_price - half_width
+    band_high = entry_price + half_width
+
+    progress = _progress_for_price(last_price, band_low, band_high, half_width)
+    state = _state_for_price(direction_token, last_price, band_low, band_high)
+
+    meta_block = plan.get("meta") if isinstance(plan, Mapping) else None
+    why_tokens = _extract_confluence(plan, meta_block)
+
+    mtf_info = _mtf_alignment_info(plan, direction_token)
+    if mtf_info and mtf_info["total"] > 0:
+        why_tokens.append(f"MTF:+{mtf_info['aligned']}/{mtf_info['total']}")
+
+    vwap_value = _resolve_vwap(plan, overlays)
+    vwap_relation = _vwap_side(last_price, vwap_value, tick_size)
+    if vwap_relation:
+        why_tokens.append(f"VWAP_{vwap_relation}")
+
+    why_tokens = _unique_tokens(why_tokens)
+
+    objective_price = round(entry_price, precision) if precision >= 0 else entry_price
+    band_low_rounded = round(band_low, precision) if precision >= 0 else band_low
+    band_high_rounded = round(band_high, precision) if precision >= 0 else band_high
+    progress_value = round(progress, 4)
+    timeframe = _normalize_timeframe(interval)
+
+    entry_distance_pct = None
+    if last_price is not None and entry_price:
+        entry_distance_pct = abs(last_price - entry_price) / entry_price
+
+    payload: Dict[str, Any] = {
+        "state": state,
+        "why": why_tokens,
+        "objective_price": objective_price,
+        "band": {
+            "low": band_low_rounded,
+            "high": band_high_rounded,
+        },
+        "timeframe": timeframe,
+        "progress": progress_value,
+    }
+    if isinstance(mtf_info, dict):
+        payload["_mtf_score"] = mtf_info["score"]
+        payload["_mtf_supporting"] = mtf_info["aligned"]
+        payload["_mtf_total"] = mtf_info["total"]
+    if vwap_relation:
+        payload["_vwap_side"] = vwap_relation
+    if tick_size:
+        payload["_tick_size"] = tick_size
+    if atr_used is not None:
+        payload["_atr_used"] = atr_used
+    if entry_distance_pct is not None and math.isfinite(entry_distance_pct):
+        payload["_entry_distance_pct"] = entry_distance_pct
+    if last_price is not None and math.isfinite(last_price):
+        payload["_last_price"] = last_price
+
+    return payload
 
 
 def _strategy_template_points(
@@ -439,7 +969,32 @@ def build_plan_layers(
     if forecast_annotation:
         layers["annotations"].append(forecast_annotation)
 
+    next_objective_payload = compute_next_objective_meta(
+        symbol=symbol,
+        plan=plan_payload,
+        direction=direction_token,
+        last_price=_coerce_float(last_close),
+        key_levels=key_levels,
+        overlays=overlays,
+        precision=precision,
+        interval=interval,
+    )
+    if next_objective_payload:
+        meta_block = layers.setdefault("meta", {})
+        public_block = {
+            key: value for key, value in next_objective_payload.items() if not (isinstance(key, str) and key.startswith("_"))
+        }
+        if public_block:
+            meta_block["next_objective"] = public_block
+        internal_block = {
+            key[1:]: value
+            for key, value in next_objective_payload.items()
+            if isinstance(key, str) and key.startswith("_")
+        }
+        if internal_block:
+            meta_block["_next_objective_internal"] = internal_block
+
     return layers
 
 
-__all__ = ["build_plan_layers"]
+__all__ = ["build_plan_layers", "compute_next_objective_meta"]

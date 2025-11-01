@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { API_BASE_URL } from "@/lib/env";
+import { API_BASE_URL, withAuthHeaders } from "@/lib/env";
 import { ensureCanonicalChartUrl } from "@/lib/chartUrl";
 
 type PlanLike = {
@@ -34,7 +34,7 @@ export function useChartUrl(plan: PlanLike | null | undefined): string | null {
       try {
         const response = await fetch(`${API_BASE_URL}/gpt/chart-url`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: withAuthHeaders({ "content-type": "application/json", Accept: "application/json" }),
           body: JSON.stringify(params),
         });
         const data = (await response.json()) as { interactive?: string | null };

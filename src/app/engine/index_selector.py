@@ -136,6 +136,7 @@ class IndexOptionSelector:
             except (TypeError, ValueError):
                 spot_ratio = None
         proxy_payload = {
+            "symbol": proxy_symbol,
             "underlying_proxy": proxy_symbol,
             "spot_ratio": spot_ratio,
             "note": note,

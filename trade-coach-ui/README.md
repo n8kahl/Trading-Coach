@@ -26,6 +26,11 @@ Feature Flags
 - `NEXT_PUBLIC_BACKEND_API_KEY` – Optional Bearer token.
   Scenario Plans UI is enabled by default (no feature flag).
 
+## Testing
+
+- `npm run test` executes the Vitest unit suite (components, hooks, and stores).
+- `npm run e2e` runs Playwright scenarios. Set `E2E_UI_BASE_URL` (defaults to `http://localhost:3000`) and `E2E_PLAN_ID` to point at a real plan before running.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

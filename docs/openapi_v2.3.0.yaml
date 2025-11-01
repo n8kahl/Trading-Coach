@@ -1,0 +1,1251 @@
+openapi: 3.1.0
+info:
+  title: Trading Coach Backend API
+  version: "2.3.0"
+  description: |
+    Fancy Trader endpoints powering GPT integrations.
+    Session-aware payloads clamp data when markets are closed (frozen).
+
+    ## Changelog 2.3.0
+    - **UI deep-linking**:
+      - Added `plan_page` to **PlanResponse** (non-null string URI) – deep-links to the public UI (e.g., `https://fancytrader.up.railway.app/plan/{plan_id}`).
+      - Added optional `plan_page` to **ScanCandidate** – included when the candidate has a `plan_id`.
+    - No breaking changes. Canonical **chart** links remain via `/gpt/chart-url` and `trade_detail`/`chart_url` fields.
+    - 2.2.4 improvements remain (geometry summary, snapshot unification, extended-hours flags).
+
+    ## Notes
+    - The backend continues to build the chart URL via `/gpt/chart-url`; clients should render the UI link (`plan_page`) for app navigation and the chart link (`chart_url` or `trade_detail`) for canonical charts.
+
+servers:
+  - url: https://trading-coach-production.up.railway.app
+    description: Production
+
+paths:
+  /gpt/plan:
+    post:
+      summary: Return a single trade plan for a symbol
+      operationId: postGptPlan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanRequest'
+      responses:
+        '200':
+          description: Structured plan response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanResponse'
+        '400': { description: Invalid input }
+        '404': { description: No plan available }
+        '502': { description: Upstream market data unavailable }
+
+  /gpt/scan:
+    post:
+      summary: Rank trade setups across a universe
+      operationId: postGptScan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanRequest'
+      responses:
+        '200':
+          description: Ranked scan candidates (paged 50 per request)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanPage'
+        '400': { description: Invalid input or empty universe }
+        '502': { description: Upstream market data unavailable }
+
+  /gpt/finalize:
+    post:
+      summary: Finalize a planning-mode candidate once live quotes are verified
+      operationId: postGptFinalize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinalizeRequest'
+      responses:
+        '200':
+          description: Finalization acknowledgement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinalizeResponse'
+        '400': { description: Invalid finalization payload }
+
+  /gpt/chart-url:
+    post:
+      summary: Build canonical /tv link for a plan
+      operationId: postGptChartUrl
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChartUrlRequest'
+      responses:
+        '200':
+          description: Canonical chart URL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [interactive]
+                properties:
+                  interactive:
+                    type: string
+                    format: uri
+                    example: >-
+                      https://trading-coach-production.up.railway.app/tv?center_time=latest&direction=long&ema=9,20,50&entry=251.4&focus=plan&interval=5m&plan_id=TSLA-2025-10-15T153000-1&plan_version=1&range=1d&scale_plan=auto&stop=249.8&symbol=TSLA&theme=dark&tp=253.0,254.2,255.6&view=1D
+        '400': { description: Validation error (unknown keys or bad types) }
+
+  /api/v1/gpt/chart-layers:
+    get:
+      summary: Return persisted overlays for a plan
+      operationId: getGptChartLayers
+      parameters:
+        - in: query
+          name: plan_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Levels/zones/annotations for plotting
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanLayers'
+        '404': { description: Not found }
+        '409':
+          description: Plan/session timestamp mismatch
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  plan_id: { type: string }
+                  plan_as_of: { type: string }
+                  layers_as_of: { type: string }
+
+components:
+  schemas:
+
+    # ---------- Requests ----------
+    PlanRequest:
+      type: object
+      required: [symbol]
+      properties:
+        symbol:
+          type: string
+          description: Ticker symbol to plan
+          example: TSLA
+        style:
+          type: string
+          nullable: true
+          description: Optional style hint (scalp, intraday, swing, leaps)
+          example: intraday
+        plan_id:
+          type: string
+          nullable: true
+          description: Force plan refresh for a specific plan id
+        simulate_open:
+          type: boolean
+          default: false
+          description: >-
+            When true, treats closed sessions as simulated-live for strategy evaluation.
+            Also accepts the `X-Simulate-Open: 1` header.
+        use_extended_hours:
+          type: boolean
+          default: false
+          description: >-
+            When true, fetches and evaluates using pre-/post-market bars in addition to RTH.
+
+    ScanFilters:
+      type: object
+      properties:
+        min_rvol:
+          type: number
+          minimum: 0
+          nullable: true
+        exclude:
+          type: array
+          items:
+            type: string
+        min_liquidity_rank:
+          type: integer
+          minimum: 1
+          nullable: true
+
+    ScanRequest:
+      type: object
+      required: [universe, style]
+      properties:
+        universe:
+          oneOf:
+            - type: string
+              description: A universe token (will be expanded to tickers server-side)
+              example: FT-TopLiquidity
+            - type: array
+              items: { type: string }
+              description: Explicit tickers
+              example: ["AAPL","MSFT","NVDA"]
+        style:
+          type: string
+          enum: [scalp, intraday, swing, leaps]
+        limit:
+          type: integer
+          default: 20
+          minimum: 1
+          maximum: 100
+        asof_policy:
+          type: string
+          enum: [live, frozen, live_or_lkg]
+          default: live_or_lkg
+        filters:
+          $ref: '#/components/schemas/ScanFilters'
+        cursor:
+          type: string
+          nullable: true
+        simulate_open:
+          type: boolean
+          default: false
+          description: >-
+            When true, evaluates the scan as if the market were open even if the
+            current session is closed. Also accepts the `X-Simulate-Open: 1` header.
+        use_extended_hours:
+          type: boolean
+          default: false
+          description: >-
+            When true, fetches and evaluates using pre-/post-market bars in addition to RTH.
+
+    ChartUrlRequest:
+      type: object
+      description: >
+        The only accepted fields to build a canonical /tv link. All other
+        keys (e.g., session_* / market_* / levels) are ignored or rejected.
+      required:
+        - symbol
+        - interval
+        - direction
+        - entry
+        - stop
+        - tp
+        - ema
+        - focus
+        - center_time
+        - scale_plan
+        - view
+        - range
+        - theme
+        - plan_id
+        - plan_version
+      properties:
+        symbol: { type: string, example: TSLA }
+        interval: { type: string, example: 5m }
+        direction: { type: string, enum: [long, short] }
+        entry: { type: number, format: double, example: 251.4 }
+        stop: { type: number, format: double, example: 249.8 }
+        tp:
+          type: array
+          description: Target prices in display order
+          items: { type: number, format: double }
+          example: [253.0, 254.2, 255.6]
+        ema:
+          type: array
+          description: EMA periods included on the chart
+          items: { type: integer, minimum: 1 }
+          example: [9, 20, 50]
+        focus: { type: string, enum: [plan], example: plan }
+        center_time: { type: string, enum: [latest], example: latest }
+        scale_plan: { type: string, enum: [auto], example: auto }
+        view: { type: string, example: 1D }
+        range: { type: string, example: 1d }
+        theme: { type: string, example: dark }
+        plan_id: { type: string, example: TSLA-2025-10-15T153000-1 }
+        plan_version: { type: integer, minimum: 1, example: 1 }
+        # Optional if server ALLOWED_CHART_PARAM_KEYS includes it:
+        session:
+          type: string
+          enum: [extended, rth]
+          description: Optional hint to render extended-hours or regular session context.
+
+    FinalizeRequest:
+      type: object
+      required: [candidate_id, status]
+      properties:
+        candidate_id:
+          type: integer
+          description: Identifier returned by planning-mode persistence
+        symbol:
+          type: string
+          nullable: true
+          description: Optional symbol for reference/logging
+        status:
+          type: string
+          enum: [finalized, rejected, deferred]
+        live_inputs:
+          type: object
+          additionalProperties: {}
+          description: Snapshot of live market inputs used during finalization (IV, spread, OI, etc.)
+          default: {}
+        selected_contracts:
+          type: array
+          items: { type: object }
+          nullable: true
+          description: Contracts approved during finalization (if any)
+        reject_reason:
+          type: string
+          nullable: true
+          description: Optional explanation when status = rejected
+
+    FinalizeResponse:
+      type: object
+      required: [candidate_id, status, updated]
+      properties:
+        candidate_id: { type: integer }
+        status: { type: string, enum: [finalized, rejected, deferred] }
+        updated: { type: boolean }
+      example:
+        candidate_id: 1234
+        status: finalized
+        updated: true
+
+    # ---------- Scan ----------
+    EntryEvaluation:
+      type: object
+      description: Evaluation metadata attached to each entry candidate.
+      properties:
+        stop_multiple:
+          type: number
+          format: double
+          description: ATR-based stop multiple used for evaluation.
+        readiness_seed:
+          type: number
+          format: double
+          description: Seed readiness score before weighting.
+        status:
+          type: string
+          description: Current disposition of the candidate (e.g., viable, filtered, invalidated).
+        actionability:
+          type: number
+          format: double
+          description: Actionability score for this candidate (0–1).
+        selected:
+          type: boolean
+          description: Whether this candidate was selected for the plan.
+
+    EntryCandidate:
+      type: object
+      description: Candidate entries considered by the planning engine.
+      properties:
+        type: { type: string, description: Entry type (limit, stop, etc.) }
+        level: { type: number, format: double }
+        anchor:
+          type: string
+          nullable: true
+          description: Reference anchor used to derive the entry (e.g., VAH, PDH).
+        actionability:
+          type: number
+          format: double
+          nullable: true
+          description: Candidate-specific actionability score (0–1).
+        evaluation:
+          $ref: '#/components/schemas/EntryEvaluation'
+
+    ScanCandidate:
+      type: object
+      required: [symbol, score, reasons]
+      properties:
+        symbol: { type: string }
+        rank: { type: integer, nullable: true }
+        score: { type: number, format: double }
+        reasons:
+          type: array
+          items: { type: string }
+        plan_id: { type: string, nullable: true }
+        plan_page:
+          type: string
+          format: uri
+          nullable: true
+          description: UI deep-link for this plan (present when plan_id is available).
+        entry: { type: number, format: double, nullable: true }
+        stop: { type: number, format: double, nullable: true }
+        tps:
+          type: array
+          items: { type: number, format: double }
+        rr_t1: { type: number, format: double, nullable: true }
+        confidence: { type: number, format: double, nullable: true }
+        chart_url: { type: string, format: uri, nullable: true }
+        target_meta:
+          type: array
+          items: { $ref: '#/components/schemas/TargetMeta' }
+        targets_meta:
+          type: array
+          items: { $ref: '#/components/schemas/TargetMeta' }
+        tp_reasons:
+          type: array
+          items: { $ref: '#/components/schemas/TpReason' }
+        structured_plan:
+          $ref: '#/components/schemas/StructuredPlan'
+          nullable: true
+        target_profile:
+          $ref: '#/components/schemas/TargetProfile'
+          nullable: true
+        runner_policy: { type: object, nullable: true }
+        snap_trace:
+          type: array
+          items: { type: string }
+          nullable: true
+        expected_move: { type: number, format: double, nullable: true }
+        remaining_atr: { type: number, format: double, nullable: true }
+        em_used: { type: boolean, nullable: true }
+        risk_block:
+          $ref: '#/components/schemas/RiskBlock'
+          nullable: true
+        execution_rules:
+          $ref: '#/components/schemas/ExecutionRules'
+          nullable: true
+        confluence:
+          type: array
+          items: { type: string }
+        accuracy_levels:
+          type: array
+          items: { type: string }
+        events:
+          $ref: '#/components/schemas/EventsBlock'
+          nullable: true
+        options: { type: object, nullable: true }
+        options_contracts:
+          type: array
+          items: { $ref: '#/components/schemas/Contract' }
+        options_note: { type: string, nullable: true }
+        entry_distance_pct: { type: number, format: double, nullable: true }
+        entry_distance_atr: { type: number, format: double, nullable: true }
+        bars_to_trigger: { type: number, format: double, nullable: true }
+        actionable_soon: { type: boolean, nullable: true }
+        source_paths:
+          type: object
+          additionalProperties: { type: string }
+        planning_snapshot:
+          type: object
+          nullable: true
+          description: Present when the scan runs in planning mode; describes the readiness scoring used by the planning engine.
+          properties:
+            planning_mode: { type: boolean }
+            readiness_score: { type: number, format: double }
+            components:
+              type: object
+              properties:
+                probability: { type: number, format: double }
+                actionability: { type: number, format: double }
+                risk_reward: { type: number, format: double }
+            levels:
+              type: object
+              properties:
+                entry: { type: number, format: double }
+                invalidation: { type: number, format: double }
+                targets:
+                  type: array
+                  items: { type: number, format: double }
+            contract_template: { type: object }
+            requires_live_confirmation: { type: boolean }
+            missing_live_inputs:
+              type: array
+              items: { type: string }
+            target_meta:
+              type: array
+              items: { $ref: '#/components/schemas/TargetMeta' }
+            runner_policy: { type: object }
+            snap_trace:
+              type: array
+              items: { type: string }
+            expected_move: { type: number, format: double, nullable: true }
+            remaining_atr: { type: number, format: double, nullable: true }
+            chart_params:
+              type: object
+              properties:
+                symbol: { type: string }
+                interval: { type: string }
+                direction: { type: string }
+                entry: { type: string }
+                stop: { type: string }
+                tp: { type: string }
+            direction: { type: string }
+            source_paths:
+              type: object
+              additionalProperties: { type: string }
+            entry_anchor:
+              type: string
+              nullable: true
+              description: Reference anchor used to derive the selected entry.
+            entry_actionability:
+              type: number
+              format: double
+              nullable: true
+              description: Actionability score used in planning (0–1).
+            entry_candidates:
+              type: array
+              items: { $ref: '#/components/schemas/EntryCandidate' }
+        entry_anchor:
+          type: string
+          nullable: true
+          description: If echoed outside the snapshot, the candidate’s entry anchor.
+        entry_actionability:
+          type: number
+          format: double
+          nullable: true
+          description: If echoed outside the snapshot, the candidate’s entry actionability score (0–1).
+        metrics:
+          type: object
+          nullable: true
+          description: Geometry summary emitted by the scan pipeline for this candidate.
+          properties:
+            atr_used: { type: number, format: double }
+            expected_move: { type: number, format: double }
+            remaining_atr: { type: number, format: double }
+            em_used: { type: boolean }
+            snap_trace:
+              type: array
+              items: { type: string }
+            key_levels_used:
+              $ref: '#/components/schemas/KeyLevelsUsed'
+            runner_policy: { type: object }
+            entry_candidates:
+              type: array
+              items: { $ref: '#/components/schemas/EntryCandidate' }
+            tp_reasons:
+              type: array
+              items: { $ref: '#/components/schemas/TpReason' }
+            geometry_warnings:
+              type: array
+              items: { type: string }
+
+    ScanPage:
+      type: object
+      required: [as_of, planning_context, meta, candidates, data_quality]
+      properties:
+        as_of: { type: string, format: date-time }
+        planning_context: { type: string, enum: [live, frozen] }
+        banner: { type: string, nullable: true }
+        use_extended_hours:
+          type: boolean
+          nullable: true
+          description: Echoed when the scan used pre-/post-market bars.
+        meta:
+          type: object
+          description: Additional metadata (includes `simulated_open` when simulated live mode is used).
+          properties:
+            planning_mode: { type: boolean, nullable: true }
+            run_id: { type: integer, nullable: true }
+            snapshot:
+              type: object
+              description: Summary of the scan snapshot used to produce this page.
+              properties:
+                generated_at: { type: string, format: date-time }
+                symbol_count: { type: integer }
+            indices_context:
+              type: object
+              nullable: true
+              description: Optional index-level context (e.g. SPX, NDX) relevant to candidates.
+            volatility_proxy:
+              type: object
+              nullable: true
+              description: Optional volatility measures used as proxy inputs (e.g., VIX, RVOL baselines).
+            universe:
+              type: object
+              properties:
+                name: { type: string }
+                source: { type: string }
+                count: { type: integer }
+        candidates:
+          type: array
+          items: { $ref: '#/components/schemas/ScanCandidate' }
+        data_quality:
+          type: object
+          description: Overall data presence/quality flags.
+          properties:
+            planning_mode: { type: boolean, nullable: true }
+            series_present: { type: boolean, nullable: true }
+            indices_present: { type: boolean, nullable: true }
+            expected_move: { type: number, format: double, nullable: true }
+            remaining_atr: { type: number, format: double, nullable: true }
+            em_used: { type: boolean, nullable: true }
+            snapshot:
+              type: object
+              nullable: true
+              description: Summary of the snapshot materialized for this page.
+              properties:
+                generated_at: { type: string, format: date-time }
+                symbol_count: { type: integer }
+        session: { type: object, nullable: true }
+        phase: { type: string, enum: [scan], nullable: true }
+        count_candidates: { type: integer, nullable: true }
+        next_cursor: { type: string, nullable: true }
+      example:
+        as_of: "2025-10-20T01:00:00Z"
+        planning_context: frozen
+        banner: "Planning mode — market closed"
+        use_extended_hours: true
+        meta:
+          planning_mode: true
+          run_id: 4123
+          snapshot:
+            generated_at: "2025-10-20T00:59:40Z"
+            symbol_count: 3
+          indices_context:
+            "I:SPX": { close: 4710.5, change_pct: 0.45 }
+          volatility_proxy:
+            vix_close: 16.2
+          universe:
+            name: FT-TopLiquidity
+            source: planner
+            count: 3
+        candidates:
+          - symbol: AAPL
+            rank: 1
+            score: 0.82
+            rr_t1: 1.6
+            entry: 188.42
+            stop: 185.9
+            tps: [189.8, 191.2, 192.4]
+            plan_id: AAPL-INTRADAY-20251017
+            plan_page: https://fancytrader.up.railway.app/plan/AAPL-INTRADAY-20251017
+            entry_anchor: "VAH break"
+            entry_actionability: 0.74
+            reasons: ["Readiness 0.82", "Probability 79%", "Risk/Reward 1.95"]
+            metrics:
+              atr_used: 1.32
+              expected_move: 4.5
+              remaining_atr: 3.1
+              em_used: true
+              snap_trace:
+                - "tp1:189.20->189.80 via VAH"
+              key_levels_used:
+                session:
+                  - { role: resistance, label: VAH, price: 189.2, distance: 0.78, source: geometry }
+                structural:
+                  - { role: swing_low, label: "10/10", price: 185.8, distance: 2.62, source: geometry }
+              runner_policy:
+                fraction: 0.2
+                atr_multiple: 0.8
+              entry_candidates:
+                - type: limit
+                  level: 188.42
+                  anchor: "VAH"
+                  actionability: 0.74
+                  evaluation:
+                    stop_multiple: 1.2
+                    readiness_seed: 0.68
+                    status: viable
+                    actionability: 0.74
+                    selected: true
+              tp_reasons:
+                - { label: TP1, reason: "Snapped to VAH" }
+              geometry_warnings: []
+            target_meta:
+              - label: TP1
+                prob_touch: 0.62
+                rr_multiple: 1.6
+            targets_meta:
+              - label: TP1
+                prob_touch: 0.62
+                rr_multiple: 1.6
+            tp_reasons:
+              - label: TP1
+                reason: "Snapped to VAH"
+            runner_policy:
+              fraction: 0.2
+              atr_multiple: 0.8
+            snap_trace:
+              - "tp1:189.20->189.80 via VAH"
+            expected_move: 4.5
+            remaining_atr: 3.1
+            em_used: true
+            risk_block:
+              risk_points: 2.52
+            execution_rules:
+              trigger: "Trigger on acceptance above VAH."
+            confluence: ["EMA stack"]
+            accuracy_levels: ["EM cap"]
+
+    # ---------- Plans ----------
+    Contract:
+      type: object
+      required: [symbol]
+      properties:
+        symbol: { type: string }
+        delta:  { type: number }
+        oi:     { type: integer }
+        spread: { type: number, description: "fraction e.g. 0.05 = 5%" }
+        ivp:    { type: number, nullable: true }
+        expiry: { type: string, nullable: true }
+
+    PlanLayers:
+      type: object
+      required: [as_of, meta]
+      properties:
+        as_of: { type: string, format: date-time }
+        levels:
+          type: array
+          items:
+            type: object
+            properties:
+              price: { type: number, format: double }
+              label: { type: string }
+              kind:  { type: string }
+        zones:
+          type: array
+          items:
+            type: object
+            properties:
+              top: { type: number, format: double }
+              bottom: { type: number, format: double }
+              label: { type: string }
+        annotations:
+          type: array
+          items:
+            type: object
+            properties:
+              time: { type: string }
+              text: { type: string }
+        meta:
+          type: object
+          properties:
+            symbol: { type: string }
+            interval: { type: string }
+            precision: { type: integer }
+
+    LevelUsage:
+      type: object
+      properties:
+        role: { type: string }
+        label: { type: string, nullable: true }
+        price: { type: number, format: double }
+        distance: { type: number, format: double, nullable: true }
+        source: { type: string, nullable: true }
+
+    KeyLevelsUsed:
+      type: object
+      description: |
+        Filled from plan computation; when upstream payloads omit levels, this structure is backfilled from geometry summary.
+      properties:
+        session:
+          type: array
+          items: { $ref: '#/components/schemas/LevelUsage' }
+        structural:
+          type: array
+          items: { $ref: '#/components/schemas/LevelUsage' }
+
+    RiskBlock:
+      type: object
+      properties:
+        risk_points: { type: number, format: double, nullable: true }
+        risk_percent: { type: number, format: double, nullable: true }
+        reward_to_target:
+          type: object
+          additionalProperties: { type: number, format: double }
+        atr_stop_multiple: { type: number, format: double, nullable: true }
+        atr_value: { type: number, format: double, nullable: true }
+        expected_move: { type: number, format: double, nullable: true }
+        expected_move_fraction:
+          type: object
+          additionalProperties: { type: number, format: double }
+        runner_trail_multiple: { type: number, format: double, nullable: true }
+
+    ExecutionRules:
+      type: object
+      properties:
+        trigger: { type: string, nullable: true }
+        invalidation: { type: string, nullable: true }
+        scale: { type: string, nullable: true }
+        reload: { type: string, nullable: true }
+
+    TargetMeta:
+      type: object
+      properties:
+        label: { type: string }
+        prob_touch: { type: number, format: double }
+        prob_touch_raw:
+          type: number
+          format: double
+          description: Raw model probability prior to calibration.
+        prob_touch_calibrated:
+          type: number
+          format: double
+          description: Calibrated probability mapped from reliability tables.
+        distance: { type: number, format: double }
+        optional: { type: boolean }
+        em_fraction: { type: number, format: double }
+        em_basis: { type: number, format: double }
+        mfe_quantile: { type: string }
+        mfe_ratio: { type: number, format: double }
+        rr_multiple: { type: number, format: double, description: "Risk/reward multiple to this target." }
+
+    TpReason:
+      type: object
+      properties:
+        label: { type: string }
+        reason: { type: string }
+        source: { type: string, nullable: true }
+
+    PlanResponse:
+      type: object
+      required: [plan_id, version, trade_detail, symbol]
+      properties:
+        plan_id: { type: string }
+        version: { type: integer, minimum: 1 }
+        trade_detail: { type: string, format: uri }
+        plan_page:
+          type: string
+          format: uri
+          description: Public UI deep-link to view this plan (e.g., https://fancytrader.up.railway.app/plan/{plan_id}).
+        warnings:
+          type: array
+          items: { type: string }
+        planning_context: { type: string, enum: [live, frozen] }
+        symbol: { type: string }
+        style: { type: string, nullable: true }
+        bias: { type: string, nullable: true }
+        setup: { type: string, nullable: true }
+        entry: { type: number, format: double, nullable: true }
+        stop: { type: number, format: double, nullable: true }
+        targets:
+          type: array
+          items: { type: number, format: double }
+        entry_anchor:
+          type: string
+          nullable: true
+          description: Reference anchor used to derive the selected entry (e.g., VAH, PDH).
+        entry_actionability:
+          type: number
+          format: double
+          nullable: true
+          description: Actionability score for the entry (0–1).
+        target_meta:
+          type: array
+          items: { $ref: '#/components/schemas/TargetMeta' }
+        targets_meta:
+          type: array
+          items: { $ref: '#/components/schemas/TargetMeta' }
+          description: Alias of `target_meta` for clients that expect pluralised naming.
+        rr_to_t1: { type: number, format: double, nullable: true }
+        confidence: { type: number, format: double, nullable: true }
+        confidence_factors:
+          type: array
+          items: { type: string }
+        notes: { type: string, nullable: true }
+        relevant_levels:
+          type: object
+          additionalProperties: { type: number, format: double }
+        expected_move_basis: { type: string, nullable: true }
+        sentiment: { type: object, nullable: true }
+        events: { $ref: '#/components/schemas/EventsBlock' }
+        earnings: { $ref: '#/components/schemas/EarningsBlock' }
+        charts_params: { type: object }
+        chart_url: { type: string, format: uri, nullable: true }
+        strategy_id: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        score: { type: number, format: double, nullable: true }
+        plan: { type: object, nullable: true }
+        structured_plan: { $ref: '#/components/schemas/StructuredPlan' }
+        target_profile: { $ref: '#/components/schemas/TargetProfile' }
+        charts:
+          type: object
+          nullable: true
+          description: Chart payload (includes `live=1` / `last_update` when live or simulated-live contexts apply).
+        key_levels:
+          type: object
+          additionalProperties: { type: number, format: double }
+        key_levels_used:
+          $ref: '#/components/schemas/KeyLevelsUsed'
+          nullable: true
+          description: |
+            If the plan returns levels this will be populated and non-null. When upstream payloads omit levels, this is backfilled from geometry metrics so clients can still render `{session, structural}` arrays.
+        market_snapshot: { type: object, nullable: true }
+        features: { type: object, nullable: true }
+        options: { type: object, nullable: true }
+        calc_notes: { type: object, nullable: true }
+        htf:
+          type: object
+          properties:
+            bias: { type: string }
+            snapped_targets:
+              type: array
+              items: { type: string }
+        decimals: { type: integer, nullable: true }
+        data_quality:
+          type: object
+          description: Geometry-derived quality fields are populated when geometry summary is available.
+          properties:
+            series_present: { type: boolean }
+            iv_present: { type: boolean }
+            earnings_present: { type: boolean }
+            expected_move: { type: number, format: double }
+            remaining_atr: { type: number, format: double }
+            em_used: { type: boolean }
+            snapshot:
+              type: object
+              nullable: true
+              properties:
+                generated_at: { type: string, format: date-time }
+                symbol_count: { type: integer }
+        debug: { type: object, nullable: true }
+        runner: { type: object, nullable: true }
+        runner_policy: { type: object, nullable: true }
+        snap_trace:
+          type: array
+          items: { type: string }
+          nullable: true
+          description: Guaranteed when geometry data is present.
+        expected_move: { type: number, format: double, nullable: true }
+        remaining_atr: { type: number, format: double, nullable: true }
+        em_used: { type: boolean, nullable: true }
+        calibration_meta:
+          type: object
+          nullable: true
+          description: Reliability bins and scoring metadata backing probability calibration.
+        updated_from_version: { type: integer, nullable: true }
+        update_reason: { type: string, nullable: true }
+        market: { type: object, nullable: true }
+        data: { type: object, nullable: true }
+        session_state: { $ref: '#/components/schemas/SessionState' }
+        confluence:
+          type: array
+          items: { type: string }
+        accuracy_levels:
+          type: array
+          items: { type: string }
+          nullable: true
+          description: Indicator-specific accuracy or cap annotations delivered by the geometry engine.
+        tp_reasons:
+          type: array
+          items: { $ref: '#/components/schemas/TpReason' }
+        options_contracts:
+          type: array
+          items: { $ref: '#/components/schemas/Contract' }
+        options_note: { type: string, nullable: true }
+        rejected_contracts:
+          type: array
+          items:
+            type: object
+            properties:
+              symbol: { type: string }
+              reason: { type: string }
+              message: { type: string, nullable: true }
+        plan_layers: { $ref: '#/components/schemas/PlanLayers' }
+        risk_block:
+          $ref: '#/components/schemas/RiskBlock'
+          nullable: true
+        execution_rules:
+          $ref: '#/components/schemas/ExecutionRules'
+          nullable: true
+        source_paths:
+          type: object
+          additionalProperties: { type: string }
+        meta:
+          type: object
+          nullable: true
+          description: Additional metadata flags (e.g., `simulated_open`). May include `key_levels_used` propagated from geometry summary.
+          properties:
+            key_levels_used:
+              $ref: '#/components/schemas/KeyLevelsUsed'
+        strategy_profile:
+          type: object
+          nullable: true
+          properties:
+            name: { type: string }
+            trigger:
+              type: array
+              items: { type: string }
+            invalidation: { type: string }
+            management: { type: string }
+            reload: { type: string, nullable: true }
+            runner: { type: string, nullable: true }
+            badges:
+              type: array
+              items: { type: string }
+            mtf_confluence:
+              type: array
+              items: { type: string }
+              maxItems: 6
+              description: Up to six higher-timeframe confluence notes attached to the strategy.
+            waiting_for:
+              type: string
+              nullable: true
+              description: Conditional prerequisite text (e.g., “5m close above VAH”).
+        badges:
+          type: array
+          items:
+            type: object
+            properties:
+              label: { type: string }
+              kind: { type: string }
+        use_extended_hours:
+          type: boolean
+          nullable: true
+          description: Echoed when the plan used pre-/post-market bars.
+      example:
+        plan_id: "AAPL-INTRADAY-20251017"
+        version: 2
+        trade_detail: "https://trading-coach-production.up.railway.app/tv?plan_id=AAPL-INTRADAY-20251017&plan_version=2&interval=5m"
+        plan_page: "https://fancytrader.up.railway.app/plan/AAPL-INTRADAY-20251017"
+        warnings: []
+        planning_context: frozen
+        symbol: AAPL
+        style: intraday
+        bias: long
+        entry: 188.42
+        stop: 185.9
+        targets: [189.8, 191.2, 192.4]
+        entry_anchor: "VAH"
+        entry_actionability: 0.74
+        target_meta:
+          - label: TP1
+            prob_touch: 0.62
+            prob_touch_raw: 0.62
+            prob_touch_calibrated: 0.59
+            distance: 1.38
+            rr_multiple: 1.6
+            em_fraction: 0.46
+            snap_tag: VAH
+        rr_to_t1: 1.6
+        confidence: 0.78
+        confluence: ["EMA stack", "VWAP reclaim"]
+        accuracy_levels: ["EM cap"]
+        tp_reasons:
+          - label: TP1
+            reason: "Snapped to VAH"
+            source: pdh
+        options_contracts: []
+        rejected_contracts:
+          - symbol: "AAPL 2025-10-17 190C"
+            reason: SPREAD_TOO_WIDE
+            message: "spread 12.5% exceeds limit 8.0%"
+        plan_layers: { plan_id: AAPL-INTRADAY-20251017 }
+        risk_block:
+          risk_points: 2.52
+          reward_to_target: { tp1: 1.6 }
+          atr_stop_multiple: 1.2
+        execution_rules:
+          trigger: "Break above VAH"
+        data_quality:
+          series_present: true
+          iv_present: true
+          earnings_present: false
+          expected_move: 4.5
+          remaining_atr: 3.1
+          em_used: true
+          snapshot:
+            generated_at: "2025-10-20T00:59:40Z"
+            symbol_count: 1
+        runner_policy:
+          fraction: 0.2
+          atr_trail_mult: 0.8
+          atr_trail_step: 0.4
+          notes: ["Runner fraction adjusted"]
+        snap_trace:
+          - "stop:185.90->185.80 via swing_low"
+          - "tp1:189.20->189.80 via VAH"
+        expected_move: 4.5
+        remaining_atr: 3.1
+        em_used: true
+        use_extended_hours: true
+        meta:
+          key_levels_used:
+            session:
+              - { role: resistance, label: VAH, price: 189.2 }
+            structural:
+              - { role: swing_low, label: "10/10", price: 185.8 }
+        strategy_profile:
+          name: "Power Hour Continuation"
+          trigger:
+            - "3–4pm ET, price above/below session VWAP"
+            - "Short EMAs stacked in trade direction with rising ADX"
+          invalidation: "Close back through VWAP or ADX rollover below threshold."
+          management: "Trim into prior high/low liquidity; trail into the close."
+          reload: "Avoid re-entries after 3:45pm ET unless fresh VWAP reclaim."
+          runner: "Tighten to 0.6× ATR once TP1 hits."
+          badges: ["Power Hour"]
+          mtf_confluence: ["HTF uptrend", "D1 higher low"]
+          waiting_for: "5m close above VAH"
+        badges:
+          - { label: "Power Hour Continuation", kind: "strategy" }
+          - { label: "Power Hour", kind: "strategy" }
+          - { label: "Intraday", kind: "style" }
+          - { label: "Long", kind: "bias" }
+        calibration_meta:
+          style: intraday
+          cohort: open_session
+          sample_size: 128
+          brier_score: 0.147
+          ece: 0.052
+          bins:
+            - lower: 0.4
+              upper: 0.6
+              count: 58
+              avg_prediction: 0.52
+              observed: 0.49
+        source_paths:
+          entry: geometry_engine
+          stop: geometry_engine
+          targets: geometry_engine
+        target_profile:
+          entry: 188.42
+          stop: 185.9
+          targets: [189.8, 191.2, 192.4]
+          probabilities: { tp1: 0.62, tp2: 0.48, tp3: 0.31 }
+          expected_move: 4.5
+          em_used: 1.0
+          atr_used: 1.32
+          snap_trace: ["tp1 snapped to VAH"]
+          warnings: []
+
+    StructuredPlan:
+      type: object
+      required: [plan_id, symbol, entry, stop, targets]
+      properties:
+        plan_id: { type: string }
+        symbol: { type: string }
+        style: { type: string, nullable: true }
+        direction: { type: string, nullable: true }
+        entry:
+          type: object
+          required: [type, level]
+          properties:
+            type: { type: string }
+            level: { type: number, format: double }
+        invalid: { type: boolean }
+        stop: { type: number, format: double }
+        targets:
+          type: array
+          items: { type: number, format: double }
+        entry_anchor:
+          type: string
+          nullable: true
+          description: Reference anchor used to derive the entry (e.g., VAH, PDH).
+        entry_actionability:
+          type: number
+          format: double
+          nullable: true
+          description: Actionability score for the entry (0–1).
+        probabilities:
+          type: object
+          additionalProperties: { type: number, format: double }
+        runner: { type: object, nullable: true }
+        runner_policy: { type: object, nullable: true }
+        confluence:
+          type: array
+          items: { type: string }
+        confidence: { type: number, format: double, nullable: true }
+        rationale: { type: string, nullable: true }
+        options: { type: object, nullable: true }
+        em_used: { type: boolean, nullable: true }
+        atr_used: { type: number, format: double, nullable: true }
+        expected_move: { type: number, format: double, nullable: true }
+        remaining_atr: { type: number, format: double, nullable: true }
+        style_horizon_applied: { type: string, nullable: true }
+        chart_url: { type: string, format: uri, nullable: true }
+        as_of: { type: string, format: date-time, nullable: true }
+        snap_trace:
+          type: array
+          items: { type: string }
+        meta:
+          type: array
+          items: { type: object }
+        target_meta:
+          type: array
+          items: { $ref: '#/components/schemas/TargetMeta' }
+        tp_reasons:
+          type: array
+          items: { $ref: '#/components/schemas/TpReason' }
+        key_levels_used:
+          $ref: '#/components/schemas/KeyLevelsUsed'
+          nullable: true
+        mtf_confluence:
+          type: array
+          items: { type: string }
+          nullable: true
+        risk_block:
+          $ref: '#/components/schemas/RiskBlock'
+          nullable: true
+        execution_rules:
+          $ref: '#/components/schemas/ExecutionRules'
+          nullable: true
+
+    TargetProfile:
+      type: object
+      required: [entry, stop, targets, probabilities, snap_trace, meta, warnings]
+      properties:
+        entry: { type: number, format: double }
+        stop: { type: number, format: double }
+        targets:
+          type: array
+          items: { type: number, format: double }
+        entry_anchor:
+          type: string
+          nullable: true
+          description: Reference anchor used to derive the entry (e.g., VAH, PDH).
+        entry_actionability:
+          type: number
+          format: double
+          nullable: true
+          description: Actionability score for the entry (0–1).
+        probabilities:
+          type: object
+          additionalProperties: { type: number, format: double }
+        expected_move: { type: number, format: double, nullable: true }
+        em_used: { type: boolean, nullable: true }
+        atr_used: { type: number, format: double, nullable: true }
+        snap_trace:
+          type: array
+          items: { type: string }
+        meta:
+          type: array
+          items: { type: object }
+        warnings:
+          type: array
+          items: { type: string }
+        runner: { type: object, nullable: true }
+        bias: { type: string, nullable: true }
+        style: { type: string, nullable: true }
+
+    EventsBlock:
+      type: object
+      nullable: true
+      properties:
+        next_fomc_minutes: { type: integer, nullable: true }
+        next_cpi_minutes: { type: integer, nullable: true }
+        next_nfp_minutes: { type: integer, nullable: true }
+        within_event_window: { type: boolean, nullable: true }
+        label: { type: string, nullable: true }
+
+    EarningsBlock:
+      type: object
+      nullable: true
+      properties:
+        next_earnings_at: { type: string, format: date-time, nullable: true }
+        dte_to_earnings: { type: integer, nullable: true }
+        pre_or_post: { type: string, nullable: true }
+        earnings_flag: { type: string, nullable: true }
+        expected_move_pct: { type: number, format: double, nullable: true }
+
+    SessionState:
+      type: object
+      nullable: true
+      properties:
+        status: { type: string, enum: [open, closed] }
+        as_of: { type: string, format: date-time }
+        next_open: { type: string, format: date-time, nullable: true }
+        tz: { type: string, default: "America/New_York" }
+        banner: { type: string }
+

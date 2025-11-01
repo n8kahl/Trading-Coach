@@ -1,21 +1,71 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import pandas as pd
 import pytest
 from httpx import ASGITransport, AsyncClient
 from urllib.parse import parse_qs, urlsplit
+from fastapi.testclient import TestClient
 
+import src.agent_server as agent_server
 from src.agent_server import (
     ChartParams,
     PlanRequest,
     PlanResponse,
+    build_plan_layers,
     _append_query_params,
     app,
     gpt_chart_url,
 )
 from src.config import get_settings
+
+
+def _stub_plan_components(symbol: str) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    entry = 430.0
+    stop = 428.6
+    target = 432.4
+    now = datetime(2025, 10, 28, 14, 30, tzinfo=timezone.utc)
+    as_of_iso = now.isoformat().replace("+00:00", "Z")
+    session_state = {
+        "status": "open",
+        "as_of": as_of_iso,
+        "next_open": None,
+        "tz": "America/New_York",
+    }
+    plan_core = {
+        "plan_id": f"{symbol}-demo",
+        "symbol": symbol,
+        "direction": "long",
+        "entry": entry,
+        "stop": stop,
+        "targets": [target],
+        "meta": {"entry_status": {"state": "waiting"}},
+        "waiting_for": "1m close above VWAP",
+        "session_state": session_state,
+        "context_overlays": {"volume_profile": {"vwap": entry - 0.12}},
+        "key_levels": {"PDL": entry - 1.0},
+    }
+    plan_layers = build_plan_layers(
+        symbol=symbol,
+        interval="5m",
+        as_of=as_of_iso,
+        planning_context="live",
+        key_levels=plan_core["key_levels"],
+        overlays=plan_core["context_overlays"],
+        strategy_id="orb_retest",
+        direction="long",
+        waiting_for=plan_core["waiting_for"],
+        plan=plan_core,
+        last_time_s=int(now.timestamp()),
+        interval_s=300,
+        last_close=entry - 0.25,
+    )
+    plan_layers["plan_id"] = plan_core["plan_id"]
+    plan_core = dict(plan_core)
+    plan_core["plan_layers"] = plan_layers
+    return plan_core, plan_layers, session_state
 
 
 @pytest.mark.asyncio
@@ -182,6 +232,163 @@ async def test_chart_layers_endpoint_returns_layers(
     assert payload["levels"]
     assert payload["meta"]["as_of"] == "2025-10-28T12:00:00Z"
 
+
+@pytest.mark.asyncio
+async def test_plan_layers_next_objective_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FF_LAYERS_ENDPOINT", "1")
+    monkeypatch.setenv("FF_CHART_CANONICAL_V1", "1")
+    monkeypatch.setenv("GPT_BACKEND_V2_ENABLED", "1")
+    monkeypatch.setenv("GPT_MARKET_ROUTING_ENABLED", "0")
+    get_settings.cache_clear()
+
+    async def fake_generate_plan_v2(
+        symbol: str,
+        style: str | None,
+        route,  # noqa: ANN001
+        app,  # noqa: ANN001
+    ) -> Dict[str, Any]:
+        plan_core, plan_layers, session_state = _stub_plan_components(symbol.upper())
+        return {
+            "plan_id": plan_core["plan_id"],
+            "version": 1,
+            "planning_context": "live",
+            "symbol": symbol.upper(),
+            "style": style or "intraday",
+            "bias": plan_core["direction"],
+            "entry": plan_core["entry"],
+            "stop": plan_core["stop"],
+            "targets": plan_core["targets"],
+            "plan": plan_core,
+            "plan_layers": plan_layers,
+            "session_state": session_state,
+            "charts": {},
+            "charts_params": {},
+        }
+
+    monkeypatch.setattr("src.agent_server.generate_plan_v2", fake_generate_plan_v2)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        plan_response = await client.post("/gpt/plan", json={"symbol": "SPY"})
+        assert plan_response.status_code == 200
+        plan_payload = plan_response.json()
+        plan_id = plan_payload["plan_id"]
+        assert plan_id in agent_server._IDEA_STORE
+        snapshot_plan = dict(plan_payload.get("plan") or {})
+        snapshot_plan["plan_id"] = plan_id
+        snapshot_plan["version"] = plan_payload.get("version") or 1
+        if plan_payload.get("session_state"):
+            snapshot_plan.setdefault("session_state", plan_payload.get("session_state"))
+        snapshot_plan["plan_layers"] = plan_payload["plan_layers"]
+        await agent_server._store_idea_snapshot(
+            plan_id,
+            {
+                "plan": snapshot_plan,
+                "plan_layers": plan_payload["plan_layers"],
+            },
+        )
+
+        layers_response = await client.get(
+            "/api/v1/gpt/chart-layers",
+            params={"plan_id": plan_id},
+        )
+
+    get_settings.cache_clear()
+
+    assert layers_response.status_code == 200
+    layers_payload = layers_response.json()
+    meta_block = layers_payload["meta"]
+    assert "next_objective" in meta_block
+    next_objective = meta_block["next_objective"]
+    assert set(next_objective.keys()) >= {"state", "why", "objective_price", "band", "timeframe", "progress"}
+    assert isinstance(next_objective["progress"], float)
+    assert isinstance(next_objective["band"]["low"], float)
+    assert next_objective["state"] in {"arming", "ready", "cooldown", "invalid"}
+    internal_meta = meta_block.get("_next_objective_internal")
+    assert internal_meta is not None
+    assert "entry_distance_pct" in internal_meta
+    assert internal_meta.get("tick_size")
+
+
+def test_coach_ws_emits_pulse(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FF_LAYERS_ENDPOINT", "1")
+    monkeypatch.setenv("FF_CHART_CANONICAL_V1", "1")
+    monkeypatch.setenv("FF_OPTIONS_ALWAYS", "1")
+    monkeypatch.setenv("GPT_BACKEND_V2_ENABLED", "1")
+    monkeypatch.setenv("GPT_MARKET_ROUTING_ENABLED", "0")
+    monkeypatch.setenv("BACKEND_API_KEY", "supersecret")
+    get_settings.cache_clear()
+
+    async def fake_generate_plan_v2(
+        symbol: str,
+        style: str | None,
+        route,  # noqa: ANN001
+        app,  # noqa: ANN001
+    ) -> Dict[str, Any]:
+        plan_core, plan_layers, session_state = _stub_plan_components(symbol.upper())
+        return {
+            "plan_id": plan_core["plan_id"],
+            "version": 1,
+            "planning_context": "live",
+            "symbol": symbol.upper(),
+            "style": style or "intraday",
+            "bias": plan_core["direction"],
+            "entry": plan_core["entry"],
+            "stop": plan_core["stop"],
+            "targets": plan_core["targets"],
+            "plan": plan_core,
+            "plan_layers": plan_layers,
+            "session_state": session_state,
+            "charts": {},
+            "charts_params": {},
+        }
+
+    monkeypatch.setattr("src.agent_server.generate_plan_v2", fake_generate_plan_v2)
+
+    with TestClient(app) as client:
+        plan_response = client.post(
+            "/gpt/plan",
+            json={"symbol": "SPY"},
+            headers={"Authorization": "Bearer supersecret"},
+        )
+        assert plan_response.status_code == 200
+        plan_payload = plan_response.json()
+        plan_id = plan_payload["plan_id"]
+        snapshot_plan = dict(plan_payload.get("plan") or {})
+        snapshot_plan["plan_id"] = plan_id
+        snapshot_plan["version"] = plan_payload.get("version") or 1
+        if plan_payload.get("session_state"):
+            snapshot_plan.setdefault("session_state", plan_payload.get("session_state"))
+        snapshot_plan["plan_layers"] = plan_payload["plan_layers"]
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(
+            agent_server._store_idea_snapshot(
+                plan_id,
+                {
+                    "plan": snapshot_plan,
+                    "plan_layers": plan_payload["plan_layers"],
+                },
+            )
+        )
+        loop.close()
+
+        with client.websocket_connect(
+            f"/ws/coach/{plan_id}",
+            headers={"Authorization": "Bearer supersecret"},
+        ) as ws:
+            message = ws.receive_json()
+            assert message["t"] == "coach_pulse"
+            diff = message["diff"]
+            objective_progress = diff["objective_progress"]
+            assert isinstance(objective_progress["progress"], float)
+            assert objective_progress["entry_distance_pct"] is not None
+            session_block = message["session"]
+            assert session_block["status"]
+            assert session_block["tz"]
+
+    get_settings.cache_clear()
 
 @pytest.mark.asyncio
 async def test_tv_api_bars_returns_ok_payload(monkeypatch: pytest.MonkeyPatch) -> None:

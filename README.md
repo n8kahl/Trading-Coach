@@ -29,6 +29,7 @@ See `docs/production_readiness.md` for scope, validation checks, and verificatio
 | `POST /gpt/contracts` | Rank Tradier option contracts with liquidity gates (spread, Δ, DTE, OI) and compute scenario P/L using plan anchors (delta/gamma/vega/theta). | `risk_amount` (defaults $100) is used only for sizing projections; no budget filtering occurs. |
 | `POST /gpt/chart-url` | Return a canonical `/chart` link (symbol, price targets, plan metadata only). | Canonicalises params; no session/market keys or inline levels when `FF_CHART_CANONICAL_V1=1`. |
 | `GET /api/v1/gpt/chart-layers` | Fetch plan-bound levels/zones/annotations for a given `plan_id`. | Drives overlays for `/chart`; layers persisted with each generated plan. |
+| `WS /ws/coach/{plan_id}` | Real-time coaching diff stream (≤ 2 Hz) for plan execution. | Emits `coach_pulse` frames with objective progress, next actions, confluence deltas, and SSOT session state. Requires `BACKEND_API_KEY` when configured. |
 
 Support routes: `/tv-api/*` (Lightweight Charts OHLC feed), `/gpt/widgets/{kind}` (legacy dashboards), `/charts/html` (static renderer), `/api/v1/gpt/chart-layers` (plan overlays).
 

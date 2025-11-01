@@ -32,6 +32,7 @@ type PlanChartPanelProps = {
   priceRefreshToken?: number;
   highlightLevelId?: string | null;
   hiddenLevelIds?: string[];
+  liveBars?: PriceSeriesCandle[] | undefined;
 };
 
 const PLAN_AS_OF_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -70,6 +71,7 @@ export default function PlanChartPanel({
   priceRefreshToken = 0,
   highlightLevelId = null,
   hiddenLevelIds = [],
+  liveBars,
 }: PlanChartPanelProps) {
   const chartHandle = useRef<PlanPriceChartHandle | null>(null);
   const [replayActive, setReplayActive] = useState(false);
@@ -330,7 +332,7 @@ export default function PlanChartPanel({
     status: priceStatus,
     error: priceError,
     reload: reloadPriceSeries,
-  } = usePriceSeries(priceSymbol, timeframe, [planId, priceRefreshToken]);
+  } = usePriceSeries(priceSymbol, timeframe, [planId, priceRefreshToken, liveBars?.length ?? 0], liveBars);
 
   useEffect(() => {
     if (!devMode) return;

@@ -8,6 +8,7 @@ For production deployments you should set these environment variables in your
 hosting provider's secrets manager rather than storing them in version control.
 """
 
+import os
 from functools import lru_cache
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -93,6 +94,8 @@ UNIFIED_SNAPSHOT_ENABLED: bool = True
 SNAPSHOT_MAX_CONCURRENCY: int = 8
 SNAPSHOT_INTERVAL: str = "1m"
 SNAPSHOT_LOOKBACK: int = 300
+
+BACKEND_API_KEY: str | None = os.getenv("BACKEND_API_KEY")
 
 _SCALP_GATES = {
     "hard_pct_cap": 0.0012,

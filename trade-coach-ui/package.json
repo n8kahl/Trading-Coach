@@ -7,7 +7,8 @@
     "build": "CSS_TRANSFORMER_WASM= next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "@heroicons/react": "^2.2.0",
@@ -16,11 +17,12 @@
     "lightweight-charts": "^4.2.0",
     "next": "15.5.5",
     "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "react-dom": "19.1.0",
+    "zustand": "^4.5.2"
   },
-  
   "devDependencies": {
     "@eslint/eslintrc": "^3",
+    "@playwright/test": "^1.51.1",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^6.5.0",
     "@testing-library/react": "^16.0.0",
@@ -33,6 +35,7 @@
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^1.6.0",
-    "whatwg-fetch": "^3.6.20"
+    "whatwg-fetch": "^3.6.20",
+    "@playwright/test": "^1.51.1"
   }
 }

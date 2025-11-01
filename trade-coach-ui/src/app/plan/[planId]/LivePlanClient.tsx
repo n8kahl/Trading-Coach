@@ -8,12 +8,12 @@ import PlanPanel from "@/components/webview/PlanPanel";
 import PlanChartPanel from "@/components/PlanChartPanel";
 import CoachNote from "@/components/CoachNote";
 import HeaderMarkers from "@/components/HeaderMarkers";
-import { usePlanSocket } from "@/lib/hooks/usePlanSocket";
-import { usePlanLayers } from "@/lib/hooks/usePlanLayers";
+import SessionChip from "@/components/SessionChip";
+import ObjectiveProgress from "@/components/ObjectiveProgress";
 import { extractPrimaryLevels, extractSupportingLevels } from "@/lib/utils/layers";
 import type { SupportingLevel } from "@/lib/chart";
-import type { PlanDeltaEvent, PlanLayers, PlanSnapshot } from "@/lib/types";
-import { API_BASE_URL, WS_BASE_URL, BUILD_SHA, withAuthHeaders } from "@/lib/env";
+import type { PlanLayers, PlanSnapshot } from "@/lib/types";
+import { API_BASE_URL, BUILD_SHA, withAuthHeaders } from "@/lib/env";
 import {
   deriveCoachMessage,
   resolvePlanEntry,
@@ -24,6 +24,9 @@ import {
 } from "@/lib/plan/coach";
 import { extractPlanLevels, resolveTrailingStop } from "@/lib/plan/levels";
 import { emitPlanEvent } from "@/lib/plan/events";
+import { useStore } from "@/store/useStore";
+import { wsMux, type ConnectionState } from "@/lib/wsMux";
+import { useChartUrl } from "@/lib/hooks/useChartUrl";
 import headerStyles from "./LivePlanHeader.module.css";
 
 const TIMEFRAME_OPTIONS = [
@@ -58,12 +61,26 @@ function sanitizeSymbolToken(value: string): string {
 
 export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClientProps) {
   const router = useRouter();
-  const [plan, setPlan] = React.useState(initialSnapshot.plan);
+  const planState = useStore((state) => state.plan);
+  const planLayersState = useStore((state) => state.planLayers);
+  const applyEvent = useStore((state) => state.applyEvent);
+  const hydratePlan = useStore((state) => state.hydratePlan);
+  const setPlanLayers = useStore((state) => state.setPlanLayers);
+  const setSession = useStore((state) => state.setSession);
+  const setConnection = useStore((state) => state.setConnection);
+  const connectionState = useStore((state) => state.connection);
+  const initialLayers = React.useMemo(() => extractInitialLayers(initialSnapshot), [initialSnapshot]);
+  const plan = planState ?? initialSnapshot.plan;
+  const layers = planLayersState ?? initialLayers;
+  const planConnectionStatus = connectionState.plan;
+  const barsConnectionStatus = connectionState.bars;
+  const coachConnectionStatus = connectionState.coach;
+  const chartUrl = useChartUrl(plan);
+  const coachPulse = useStore((state) => state.coach);
   const [followLive, setFollowLive] = React.useState(true);
   const [streamingEnabled, setStreamingEnabled] = React.useState(true);
   const [supportVisible, setSupportVisible] = React.useState(() => extractSupportVisible(initialSnapshot.plan));
   const [highlightedLevel, setHighlightedLevel] = React.useState<SupportingLevel | null>(null);
-  const [layerSeed, setLayerSeed] = React.useState<PlanLayers | null>(() => extractInitialLayers(initialSnapshot));
   const [timeframe, setTimeframe] = React.useState(() => normalizeTimeframeFromPlan(initialSnapshot.plan));
   const [nowTick, setNowTick] = React.useState(Date.now());
   const [lastBarTime, setLastBarTime] = React.useState<number | null>(null);
@@ -92,6 +109,48 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   const touchStartYRef = React.useRef<number | null>(null);
 
   const theme = "dark" as const;
+
+  const bootstrappedRef = React.useRef(false);
+  const perfRef = React.useRef<{ mark: (name: string) => void; end: (name: string) => void } | null>(null);
+  const diagModuleRef = React.useRef<{ updatePerf: () => void; updateDataAge: (date: Date | null) => void } | null>(null);
+  const prevPlanStateRef = React.useRef<ConnectionState | null>(null);
+
+  React.useEffect(() => {
+    let disposed = false;
+    (async () => {
+      try {
+        const mod = await import("../../../../../webview/diag.js");
+        if (disposed) return;
+        diagModuleRef.current = {
+          updatePerf: () => mod.updatePerf(),
+          updateDataAge: (date: Date | null) => mod.updateDataAge(date as unknown as Date),
+        };
+        perfRef.current = mod.Perf;
+        mod.Perf.mark("webview:init");
+        await mod.mountObservabilityPanel("#diag-panel");
+        mod.Perf.end("webview:init");
+        mod.updatePerf();
+      } catch (error) {
+        if (process.env.NODE_ENV !== "production") {
+          console.warn("[LivePlanClient] diagnostics mount failed", error);
+        }
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (bootstrappedRef.current) return;
+    hydratePlan(initialSnapshot.plan);
+    setPlanLayers(initialLayers ?? null);
+    const sessionBlock = initialSnapshot.plan?.session_state ?? null;
+    if (sessionBlock) {
+      setSession(sessionBlock);
+    }
+    bootstrappedRef.current = true;
+  }, [hydratePlan, initialSnapshot.plan, initialLayers, setPlanLayers, setSession]);
 
   const requestPriceRefresh = React.useCallback(() => {
     const now = Date.now();
@@ -124,19 +183,98 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     }
   }, []);
 
-  const planSocketUrl = React.useMemo(() => `${WS_BASE_URL}/ws/plans/${encodeURIComponent(activePlanId)}`, [activePlanId]);
-
   const streamingEnabledRef = React.useRef(streamingEnabled);
   React.useEffect(() => {
     streamingEnabledRef.current = streamingEnabled;
   }, [streamingEnabled]);
 
-  const { layers } = usePlanLayers(activePlanId, layerSeed);
+  React.useEffect(() => {
+    if (!streamingEnabled) {
+      setConnection("plan", "idle");
+      return;
+    }
+    const release = wsMux.connectPlan(activePlanId);
+    const releaseState = wsMux.onState("plan", activePlanId, (state) => {
+      setConnection("plan", state);
+      if (state === "connected") {
+        markPlanHeartbeat();
+      }
+    });
+    return () => {
+      release();
+      releaseState();
+    };
+  }, [activePlanId, markPlanHeartbeat, setConnection, streamingEnabled]);
+
+  const planSymbol = React.useMemo(() => (plan.symbol ? plan.symbol.toUpperCase() : null), [plan.symbol]);
+  const barsBySymbol = useStore((state) => state.barsBySymbol);
+  const streamingBars = React.useMemo(() => (planSymbol ? barsBySymbol[planSymbol] : undefined), [barsBySymbol, planSymbol]);
+
+  React.useEffect(() => {
+    if (!streamingEnabled || !planSymbol) {
+      setConnection("bars", "idle");
+      return;
+    }
+    const release = wsMux.connectBars(planSymbol);
+    const releaseState = wsMux.onState("bars", planSymbol, (state) => setConnection("bars", state));
+    return () => {
+      release();
+      releaseState();
+    };
+  }, [planSymbol, setConnection, streamingEnabled]);
+
+  React.useEffect(() => {
+    if (!streamingEnabled) {
+      setConnection("coach", "idle");
+      return;
+    }
+    const release = wsMux.connectCoach(activePlanId);
+    const releaseState = wsMux.onState("coach", activePlanId, (state) => setConnection("coach", state));
+    return () => {
+      release();
+      releaseState();
+    };
+  }, [activePlanId, setConnection, streamingEnabled]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    const load = async () => {
+      try {
+        const qs = new URLSearchParams({ plan_id: activePlanId });
+        const response = await fetch(`${API_BASE_URL}/api/v1/gpt/chart-layers?${qs.toString()}`, {
+          cache: "no-store",
+          signal: controller.signal,
+          headers: withAuthHeaders({ Accept: "application/json" }),
+        });
+        if (!response.ok) {
+          return;
+        }
+        const payload = (await response.json()) as PlanLayers;
+        if (!cancelled && payload) {
+          setPlanLayers(payload);
+        }
+      } catch (error) {
+        if (cancelled || (error instanceof DOMException && error.name === "AbortError")) {
+          return;
+        }
+        if (process.env.NODE_ENV !== "production") {
+          console.warn("[LivePlanClient] chart layers fetch failed", error);
+        }
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [activePlanId, setPlanLayers]);
 
   const refreshPlanSnapshot = React.useCallback(
     async (targetPlanId: string) => {
       if (!targetPlanId) return;
       try {
+        perfRef.current?.mark("plan:fetch");
         const response = await fetch(`${API_BASE_URL}/idea/${encodeURIComponent(targetPlanId)}`, {
           headers: withAuthHeaders({ Accept: "application/json" }),
           cache: "no-store",
@@ -146,8 +284,12 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         }
         const payload = (await response.json()) as PlanSnapshot;
         if (!payload?.plan) return;
-        setPlan(payload.plan);
-        setLayerSeed(extractInitialLayers(payload));
+        hydratePlan(payload.plan);
+        const overlays = extractInitialLayers(payload);
+        setPlanLayers(overlays ?? null);
+        if (payload.plan.session_state) {
+          setSession(payload.plan.session_state);
+        }
         setHighlightedLevel(null);
         setTimeframe((prev) => prev || normalizeTimeframeFromPlan(payload.plan));
         setLastPlanHeartbeat(Date.now());
@@ -158,9 +300,11 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         if (process.env.NODE_ENV !== "production") {
           console.error("[LivePlanClient] refreshPlanSnapshot", error);
         }
+      } finally {
+        perfRef.current?.end("plan:fetch");
       }
     },
-    [requestPriceRefresh],
+    [hydratePlan, requestPriceRefresh, setPlanLayers, setSession],
   );
 
   const queueReplan = React.useCallback(
@@ -174,61 +318,25 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     [refreshPlanSnapshot],
   );
 
-  const socketStatus = usePlanSocket(
-    planSocketUrl,
-    activePlanId,
-    React.useCallback(
-      (payload: unknown) => {
-        if (!streamingEnabledRef.current) return;
-        if (!payload || typeof payload !== 'object') return;
-        const message = payload as { plan_id?: string; event?: Record<string, unknown> };
-        const event = message.event;
-        if (!event || typeof event !== "object") return;
-        const type = typeof event.t === "string" ? event.t : null;
-        if (!type) return;
+  React.useEffect(() => {
+    const unsubscribe = wsMux.onEvent((event) => {
+      if (!streamingEnabledRef.current) return;
+      if (event.t === "plan_delta") {
         markPlanHeartbeat();
-        if (type === 'plan_delta') {
-          const delta = event as unknown as PlanDeltaEvent;
-          setPlan((prev) => {
-            const merged = mergePlanWithDelta(prev, delta);
-            if (merged !== prev) {
-              const statusChange = typeof delta.changes?.status === "string" ? delta.changes.status.toLowerCase() : null;
-              if (statusChange === "invalid") {
-                const targetPlanId = merged.plan_id || prev.plan_id || activePlanId;
-                queueReplan(targetPlanId ?? activePlanId);
-              }
-            }
-            return merged;
-          });
-          if (delta.changes && (delta.changes.last_price !== undefined || delta.changes.trailing_stop !== undefined)) {
-            requestPriceRefresh();
-          }
-          return;
+        applyEvent(event);
+        const statusToken = typeof event.fields.status === "string" ? event.fields.status.toLowerCase() : null;
+        if (statusToken === "invalid") {
+          const targetPlanId = plan.plan_id || activePlanId;
+          queueReplan(targetPlanId);
         }
-        if (type === 'plan_full') {
-          const payloadSnapshot = (event as Record<string, unknown>).payload as PlanSnapshot | undefined;
-          if (!payloadSnapshot || !payloadSnapshot.plan) return;
-        setPlan(payloadSnapshot.plan);
-          setLayerSeed(extractInitialLayers(payloadSnapshot));
-          setTimeframe((prev) => {
-            const inferred = normalizeTimeframeFromPlan(payloadSnapshot.plan);
-            return prev || inferred;
-          });
-          setSymbolDraft(payloadSnapshot.plan.symbol ? payloadSnapshot.plan.symbol.toUpperCase() : "");
-          requestPriceRefresh();
-          return;
-        }
-        if (type === "plan_state") {
-          return;
-        }
-        if (type === "tick" || type === "bar") {
-          requestPriceRefresh();
-          return;
-        }
-      },
-      [activePlanId, queueReplan, requestPriceRefresh, markPlanHeartbeat],
-    ),
-  );
+        return;
+      }
+      applyEvent(event);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [applyEvent, markPlanHeartbeat, plan.plan_id, activePlanId, queueReplan]);
 
   const primaryLevels = React.useMemo(() => extractPrimaryLevels(layers), [layers]);
   const supportingLevels = React.useMemo(() => extractSupportingLevels(layers), [layers]);
@@ -264,31 +372,65 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   }, [plan]);
 
   const streamStatusTone = React.useMemo<StatusTone>(() => {
-    if (socketStatus === "disconnected") return "red";
+    if (planConnectionStatus === "error") return "red";
+    if (planConnectionStatus === "idle") return "yellow";
+    if (planConnectionStatus === "connecting") return "yellow";
     if (planHeartbeatAgeSeconds == null) return "yellow";
     if (planHeartbeatAgeSeconds <= 15) return "green";
     if (planHeartbeatAgeSeconds <= 60) return "yellow";
     return "red";
-  }, [socketStatus, planHeartbeatAgeSeconds]);
+  }, [planConnectionStatus, planHeartbeatAgeSeconds]);
 
   const streamStatusTitle = React.useMemo(() => {
-    if (socketStatus === "disconnected") return "Stream disconnected";
+    if (planConnectionStatus === "error") return "Stream disconnected";
+    if (planConnectionStatus === "idle") return "Stream idle";
+    if (planConnectionStatus === "connecting") return "Stream connecting";
     if (planHeartbeatAgeSeconds == null) return "Stream heartbeat pending";
     return `Last stream ${planHeartbeatAgeSeconds.toFixed(1)}s ago`;
-  }, [planHeartbeatAgeSeconds, socketStatus]);
+  }, [planConnectionStatus, planHeartbeatAgeSeconds]);
 
   const dataStatusTone = React.useMemo<StatusTone>(() => {
     if (!streamingEnabled) return "red";
+    if (barsConnectionStatus === "error" || barsConnectionStatus === "idle") return "red";
     if (dataAgeSeconds == null || resolutionSeconds == null) return "yellow";
     if (dataAgeSeconds <= resolutionSeconds * 2) return "green";
     if (dataAgeSeconds <= resolutionSeconds * 6) return "yellow";
     return "red";
-  }, [streamingEnabled, dataAgeSeconds, resolutionSeconds]);
+  }, [streamingEnabled, dataAgeSeconds, resolutionSeconds, barsConnectionStatus]);
 
   const dataStatusTitle = React.useMemo(() => {
     if (dataAgeSeconds == null) return "Price data pending";
     return `Last price update ${dataAgeSeconds.toFixed(1)}s ago`;
   }, [dataAgeSeconds]);
+
+  React.useEffect(() => {
+    if (!diagModuleRef.current) return;
+    diagModuleRef.current.updatePerf();
+  }, [planConnectionStatus, barsConnectionStatus, streamingEnabled, streamStatusTone, dataStatusTone]);
+
+  React.useEffect(() => {
+    if (!diagModuleRef.current) return;
+    if (lastBarTime) {
+      diagModuleRef.current.updateDataAge(new Date(lastBarTime));
+    } else {
+      diagModuleRef.current.updateDataAge(null);
+    }
+  }, [lastBarTime]);
+
+  React.useEffect(() => {
+    if (!diagModuleRef.current || lastBarTime) return;
+    const asOf = plan.session_state?.as_of;
+    if (!asOf) {
+      diagModuleRef.current.updateDataAge(null);
+      return;
+    }
+    const date = new Date(asOf);
+    if (Number.isNaN(date.getTime())) {
+      diagModuleRef.current.updateDataAge(null);
+    } else {
+      diagModuleRef.current.updateDataAge(date);
+    }
+  }, [plan.session_state?.as_of, lastBarTime]);
 
   const sessionBanner = plan.session_state?.banner ?? null;
   const riskBanner =
@@ -309,6 +451,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   );
   const coachMetrics = React.useMemo(() => {
     const entries: Array<{ key: string; label: string; value: string; ariaLabel?: string }> = [];
+    const coachDiff = coachPulse.diff;
     if (entryValue != null) {
       entries.push({
         key: "entry",
@@ -333,8 +476,24 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
         ariaLabel: `${nextTarget.label || "Target"} ${levelFormatter.format(nextTarget.price)}`,
       });
     }
+    if (coachDiff?.waiting_for) {
+      entries.push({
+        key: "waiting",
+        label: "Waiting",
+        value: coachDiff.waiting_for.replace(/_/g, " "),
+        ariaLabel: `Waiting for ${coachDiff.waiting_for}`,
+      });
+    }
+    if (coachDiff?.risk_cue) {
+      entries.push({
+        key: "risk",
+        label: "Risk Cue",
+        value: coachDiff.risk_cue.replace(/_/g, " "),
+        ariaLabel: `Risk cue ${coachDiff.risk_cue}`,
+      });
+    }
     return entries;
-  }, [entryValue, stopResolved, nextTarget, levelFormatter]);
+  }, [entryValue, stopResolved, nextTarget, levelFormatter, coachPulse.diff]);
 
   React.useEffect(() => {
     setSymbolDraft(plan.symbol ? sanitizeSymbolToken(String(plan.symbol)) : "");
@@ -385,6 +544,20 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     });
   }, [plan, lastPrice, levelSummary.trailingStop]);
 
+  React.useEffect(() => {
+    if (!coachPulse.diff) return;
+    const base = computeCoachMessage();
+    const progress = coachPulse.diff.objective_progress?.progress;
+    const progressPct = progress != null && Number.isFinite(progress) ? Math.round(Math.max(0, Math.min(1, progress)) * 100) : base.progressPct;
+    setCoachNote({
+      text: coachPulse.diff.next_action ?? coachPulse.diff.waiting_for ?? base.text,
+      goal: base.goal,
+      progressPct,
+      updatedAt: Date.now(),
+    });
+    setCoachLoading(false);
+  }, [coachPulse.diff, computeCoachMessage]);
+
   const applyCoachMessage = React.useCallback(
     (reason: string) => {
       const next = computeCoachMessage();
@@ -418,7 +591,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   }, [applyCoachMessage]);
 
   React.useEffect(() => {
-    if (typeof window === "undefined") return undefined;
+    if (coachPulse.diff || typeof window === "undefined") return undefined;
     const interval = window.setInterval(() => {
       setCoachLoading(true);
       applyCoachMessage("cadence");
@@ -426,7 +599,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     return () => {
       window.clearInterval(interval);
     };
-  }, [applyCoachMessage]);
+  }, [applyCoachMessage, coachPulse.diff]);
 
   React.useEffect(() => {
     const goal = coachNote.goal;
@@ -461,7 +634,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     const match = TIMEFRAME_OPTIONS.find((item) => item.value === timeframe);
     return match?.label ?? timeframe;
   }, [timeframe]);
-  const planSymbol = plan.symbol?.toUpperCase() ?? "—";
+  const planSymbolLabel = plan.symbol?.toUpperCase() ?? "—";
   const planVersion = plan.version ?? (plan as Record<string, unknown>).version ?? null;
   const planAsOfLabel = React.useMemo(() => {
     const asOf = plan.session_state?.as_of ?? null;
@@ -576,10 +749,21 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
   }, [markPlanHeartbeat]);
 
   React.useEffect(() => {
-    if (socketStatus === "connected") {
+    if (planConnectionStatus === "connected") {
       markPlanHeartbeat();
     }
-  }, [socketStatus, markPlanHeartbeat]);
+  }, [planConnectionStatus, markPlanHeartbeat]);
+
+  React.useEffect(() => {
+    const previous = prevPlanStateRef.current;
+    if (planConnectionStatus === "connecting" && previous !== "connecting") {
+      perfRef.current?.mark("ws:connect");
+    }
+    if (planConnectionStatus === "connected" && previous !== "connected") {
+      perfRef.current?.end("ws:connect");
+    }
+    prevPlanStateRef.current = planConnectionStatus;
+  }, [planConnectionStatus]);
 
   const indicatorItems = React.useMemo(
     () => [
@@ -612,7 +796,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     }
   }, []);
 
-  const coachLive = streamingEnabled && streamStatusTone !== "red";
+  const coachLive = streamingEnabled && coachConnectionStatus === "connected" && (!!coachPulse.planId ? coachPulse.planId === plan.plan_id : true);
   const toneBadgeClass: Record<StatusTone, string> = {
     green: "border-emerald-500/60 bg-emerald-500/10 text-emerald-100",
     yellow: "border-amber-500/60 bg-amber-500/10 text-amber-100",
@@ -730,7 +914,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
           <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.25em] text-neutral-400">
             <span className="text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
             <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-100">
-              {planSymbol}
+              {planSymbolLabel}
             </span>
             <span className="rounded-full border border-neutral-700/60 px-2 py-0.5 text-[0.65rem] text-neutral-300">
               {timeframeLabel}
@@ -757,6 +941,12 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
             metrics={coachMetrics}
             live={coachLive}
           />
+          <div className="flex flex-col gap-3 md:flex-row md:items-start">
+            <SessionChip />
+            <div className="min-w-[220px] flex-1">
+              <ObjectiveProgress />
+            </div>
+          </div>
           <div className="flex flex-wrap items-center gap-2 text-[0.6rem] uppercase tracking-[0.24em] text-neutral-400">
             <div className="flex flex-wrap items-center gap-2">
               {headerStatusItems.map((indicator) => (
@@ -813,6 +1003,19 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
               >
                 Stream {streamingEnabled ? "On" : "Off"}
               </button>
+              {chartUrl ? (
+                <a
+                  href={chartUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={clsx(
+                    "inline-flex items-center justify-center rounded-full border px-3 py-1 text-[0.6rem] font-semibold uppercase tracking-[0.24em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+                    "border-emerald-500/50 bg-emerald-500/10 text-emerald-100 hover:border-emerald-400/70 hover:text-emerald-50",
+                  )}
+                >
+                  Open Chart
+                </a>
+              ) : null}
               {renderSetupControl("expanded")}
               <button
                 type="button"
@@ -843,6 +1046,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
                 <span className="font-semibold text-neutral-100">{dataStatusTitle}</span>
               </span>
             </div>
+            <div id="diag-panel" className="mt-2 w-full" />
           </div>
         </div>
       )}
@@ -884,6 +1088,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
       priceRefreshToken={priceRefreshToken}
       highlightLevelId={activeLevelId}
       hiddenLevelIds={hiddenLevelIdList}
+      liveBars={streamingBars}
     />
   );
 
@@ -891,7 +1096,7 @@ export default function LivePlanClient({ initialSnapshot, planId }: LivePlanClie
     <div className="fixed bottom-4 left-4 z-50 rounded-lg border border-neutral-800 bg-neutral-950/85 px-4 py-3 text-xs text-neutral-200 shadow-lg">
       <div className="font-semibold uppercase tracking-[0.2em] text-neutral-400">Dev Stats</div>
       <div>Bundle: {BUILD_SHA ? BUILD_SHA.slice(0, 7) : 'n/a'}</div>
-      <div>WS: {socketStatus}</div>
+      <div>WS: {planConnectionStatus}</div>
       <div>Data age: {dataAgeSeconds != null ? `${dataAgeSeconds.toFixed(1)}s` : 'n/a'}</div>
       <div>Last bar: {lastBarTime ? new Date(lastBarTime).toLocaleTimeString() : 'n/a'}</div>
       <div>Follow Live: {followLive ? 'yes' : 'no'}</div>
@@ -960,47 +1165,6 @@ function extractSupportVisible(plan: PlanSnapshot['plan']): boolean {
     }
   }
   return true;
-}
-
-function mergePlanWithDelta(prev: PlanSnapshot['plan'], event: PlanDeltaEvent): PlanSnapshot['plan'] {
-  const { status, next_step, note, rr_to_t1, trailing_stop, last_price } = event.changes;
-  let mutated = false;
-  const next: PlanSnapshot['plan'] = { ...prev };
-
-  if (status !== undefined && status !== prev.status) {
-    next.status = status;
-    mutated = true;
-  }
-  if (next_step !== undefined && (prev as Record<string, unknown>).next_step !== next_step) {
-    (next as Record<string, unknown>).next_step = next_step ?? undefined;
-    mutated = true;
-  }
-  if (note !== undefined && prev.notes !== (note ?? null)) {
-    next.notes = note ?? null;
-    mutated = true;
-  }
-  if (rr_to_t1 !== undefined && prev.rr_to_t1 !== (rr_to_t1 ?? null)) {
-    next.rr_to_t1 = rr_to_t1 ?? null;
-    mutated = true;
-  }
-  if (trailing_stop !== undefined && (prev as Record<string, unknown>).trailing_stop !== (trailing_stop ?? null)) {
-    (next as Record<string, unknown>).trailing_stop = trailing_stop ?? null;
-    if (trailing_stop != null) {
-      const detailsPrev = (prev.details ?? {}) as Record<string, unknown>;
-      next.details = { ...detailsPrev, stop: trailing_stop };
-    }
-    mutated = true;
-  }
-  if (last_price !== undefined && (prev as Record<string, unknown>).last_price !== (last_price ?? null)) {
-    (next as Record<string, unknown>).last_price = last_price ?? null;
-    if (last_price != null) {
-      const detailsPrev = (prev.details ?? {}) as Record<string, unknown>;
-      next.details = { ...detailsPrev, last: last_price };
-    }
-    mutated = true;
-  }
-
-  return mutated ? next : prev;
 }
 
 const STATUS_TONE_COLOR: Record<StatusTone, string> = {
