@@ -79,6 +79,7 @@ export default function PlanChartPanel({
   const chartHandle = useRef<PlanPriceChartHandle | null>(null);
   const [replayActive, setReplayActive] = useState(false);
   const [recentPlanEvent, setRecentPlanEvent] = useState<{ type: string; at: number } | null>(null);
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
 
   const symbol = plan.symbol?.toUpperCase() ?? "—";
   const style = plan.style ?? plan.structured_plan?.style ?? null;
@@ -443,22 +444,30 @@ export default function PlanChartPanel({
             {layers?.planning_context ? <span>{layers.planning_context.toUpperCase()}</span> : null}
           </div>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
-        {timeframeOptions.map((option) => (
+        <div className="flex flex-wrap items-center gap-2">
           <button
-            key={option.value}
-              type="button"
-              onClick={() => handleResolution(option.value)}
-              className={clsx(
-                "inline-flex h-10 items-center justify-center rounded-full px-4 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
-                option.value === timeframe
-                  ? "border border-emerald-400/60 bg-emerald-400/10 text-emerald-200"
-                  : "border border-neutral-800/60 bg-neutral-900/70 text-neutral-300 hover:border-emerald-400/40 hover:text-emerald-200",
-              )}
+            type="button"
+            onClick={() => setPanelCollapsed((prev) => !prev)}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-neutral-800/60 bg-neutral-900/70 text-lg font-semibold text-neutral-300 transition hover:border-emerald-400 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+            aria-pressed={panelCollapsed}
+            aria-label={panelCollapsed ? "Expand plan details" : "Collapse plan details"}
+          >
+            {panelCollapsed ? "+" : "−"}
+          </button>
+          <label className="flex items-center gap-2 rounded-full border border-neutral-800/60 bg-neutral-900/70 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-neutral-300 focus-within:border-emerald-400 focus-within:text-emerald-100">
+            <span className="sr-only">Timeframe</span>
+            <select
+              value={timeframe}
+              onChange={(event) => handleResolution(event.target.value)}
+              className="bg-transparent text-neutral-200 outline-none"
             >
-              {option.label}
-            </button>
-          ))}
+              {timeframeOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
             onClick={() => onToggleSupporting?.()}
@@ -530,54 +539,56 @@ export default function PlanChartPanel({
             <ConfidenceBadge value={plan.confidence} className="h-8 w-8 text-[10px]" />
           </div>
         </div>
-        <div
-          className={clsx(
-            "rounded-xl bg-neutral-950/20 p-3",
-            supportingVisible ? "shadow-[0_0_25px_rgba(16,185,129,0.15)]" : "",
-          )}
-        >
-          <div className="grid gap-5 lg:grid-cols-2">
-            <div className="space-y-2.5">
-              <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Target notes</h3>
-              {targetRationales.length ? (
-                <ul className="space-y-1 text-[11px] leading-relaxed text-neutral-300">
-                  {targetRationales.map((detail, index) => {
-                    const label = detail.label ?? `TP${index + 1}`;
-                    return (
-                      <li key={`${label}-${detail.price}-note`} className="space-y-0.5">
-                        <div className="flex flex-wrap items-baseline gap-1.5">
-                          <span className="font-semibold uppercase tracking-[0.18em] text-neutral-100">{label}</span>
-                          <span className="tabular-nums text-neutral-500">{detail.price.toFixed(2)}</span>
-                        </div>
-                        <p className="text-[11px] leading-snug text-neutral-400">{detail.rationale}</p>
-                      </li>
-                    );
-                  })}
-                </ul>
-              ) : (
-                <p className="text-[11px] text-neutral-500">No target rationales published.</p>
-              )}
-            </div>
-            <div className="space-y-2.5">
-              <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Primary levels</h3>
-              {primaryLevels.length ? (
-                <ul className="divide-y divide-neutral-800/60 text-[11px]">
-                  {primaryLevels.map((level, index) => {
-                    const label = level.label ?? level.kind ?? `Level ${index + 1}`;
-                    return (
-                      <li key={`${label}-${level.price}`} className="flex items-center justify-between px-2 py-1.5 text-neutral-200">
-                        <span className="uppercase tracking-[0.15em] text-neutral-500">{label}</span>
-                        <span className="font-semibold text-neutral-100">{level.price.toFixed(2)}</span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              ) : (
-                <p className="text-[11px] text-neutral-500">No primary levels published.</p>
-              )}
+        {!panelCollapsed ? (
+          <div
+            className={clsx(
+              "rounded-xl bg-neutral-950/20 p-3",
+              supportingVisible ? "shadow-[0_0_25px_rgba(16,185,129,0.15)]" : "",
+            )}
+          >
+            <div className="grid gap-5 lg:grid-cols-2">
+              <div className="space-y-2.5">
+                <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Target notes</h3>
+                {targetRationales.length ? (
+                  <ul className="space-y-1 text-[11px] leading-relaxed text-neutral-300">
+                    {targetRationales.map((detail, index) => {
+                      const label = detail.label ?? `TP${index + 1}`;
+                      return (
+                        <li key={`${label}-${detail.price}-note`} className="space-y-0.5">
+                          <div className="flex flex-wrap items-baseline gap-1.5">
+                            <span className="font-semibold uppercase tracking-[0.18em] text-neutral-100">{label}</span>
+                            <span className="tabular-nums text-neutral-500">{detail.price.toFixed(2)}</span>
+                          </div>
+                          <p className="text-[11px] leading-snug text-neutral-400">{detail.rationale}</p>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p className="text-[11px] text-neutral-500">No target rationales published.</p>
+                )}
+              </div>
+              <div className="space-y-2.5">
+                <h3 className="text-[0.68rem] uppercase tracking-[0.3em] text-neutral-500">Primary levels</h3>
+                {primaryLevels.length ? (
+                  <ul className="divide-y divide-neutral-800/60 text-[11px]">
+                    {primaryLevels.map((level, index) => {
+                      const label = level.label ?? level.kind ?? `Level ${index + 1}`;
+                      return (
+                        <li key={`${label}-${level.price}`} className="flex items-center justify-between px-2 py-1.5 text-neutral-200">
+                          <span className="uppercase tracking-[0.15em] text-neutral-500">{label}</span>
+                          <span className="font-semibold text-neutral-100">{level.price.toFixed(2)}</span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p className="text-[11px] text-neutral-500">No primary levels published.</p>
+                )}
+              </div>
             </div>
           </div>
-        </div>
+        ) : null}
       </section>
 
       <section className={chartSectionClass}>

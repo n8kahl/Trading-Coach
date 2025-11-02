@@ -83,6 +83,8 @@ export default function LivePlanClient({
   const planConnectionStatus = connectionState.plan;
   const barsConnectionStatus = connectionState.bars;
 
+  const planSymbolLabel = plan.symbol?.toUpperCase() ?? "—";
+
   const [followLive, setFollowLive] = React.useState(true);
   const [streamingEnabled] = React.useState(true);
   const [supportVisible, setSupportVisible] = React.useState(false);
@@ -456,7 +458,7 @@ export default function LivePlanClient({
     };
   }, [coachProp, coachPulse.diff]);
 
-  const planMetrics = React.useMemo(() => buildPlanMetrics(plan), [plan]);
+  const planMetrics = React.useMemo(() => buildPlanMetrics(plan, planSymbolLabel), [plan, planSymbolLabel]);
   const additionalCoachMetrics = React.useMemo(
     () => coachNoteContent?.metrics ?? [],
     [coachNoteContent?.metrics],
@@ -559,13 +561,13 @@ export default function LivePlanClient({
   const STATUS_COLOR_CLASS: Record<StatusToken, string> = {
     connected: "bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.6)]",
     connecting: "bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.5)]",
-    disconnected: "bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.55)]",
+    disconnected: "bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.5)]",
   };
 
   const STATUS_LABEL: Record<StatusToken, string> = {
     connected: "Live",
-    connecting: "Connecting",
-    disconnected: "Offline",
+    connecting: "Syncing",
+    disconnected: "Syncing",
   };
 
   const statusItems: Array<{ label: string; status: StatusToken }> = [
@@ -577,19 +579,20 @@ export default function LivePlanClient({
     entry: "border-sky-500/60 bg-sky-500/15 text-sky-100",
     stop: "border-rose-500/60 bg-rose-500/15 text-rose-100",
     tp: "border-emerald-500/60 bg-emerald-500/15 text-emerald-100",
-    next: "border-neutral-700/60 bg-neutral-900/60 text-neutral-200",
+    next: "border-neutral-700/60 bg-neutral-900/70 text-neutral-100",
     default: "border-neutral-800/60 bg-neutral-900/70 text-neutral-300",
   };
 
   const headerContent = headerCollapsed ? (
     <div className="flex items-center justify-between">
+      <span className="text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
       <button
         type="button"
         onClick={() => setHeaderCollapsed(false)}
-        className="text-left text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300 transition hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60"
+        className="flex h-8 w-8 items-center justify-center rounded-full border border-neutral-800/60 bg-neutral-900/70 text-lg font-semibold text-neutral-200 transition hover:border-emerald-400 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
         aria-label="Expand header"
       >
-        Fancy Trader
+        +
       </button>
     </div>
   ) : (
@@ -609,10 +612,10 @@ export default function LivePlanClient({
           <button
             type="button"
             onClick={() => setHeaderCollapsed(true)}
-            className="rounded-full border border-neutral-800/60 bg-neutral-900/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.22em] text-neutral-300 transition hover:border-emerald-400 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+            className="flex h-8 w-8 items-center justify-center rounded-full border border-neutral-800/60 bg-neutral-900/70 text-lg font-semibold text-neutral-300 transition hover:border-emerald-400 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
             aria-label="Collapse header"
           >
-            Collapse
+            −
           </button>
         </div>
       </div>
@@ -689,10 +692,11 @@ export default function LivePlanClient({
         <button
           type="button"
           onClick={() => setCoachCollapsed((prev) => !prev)}
-          className="rounded-full border border-neutral-800/60 bg-neutral-900/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.22em] text-neutral-300 transition hover:border-emerald-400 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+          className="flex h-8 w-8 items-center justify-center rounded-full border border-neutral-800/60 bg-neutral-900/70 text-lg font-semibold text-neutral-300 transition hover:border-emerald-400 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
           aria-pressed={coachCollapsed}
+          aria-label={coachCollapsed ? "Expand coach guidance" : "Collapse coach guidance"}
         >
-          {coachCollapsed ? "Expand" : "Collapse"}
+          {coachCollapsed ? "+" : "−"}
         </button>
       </div>
       {coachCollapsed ? (
@@ -868,7 +872,7 @@ function truncateMetric(value: string): string {
   return `${trimmed.slice(0, 39)}…`;
 }
 
-function buildPlanMetrics(plan: PlanSnapshot["plan"]): MetricDescriptor[] {
+function buildPlanMetrics(plan: PlanSnapshot["plan"], symbolLabel: string): MetricDescriptor[] {
   const metrics: MetricDescriptor[] = [];
 
   const entry =
@@ -877,9 +881,9 @@ function buildPlanMetrics(plan: PlanSnapshot["plan"]): MetricDescriptor[] {
   if (entry != null) {
     metrics.push({
       key: "entry",
-      label: "Entry",
+      label: `${symbolLabel} Entry`,
       value: formatPrice(entry),
-      ariaLabel: `Entry ${formatPrice(entry)}`,
+      ariaLabel: `${symbolLabel} entry ${formatPrice(entry)}`,
       tone: "entry",
     });
   }
