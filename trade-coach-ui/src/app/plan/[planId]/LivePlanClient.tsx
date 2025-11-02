@@ -7,7 +7,6 @@ import PlanShell from "@/components/PlanShell";
 import PlanChartPanel from "@/components/PlanChartPanel";
 import SessionChip, { type SessionSSOT, safeTime } from "@/components/SessionChip";
 import ObjectiveProgress, { type NextObjectiveMeta } from "@/components/ObjectiveProgress";
-import WatchlistRail, { type WatchItem as WatchlistRailItem } from "@/components/WatchlistRail";
 import CoachNote from "@/components/CoachNote";
 import ConfluenceStrength from "@/components/ConfluenceStrength";
 import { extractPrimaryLevels } from "@/lib/utils/layers";
@@ -15,7 +14,6 @@ import type { PlanLayers, PlanSnapshot } from "@/lib/types";
 import { API_BASE_URL, BUILD_SHA, withAuthHeaders } from "@/lib/env";
 import { useStore } from "@/store/useStore";
 import { wsMux } from "@/lib/wsMux";
-import { useWatchlist } from "@/features/watchlist";
 
 const TIMEFRAME_OPTIONS = [
   { value: "1", label: "1m" },
@@ -27,10 +25,20 @@ const TIMEFRAME_OPTIONS = [
   { value: "1D", label: "1D" },
 ];
 
+type MetricTone = "entry" | "stop" | "tp" | "next";
+
+type MetricDescriptor = {
+  key: string;
+  label: string;
+  value: string;
+  ariaLabel?: string;
+  tone?: MetricTone;
+};
+
 type CoachSnapshot = {
   text: string;
   progressPct?: number | null;
-  metrics?: Array<{ key: string; label: string; value: string; ariaLabel?: string }>;
+  metrics?: MetricDescriptor[];
 };
 
 type LivePlanClientProps = {
@@ -38,7 +46,6 @@ type LivePlanClientProps = {
   planId: string;
   session?: SessionSSOT | null;
   nextObjective?: NextObjectiveMeta | null;
-  watchlist?: WatchlistRailItem[] | null;
   coach?: CoachSnapshot | null;
 };
 
@@ -54,7 +61,6 @@ export default function LivePlanClient({
   planId,
   session: sessionProp = null,
   nextObjective: nextObjectiveProp = null,
-  watchlist: watchlistProp = null,
   coach: coachProp = null,
 }: LivePlanClientProps) {
   const router = useRouter();
@@ -69,7 +75,6 @@ export default function LivePlanClient({
   const storeSession = useStore((state) => state.session);
   const coachPulse = useStore((state) => state.coach);
   const barsBySymbol = useStore((state) => state.barsBySymbol);
-  const { items: watchlistItems } = useWatchlist();
 
   const initialLayers = React.useMemo(() => extractInitialLayers(initialSnapshot), [initialSnapshot]);
   const plan = planState ?? initialSnapshot.plan;
@@ -90,6 +95,7 @@ export default function LivePlanClient({
   const [symbolDraft, setSymbolDraft] = React.useState(() => sanitizeSymbolToken(plan.symbol ?? ""));
   const [symbolSubmitting, setSymbolSubmitting] = React.useState(false);
   const [coachCollapsed, setCoachCollapsed] = React.useState(false);
+  const [headerCollapsed, setHeaderCollapsed] = React.useState(false);
 
   const lastPriceRefreshRef = React.useRef(0);
   const lastDeltaAtRef = React.useRef(Date.now());
@@ -422,25 +428,6 @@ export default function LivePlanClient({
     };
   }, [layers?.meta, plan, lastBarTime]);
 
-  const watchlistRailItems = React.useMemo<WatchlistRailItem[]>(() => {
-    if (watchlistProp?.length) return watchlistProp;
-    if (!watchlistItems?.length) return [];
-    return watchlistItems
-      .map<WatchlistRailItem | null>((item) => {
-        if (!item.plan_id || !item.symbol) return null;
-        const bias = extractBias(item.meta);
-        return {
-          planId: item.plan_id,
-          symbol: item.symbol,
-          actionableSoon: item.actionable_soon,
-          entryDistancePct: item.entry_distance_pct,
-          barsToTrigger: item.bars_to_trigger,
-          bias,
-        };
-      })
-      .filter((item): item is WatchlistRailItem => item !== null);
-  }, [watchlistItems, watchlistProp]);
-
   const coachNoteContent = React.useMemo(() => {
     if (coachProp?.text) {
       return {
@@ -497,6 +484,7 @@ export default function LivePlanClient({
         label: "Next",
         value: truncateMetric(trimmed),
         ariaLabel: `Next action ${trimmed}`,
+        tone: "next",
       });
     }
     return metrics;
@@ -510,6 +498,7 @@ export default function LivePlanClient({
         label: "Next Action",
         value: truncateMetric(trimmed),
         ariaLabel: `Next action ${trimmed}`,
+        tone: "next",
       });
     }
     return metrics;
@@ -584,7 +573,26 @@ export default function LivePlanClient({
     { label: "Data", status: statusTokens.price },
   ];
 
-  const headerContent = (
+  const METRIC_TONE_CLASS: Record<MetricTone | "default", string> = {
+    entry: "border-sky-500/60 bg-sky-500/15 text-sky-100",
+    stop: "border-rose-500/60 bg-rose-500/15 text-rose-100",
+    tp: "border-emerald-500/60 bg-emerald-500/15 text-emerald-100",
+    next: "border-neutral-700/60 bg-neutral-900/60 text-neutral-200",
+    default: "border-neutral-800/60 bg-neutral-900/70 text-neutral-300",
+  };
+
+  const headerContent = headerCollapsed ? (
+    <div className="flex items-center justify-between">
+      <button
+        type="button"
+        onClick={() => setHeaderCollapsed(false)}
+        className="text-left text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300 transition hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60"
+        aria-label="Expand header"
+      >
+        Fancy Trader
+      </button>
+    </div>
+  ) : (
     <>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap items-center gap-2">
@@ -596,20 +604,36 @@ export default function LivePlanClient({
             </span>
           ) : null}
         </div>
-        <ObjectiveProgress meta={objectiveMeta ?? undefined} />
+        <div className="flex flex-wrap items-center gap-2">
+          <ObjectiveProgress meta={objectiveMeta ?? undefined} />
+          <button
+            type="button"
+            onClick={() => setHeaderCollapsed(true)}
+            className="rounded-full border border-neutral-800/60 bg-neutral-900/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.22em] text-neutral-300 transition hover:border-emerald-400 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+            aria-label="Collapse header"
+          >
+            Collapse
+          </button>
+        </div>
       </div>
       {headerPlanMetrics.length ? (
         <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.24em] text-neutral-300">
-          {headerPlanMetrics.map((metric) => (
-            <span
-              key={metric.key}
-              className="inline-flex items-center gap-1 rounded-full border border-neutral-800/60 bg-neutral-900/70 px-3 py-1 text-neutral-200"
-              aria-label={metric.ariaLabel ?? `${metric.label} ${metric.value}`}
-            >
-              <span className="text-neutral-400">{metric.label}</span>
-              <span className="tabular-nums text-neutral-100">{metric.value}</span>
-            </span>
-          ))}
+          {headerPlanMetrics.map((metric) => {
+            const toneClass = METRIC_TONE_CLASS[metric.tone ?? "default"];
+            return (
+              <span
+                key={metric.key}
+                className={clsx(
+                  "inline-flex items-center gap-1 rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.22em]",
+                  toneClass,
+                )}
+                aria-label={metric.ariaLabel ?? `${metric.label} ${metric.value}`}
+              >
+                <span className="text-white/80">{metric.label}</span>
+                <span className="tabular-nums text-white">{metric.value}</span>
+              </span>
+            );
+          })}
         </div>
       ) : null}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -719,37 +743,9 @@ export default function LivePlanClient({
     </>
   );
 
-  React.useEffect(() => {
-    if (!watchlistRailItems.length) return;
-    // Preload navigation for watchlist items.
-    watchlistRailItems.slice(0, 5).forEach((item) => {
-      router.prefetch(`/plan/${encodeURIComponent(item.planId)}`);
-    });
-  }, [watchlistRailItems, router]);
-
   return (
-    <PlanShell
-      header={headerContent}
-      leftRail={<WatchlistRail items={watchlistRailItems} />}
-      coach={coachContent}
-      chart={chartNode}
-      footer={footerContent}
-    />
+    <PlanShell header={headerContent} coach={coachContent} chart={chartNode} footer={footerContent} />
   );
-}
-
-function extractBias(meta: Record<string, unknown> | undefined): WatchlistRailItem["bias"] {
-  if (!meta) return null;
-  const bias = meta.bias;
-  if (bias === "long" || bias === "short") {
-    return bias;
-  }
-  if (typeof bias === "string") {
-    const token = bias.toLowerCase();
-    if (token.includes("long")) return "long";
-    if (token.includes("short")) return "short";
-  }
-  return null;
 }
 
 function normalizeProgressPct(value: number | null | undefined): number {
@@ -774,14 +770,15 @@ function deriveCoachText(diff: NonNullable<ReturnType<typeof useStore>["coach"][
 
 function buildCoachMetrics(
   diff: NonNullable<ReturnType<typeof useStore>["coach"]["diff"]>,
-): Array<{ key: string; label: string; value: string; ariaLabel?: string }> {
-  const metrics: Array<{ key: string; label: string; value: string; ariaLabel?: string }> = [];
+): MetricDescriptor[] {
+  const metrics: MetricDescriptor[] = [];
   const objective = diff.objective_progress;
   if (objective?.entry_distance_pct != null && Number.isFinite(objective.entry_distance_pct)) {
     metrics.push({
       key: "entry-distance",
       label: "Entry Δ",
       value: `${Math.round(objective.entry_distance_pct * 10) / 10}%`,
+      ariaLabel: `Entry distance ${Math.round(objective.entry_distance_pct * 10) / 10} percent`,
     });
   }
   const confluence = diff.confluence_delta;
@@ -790,6 +787,7 @@ function buildCoachMetrics(
       key: "mtf",
       label: "MTF",
       value: `${confluence.mtf >= 0 ? "+" : ""}${confluence.mtf}`,
+      ariaLabel: `MTF ${confluence.mtf}`,
     });
   }
   if (confluence?.vwap_side) {
@@ -797,6 +795,7 @@ function buildCoachMetrics(
       key: "vwap",
       label: "VWAP",
       value: confluence.vwap_side === "above" ? "Above" : "Below",
+      ariaLabel: `VWAP ${confluence.vwap_side}`,
     });
   }
   return metrics;
@@ -869,10 +868,8 @@ function truncateMetric(value: string): string {
   return `${trimmed.slice(0, 39)}…`;
 }
 
-function buildPlanMetrics(
-  plan: PlanSnapshot["plan"],
-): Array<{ key: string; label: string; value: string; ariaLabel?: string }> {
-  const metrics: Array<{ key: string; label: string; value: string; ariaLabel?: string }> = [];
+function buildPlanMetrics(plan: PlanSnapshot["plan"]): MetricDescriptor[] {
+  const metrics: MetricDescriptor[] = [];
 
   const entry =
     getNumber((plan as Record<string, unknown>).entry) ??
@@ -882,6 +879,8 @@ function buildPlanMetrics(
       key: "entry",
       label: "Entry",
       value: formatPrice(entry),
+      ariaLabel: `Entry ${formatPrice(entry)}`,
+      tone: "entry",
     });
   }
 
@@ -893,18 +892,29 @@ function buildPlanMetrics(
       key: "stop",
       label: "Stop",
       value: formatPrice(stop),
+      ariaLabel: `Stop ${formatPrice(stop)}`,
+      tone: "stop",
     });
   }
 
   const rawTargets = Array.isArray(plan.targets) ? plan.targets : [];
-  const firstTarget = rawTargets.map((value) => getNumber(value)).find((value): value is number => value != null);
-  if (firstTarget != null) {
+  const targetMeta = Array.isArray(plan.target_meta) ? plan.target_meta : [];
+  rawTargets.forEach((value, index) => {
+    const numeric = getNumber(value);
+    if (numeric == null) return;
+    const metaRecord = targetMeta[index] as { label?: string | null } | undefined;
+    const rawLabel = metaRecord?.label;
+    const label =
+      typeof rawLabel === "string" && rawLabel.trim().length > 0 ? rawLabel.trim() : `TP${index + 1}`;
+    const key = `tp-${index + 1}`;
     metrics.push({
-      key: "tp",
-      label: "TP",
-      value: formatPrice(firstTarget),
+      key,
+      label,
+      value: formatPrice(numeric),
+      ariaLabel: `${label} ${formatPrice(numeric)}`,
+      tone: "tp",
     });
-  }
+  });
 
   return metrics;
 }

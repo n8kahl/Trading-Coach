@@ -292,6 +292,30 @@ export default function PlanChartPanel({
     [targetDetails],
   );
 
+  const levelBadges = useMemo(() => {
+    const format = (value: number) =>
+      value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const badges: Array<{ key: string; label: string; tone: "entry" | "stop" | "tp"; value: string }> = [];
+    if (typeof entryPrice === "number" && Number.isFinite(entryPrice)) {
+      badges.push({ key: "entry", label: "Entry", tone: "entry", value: format(entryPrice) });
+    }
+    if (typeof stopPrice === "number" && Number.isFinite(stopPrice)) {
+      badges.push({ key: "stop", label: "Stop", tone: "stop", value: format(stopPrice) });
+    }
+    overlayTargets.forEach((target, index) => {
+      if (!target || !Number.isFinite(target.price)) return;
+      const label = target.label ?? `TP${index + 1}`;
+      badges.push({ key: `tp-${index + 1}`, label, tone: "tp", value: format(Number(target.price)) });
+    });
+    return badges;
+  }, [entryPrice, stopPrice, overlayTargets]);
+
+  const levelToneClass: Record<"entry" | "stop" | "tp", string> = {
+    entry: "border-sky-500/60 bg-sky-500/15 text-sky-100",
+    stop: "border-rose-500/60 bg-rose-500/15 text-rose-100",
+    tp: "border-emerald-500/60 bg-emerald-500/15 text-emerald-100",
+  };
+
   const chartOverlays = useMemo<ChartOverlayState>(
     () => ({
       entry: entryPrice,
@@ -418,11 +442,11 @@ export default function PlanChartPanel({
             {planAsOfLabel ? <span>As of {planAsOfLabel}</span> : null}
             {layers?.planning_context ? <span>{layers.planning_context.toUpperCase()}</span> : null}
           </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {timeframeOptions.map((option) => (
-            <button
-              key={option.value}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {timeframeOptions.map((option) => (
+          <button
+            key={option.value}
               type="button"
               onClick={() => handleResolution(option.value)}
               className={clsx(
@@ -463,6 +487,23 @@ export default function PlanChartPanel({
           </button>
         </div>
       </header>
+
+      {levelBadges.length ? (
+        <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.24em] text-neutral-300">
+          {levelBadges.map((badge) => (
+            <span
+              key={badge.key}
+              className={clsx(
+                "inline-flex items-center gap-1 rounded-full px-3 py-1 font-semibold",
+                levelToneClass[badge.tone],
+              )}
+            >
+              <span className="text-white/80">{badge.label}</span>
+              <span className="tabular-nums text-white">{badge.value}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
 
       <section className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-neutral-950/20 px-3 py-2 text-[11px] uppercase tracking-[0.24em] text-neutral-400">

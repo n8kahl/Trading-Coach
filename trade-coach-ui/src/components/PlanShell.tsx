@@ -28,17 +28,10 @@ export default function PlanShell({
         <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-3 px-4 py-3 sm:px-6 sm:py-4">{header}</div>
       </header>
       <main className="flex-1">
-        <div className="mx-auto grid max-w-[1400px] grid-cols-12 gap-4 px-4 py-4 sm:px-6">
-          <aside className="hidden md:col-span-3 md:block">
-            {leftRail ? (
-              <div className="sticky top-[88px] space-y-3">
-                <div className="rounded-xl border border-neutral-900/70 bg-neutral-950/60">{leftRail}</div>
-              </div>
-            ) : null}
-          </aside>
-          <section className="col-span-12 flex flex-col gap-4 md:col-span-9">
+        <div className="mx-auto w-full max-w-[1400px] px-4 py-4 sm:px-6">
+          <section className="flex flex-col gap-4">
             {coach ? (
-              <div className="sticky top-[68px] z-10 sm:top-[72px]">
+              <div className="sticky top-[60px] z-10 sm:top-[68px]">
                 <div className="rounded-2xl border border-neutral-900/70 bg-neutral-950/70 p-0.5 backdrop-blur">
                   {coach}
                 </div>
