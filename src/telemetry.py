@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
 
 PLAN_DURATION_MS = Histogram(
@@ -51,6 +51,19 @@ SELECTOR_REJECTED_TOTAL = Counter(
     labelnames=("reason", "source"),
 )
 
+PROVIDER_LATENCY_MS = Histogram(
+    "provider_latency_ms",
+    "Latency of upstream market data/provider requests in milliseconds.",
+    labelnames=("provider", "operation"),
+    buckets=(10, 25, 50, 100, 200, 400, 800, 1600, 3200),
+)
+
+LAST_BAR_AGE_SECONDS = Gauge(
+    "last_bar_age_seconds",
+    "Age in seconds of the most recent bar or tick per symbol.",
+    labelnames=("symbol",),
+)
+
 
 def record_plan_duration(mode: str, duration_ms: float) -> None:
     PLAN_DURATION_MS.labels(mode=mode or "unknown").observe(max(0.0, float(duration_ms)))
@@ -84,6 +97,20 @@ def record_selector_rejections(rejections: Iterable[dict[str, str | None]], *, s
         SELECTOR_REJECTED_TOTAL.labels(reason=reason, source=source or "unknown").inc()
 
 
+def record_provider_latency(provider: str, operation: str, duration_ms: float) -> None:
+    """Record latency for upstream provider interactions."""
+
+    PROVIDER_LATENCY_MS.labels(provider or "unknown", operation or "unknown").observe(max(0.0, float(duration_ms)))
+
+
+def record_last_bar_age(symbol: str, age_seconds: float) -> None:
+    """Record the age of the most recent price bar or tick per symbol."""
+
+    if not symbol:
+        return
+    LAST_BAR_AGE_SECONDS.labels(symbol.upper()).set(max(0.0, float(age_seconds)))
+
+
 def prometheus_response() -> tuple[bytes, str]:
     return generate_latest(), CONTENT_TYPE_LATEST
 
@@ -92,6 +119,8 @@ __all__ = [
     "CANDIDATE_COUNT",
     "EM_CAPPED_TP",
     "PLAN_DURATION_MS",
+    "PROVIDER_LATENCY_MS",
+    "LAST_BAR_AGE_SECONDS",
     "RR_BELOW_MIN",
     "SELECTOR_REJECTED_TOTAL",
     "SL_HIT",
@@ -99,10 +128,11 @@ __all__ = [
     "prometheus_response",
     "record_candidate_count",
     "record_em_capped_tp",
+    "record_last_bar_age",
     "record_plan_duration",
+    "record_provider_latency",
     "record_rr_below_min",
     "record_selector_rejections",
     "record_sl_hit",
     "record_tp_hit",
 ]
-

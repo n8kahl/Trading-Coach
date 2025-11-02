@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from typing import Optional, Tuple
 
 import httpx
 import pandas as pd
 
 from .config import get_settings
+from .telemetry import record_provider_latency
 
 _CLIENT_LOCK = asyncio.Lock()
 _POLYGON_CLIENT: httpx.AsyncClient | None = None
@@ -87,11 +89,17 @@ async def fetch_polygon_ohlcv(
     if include_extended:
         params["include_extended"] = "true"
     client = await _get_polygon_client()
+    operation = f"ohlcv_{timespan}"
+    start = time.perf_counter()
     try:
         resp = await client.get(url, params=params)
         resp.raise_for_status()
     except httpx.HTTPError:
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        record_provider_latency("polygon", f"{operation}_error", duration_ms)
         return None
+    duration_ms = (time.perf_counter() - start) * 1000.0
+    record_provider_latency("polygon", operation, duration_ms)
 
     data = resp.json()
     results = data.get("results")

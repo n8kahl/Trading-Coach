@@ -150,10 +150,12 @@ from .telemetry import (
     prometheus_response,
     record_candidate_count,
     record_em_capped_tp,
+    record_last_bar_age,
     record_plan_duration,
     record_rr_below_min,
     record_selector_rejections,
 )
+from .logging_setup import setup_logging, REQUEST_ID_CONTEXT
 from .plans import (
     build_plan_geometry,
     RunnerPolicy,
@@ -195,6 +197,7 @@ from .logic.runner import build_runner_policy as build_runner_policy_logic
 from .logic.validators import validate_plan as validate_plan_guardrails
 from .server.serialization.levels import _extract_levels_for_chart
 
+setup_logging()
 logger = logging.getLogger(__name__)
 
 MIN_STOP_ATR = {"scalp": 0.6, "intraday": 0.9, "swing": 1.2, "leaps": 1.5}
@@ -2771,7 +2774,27 @@ class ServiceHeaderMiddleware(BaseHTTPMiddleware):
         return resp
 
 
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    """Attach or generate a request ID for each inbound request."""
+
+    async def dispatch(self, request: Request, call_next):
+        incoming = str(request.headers.get("x-request-id") or "").strip()
+        request_id = incoming or uuid.uuid4().hex
+        token = REQUEST_ID_CONTEXT.set(request_id)
+        request.state.request_id = request_id
+        try:
+            response = await call_next(request)
+        finally:
+            REQUEST_ID_CONTEXT.reset(token)
+        try:
+            response.headers["X-Request-ID"] = request_id
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return response
+
+
 app.add_middleware(ServiceHeaderMiddleware)
+app.add_middleware(RequestIdMiddleware)
 
 
 
@@ -7204,6 +7227,27 @@ class CoachPulseState:
 
 
 async def _symbol_stream_emit(symbol: str, event: Dict[str, Any]) -> None:
+    event_type = str(event.get("t") or "").lower()
+    if event_type in {"tick", "bar"}:
+        ts_value = event.get("time")
+        if ts_value is None:
+            ts_value = event.get("ts")
+        age_seconds: Optional[float] = None
+        if isinstance(ts_value, (int, float)):
+            age_seconds = max(0.0, datetime.now(timezone.utc).timestamp() - float(ts_value))
+        elif isinstance(ts_value, str):
+            normalized = ts_value.replace("Z", "+00:00") if ts_value.endswith("Z") else ts_value
+            try:
+                parsed = datetime.fromisoformat(normalized)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                else:
+                    parsed = parsed.astimezone(timezone.utc)
+                age_seconds = max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+            except ValueError:
+                age_seconds = None
+        if age_seconds is not None:
+            record_last_bar_age(symbol, age_seconds)
     await _ingest_stream_event(symbol, event)
 
 
