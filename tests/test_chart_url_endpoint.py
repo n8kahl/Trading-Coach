@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -14,58 +13,13 @@ from src.agent_server import (
     ChartParams,
     PlanRequest,
     PlanResponse,
-    build_plan_layers,
     _append_query_params,
     app,
     gpt_chart_url,
 )
 from src.config import get_settings
 
-
-def _stub_plan_components(symbol: str) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-    entry = 430.0
-    stop = 428.6
-    target = 432.4
-    now = datetime(2025, 10, 28, 14, 30, tzinfo=timezone.utc)
-    as_of_iso = now.isoformat().replace("+00:00", "Z")
-    session_state = {
-        "status": "open",
-        "as_of": as_of_iso,
-        "next_open": None,
-        "tz": "America/New_York",
-    }
-    plan_core = {
-        "plan_id": f"{symbol}-demo",
-        "symbol": symbol,
-        "direction": "long",
-        "entry": entry,
-        "stop": stop,
-        "targets": [target],
-        "meta": {"entry_status": {"state": "waiting"}},
-        "waiting_for": "1m close above VWAP",
-        "session_state": session_state,
-        "context_overlays": {"volume_profile": {"vwap": entry - 0.12}},
-        "key_levels": {"PDL": entry - 1.0},
-    }
-    plan_layers = build_plan_layers(
-        symbol=symbol,
-        interval="5m",
-        as_of=as_of_iso,
-        planning_context="live",
-        key_levels=plan_core["key_levels"],
-        overlays=plan_core["context_overlays"],
-        strategy_id="orb_retest",
-        direction="long",
-        waiting_for=plan_core["waiting_for"],
-        plan=plan_core,
-        last_time_s=int(now.timestamp()),
-        interval_s=300,
-        last_close=entry - 0.25,
-    )
-    plan_layers["plan_id"] = plan_core["plan_id"]
-    plan_core = dict(plan_core)
-    plan_core["plan_layers"] = plan_layers
-    return plan_core, plan_layers, session_state
+from _helpers import stub_plan_components
 
 
 @pytest.mark.asyncio
@@ -247,7 +201,7 @@ async def test_plan_layers_next_objective_meta(monkeypatch: pytest.MonkeyPatch) 
         route,  # noqa: ANN001
         app,  # noqa: ANN001
     ) -> Dict[str, Any]:
-        plan_core, plan_layers, session_state = _stub_plan_components(symbol.upper())
+        plan_core, plan_layers, session_state = stub_plan_components(symbol.upper())
         return {
             "plan_id": plan_core["plan_id"],
             "version": 1,
@@ -325,7 +279,7 @@ def test_coach_ws_emits_pulse(monkeypatch: pytest.MonkeyPatch) -> None:
         route,  # noqa: ANN001
         app,  # noqa: ANN001
     ) -> Dict[str, Any]:
-        plan_core, plan_layers, session_state = _stub_plan_components(symbol.upper())
+        plan_core, plan_layers, session_state = stub_plan_components(symbol.upper())
         return {
             "plan_id": plan_core["plan_id"],
             "version": 1,

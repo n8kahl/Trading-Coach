@@ -352,15 +352,18 @@ def _normalize_timeframe(interval: str | None) -> str:
 
 
 def _progress_for_price(last_price: Optional[float], band_low: float, band_high: float, half_width: float) -> float:
+    """Return normalized progress where 1.0 indicates the price is inside the band."""
+
     if last_price is None or not math.isfinite(last_price) or half_width <= 0:
         return 0.0
-    if band_low <= last_price <= band_high:
+
+    center = (band_low + band_high) / 2.0
+    # Measure how far price sits outside the band; inside the band counts as full progress.
+    distance_from_center = abs(last_price - center)
+    excess = max(0.0, distance_from_center - half_width)
+    if excess <= 0:
         return 1.0
-    if last_price < band_low:
-        distance = band_low - last_price
-    else:
-        distance = last_price - band_high
-    progress = 1.0 - (distance / half_width)
+    progress = 1.0 - (excess / half_width)
     return max(0.0, min(1.0, progress))
 
 

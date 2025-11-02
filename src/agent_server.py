@@ -21,7 +21,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Literal, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, cast
 from collections import Counter
 import copy
 
@@ -16085,6 +16085,121 @@ async def _rebuild_plan_layers(plan_id: str, snapshot: Dict[str, Any], request: 
     return response.plan_layers
 
 
+def _direction_from_plan(plan_block: Mapping[str, Any] | None) -> Optional[str]:
+    if not isinstance(plan_block, Mapping):
+        return None
+    direction = plan_block.get("direction") or plan_block.get("bias")
+    if isinstance(direction, str):
+        token = direction.strip().lower()
+        if token in {"long", "short"}:
+            return token
+    return None
+
+
+def _resolve_last_price_for_layers(
+    plan_block: Mapping[str, Any] | None,
+    layers_meta: Mapping[str, Any] | None,
+) -> Optional[float]:
+    candidates: List[Any] = []
+    if isinstance(layers_meta, Mapping):
+        internal = layers_meta.get("_next_objective_internal")
+        if isinstance(internal, Mapping):
+            for key in ("last_price", "close", "price"):
+                candidates.append(internal.get(key))
+        public = layers_meta.get("next_objective")
+        if isinstance(public, Mapping):
+            band_center = public.get("objective_price")
+            candidates.append(band_center)
+    if isinstance(plan_block, Mapping):
+        price_block = plan_block.get("price")
+        if isinstance(price_block, Mapping):
+            for key in ("last", "close", "mid", "price"):
+                if key in price_block:
+                    candidates.append(price_block.get(key))
+        meta_block = plan_block.get("meta")
+        if isinstance(meta_block, Mapping):
+            for key in ("last_price", "close", "recent_price"):
+                if key in meta_block:
+                    candidates.append(meta_block.get(key))
+        for key in ("last_price", "close_price", "last"):
+            if key in plan_block:
+                candidates.append(plan_block.get(key))
+    for candidate in candidates:
+        price_value = _safe_number(candidate)
+        if price_value is not None:
+            return price_value
+    return None
+
+
+def _inject_next_objective_payload(
+    layers_payload: MutableMapping[str, Any],
+    plan_block: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(layers_payload, MutableMapping):
+        return
+    meta_block = layers_payload.get("meta")
+    if not isinstance(meta_block, MutableMapping):
+        meta_block = {}
+        layers_payload["meta"] = meta_block
+
+    symbol_token = ""
+    if isinstance(plan_block, Mapping):
+        symbol_token = str(plan_block.get("symbol") or "").upper()
+    if not symbol_token:
+        symbol_token = str(layers_payload.get("symbol") or "").upper()
+
+    direction = _direction_from_plan(plan_block)
+
+    key_levels: Mapping[str, Any] | None = None
+    overlays: Mapping[str, Any] | None = None
+    if isinstance(plan_block, Mapping):
+        key_candidate = plan_block.get("key_levels")
+        key_levels = key_candidate if isinstance(key_candidate, Mapping) else None
+        overlay_candidate = plan_block.get("context_overlays")
+        overlays = overlay_candidate if isinstance(overlay_candidate, Mapping) else None
+
+    precision_value: Optional[int] = None
+    precision_candidate = layers_payload.get("precision")
+    if isinstance(precision_candidate, (int, float)):
+        precision_value = int(precision_candidate)
+    elif isinstance(precision_candidate, str):
+        with suppress(ValueError):
+            precision_value = int(precision_candidate)
+    if precision_value is None:
+        precision_value = get_precision(symbol_token or (plan_block.get("symbol") if isinstance(plan_block, Mapping) else None))
+
+    interval_candidate = layers_payload.get("interval")
+    if interval_candidate is None and isinstance(plan_block, Mapping):
+        interval_candidate = plan_block.get("interval")
+
+    last_price = _resolve_last_price_for_layers(plan_block, meta_block)
+
+    meta_payload = compute_next_objective_meta(
+        symbol=symbol_token or str(layers_payload.get("symbol") or ""),
+        plan=plan_block if isinstance(plan_block, Mapping) else {},
+        direction=direction,
+        last_price=last_price,
+        key_levels=key_levels,
+        overlays=overlays,
+        precision=int(precision_value or 2),
+        interval=str(interval_candidate) if interval_candidate is not None else None,
+    )
+    if not meta_payload:
+        return
+
+    public_block = {
+        key: value for key, value in meta_payload.items() if not (isinstance(key, str) and key.startswith("_"))
+    }
+    if public_block:
+        meta_block["next_objective"] = public_block
+
+    internal_block = {
+        key[1:]: value for key, value in meta_payload.items() if isinstance(key, str) and key.startswith("_")
+    }
+    if internal_block:
+        meta_block["_next_objective_internal"] = internal_block
+
+
 @app.get(
     "/api/v1/gpt/chart-layers",
     summary="Return plan-bound chart layers",
@@ -16145,6 +16260,13 @@ async def chart_layers_endpoint(
 
     payload = copy.deepcopy(layers)
     payload["plan_id"] = plan_id
+    try:
+        _inject_next_objective_payload(payload, plan_block)
+    except Exception:
+        logger.exception(
+            "chart_layers_next_objective_failed",
+            extra={"plan_id": plan_id},
+        )
     return payload
 
 
