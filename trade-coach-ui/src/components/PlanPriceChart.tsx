@@ -52,7 +52,6 @@ type PlanPriceChartProps = {
   followLive?: boolean;
   onFollowLiveChange?: (value: boolean) => void;
   levelsExpanded?: boolean;
-  expanded?: boolean;
 };
 
 export type PlanPriceChartHandle = {
@@ -144,7 +143,6 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
       followLive: followLiveProp,
       onFollowLiveChange,
       levelsExpanded = true,
-      expanded = false,
     },
     ref,
   ) => {
@@ -1238,8 +1236,7 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
 
     const effectiveFollowLive = followLiveProp ?? internalFollowLive;
     const containerClasses = clsx(
-      "relative h-full w-full rounded-2xl border border-neutral-800/70 transition-[height] duration-300",
-      expanded ? "chart-expanded min-h-[70vh] md:min-h-[75vh]" : "chart-compact min-h-[360px] md:min-h-[440px]",
+      "relative h-full w-full rounded-2xl border border-neutral-800/70 transition-[height] duration-300 chart-expanded min-h-[70vh] md:min-h-[75vh]",
     );
 
     return (

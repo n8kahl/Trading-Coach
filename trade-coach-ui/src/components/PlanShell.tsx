@@ -25,7 +25,7 @@ export default function PlanShell({
   return (
     <div className={clsx("flex min-h-screen flex-col bg-neutral-950 text-neutral-100", className)}>
       <header className="sticky top-0 z-40 border-b border-neutral-900/80 bg-neutral-950/95 backdrop-blur">
-        <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-3 px-4 py-4 sm:px-6">{header}</div>
+        <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-3 px-4 py-3 sm:px-6 sm:py-4">{header}</div>
       </header>
       <main className="flex-1">
         <div className="mx-auto grid max-w-[1400px] grid-cols-12 gap-4 px-4 py-4 sm:px-6">
@@ -38,7 +38,7 @@ export default function PlanShell({
           </aside>
           <section className="col-span-12 flex flex-col gap-4 md:col-span-9">
             {coach ? (
-              <div className="sticky top-[72px] z-10">
+              <div className="sticky top-[68px] z-10 sm:top-[72px]">
                 <div className="rounded-2xl border border-neutral-900/70 bg-neutral-950/70 p-0.5 backdrop-blur">
                   {coach}
                 </div>

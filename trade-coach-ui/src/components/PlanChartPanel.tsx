@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PlanPriceChart, { type ChartOverlayState, type PlanPriceChartHandle } from "@/components/PlanPriceChart";
 import ConfidenceBadge from "@/components/ConfidenceBadge";
 import { usePriceSeries } from "@/lib/hooks/usePriceSeries";
+import type { PriceSeriesCandle } from "@/lib/hooks/usePriceSeries";
 import type { SupportingLevel } from "@/lib/chart";
 import type { PlanLayers, PlanSnapshot, TargetMetaEntry } from "@/lib/types";
 import { subscribePlanEvents } from "@/lib/plan/events";
@@ -19,6 +20,7 @@ type PlanChartPanelProps = {
   layers: PlanLayers | null;
   primaryLevels: SupportingLevel[];
   supportingVisible: boolean;
+  onToggleSupporting?: () => void;
   followLive: boolean;
   streamingEnabled: boolean;
   onSetFollowLive(value: boolean): void;
@@ -58,6 +60,7 @@ export default function PlanChartPanel({
   layers,
   primaryLevels,
   supportingVisible,
+  onToggleSupporting,
   followLive,
   streamingEnabled,
   onSetFollowLive,
@@ -76,7 +79,6 @@ export default function PlanChartPanel({
   const chartHandle = useRef<PlanPriceChartHandle | null>(null);
   const [replayActive, setReplayActive] = useState(false);
   const [recentPlanEvent, setRecentPlanEvent] = useState<{ type: string; at: number } | null>(null);
-  const [chartExpanded, setChartExpanded] = useState(false);
 
   const symbol = plan.symbol?.toUpperCase() ?? "—";
   const style = plan.style ?? plan.structured_plan?.style ?? null;
@@ -413,10 +415,7 @@ export default function PlanChartPanel({
   const highlightInvalidate = recentPlanEvent?.type === "stop_hit";
   const highlightScale = recentPlanEvent?.type === "tp_hit";
 
-  const chartSectionClass = clsx(
-    "relative overflow-hidden rounded-3xl border border-neutral-800/70 bg-neutral-950/40 p-2 transition-all duration-300",
-    chartExpanded ? "chart-expanded min-h-[75vh] md:min-h-[80vh]" : "chart-default min-h-[60vh] md:min-h-[520px]",
-  );
+  const chartSectionClass = "relative overflow-hidden rounded-3xl border border-neutral-800/70 bg-neutral-950/40 p-2 transition-all duration-300 chart-expanded min-h-[75vh] md:min-h-[80vh]";
 
   return (
     <div className="flex h-full flex-col gap-6">
@@ -460,6 +459,19 @@ export default function PlanChartPanel({
               {option.label}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={() => onToggleSupporting?.()}
+            className={clsx(
+              "inline-flex h-10 items-center justify-center rounded-full px-4 text-xs font-semibold uppercase tracking-[0.2em] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400",
+              supportingVisible
+                ? "border border-emerald-400/60 bg-emerald-400/10 text-emerald-200"
+                : "border border-neutral-800/60 bg-neutral-900/70 text-neutral-300 hover:border-emerald-400/40 hover:text-emerald-200",
+            )}
+            aria-pressed={supportingVisible}
+          >
+            {supportingVisible ? "Hide Levels" : "Show Levels"}
+          </button>
           <button
             type="button"
             onClick={handleReplayToggle}
@@ -552,14 +564,6 @@ export default function PlanChartPanel({
       </section>
 
       <section className={chartSectionClass}>
-        <button
-          type="button"
-          onClick={() => setChartExpanded((prev) => !prev)}
-          className="absolute right-4 top-4 z-30 rounded-full border border-neutral-700/60 bg-neutral-900/70 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-neutral-200 transition hover:border-emerald-400 hover:text-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-          aria-pressed={chartExpanded}
-        >
-          {chartExpanded ? "Collapse" : "Expand"}
-        </button>
         {chartStatusMessage ? (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-neutral-950/70 text-sm text-neutral-300">
             {chartStatusMessage}
@@ -583,7 +587,6 @@ export default function PlanChartPanel({
           followLive={followLive}
           onFollowLiveChange={onSetFollowLive}
           levelsExpanded={supportingVisible}
-          expanded={chartExpanded}
           highlightedLevelId={highlightLevelId}
           hiddenLevelIds={hiddenLevelIds}
         />
