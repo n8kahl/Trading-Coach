@@ -222,22 +222,6 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
     }, [hiddenLevelIds]);
     const showExpandedLevels = levelsExpanded !== false;
 
-    const overlayLegendItems = useMemo(() => {
-      const items: Array<{ key: string; label: string; tone: "vwap" | "ema" }> = [];
-      const periods = (overlays.emaPeriods ?? [])
-        .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 1)
-        .map((value) => Math.round(value))
-        .sort((a, b) => a - b);
-      const uniquePeriods = Array.from(new Set(periods));
-      if (overlays.showVWAP !== false) {
-        items.push({ key: "vwap", label: "VWAP", tone: "vwap" });
-      }
-      if (uniquePeriods.length) {
-        items.push({ key: "ema", label: `EMA ${uniquePeriods.join("/")}`, tone: "ema" });
-      }
-      return items;
-    }, [overlays]);
-
     const computeOverlayBounds = useCallback(
       (overlayState: ChartOverlayState | null | undefined, bars: PriceSeriesCandle[], hidden: Set<string>) => {
         if (!overlayState) return { min: null, max: null };
@@ -1247,33 +1231,6 @@ const PlanPriceChart = forwardRef<PlanPriceChartHandle, PlanPriceChartProps>(
         data-plan-id={planId}
         data-resolution={_resolution}
       >
-        {overlayLegendItems.length ? (
-          <div
-            className={clsx(
-              "pointer-events-none absolute left-4 top-4 z-20 flex flex-wrap items-center gap-2 rounded-lg px-3 py-2 text-[0.68rem] font-semibold",
-              theme === "light"
-                ? "bg-white/85 text-slate-700 shadow-sm"
-                : "bg-neutral-950/70 text-neutral-200 backdrop-blur",
-            )}
-          >
-            {overlayLegendItems.map((item) => (
-              <span
-                key={item.key}
-                className={clsx(
-                  item.tone === "ema"
-                    ? theme === "light"
-                      ? "text-sky-700"
-                      : "text-sky-200"
-                    : theme === "light"
-                      ? "text-slate-800"
-                      : "text-neutral-100",
-                )}
-              >
-                {item.label}
-              </span>
-            ))}
-          </div>
-        ) : null}
         {!effectiveFollowLive ? (
           <div className="pointer-events-none absolute bottom-4 right-4 z-30">
             <button

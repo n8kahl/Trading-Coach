@@ -445,15 +445,6 @@ export default function PlanChartPanel({
           </div>
       </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setPanelCollapsed((prev) => !prev)}
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-neutral-800/60 bg-neutral-900/70 text-lg font-semibold text-neutral-300 transition hover:border-emerald-400 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-            aria-pressed={panelCollapsed}
-            aria-label={panelCollapsed ? "Expand plan details" : "Collapse plan details"}
-          >
-            {panelCollapsed ? "+" : "−"}
-          </button>
           <label className="flex items-center gap-2 rounded-full border border-neutral-800/60 bg-neutral-900/70 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-neutral-300 focus-within:border-emerald-400 focus-within:text-emerald-100">
             <span className="sr-only">Timeframe</span>
             <select
@@ -493,6 +484,15 @@ export default function PlanChartPanel({
             aria-pressed={replayActive}
           >
             {replayActive ? "Stop Replay" : "Replay"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setPanelCollapsed((prev) => !prev)}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-neutral-800/60 bg-neutral-900/70 text-lg font-semibold text-neutral-300 transition hover:border-emerald-400 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+            aria-pressed={panelCollapsed}
+            aria-label={panelCollapsed ? "Expand plan details" : "Collapse plan details"}
+          >
+            {panelCollapsed ? "+" : "−"}
           </button>
         </div>
       </header>

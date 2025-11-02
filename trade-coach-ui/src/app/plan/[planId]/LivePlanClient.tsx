@@ -584,16 +584,38 @@ export default function LivePlanClient({
   };
 
   const headerContent = headerCollapsed ? (
-    <div className="flex items-center justify-between">
-      <span className="text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
-      <button
-        type="button"
-        onClick={() => setHeaderCollapsed(false)}
-        className="flex h-8 w-8 items-center justify-center rounded-full border border-neutral-800/60 bg-neutral-900/70 text-lg font-semibold text-neutral-200 transition hover:border-emerald-400 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-        aria-label="Expand header"
-      >
-        +
-      </button>
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="text-lg font-semibold uppercase tracking-[0.35em] text-emerald-300">Fancy Trader</span>
+        <button
+          type="button"
+          onClick={() => setHeaderCollapsed(false)}
+          className="flex h-8 w-8 items-center justify-center rounded-full border border-neutral-800/60 bg-neutral-900/70 text-lg font-semibold text-neutral-200 transition hover:border-emerald-400 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+          aria-label="Expand header"
+        >
+          +
+        </button>
+      </div>
+      {headerPlanMetrics.length ? (
+        <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.24em] text-neutral-300">
+          {headerPlanMetrics.map((metric) => {
+            const toneClass = METRIC_TONE_CLASS[metric.tone ?? "default"];
+            return (
+              <span
+                key={metric.key}
+                className={clsx(
+                  "inline-flex items-center gap-1 rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.22em]",
+                  toneClass,
+                )}
+                aria-label={metric.ariaLabel ?? `${metric.label} ${metric.value}`}
+              >
+                <span className="text-white/80">{metric.label}</span>
+                <span className="tabular-nums text-white">{metric.value}</span>
+              </span>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   ) : (
     <>
