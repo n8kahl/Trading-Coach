@@ -125,30 +125,6 @@ export default function PlanChartPanel({
     previousFollowLiveRef.current = followLive;
   }, [followLive]);
 
-  const filteredLayers = useMemo(() => {
-    if (!layers) return null;
-    if (supportingVisible) return layers;
-    const groups = (layers.meta?.level_groups ?? {}) as Record<string, unknown>;
-    type LevelGroupEntry = { price?: number | null };
-    const primaryEntries = Array.isArray(groups.primary)
-      ? (groups.primary as LevelGroupEntry[])
-      : [];
-    const priceSet = new Set<number>();
-    primaryEntries.forEach((entry) => {
-      if (entry && typeof entry.price === "number") {
-        priceSet.add(entry.price);
-      }
-    });
-    const filteredLevels = Array.isArray(layers.levels)
-      ? layers.levels.filter((level) => typeof level?.price === "number" && priceSet.has(level.price))
-      : [];
-    return {
-      ...layers,
-      levels: filteredLevels,
-      zones: [],
-    };
-  }, [layers, supportingVisible]);
-
   const chartParams = useMemo(() => {
     const fromCharts = plan.charts?.params;
     const candidate =
@@ -324,9 +300,9 @@ export default function PlanChartPanel({
       targets: overlayTargets,
       emaPeriods,
       showVWAP,
-      layers: (filteredLayers ?? layers) ?? null,
+      layers: layers ?? null,
     }),
-    [entryPrice, stopPrice, trailingStop, overlayTargets, emaPeriods, showVWAP, filteredLayers, layers],
+    [entryPrice, stopPrice, trailingStop, overlayTargets, emaPeriods, showVWAP, layers],
   );
 
   const {

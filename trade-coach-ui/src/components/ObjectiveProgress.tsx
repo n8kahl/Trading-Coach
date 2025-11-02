@@ -21,13 +21,6 @@ function clamp(value: number | null | undefined): number {
   return Math.max(0, Math.min(1, value as number));
 }
 
-function formatBand(band: NextObjectiveMeta["band"]): string | null {
-  if (!band || !Number.isFinite(band.low) || !Number.isFinite(band.high)) {
-    return null;
-  }
-  return `band ${band.low.toFixed(2)}–${band.high.toFixed(2)}`;
-}
-
 export default function ObjectiveProgress({ meta, className }: ObjectiveProgressProps) {
   if (!meta) {
     return null;
@@ -36,7 +29,6 @@ export default function ObjectiveProgress({ meta, className }: ObjectiveProgress
   const progress = clamp(meta.progress);
   const percent = Math.round(progress * 100);
   const timeframe = meta.timeframe?.toUpperCase();
-  const bandLabel = formatBand(meta.band);
 
   return (
     <div
@@ -60,9 +52,6 @@ export default function ObjectiveProgress({ meta, className }: ObjectiveProgress
           style={{ transform: `scaleX(${progress})` }}
         />
       </div>
-      {bandLabel ? (
-        <div className="text-[9px] uppercase tracking-[0.22em] text-neutral-400">{bandLabel}</div>
-      ) : null}
       {meta.state ? (
         <div className="text-[9px] uppercase tracking-[0.22em] text-neutral-500">{meta.state}</div>
       ) : null}

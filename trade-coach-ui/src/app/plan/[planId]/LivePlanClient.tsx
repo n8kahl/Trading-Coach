@@ -487,6 +487,20 @@ export default function LivePlanClient({
   }, [coachNoteContent?.note]);
 
   const nextActionText = React.useMemo(() => coachNote.text, [coachNote.text]);
+
+  const headerPlanMetrics = React.useMemo(() => {
+    const metrics = [...planMetrics];
+    const trimmed = nextActionText.trim();
+    if (trimmed) {
+      metrics.push({
+        key: "next-action",
+        label: "Next",
+        value: truncateMetric(trimmed),
+        ariaLabel: `Next action ${trimmed}`,
+      });
+    }
+    return metrics;
+  }, [planMetrics, nextActionText]);
   const coachMetrics = React.useMemo(() => {
     const metrics = [...planMetrics, ...additionalCoachMetrics];
     const trimmed = nextActionText.trim();
@@ -584,6 +598,20 @@ export default function LivePlanClient({
         </div>
         <ObjectiveProgress meta={objectiveMeta ?? undefined} />
       </div>
+      {headerPlanMetrics.length ? (
+        <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.24em] text-neutral-300">
+          {headerPlanMetrics.map((metric) => (
+            <span
+              key={metric.key}
+              className="inline-flex items-center gap-1 rounded-full border border-neutral-800/60 bg-neutral-900/70 px-3 py-1 text-neutral-200"
+              aria-label={metric.ariaLabel ?? `${metric.label} ${metric.value}`}
+            >
+              <span className="text-neutral-400">{metric.label}</span>
+              <span className="tabular-nums text-neutral-100">{metric.value}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap items-center gap-3 text-[10px] uppercase tracking-[0.24em] text-neutral-400">
           {statusItems.map((item) => (
