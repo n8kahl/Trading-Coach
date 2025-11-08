@@ -15,7 +15,7 @@ from src.config import get_settings
 
 _ET = ZoneInfo("America/New_York")
 _CLOCK = MarketClock()
-_POLYGON_BASE = "https://api.polygon.io"
+_POLYGON_BASE = "https://api.massive.com"
 _STATUS_CACHE: Optional[Tuple[float, Dict[str, Any]]] = None
 _STATUS_CACHE_TTL = 30.0
 

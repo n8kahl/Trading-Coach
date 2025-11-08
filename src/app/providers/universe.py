@@ -18,7 +18,7 @@ import httpx
 
 from src.config import get_settings
 
-_POLYGON_BASE = "https://api.polygon.io"
+_POLYGON_BASE = "https://api.massive.com"
 INDEX_PRIORITY = ['SPX', 'NDX']
 _UNIVERSE_CACHE: Optional[Tuple[float, List[Dict[str, Any]]]] = None
 _UNIVERSE_CACHE_TTL = 900.0  # 15 minutes

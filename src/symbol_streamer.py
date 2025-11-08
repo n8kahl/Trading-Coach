@@ -41,7 +41,7 @@ def _age_seconds_from_iso(ts: Optional[str]) -> Optional[float]:
 
 
 async def _fetch_polygon_last_trade(symbol: str, api_key: str) -> QuoteResult:
-    url = f"https://api.polygon.io/v2/last/trade/{symbol.upper()}"
+    url = f"https://api.massive.com/v2/last/trade/{symbol.upper()}"
     params = {"apiKey": api_key}
     timeout = httpx.Timeout(4.0, connect=2.0)
     async with httpx.AsyncClient(timeout=timeout) as client:

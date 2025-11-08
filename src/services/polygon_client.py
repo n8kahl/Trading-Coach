@@ -88,7 +88,7 @@ class PolygonAggregatesClient:
         if cached and _now_ts() - cached[0] <= self._cache_ttl:
             return list(cached[1])
 
-        endpoint = f"https://api.polygon.io/v2/reference/indices/{index_ticker.upper()}/constituents"
+        endpoint = f"https://api.massive.com/v2/reference/indices/{index_ticker.upper()}/constituents"
         params = {"apiKey": self._api_key, "limit": 1000}
         client = await self._get_client()
         attempt = 0
@@ -120,7 +120,7 @@ class PolygonAggregatesClient:
         if cached and _now_ts() - cached[0] <= self._cache_ttl:
             return list(cached[1])
 
-        endpoint = "https://api.polygon.io/v3/reference/tickers"
+        endpoint = "https://api.massive.com/v3/reference/tickers"
         params = {
             "market": "stocks",
             "active": "true",

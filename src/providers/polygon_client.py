@@ -10,7 +10,7 @@ import httpx
 
 from ..config import get_settings
 
-POLYGON_BASE_URL = "https://api.polygon.io"
+POLYGON_BASE_URL = "https://api.massive.com"
 _MAX_ATTEMPTS = 3
 _BASE_DELAY = 0.35
 _TIMEOUT = httpx.Timeout(timeout=8.0, connect=3.0)

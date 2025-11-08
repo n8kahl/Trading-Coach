@@ -66,7 +66,7 @@ async def polygon_index_snapshot(symbol: str, *, force_refresh: bool = False) ->
         )
         return None, status
 
-    url = f"https://api.polygon.io/v3/snapshot/options/{polygon_symbol}"
+    url = f"https://api.massive.com/v3/snapshot/options/{polygon_symbol}"
     params = {"apiKey": api_key}
     timeout = httpx.Timeout(6.0, connect=3.0)
     started = time.perf_counter()
@@ -273,7 +273,7 @@ async def polygon_universal_snapshot() -> Tuple[Dict[str, Any] | None, FeedStatu
         "ticker.any_of": "I:SPX,I:NDX,SPY,QQQ",
         "apiKey": api_key,
     }
-    url = "https://api.polygon.io/v3/snapshot"
+    url = "https://api.massive.com/v3/snapshot"
     timeout = httpx.Timeout(6.0, connect=3.0)
     started = time.perf_counter()
     async with httpx.AsyncClient(timeout=timeout) as client:

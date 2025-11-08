@@ -77,7 +77,7 @@ async def fetch_polygon_ohlcv(
     frm = start.normalize().date().isoformat()
     to = (end.normalize() + pd.Timedelta(days=1)).date().isoformat()
 
-    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{frm}/{to}"
+    url = f"https://api.massive.com/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{frm}/{to}"
     params = {
         "adjusted": "true",
         "sort": "desc",

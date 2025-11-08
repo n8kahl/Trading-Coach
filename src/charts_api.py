@@ -101,7 +101,7 @@ def _fetch_polygon_candles(symbol: str, interval: str, lookback: int) -> pd.Data
         return None
 
     multiplier, timespan, start, end = _polygon_range_params(interval, lookback)
-    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{start.date()}/{end.date()}"
+    url = f"https://api.massive.com/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{start.date()}/{end.date()}"
     params = {
         "adjusted": "true",
         "sort": "desc",

@@ -10,7 +10,7 @@ import httpx
 
 from src.config import get_settings
 
-_POLYGON_BASE = "https://api.polygon.io"
+_POLYGON_BASE = "https://api.massive.com"
 _CACHE_TTL = 60.0
 _CHANGE_CACHE: Dict[str, Tuple[float, Optional[float]]] = {}
 
