@@ -4,21 +4,33 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
+import os
 import time
 
 import httpx
 
 from src.config import get_settings, get_massive_api_key
 
-_POLYGON_BASE = "https://api.massive.com"
+_MASSIVE_BASE = os.getenv("MARKETDATA_BASE_URL", "https://api.massive.com").rstrip("/")
+_POLYGON_BASE = os.getenv("POLYGON_BASE_URL", "https://api.polygon.io").rstrip("/")
+_BASE = _MASSIVE_BASE or _POLYGON_BASE
 _CACHE_TTL = 30.0
 _INTERNALS_CACHE: Optional[Tuple[float, Dict[str, int | float]]] = None
 
 
+def _api_key() -> str | None:
+    key = get_massive_api_key()
+    if key:
+        return key
+    return os.getenv("MASSIVE_API_KEY") or os.getenv("POLYGON_API_KEY")
+
+
 def _polygon_request(path: str, params: Dict[str, str], api_key: str) -> Optional[Dict[str, Any]]:  # type: ignore[name-defined]
+    query = dict(params)
+    query["apiKey"] = api_key
     try:
         with httpx.Client(timeout=5.0) as client:
-            resp = client.get(f"{_POLYGON_BASE}{path}", params=params, headers={"Authorization": f"Bearer {api_key}"})
+            resp = client.get(f"{_BASE}{path}", params=query)
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPError:
@@ -53,7 +65,7 @@ def market_internals(as_of: str | None = None) -> Dict[str, int | float]:
         return dict(_INTERNALS_CACHE[1])
 
     settings = get_settings()
-    api_key = get_massive_api_key(settings)
+    api_key = get_massive_api_key(settings) or _api_key()
     if not api_key:
         fallback = {"breadth": 0, "vix": None, "tick": 0}
         _INTERNALS_CACHE = (now, fallback)

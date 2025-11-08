@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 from typing import Optional, Tuple
 
 import httpx
@@ -14,6 +15,9 @@ from .config import get_settings, get_massive_api_key
 _CLIENT_LOCK = asyncio.Lock()
 _POLYGON_CLIENT: httpx.AsyncClient | None = None
 _DEFAULT_TIMEOUT = httpx.Timeout(8.0, connect=4.0)
+_MASSIVE_BASE = os.getenv("MARKETDATA_BASE_URL", "https://api.massive.com").rstrip("/")
+_POLYGON_BASE = os.getenv("POLYGON_BASE_URL", "https://api.polygon.io").rstrip("/")
+_BASE_URL = _MASSIVE_BASE or _POLYGON_BASE
 
 
 def _parse_polygon_timeframe(timeframe: str) -> Tuple[int, str, int]:
@@ -77,27 +81,55 @@ async def fetch_polygon_ohlcv(
     frm = start.normalize().date().isoformat()
     to = (end.normalize() + pd.Timedelta(days=1)).date().isoformat()
 
-    url = f"https://api.massive.com/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{frm}/{to}"
-    params = {
-        "adjusted": "true",
-        "sort": "desc",
-        "limit": 5000,
-    }
-    if include_extended:
-        params["include_extended"] = "true"
     client = await _get_polygon_client()
-    try:
-        resp = await client.get(url, params=params, headers={"Authorization": f"Bearer {api_key}"})
-        resp.raise_for_status()
-    except httpx.HTTPError:
+
+    async def _fetch_range(start_str: str, end_str: str) -> pd.DataFrame | None:
+        params = {
+            "adjusted": "true",
+            "sort": "desc",
+            "limit": 5000,
+            "apiKey": api_key,
+        }
+        if include_extended:
+            params["include_extended"] = "true"
+        url = f"{_BASE_URL}/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{start_str}/{end_str}"
+        try:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+        except httpx.HTTPError:
+            return None
+        data = resp.json()
+        results = data.get("results")
+        if not results:
+            return None
+        frame = pd.DataFrame(results)
+        if frame.empty:
+            return None
+        return frame
+
+    frame = await _fetch_range(frm, to)
+    if frame is None or frame.empty:
+        try:
+            end_ts = pd.Timestamp(to)
+            start_ts = pd.Timestamp(frm)
+        except Exception:
+            end_ts = pd.Timestamp.utcnow()
+            start_ts = end_ts - pd.Timedelta(days=days_back or 5)
+        window = end_ts - start_ts
+        for offset in range(1, 6):
+            shifted_end = end_ts - pd.Timedelta(days=offset)
+            shifted_start = shifted_end - window
+            fallback_frame = await _fetch_range(
+                shifted_start.date().isoformat(),
+                shifted_end.date().isoformat(),
+            )
+            if fallback_frame is not None and not fallback_frame.empty:
+                frame = fallback_frame
+                break
+
+    if frame is None or frame.empty:
         return None
 
-    data = resp.json()
-    results = data.get("results")
-    if not results:
-        return None
-
-    frame = pd.DataFrame(results)
     column_map = {"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close"}
     if "v" in frame.columns:
         column_map["v"] = "volume"

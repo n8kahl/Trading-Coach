@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Dict, Mapping, Optional, Tuple
+import os
 import time as _time
 
 import httpx
@@ -15,7 +16,9 @@ from src.config import get_settings, get_massive_api_key
 
 _ET = ZoneInfo("America/New_York")
 _CLOCK = MarketClock()
-_POLYGON_BASE = "https://api.massive.com"
+_BASE_CANDIDATE = os.getenv("MARKETDATA_BASE_URL", "https://api.massive.com").rstrip("/")
+_POLYGON_FALLBACK = os.getenv("POLYGON_BASE_URL", "https://api.polygon.io").rstrip("/")
+_POLYGON_BASE = _BASE_CANDIDATE or _POLYGON_FALLBACK
 _STATUS_CACHE: Optional[Tuple[float, Dict[str, Any]]] = None
 _STATUS_CACHE_TTL = 30.0
 
@@ -57,9 +60,10 @@ def _polygon_market_status() -> Optional[Dict[str, Any]]:
         return dict(cached[1])
 
     url = f"{_POLYGON_BASE}/v1/marketstatus/now"
+    params = {"apiKey": api_key}
     try:
         with httpx.Client(timeout=3.0) as client:
-            resp = client.get(url, headers={"Authorization": f"Bearer {api_key}"})
+            resp = client.get(url, params=params)
             resp.raise_for_status()
     except httpx.HTTPError:
         return None

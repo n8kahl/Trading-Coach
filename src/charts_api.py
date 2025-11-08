@@ -106,10 +106,11 @@ def _fetch_polygon_candles(symbol: str, interval: str, lookback: int) -> pd.Data
         "adjusted": "true",
         "sort": "desc",
         "limit": max(lookback, 500),
+        "apiKey": api_key,
     }
     try:
         with httpx.Client(timeout=8.0) as client:
-            resp = client.get(url, params=params, headers={"Authorization": f"Bearer {api_key}"})
+            resp = client.get(url, params=params)
             resp.raise_for_status()
     except httpx.HTTPError:
         return None

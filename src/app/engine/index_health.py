@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
@@ -42,6 +43,9 @@ _TRADIER_CACHE: Dict[Tuple[str, Optional[str]], Tuple[float, Dict[str, Any], Fee
 _UNIVERSAL_CACHE: Dict[str, Tuple[float, Dict[str, Any], FeedStatus]] = {}
 
 _CACHE_TTL = 30.0
+_MASSIVE_BASE = os.getenv("MARKETDATA_BASE_URL", "https://api.massive.com").rstrip("/")
+_POLYGON_BASE = os.getenv("POLYGON_BASE_URL", "https://api.polygon.io").rstrip("/")
+_MARKET_BASE = _MASSIVE_BASE or _POLYGON_BASE
 
 
 async def polygon_index_snapshot(symbol: str, *, force_refresh: bool = False) -> Tuple[Dict[str, Any] | None, FeedStatus]:
@@ -66,7 +70,7 @@ async def polygon_index_snapshot(symbol: str, *, force_refresh: bool = False) ->
         )
         return None, status
 
-    url = f"https://api.massive.com/v3/snapshot/options/{polygon_symbol}"
+    url = f"{_MARKET_BASE}/v3/snapshot/options/{polygon_symbol}"
     timeout = httpx.Timeout(6.0, connect=3.0)
     started = time.perf_counter()
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -271,7 +275,7 @@ async def polygon_universal_snapshot() -> Tuple[Dict[str, Any] | None, FeedStatu
     params = {
         "ticker.any_of": "I:SPX,I:NDX,SPY,QQQ",
     }
-    url = "https://api.massive.com/v3/snapshot"
+    url = f"{_MARKET_BASE}/v3/snapshot"
     timeout = httpx.Timeout(6.0, connect=3.0)
     started = time.perf_counter()
     async with httpx.AsyncClient(timeout=timeout) as client:

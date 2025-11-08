@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from typing import Dict, Optional, Tuple
+import os
 import time
 
 import httpx
 
 from src.config import get_settings, get_massive_api_key
 
-_POLYGON_BASE = "https://api.massive.com"
+_MASSIVE_BASE = os.getenv("MARKETDATA_BASE_URL", "https://api.massive.com").rstrip("/")
+_POLYGON_BASE = os.getenv("POLYGON_BASE_URL", "https://api.polygon.io").rstrip("/")
+_BASE = _MASSIVE_BASE or _POLYGON_BASE
 _CACHE_TTL = 60.0
 _CHANGE_CACHE: Dict[str, Tuple[float, Optional[float]]] = {}
 
@@ -44,11 +47,11 @@ def _daily_change(symbol: str) -> Optional[float]:
         return cached[1]
     end = date.today()
     start = end - timedelta(days=6)
-    url = f"{_POLYGON_BASE}/v2/aggs/ticker/{symbol.upper()}/range/1/day/{start}/{end}"
-    params = {"adjusted": "true", "sort": "desc", "limit": 2}
+    url = f"{_BASE}/v2/aggs/ticker/{symbol.upper()}/range/1/day/{start}/{end}"
+    params = {"adjusted": "true", "sort": "desc", "limit": 2, "apiKey": api_key}
     try:
         with httpx.Client(timeout=5.0) as client:
-            resp = client.get(url, params=params, headers={"Authorization": f"Bearer {api_key}"})
+            resp = client.get(url, params=params)
             resp.raise_for_status()
             results = resp.json().get("results") or []
     except httpx.HTTPError:

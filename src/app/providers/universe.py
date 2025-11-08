@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
@@ -18,7 +19,9 @@ import httpx
 
 from src.config import get_settings, get_massive_api_key
 
-_POLYGON_BASE = "https://api.massive.com"
+_MASSIVE_BASE = os.getenv("MARKETDATA_BASE_URL", "https://api.massive.com").rstrip("/")
+_POLYGON_BASE = os.getenv("POLYGON_BASE_URL", "https://api.polygon.io").rstrip("/")
+_BASE = _MASSIVE_BASE or _POLYGON_BASE
 INDEX_PRIORITY = ['SPX', 'NDX']
 _UNIVERSE_CACHE: Optional[Tuple[float, List[Dict[str, Any]]]] = None
 _UNIVERSE_CACHE_TTL = 900.0  # 15 minutes
@@ -91,7 +94,7 @@ async def _fetch_top_list(api_key: str) -> List[Dict[str, Any]]:
     if cached and now - cached[0] < _UNIVERSE_CACHE_TTL:
         return list(cached[1])
 
-    url = f"{_POLYGON_BASE}/v3/reference/tickers"
+    url = f"{_BASE}/v3/reference/tickers"
     params = {
         "market": "stocks",
         "active": "true",
@@ -109,7 +112,8 @@ async def _fetch_top_list(api_key: str) -> List[Dict[str, Any]]:
             if cursor:
                 req_params["cursor"] = cursor
             try:
-                resp = await client.get(url, params=req_params, headers={"Authorization": f"Bearer {api_key}"})
+                req_params["apiKey"] = api_key
+                resp = await client.get(url, params=req_params)
                 resp.raise_for_status()
             except httpx.HTTPError:
                 break
@@ -126,10 +130,10 @@ async def _fetch_top_list(api_key: str) -> List[Dict[str, Any]]:
 
 
 async def _percent_change(api_key: str, client: httpx.AsyncClient, symbol: str) -> Optional[float]:
-    params = {"adjusted": "true"}
-    url = f"{_POLYGON_BASE}/v2/aggs/ticker/{symbol.upper()}/prev"
+    params = {"adjusted": "true", "apiKey": api_key}
+    url = f"{_BASE}/v2/aggs/ticker/{symbol.upper()}/prev"
     try:
-        resp = await client.get(url, params=params, headers={"Authorization": f"Bearer {api_key}"})
+        resp = await client.get(url, params=params)
         resp.raise_for_status()
     except httpx.HTTPError:
         return None
