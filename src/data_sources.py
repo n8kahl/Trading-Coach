@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any, Dict
 
 import httpx
 import pandas as pd
@@ -18,6 +18,22 @@ _POLYGON_CLIENT: httpx.AsyncClient | None = None
 _DEFAULT_TIMEOUT = httpx.Timeout(8.0, connect=4.0)
 _BASE_URL = (os.getenv("MARKETDATA_BASE_URL") or "https://api.massive.com").rstrip("/")
 logger = logging.getLogger(__name__)
+
+
+def _format_log_context(details: Dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key, value in details.items():
+        if value is None:
+            continue
+        if isinstance(value, str):
+            token = value.strip()
+            if not token:
+                continue
+            safe = token.replace("\n", " ")[:200]
+            parts.append(f"{key}={safe}")
+            continue
+        parts.append(f"{key}={value}")
+    return " ".join(parts)
 
 
 def _parse_polygon_timeframe(timeframe: str) -> Tuple[int, str, int]:
@@ -93,65 +109,58 @@ async def fetch_polygon_ohlcv(
         if include_extended:
             params["include_extended"] = "true"
         url = f"{_BASE_URL}/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{start_str}/{end_str}"
-        logger.debug(
-            "massive_ohlcv_request",
-            extra={
-                "symbol": symbol.upper(),
-                "timeframe": timeframe,
-                "url": url,
-                "start": start_str,
-                "end": end_str,
-                "attempt": attempt,
-                "window": label,
-            },
-        )
+        base_context = {
+            "symbol": symbol.upper(),
+            "timeframe": timeframe,
+            "url": url,
+            "start": start_str,
+            "end": end_str,
+            "attempt": attempt,
+            "window": label,
+        }
+        logger.debug("massive_ohlcv_request %s", _format_log_context(base_context), extra=base_context)
         try:
             resp = await client.get(url, params=params, headers=headers)
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             body = (exc.response.text or "")[:400]
-            logger.warning(
-                "massive_ohlcv_http_error",
-                extra={
-                    "symbol": symbol.upper(),
-                    "timeframe": timeframe,
+            context = dict(base_context)
+            context.update(
+                {
                     "error": str(exc),
                     "status_code": exc.response.status_code,
-                    "request_id": exc.response.headers.get("x-request-id") or exc.response.headers.get("x-correlation-id"),
+                    "request_id": exc.response.headers.get("x-request-id")
+                    or exc.response.headers.get("x-correlation-id"),
                     "body": body,
-                    "start": start_str,
-                    "end": end_str,
-                    "attempt": attempt,
-                    "window": label,
-                },
+                }
+            )
+            logger.warning(
+                "massive_ohlcv_http_error %s",
+                _format_log_context(context),
+                extra=context,
             )
             return None
         except httpx.RequestError as exc:
+            context = dict(base_context)
+            context.update({"error": str(exc)})
             logger.warning(
-                "massive_ohlcv_request_error",
-                extra={
-                    "symbol": symbol.upper(),
-                    "timeframe": timeframe,
-                    "error": str(exc),
-                    "start": start_str,
-                    "end": end_str,
-                    "attempt": attempt,
-                    "window": label,
-                },
+                "massive_ohlcv_request_error %s",
+                _format_log_context(context),
+                extra=context,
             )
             return None
         data = resp.json()
         results = data.get("results")
         if not results:
-            logger.info(
-                "massive_ohlcv_empty",
-                extra={
-                    "symbol": symbol.upper(),
-                    "timeframe": timeframe,
-                    "start": start_str,
-                    "end": end_str,
-                },
-            )
+            context = {
+                "symbol": symbol.upper(),
+                "timeframe": timeframe,
+                "start": start_str,
+                "end": end_str,
+                "attempt": attempt,
+                "window": label,
+            }
+            logger.info("massive_ohlcv_empty %s", _format_log_context(context), extra=context)
             return None
         frame = pd.DataFrame(results)
         if frame.empty:
@@ -170,15 +179,18 @@ async def fetch_polygon_ohlcv(
         for offset in range(1, 6):
             shifted_end = end_ts - pd.Timedelta(days=offset)
             shifted_start = shifted_end - window
+            attempt_context = {
+                "symbol": symbol.upper(),
+                "timeframe": timeframe,
+                "attempt": offset,
+                "start": shifted_start.date().isoformat(),
+                "end": shifted_end.date().isoformat(),
+                "window": "backfill",
+            }
             logger.info(
-                "massive_ohlcv_backfill_attempt",
-                extra={
-                    "symbol": symbol.upper(),
-                    "timeframe": timeframe,
-                    "attempt": offset,
-                    "start": shifted_start.date().isoformat(),
-                    "end": shifted_end.date().isoformat(),
-                },
+                "massive_ohlcv_backfill_attempt %s",
+                _format_log_context(attempt_context),
+                extra=attempt_context,
             )
             fallback_frame = await _fetch_range(
                 shifted_start.date().isoformat(),
@@ -188,23 +200,29 @@ async def fetch_polygon_ohlcv(
             )
             if fallback_frame is not None and not fallback_frame.empty:
                 frame = fallback_frame
+                success_context = {
+                    "symbol": symbol.upper(),
+                    "timeframe": timeframe,
+                    "attempt": offset,
+                    "window": "backfill",
+                }
                 logger.info(
-                    "massive_ohlcv_backfill_success",
-                    extra={
-                        "symbol": symbol.upper(),
-                        "timeframe": timeframe,
-                        "attempt": offset,
-                    },
+                    "massive_ohlcv_backfill_success %s",
+                    _format_log_context(success_context),
+                    extra=success_context,
                 )
                 break
 
     if frame is None or frame.empty:
+        failure_context = {
+            "symbol": symbol.upper(),
+            "timeframe": timeframe,
+            "window": "final",
+        }
         logger.error(
-            "massive_ohlcv_unavailable",
-            extra={
-                "symbol": symbol.upper(),
-                "timeframe": timeframe,
-            },
+            "massive_ohlcv_unavailable %s",
+            _format_log_context(failure_context),
+            extra=failure_context,
         )
         return None
 

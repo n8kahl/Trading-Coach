@@ -14738,6 +14738,20 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     entry = data.get("entry")
     stop = data.get("stop")
     tp_csv = data.get("tp")
+    def _format_chart_log_ctx(details: Dict[str, Any]) -> str:
+        parts: list[str] = []
+        for key, value in details.items():
+            if value is None:
+                continue
+            if isinstance(value, str):
+                token = value.strip()
+                if not token:
+                    continue
+                parts.append(f"{key}={token[:160]}")
+            else:
+                parts.append(f"{key}={value}")
+        return " ".join(parts)
+
     log_extra: Dict[str, Any] = {
         "symbol": raw_symbol.upper() if raw_symbol else "",
         "interval": raw_interval,
@@ -14757,7 +14771,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     def _validation_error(message: str) -> None:
         context = {k: v for k, v in log_extra.items() if v not in (None, "", [])}
         context["error"] = message
-        logger.warning("chart_url_validation_failed", extra=context)
+        logger.warning("chart_url_validation_failed %s", _format_chart_log_ctx(context), extra=context)
         raise HTTPException(status_code=422, detail={"error": message})
 
     def _missing(field: str) -> None:
