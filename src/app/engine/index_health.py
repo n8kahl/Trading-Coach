@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
-from src.config import get_settings
+from src.config import get_settings, get_massive_api_key
 from .index_common import POLYGON_INDEX_TICKERS
 
 
@@ -47,7 +47,7 @@ _CACHE_TTL = 30.0
 async def polygon_index_snapshot(symbol: str, *, force_refresh: bool = False) -> Tuple[Dict[str, Any] | None, FeedStatus]:
     """Fetch Polygon index option snapshot and return diagnostics."""
     settings = get_settings()
-    api_key = settings.polygon_api_key
+    api_key = get_massive_api_key(settings)
     base = symbol.upper()
     polygon_symbol = POLYGON_INDEX_TICKERS.get(base, symbol.upper())
     cache_key = base
@@ -67,12 +67,11 @@ async def polygon_index_snapshot(symbol: str, *, force_refresh: bool = False) ->
         return None, status
 
     url = f"https://api.massive.com/v3/snapshot/options/{polygon_symbol}"
-    params = {"apiKey": api_key}
     timeout = httpx.Timeout(6.0, connect=3.0)
     started = time.perf_counter()
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
             latency = (time.perf_counter() - started) * 1000.0
             if resp.status_code == 429:
                 status = FeedStatus(
@@ -259,7 +258,7 @@ async def polygon_universal_snapshot() -> Tuple[Dict[str, Any] | None, FeedStatu
         return dict(cached[1]), cached[2]
 
     settings = get_settings()
-    api_key = settings.polygon_api_key
+    api_key = get_massive_api_key(settings)
     if not api_key:
         status = FeedStatus(
             source="polygon",
@@ -271,14 +270,13 @@ async def polygon_universal_snapshot() -> Tuple[Dict[str, Any] | None, FeedStatu
 
     params = {
         "ticker.any_of": "I:SPX,I:NDX,SPY,QQQ",
-        "apiKey": api_key,
     }
     url = "https://api.massive.com/v3/snapshot"
     timeout = httpx.Timeout(6.0, connect=3.0)
     started = time.perf_counter()
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers={"Authorization": f"Bearer {api_key}"})
             latency = (time.perf_counter() - started) * 1000.0
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:

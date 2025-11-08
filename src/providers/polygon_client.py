@@ -8,9 +8,9 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from ..config import get_settings
+from ..config import get_settings, get_massive_api_key
 
-POLYGON_BASE_URL = "https://api.massive.com"
+MASSIVE_BASE_URL = "https://api.massive.com"
 _MAX_ATTEMPTS = 3
 _BASE_DELAY = 0.35
 _TIMEOUT = httpx.Timeout(timeout=8.0, connect=3.0)
@@ -22,23 +22,23 @@ async def fetch_option_snapshot(
     expiration: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> Optional[Dict[str, Any]]:
-    """Fetch Polygon option snapshot payload with bounded retries."""
+    """Fetch Massive option snapshot payload with bounded retries."""
     settings = get_settings()
-    api_key = settings.polygon_api_key
+    api_key = get_massive_api_key(settings)
     if not api_key:
         return None
 
-    params: Dict[str, Any] = {"apiKey": api_key}
+    params: Dict[str, Any] = {}
     if expiration:
         params["expiration_date"] = expiration
 
-    url = f"{POLYGON_BASE_URL}/v3/snapshot/options/{symbol}"
+    url = f"{MASSIVE_BASE_URL}/v3/snapshot/options/{symbol}"
     own_client = client is None
     session = client or httpx.AsyncClient(timeout=_TIMEOUT)
     try:
         for attempt in range(_MAX_ATTEMPTS):
             try:
-                response = await session.get(url, params=params)
+                response = await session.get(url, params=params, headers={"Authorization": f"Bearer {api_key}"})
             except httpx.TimeoutException:
                 await asyncio.sleep(_backoff(attempt))
                 continue

@@ -44,6 +44,7 @@ from .config import (
     SNAPSHOT_LOOKBACK,
     UNIFIED_SNAPSHOT_ENABLED,
     get_settings,
+    get_massive_api_key,
 )
 from .schemas import (
     ScanRequest,
@@ -2847,7 +2848,7 @@ async def _startup_tasks() -> None:
     logger.info("Live symbol streamer initialized")
 
     settings = get_settings()
-    polygon_key = (settings.polygon_api_key or "").strip() if hasattr(settings, "polygon_api_key") else ""
+    polygon_key = get_massive_api_key(settings) or ""
     if polygon_key:
         try:
             streamer = PolygonRealtimeBarStreamer(
@@ -7144,7 +7145,7 @@ async def tv_symbol(symbol: str = Query(..., alias="symbol")) -> Dict[str, Any]:
         "has_weekly_and_monthly": True,
         "supported_resolutions": TV_SUPPORTED_RESOLUTIONS,
         "volume_precision": 0,
-        "data_status": "streaming" if settings.polygon_api_key else "endofday",
+        "data_status": "streaming" if get_massive_api_key(settings) else "endofday",
     }
 
 
@@ -7313,9 +7314,10 @@ gpt = APIRouter(prefix="/gpt", tags=["gpt"])
 @gpt.get("/health", summary="Lightweight readiness probe")
 async def gpt_health(_: AuthedUser = Depends(require_api_key)) -> Dict[str, Any]:
     settings = get_settings()
+    massive_key = get_massive_api_key(settings)
 
     async def _check_polygon() -> Dict[str, Any]:
-        if not settings.polygon_api_key:
+        if not massive_key:
             return {"status": "missing"}
         try:
             sample = await fetch_polygon_ohlcv("SPY", "5")
@@ -8360,7 +8362,7 @@ async def _legacy_scan(
 
     unique_symbols = sorted({signal.symbol for signal in signals})
 
-    polygon_enabled = bool(settings.polygon_api_key)
+    polygon_enabled = bool(get_massive_api_key(settings))
     tradier_enabled = bool(settings.tradier_token)
 
     if stub_mode:
@@ -15176,7 +15178,7 @@ async def gpt_context(
     chain_df: pd.DataFrame | None = None
     polygon_bundle: Dict[str, Any] | None = None
     settings = get_settings()
-    if settings.polygon_api_key:
+    if get_massive_api_key(settings):
         chain_df = await fetch_polygon_option_chain(symbol)
         if chain_df is not None and not chain_df.empty:
             polygon_bundle = summarize_polygon_chain(chain_df, rules=None, top_n=3)

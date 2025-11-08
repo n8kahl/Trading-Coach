@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 from zoneinfo import ZoneInfo
 
 import httpx
-from .config import get_settings
+from .config import get_settings, get_massive_api_key
 from .data_sources import fetch_polygon_ohlcv
 
 logger = logging.getLogger(__name__)
@@ -42,11 +42,10 @@ def _age_seconds_from_iso(ts: Optional[str]) -> Optional[float]:
 
 async def _fetch_polygon_last_trade(symbol: str, api_key: str) -> QuoteResult:
     url = f"https://api.massive.com/v2/last/trade/{symbol.upper()}"
-    params = {"apiKey": api_key}
     timeout = httpx.Timeout(4.0, connect=2.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
             resp.raise_for_status()
             payload = resp.json()
         except httpx.HTTPError as exc:
@@ -96,8 +95,9 @@ async def fetch_live_quote(symbol: str) -> QuoteResult:
 
     settings = get_settings()
     errors = []
-    if settings.polygon_api_key:
-        quote = await _fetch_polygon_last_trade(symbol, settings.polygon_api_key)
+    massive_key = get_massive_api_key(settings)
+    if massive_key:
+        quote = await _fetch_polygon_last_trade(symbol, massive_key)
         if quote.price is not None:
             quote.age_seconds = _age_seconds_from_iso(quote.timestamp)
             if quote.age_seconds is not None and quote.age_seconds > QUOTES_MAX_AGE_S:
@@ -129,7 +129,7 @@ async def fetch_live_quote(symbol: str) -> QuoteResult:
             ts = datetime.utcnow().isoformat()
         age = _age_seconds_from_iso(ts)
         return QuoteResult(price=price, timestamp=ts, source="polygon_bars", error=None, age_seconds=age)
-    if not settings.polygon_api_key and not settings.finnhub_api_key:
+    if not massive_key and not settings.finnhub_api_key:
         errors.append("missing_credentials")
     return QuoteResult(price=None, timestamp=None, source="none", error=";".join(errors) or "no_data")
 

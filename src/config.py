@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="allow")
 
     polygon_api_key: str | None = Field(None, env="POLYGON_API_KEY")
+    # Prefer MASSIVE_API_KEY; fall back to POLYGON_API_KEY for backward compatibility
+    massive_api_key: str | None = Field(None, env="MASSIVE_API_KEY")
     db_url: str | None = Field(
         default=None,
         validation_alias=AliasChoices("DB_URL", "DATABASE_URL"),
@@ -83,6 +85,14 @@ def get_settings() -> Settings:
     """
 
     return Settings()
+
+
+def get_massive_api_key(settings: Settings | None = None) -> str | None:
+    """Return the preferred Massive API key (falls back to legacy Polygon key)."""
+
+    resolved = settings or get_settings()
+    key = (resolved.massive_api_key or resolved.polygon_api_key or "").strip()
+    return key or None
 
 
 UNIFIED_SNAPSHOT_ENABLED: bool = True

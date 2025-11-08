@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 import httpx
 import pandas as pd
 
-from ..config import get_settings
+from ..config import get_settings, get_massive_api_key
 from ..data_sources import fetch_polygon_ohlcv
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,8 @@ class PolygonAggregatesClient:
         request_timeout: httpx.Timeout | None = None,
     ) -> None:
         self._settings = get_settings()
-        self._api_key = (self._settings.polygon_api_key or "").strip()
+        self._api_key = get_massive_api_key(self._settings) or ""
+        self._auth_headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
         self._sem = asyncio.Semaphore(max(1, max_concurrency))
         self._cache_ttl = max(60.0, cache_ttl)
         self._agg_cache: MutableMapping[Tuple[str, str], Tuple[float, pd.DataFrame | None]] = {}
@@ -89,14 +90,14 @@ class PolygonAggregatesClient:
             return list(cached[1])
 
         endpoint = f"https://api.massive.com/v2/reference/indices/{index_ticker.upper()}/constituents"
-        params = {"apiKey": self._api_key, "limit": 1000}
+        params = {"limit": 1000}
         client = await self._get_client()
         attempt = 0
         while attempt < self._max_retries:
             attempt += 1
             try:
                 async with self._sem:
-                    resp = await client.get(endpoint, params=params)
+                    resp = await client.get(endpoint, params=params, headers=self._auth_headers)
                 resp.raise_for_status()
                 payload = resp.json()
                 results = payload.get("results") or []
@@ -127,7 +128,6 @@ class PolygonAggregatesClient:
             "sort": "market_cap",
             "order": "desc",
             "limit": limit,
-            "apiKey": self._api_key,
         }
         client = await self._get_client()
         attempt = 0
@@ -141,7 +141,7 @@ class PolygonAggregatesClient:
                 if cursor:
                     query["cursor"] = cursor
                 async with self._sem:
-                    resp = await client.get(endpoint, params=query)
+                    resp = await client.get(endpoint, params=query, headers=self._auth_headers)
                 resp.raise_for_status()
                 payload = resp.json()
             except httpx.HTTPError as exc:

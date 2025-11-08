@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 import httpx
 import pandas as pd
 
-from .config import get_settings
+from .config import get_settings, get_massive_api_key
 
 _CLIENT_LOCK = asyncio.Lock()
 _POLYGON_CLIENT: httpx.AsyncClient | None = None
@@ -64,7 +64,7 @@ async def fetch_polygon_ohlcv(
 ) -> pd.DataFrame | None:
     """Fetch OHLCV candles from Polygon."""
     settings = get_settings()
-    api_key = settings.polygon_api_key
+    api_key = get_massive_api_key(settings)
     if not api_key:
         return None
     multiplier, timespan, default_days = _parse_polygon_timeframe(timeframe)
@@ -82,13 +82,12 @@ async def fetch_polygon_ohlcv(
         "adjusted": "true",
         "sort": "desc",
         "limit": 5000,
-        "apiKey": api_key,
     }
     if include_extended:
         params["include_extended"] = "true"
     client = await _get_polygon_client()
     try:
-        resp = await client.get(url, params=params)
+        resp = await client.get(url, params=params, headers={"Authorization": f"Bearer {api_key}"})
         resp.raise_for_status()
     except httpx.HTTPError:
         return None

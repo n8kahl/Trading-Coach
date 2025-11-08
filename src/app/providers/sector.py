@@ -8,7 +8,7 @@ import time
 
 import httpx
 
-from src.config import get_settings
+from src.config import get_settings, get_massive_api_key
 
 _POLYGON_BASE = "https://api.massive.com"
 _CACHE_TTL = 60.0
@@ -34,7 +34,7 @@ def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
 
 def _daily_change(symbol: str) -> Optional[float]:
     settings = get_settings()
-    api_key = settings.polygon_api_key
+    api_key = get_massive_api_key(settings)
     if not api_key:
         return None
     key = symbol.upper()
@@ -45,10 +45,10 @@ def _daily_change(symbol: str) -> Optional[float]:
     end = date.today()
     start = end - timedelta(days=6)
     url = f"{_POLYGON_BASE}/v2/aggs/ticker/{symbol.upper()}/range/1/day/{start}/{end}"
-    params = {"adjusted": "true", "sort": "desc", "limit": 2, "apiKey": api_key}
+    params = {"adjusted": "true", "sort": "desc", "limit": 2}
     try:
         with httpx.Client(timeout=5.0) as client:
-            resp = client.get(url, params=params)
+            resp = client.get(url, params=params, headers={"Authorization": f"Bearer {api_key}"})
             resp.raise_for_status()
             results = resp.json().get("results") or []
     except httpx.HTTPError:

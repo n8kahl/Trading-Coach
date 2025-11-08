@@ -16,7 +16,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
-from .config import get_settings
+from .config import get_settings, get_massive_api_key
 
 router = APIRouter(prefix="/charts", tags=["charts"])
 
@@ -96,7 +96,7 @@ def _polygon_range_params(interval: str, lookback: int, session_padding: int = 2
 def _fetch_polygon_candles(symbol: str, interval: str, lookback: int) -> pd.DataFrame | None:
     """Fetch candles from Polygon.io; return None if credentials missing or no data."""
     settings = get_settings()
-    api_key = settings.polygon_api_key
+    api_key = get_massive_api_key(settings)
     if not api_key:
         return None
 
@@ -106,11 +106,10 @@ def _fetch_polygon_candles(symbol: str, interval: str, lookback: int) -> pd.Data
         "adjusted": "true",
         "sort": "desc",
         "limit": max(lookback, 500),
-        "apiKey": api_key,
     }
     try:
         with httpx.Client(timeout=8.0) as client:
-            resp = client.get(url, params=params)
+            resp = client.get(url, params=params, headers={"Authorization": f"Bearer {api_key}"})
             resp.raise_for_status()
     except httpx.HTTPError:
         return None

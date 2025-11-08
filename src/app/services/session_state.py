@@ -11,7 +11,7 @@ import httpx
 from zoneinfo import ZoneInfo
 
 from ...market_clock import MarketClock
-from src.config import get_settings
+from src.config import get_settings, get_massive_api_key
 
 _ET = ZoneInfo("America/New_York")
 _CLOCK = MarketClock()
@@ -47,7 +47,7 @@ def _polygon_market_status() -> Optional[Dict[str, Any]]:
     global _STATUS_CACHE
 
     settings = get_settings()
-    api_key = getattr(settings, "polygon_api_key", None)
+    api_key = get_massive_api_key(settings)
     if not api_key:
         return None
 
@@ -56,11 +56,10 @@ def _polygon_market_status() -> Optional[Dict[str, Any]]:
     if cached and now - cached[0] < _STATUS_CACHE_TTL:
         return dict(cached[1])
 
-    params = {"apiKey": api_key}
     url = f"{_POLYGON_BASE}/v1/marketstatus/now"
     try:
         with httpx.Client(timeout=3.0) as client:
-            resp = client.get(url, params=params)
+            resp = client.get(url, headers={"Authorization": f"Bearer {api_key}"})
             resp.raise_for_status()
     except httpx.HTTPError:
         return None

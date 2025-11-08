@@ -8,17 +8,17 @@ import time
 
 import httpx
 
-from src.config import get_settings
+from src.config import get_settings, get_massive_api_key
 
 _POLYGON_BASE = "https://api.massive.com"
 _CACHE_TTL = 30.0
 _INTERNALS_CACHE: Optional[Tuple[float, Dict[str, int | float]]] = None
 
 
-def _polygon_request(path: str, params: Dict[str, str]) -> Optional[Dict[str, Any]]:  # type: ignore[name-defined]
+def _polygon_request(path: str, params: Dict[str, str], api_key: str) -> Optional[Dict[str, Any]]:  # type: ignore[name-defined]
     try:
         with httpx.Client(timeout=5.0) as client:
-            resp = client.get(f"{_POLYGON_BASE}{path}", params=params)
+            resp = client.get(f"{_POLYGON_BASE}{path}", params=params, headers={"Authorization": f"Bearer {api_key}"})
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPError:
@@ -26,10 +26,7 @@ def _polygon_request(path: str, params: Dict[str, str]) -> Optional[Dict[str, An
 
 
 def _latest_vix(api_key: str) -> Optional[float]:
-    data = _polygon_request(
-        "/v2/aggs/ticker/CBOE:VIX/prev",
-        {"adjusted": "true", "apiKey": api_key},
-    )
+    data = _polygon_request("/v2/aggs/ticker/CBOE:VIX/prev", {"adjusted": "true"}, api_key)
     results = (data or {}).get("results") or []
     if not results:
         return None
@@ -40,14 +37,8 @@ def _latest_vix(api_key: str) -> Optional[float]:
 
 
 def _breadth_counts(api_key: str) -> Tuple[int, int]:
-    adv = _polygon_request(
-        "/v2/snapshot/locale/us/markets/stocks/advancers",
-        {"apiKey": api_key, "limit": "1000"},
-    )
-    dec = _polygon_request(
-        "/v2/snapshot/locale/us/markets/stocks/decliners",
-        {"apiKey": api_key, "limit": "1000"},
-    )
+    adv = _polygon_request("/v2/snapshot/locale/us/markets/stocks/advancers", {"limit": "1000"}, api_key)
+    dec = _polygon_request("/v2/snapshot/locale/us/markets/stocks/decliners", {"limit": "1000"}, api_key)
     adv_count = len((adv or {}).get("results") or [])
     dec_count = len((dec or {}).get("results") or [])
     return adv_count, dec_count
@@ -62,7 +53,7 @@ def market_internals(as_of: str | None = None) -> Dict[str, int | float]:
         return dict(_INTERNALS_CACHE[1])
 
     settings = get_settings()
-    api_key = settings.polygon_api_key
+    api_key = get_massive_api_key(settings)
     if not api_key:
         fallback = {"breadth": 0, "vix": None, "tick": 0}
         _INTERNALS_CACHE = (now, fallback)

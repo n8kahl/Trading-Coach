@@ -16,7 +16,7 @@ from urllib.parse import urlparse, parse_qs
 
 import httpx
 
-from src.config import get_settings
+from src.config import get_settings, get_massive_api_key
 
 _POLYGON_BASE = "https://api.massive.com"
 INDEX_PRIORITY = ['SPX', 'NDX']
@@ -98,7 +98,6 @@ async def _fetch_top_list(api_key: str) -> List[Dict[str, Any]]:
         "order": "desc",
         "sort": "market_cap",
         "limit": 100,
-        "apiKey": api_key,
     }
     results: List[Dict[str, Any]] = []
     cursor: Optional[str] = None
@@ -110,7 +109,7 @@ async def _fetch_top_list(api_key: str) -> List[Dict[str, Any]]:
             if cursor:
                 req_params["cursor"] = cursor
             try:
-                resp = await client.get(url, params=req_params)
+                resp = await client.get(url, params=req_params, headers={"Authorization": f"Bearer {api_key}"})
                 resp.raise_for_status()
             except httpx.HTTPError:
                 break
@@ -127,10 +126,10 @@ async def _fetch_top_list(api_key: str) -> List[Dict[str, Any]]:
 
 
 async def _percent_change(api_key: str, client: httpx.AsyncClient, symbol: str) -> Optional[float]:
-    params = {"adjusted": "true", "apiKey": api_key}
+    params = {"adjusted": "true"}
     url = f"{_POLYGON_BASE}/v2/aggs/ticker/{symbol.upper()}/prev"
     try:
-        resp = await client.get(url, params=params)
+        resp = await client.get(url, params=params, headers={"Authorization": f"Bearer {api_key}"})
         resp.raise_for_status()
     except httpx.HTTPError:
         return None
@@ -210,7 +209,7 @@ async def load_universe(
     """Return a list of tickers sized to `limit`, weighted by Polygon data."""
 
     settings = get_settings()
-    api_key = getattr(settings, "polygon_api_key", None)
+    api_key = get_massive_api_key(settings)
     if not api_key:
         # Without Polygon, fall back to a static set of large-cap names.
         fallback = [
