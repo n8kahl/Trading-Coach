@@ -84,7 +84,7 @@ async def fetch_polygon_ohlcv(
 
     client = await _get_polygon_client()
 
-    async def _fetch_range(start_str: str, end_str: str) -> pd.DataFrame | None:
+    async def _fetch_range(start_str: str, end_str: str, attempt: int = 0, label: str = "primary") -> pd.DataFrame | None:
         params = {
             "adjusted": "true",
             "sort": "desc",
@@ -101,18 +101,42 @@ async def fetch_polygon_ohlcv(
                 "url": url,
                 "start": start_str,
                 "end": end_str,
+                "attempt": attempt,
+                "window": label,
             },
         )
         try:
             resp = await client.get(url, params=params, headers=headers)
             resp.raise_for_status()
-        except httpx.HTTPError as exc:
+        except httpx.HTTPStatusError as exc:
+            body = (exc.response.text or "")[:400]
             logger.warning(
                 "massive_ohlcv_http_error",
                 extra={
                     "symbol": symbol.upper(),
                     "timeframe": timeframe,
                     "error": str(exc),
+                    "status_code": exc.response.status_code,
+                    "request_id": exc.response.headers.get("x-request-id") or exc.response.headers.get("x-correlation-id"),
+                    "body": body,
+                    "start": start_str,
+                    "end": end_str,
+                    "attempt": attempt,
+                    "window": label,
+                },
+            )
+            return None
+        except httpx.RequestError as exc:
+            logger.warning(
+                "massive_ohlcv_request_error",
+                extra={
+                    "symbol": symbol.upper(),
+                    "timeframe": timeframe,
+                    "error": str(exc),
+                    "start": start_str,
+                    "end": end_str,
+                    "attempt": attempt,
+                    "window": label,
                 },
             )
             return None
@@ -159,6 +183,8 @@ async def fetch_polygon_ohlcv(
             fallback_frame = await _fetch_range(
                 shifted_start.date().isoformat(),
                 shifted_end.date().isoformat(),
+                attempt=offset,
+                label="backfill",
             )
             if fallback_frame is not None and not fallback_frame.empty:
                 frame = fallback_frame

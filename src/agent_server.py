@@ -14738,31 +14738,53 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     entry = data.get("entry")
     stop = data.get("stop")
     tp_csv = data.get("tp")
+    log_extra: Dict[str, Any] = {
+        "symbol": raw_symbol.upper() if raw_symbol else "",
+        "interval": raw_interval,
+        "request_id": request.headers.get("x-request-id")
+        or request.headers.get("x-correlation-id")
+        or request.headers.get("x-amzn-trace-id"),
+        "path": request.url.path,
+    }
+    plan_id_token = str(data.get("plan_id") or "").strip()
+    if plan_id_token:
+        log_extra["plan_id"] = plan_id_token
+    plan_version_token = str(data.get("plan_version") or "").strip()
+    if plan_version_token:
+        log_extra["plan_version"] = plan_version_token
 
     # 1) Required fields
+    def _validation_error(message: str) -> None:
+        context = {k: v for k, v in log_extra.items() if v not in (None, "", [])}
+        context["error"] = message
+        logger.warning("chart_url_validation_failed", extra=context)
+        raise HTTPException(status_code=422, detail={"error": message})
+
     def _missing(field: str) -> None:
-        raise HTTPException(status_code=422, detail={"error": f"missing field {field}"})
+        _validation_error(f"missing field {field}")
 
     if not raw_symbol:
         _missing("symbol")
     if not raw_interval:
         _missing("interval")
 
-    def _numeric_error() -> HTTPException:
-        return HTTPException(status_code=422, detail={"error": "entry/stop/tp must be numeric"})
+    def _numeric_error() -> None:
+        _validation_error("entry/stop/tp must be numeric")
 
     if direction and direction not in {"long", "short"}:
-        raise HTTPException(status_code=422, detail={"error": "direction must be 'long' or 'short'"})
+        _validation_error("direction must be 'long' or 'short'")
     direction_token = direction if direction in {"long", "short"} else None
+    if direction_token:
+        log_extra["direction"] = direction_token
 
     try:
         entry_f = float(entry) if entry is not None else None
     except Exception:
-        raise _numeric_error()
+        _numeric_error()
     try:
         stop_f = float(stop) if stop is not None else None
     except Exception:
-        raise _numeric_error()
+        _numeric_error()
 
     tp_values: List[float] = []
     if tp_csv is not None:
@@ -14771,7 +14793,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
             try:
                 tp_values = [float(chunk) for chunk in tp_tokens]
             except Exception:
-                raise _numeric_error()
+                _numeric_error()
 
     tp1_f = tp_values[0] if tp_values else None
 
@@ -14781,11 +14803,12 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     try:
         interval_norm = normalize_interval(raw_interval)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"error": str(exc)})
+        _validation_error(str(exc))
 
     allowed_intervals = {"1m", "5m", "15m", "1h", "d"}
     if interval_norm not in allowed_intervals:
-        raise HTTPException(status_code=422, detail={"error": f"interval '{raw_interval}' not allowed"})
+        _validation_error(f"interval '{raw_interval}' not allowed")
+    log_extra["interval"] = interval_norm
 
     interval_style_map = {
         "1m": "scalp",
@@ -14899,19 +14922,19 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
         if direction_token == "long":
             if not (stop_f < entry_f < tp1_f):
-                raise HTTPException(status_code=422, detail={"error": "order invalid for long (stop < entry < TP1)"})
+                _validation_error("order invalid for long (stop < entry < TP1)")
             prev = entry_f
             for idx, value in enumerate(tp_values, start=1):
                 if value <= prev:
-                    raise HTTPException(status_code=422, detail={"error": f"tp{idx} not above previous"})
+                    _validation_error(f"tp{idx} not above previous")
                 prev = value
         else:
             if not (stop_f > entry_f > tp1_f):
-                raise HTTPException(status_code=422, detail={"error": "order invalid for short (stop > entry > TP1)"})
+                _validation_error("order invalid for short (stop > entry > TP1)")
             prev = entry_f
             for idx, value in enumerate(tp_values, start=1):
                 if value >= prev:
-                    raise HTTPException(status_code=422, detail={"error": f"tp{idx} not below previous"})
+                    _validation_error(f"tp{idx} not below previous")
                 prev = value
 
         window_atr_base = atr_f if atr_f and atr_f > 0 else abs(entry_f - stop_f)
@@ -14950,25 +14973,25 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
 
         if direction_token == "long":
             if snapped_stop >= entry_f:
-                raise HTTPException(status_code=422, detail={"error": "snapped stop not below entry"})
+                _validation_error("snapped stop not below entry")
             prev = entry_f
             for idx, value in enumerate(snapped_tp_values, start=1):
                 if value <= prev:
-                    raise HTTPException(status_code=422, detail={"error": f"snapped tp{idx} not above previous"})
+                    _validation_error(f"snapped tp{idx} not above previous")
                     prev = value
         else:
             if snapped_stop <= entry_f:
-                raise HTTPException(status_code=422, detail={"error": "snapped stop not above entry"})
+                _validation_error("snapped stop not above entry")
             prev = entry_f
             for idx, value in enumerate(snapped_tp_values, start=1):
                 if value >= prev:
-                    raise HTTPException(status_code=422, detail={"error": f"snapped tp{idx} not below previous"})
+                    _validation_error(f"snapped tp{idx} not below previous")
                     prev = value
 
         tp1_snapped = snapped_tp_values[0]
         rr_val = _rr(entry_f, snapped_stop, tp1_snapped, direction_token)
         if rr_val < min_rr:
-            raise HTTPException(status_code=422, detail={"error": f"R:R {rr_val:.2f} < {min_rr:.1f}"})
+            _validation_error(f"R:R {rr_val:.2f} < {min_rr:.1f}")
 
         if atr_f and atr_f > 0:
             k = 0.3 if interval_norm in {"1m", "5m", "15m", "1h"} else 0.6
@@ -14991,7 +15014,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
                             has_confluence = True
                             break
                 if not has_confluence:
-                    raise HTTPException(status_code=422, detail={"error": "TP1 too close; fails ATR gate"})
+                    _validation_error("TP1 too close; fails ATR gate")
 
     direction = direction_token
 
