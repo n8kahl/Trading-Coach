@@ -26,11 +26,11 @@ def _api_key() -> str | None:
 
 
 def _polygon_request(path: str, params: Dict[str, str], api_key: str) -> Optional[Dict[str, Any]]:  # type: ignore[name-defined]
-    query = dict(params)
-    query["apiKey"] = api_key
+    query = dict(params or {})
+    headers = {"Authorization": f"Bearer {api_key}"}
     try:
         with httpx.Client(timeout=5.0) as client:
-            resp = client.get(f"{_BASE}{path}", params=query)
+            resp = client.get(f"{_BASE}{path}", params=query, headers=headers)
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPError:

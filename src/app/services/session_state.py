@@ -60,10 +60,10 @@ def _polygon_market_status() -> Optional[Dict[str, Any]]:
         return dict(cached[1])
 
     url = f"{_POLYGON_BASE}/v1/marketstatus/now"
-    params = {"apiKey": api_key}
+    headers = {"Authorization": f"Bearer {api_key}"}
     try:
         with httpx.Client(timeout=3.0) as client:
-            resp = client.get(url, params=params)
+            resp = client.get(url, headers=headers)
             resp.raise_for_status()
     except httpx.HTTPError:
         return None

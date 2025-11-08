@@ -142,7 +142,9 @@ Environment variables (read via Pydantic):
 
 ```
 # .env (example)
-POLYGON_API_KEY=pk_your_key              # Required for premium Polygon data (optional)
+MASSIVE_API_KEY=pk_or_sk_your_key        # Preferred bearer token for Massive/Polygon REST
+POLYGON_API_KEY=pk_your_key              # Legacy fallback when MASSIVE_API_KEY is unset
+MARKETDATA_BASE_URL=https://api.massive.com  # Shared base URL for all market data providers
 BACKEND_API_KEY=super-secret             # Omit for anonymous access during dev
 BASE_URL=https://<your-app>.up.railway.app/tv
 FINNHUB_API_KEY=your_finnhub_key         # Required for enrich_service.py

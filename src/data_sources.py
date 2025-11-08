@@ -16,9 +16,7 @@ from .config import get_settings, get_massive_api_key
 _CLIENT_LOCK = asyncio.Lock()
 _POLYGON_CLIENT: httpx.AsyncClient | None = None
 _DEFAULT_TIMEOUT = httpx.Timeout(8.0, connect=4.0)
-_MASSIVE_BASE = os.getenv("MARKETDATA_BASE_URL", "https://api.massive.com").rstrip("/")
-_POLYGON_BASE = os.getenv("POLYGON_BASE_URL", "https://api.polygon.io").rstrip("/")
-_BASE_URL = _MASSIVE_BASE or _POLYGON_BASE
+_BASE_URL = (os.getenv("MARKETDATA_BASE_URL") or "https://api.massive.com").rstrip("/")
 logger = logging.getLogger(__name__)
 
 
@@ -73,6 +71,7 @@ async def fetch_polygon_ohlcv(
     api_key = get_massive_api_key(settings)
     if not api_key:
         return None
+    headers = {"Authorization": f"Bearer {api_key}"}
     multiplier, timespan, default_days = _parse_polygon_timeframe(timeframe)
 
     days_back = max_days if max_days is not None else default_days
@@ -90,7 +89,6 @@ async def fetch_polygon_ohlcv(
             "adjusted": "true",
             "sort": "desc",
             "limit": 5000,
-            "apiKey": api_key,
         }
         if include_extended:
             params["include_extended"] = "true"
@@ -106,7 +104,7 @@ async def fetch_polygon_ohlcv(
             },
         )
         try:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=headers)
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             logger.warning(

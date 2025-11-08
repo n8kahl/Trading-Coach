@@ -91,6 +91,38 @@ async def test_gpt_chart_url_strips_non_canonical_params(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_gpt_chart_url_allows_minimal_payload(monkeypatch):
+    monkeypatch.delenv("FF_CHART_CANONICAL_V1", raising=False)
+    get_settings.cache_clear()
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/gpt/chart-url",
+        "headers": [(b"host", b"charts.local")],
+        "scheme": "https",
+        "client": ("127.0.0.1", 0),
+        "server": ("charts.local", 443),
+        "query_string": b"",
+    }
+    request = Request(scope)
+    params = ChartParams(
+        symbol="MSFT",
+        interval="15m",
+    )
+
+    links = await gpt_chart_url(params, request)
+
+    parsed = urlsplit(links.interactive)
+    query = parse_qs(parsed.query)
+    assert query["symbol"] == ["MSFT"]
+    assert query["interval"] == ["15m"]
+    assert "entry" not in query
+    assert "stop" not in query
+    assert "tp" not in query
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_gpt_chart_url_rejects_non_monotonic(monkeypatch):
     monkeypatch.setenv("FF_CHART_CANONICAL_V1", "1")
     get_settings.cache_clear()

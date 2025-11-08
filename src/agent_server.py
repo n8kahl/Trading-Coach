@@ -2674,7 +2674,7 @@ async def _expand_universe_tokens(symbols: List[str], *, style: str | None, limi
 
 
 class ChartParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     symbol: str
     interval: str
@@ -14722,7 +14722,7 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     """Validate and return a canonical charts/html URL.
 
     Validation rules:
-    - Required fields: symbol, interval, direction, entry, stop, tp
+    - Required fields: symbol, interval (trade validation runs only when direction/entry/stop/tp are supplied)
     - Monotonic order by direction
     - R:R gate (1.5 for index intraday; else 1.2)
     - Min TP distance if ATR provided (0.3×ATR intraday; 0.6×ATR swing), unless confluence label at TP exists
@@ -14740,42 +14740,40 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     tp_csv = data.get("tp")
 
     # 1) Required fields
-    def _missing(field: str):
+    def _missing(field: str) -> None:
         raise HTTPException(status_code=422, detail={"error": f"missing field {field}"})
 
     if not raw_symbol:
         _missing("symbol")
     if not raw_interval:
         _missing("interval")
-    if not direction:
-        _missing("direction")
-    if entry is None:
-        _missing("entry")
-    if stop is None:
-        _missing("stop")
-    if not tp_csv:
-        _missing("tp")
+
+    def _numeric_error() -> HTTPException:
+        return HTTPException(status_code=422, detail={"error": "entry/stop/tp must be numeric"})
+
+    if direction and direction not in {"long", "short"}:
+        raise HTTPException(status_code=422, detail={"error": "direction must be 'long' or 'short'"})
+    direction_token = direction if direction in {"long", "short"} else None
 
     try:
-        entry_f = float(entry)
-        stop_f = float(stop)
+        entry_f = float(entry) if entry is not None else None
     except Exception:
-        raise HTTPException(status_code=422, detail={"error": "entry/stop/tp must be numeric"})
+        raise _numeric_error()
+    try:
+        stop_f = float(stop) if stop is not None else None
+    except Exception:
+        raise _numeric_error()
 
     tp_values: List[float] = []
-    try:
-        for token in str(tp_csv).split(","):
-            token = token.strip()
-            if not token:
-                continue
-            tp_values.append(float(token))
-    except Exception:
-        raise HTTPException(status_code=422, detail={"error": "entry/stop/tp must be numeric"})
+    if tp_csv is not None:
+        tp_tokens = [chunk.strip() for chunk in str(tp_csv).split(",") if chunk.strip()]
+        if tp_tokens:
+            try:
+                tp_values = [float(chunk) for chunk in tp_tokens]
+            except Exception:
+                raise _numeric_error()
 
-    if not tp_values:
-        raise HTTPException(status_code=422, detail={"error": "tp must include at least one target"})
-
-    tp1_f = tp_values[0]
+    tp1_f = tp_values[0] if tp_values else None
 
     data = coerce_by_style(dict(data))
     raw_interval = str(data.get("interval") or raw_interval).strip()
@@ -14892,103 +14890,110 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     is_intraday = interval_norm in {"1m", "5m", "15m"}
     min_rr = 1.5 if is_index and is_intraday else 1.2
 
-    if direction == "long":
-        if not (stop_f < entry_f < tp1_f):
-            raise HTTPException(status_code=422, detail={"error": "order invalid for long (stop < entry < TP1)"})
-        prev = entry_f
-        for idx, value in enumerate(tp_values, start=1):
-            if value <= prev:
-                raise HTTPException(status_code=422, detail={"error": f"tp{idx} not above previous"})
-            prev = value
-    elif direction == "short":
-        if not (stop_f > entry_f > tp1_f):
-            raise HTTPException(status_code=422, detail={"error": "order invalid for short (stop > entry > TP1)"})
-        prev = entry_f
-        for idx, value in enumerate(tp_values, start=1):
-            if value >= prev:
-                raise HTTPException(status_code=422, detail={"error": f"tp{idx} not below previous"})
-            prev = value
-    else:
-        raise HTTPException(status_code=422, detail={"error": "direction must be 'long' or 'short'"})
+    trade_context = bool(direction_token and entry_f is not None and stop_f is not None and tp_values)
 
-    window_atr_base = atr_f if atr_f and atr_f > 0 else abs(entry_f - stop_f)
-    if not window_atr_base or window_atr_base <= 0:
-        window_atr_base = max(abs(entry_f) * 0.005, 0.5)
-    window_atr = float(style_params["atr_mult"]) * float(window_atr_base)
-    window_pct = float(style_params["pct"])
+    if trade_context:
+        assert entry_f is not None
+        assert stop_f is not None
+        assert tp1_f is not None
 
-    snapped_stop = stop_f
-    snapped_pairs: List[Tuple[float, Optional[str]]] = [(value, None) for value in tp_values]
-    if snap_levels:
-        snap_ctx = SnapContext(
-            side=direction,
-            style=style_token,
-            strategy=str(data.get("strategy") or "").strip() or None,
-            window_atr=window_atr,
-            window_pct=window_pct,
-            rr_min=min_rr,
-            entry=entry_f,
-        )
-        try:
-            snapped_stop, _, snapped_pairs = snap_prices(
-                entry_f,
-                stop_f,
-                tp_values,
-                levels=snap_levels,
-                ctx=snap_ctx,
+        if direction_token == "long":
+            if not (stop_f < entry_f < tp1_f):
+                raise HTTPException(status_code=422, detail={"error": "order invalid for long (stop < entry < TP1)"})
+            prev = entry_f
+            for idx, value in enumerate(tp_values, start=1):
+                if value <= prev:
+                    raise HTTPException(status_code=422, detail={"error": f"tp{idx} not above previous"})
+                prev = value
+        else:
+            if not (stop_f > entry_f > tp1_f):
+                raise HTTPException(status_code=422, detail={"error": "order invalid for short (stop > entry > TP1)"})
+            prev = entry_f
+            for idx, value in enumerate(tp_values, start=1):
+                if value >= prev:
+                    raise HTTPException(status_code=422, detail={"error": f"tp{idx} not below previous"})
+                prev = value
+
+        window_atr_base = atr_f if atr_f and atr_f > 0 else abs(entry_f - stop_f)
+        if not window_atr_base or window_atr_base <= 0:
+            window_atr_base = max(abs(entry_f) * 0.005, 0.5)
+        window_atr = float(style_params["atr_mult"]) * float(window_atr_base)
+        window_pct = float(style_params["pct"])
+
+        snapped_stop = stop_f
+        snapped_pairs: List[Tuple[float, Optional[str]]] = [(value, None) for value in tp_values]
+        if snap_levels:
+            snap_ctx = SnapContext(
+                side=direction_token,
+                style=style_token,
+                strategy=str(data.get("strategy") or "").strip() or None,
+                window_atr=window_atr,
+                window_pct=window_pct,
+                rr_min=min_rr,
+                entry=entry_f,
             )
-        except Exception:
-            snapped_stop = stop_f
-            snapped_pairs = [(value, None) for value in tp_values]
+            try:
+                snapped_stop, _, snapped_pairs = snap_prices(
+                    entry_f,
+                    stop_f,
+                    tp_values,
+                    levels=snap_levels,
+                    ctx=snap_ctx,
+                )
+            except Exception:
+                snapped_stop = stop_f
+                snapped_pairs = [(value, None) for value in tp_values]
 
-    snapped_tp_values = [pair[0] for pair in snapped_pairs] if snapped_pairs else list(tp_values)
-    if len(snapped_tp_values) != len(tp_values):
-        snapped_tp_values = list(tp_values)
+        snapped_tp_values = [pair[0] for pair in snapped_pairs] if snapped_pairs else list(tp_values)
+        if len(snapped_tp_values) != len(tp_values):
+            snapped_tp_values = list(tp_values)
 
-    if direction == "long":
-        if snapped_stop >= entry_f:
-            raise HTTPException(status_code=422, detail={"error": "snapped stop not below entry"})
-        prev = entry_f
-        for idx, value in enumerate(snapped_tp_values, start=1):
-            if value <= prev:
-                raise HTTPException(status_code=422, detail={"error": f"snapped tp{idx} not above previous"})
-            prev = value
-    else:
-        if snapped_stop <= entry_f:
-            raise HTTPException(status_code=422, detail={"error": "snapped stop not above entry"})
-        prev = entry_f
-        for idx, value in enumerate(snapped_tp_values, start=1):
-            if value >= prev:
-                raise HTTPException(status_code=422, detail={"error": f"snapped tp{idx} not below previous"})
-            prev = value
+        if direction_token == "long":
+            if snapped_stop >= entry_f:
+                raise HTTPException(status_code=422, detail={"error": "snapped stop not below entry"})
+            prev = entry_f
+            for idx, value in enumerate(snapped_tp_values, start=1):
+                if value <= prev:
+                    raise HTTPException(status_code=422, detail={"error": f"snapped tp{idx} not above previous"})
+                    prev = value
+        else:
+            if snapped_stop <= entry_f:
+                raise HTTPException(status_code=422, detail={"error": "snapped stop not above entry"})
+            prev = entry_f
+            for idx, value in enumerate(snapped_tp_values, start=1):
+                if value >= prev:
+                    raise HTTPException(status_code=422, detail={"error": f"snapped tp{idx} not below previous"})
+                    prev = value
 
-    tp1_snapped = snapped_tp_values[0]
-    rr_val = _rr(entry_f, snapped_stop, tp1_snapped, direction)
-    if rr_val < min_rr:
-        raise HTTPException(status_code=422, detail={"error": f"R:R {rr_val:.2f} < {min_rr:.1f}"})
+        tp1_snapped = snapped_tp_values[0]
+        rr_val = _rr(entry_f, snapped_stop, tp1_snapped, direction_token)
+        if rr_val < min_rr:
+            raise HTTPException(status_code=422, detail={"error": f"R:R {rr_val:.2f} < {min_rr:.1f}"})
 
-    if atr_f and atr_f > 0:
-        k = 0.3 if interval_norm in {"1m", "5m", "15m", "1h"} else 0.6
-        min_tp = entry_f + k * atr_f if direction == "long" else entry_f - k * atr_f
-        tp_candidate = tp1_snapped
-        ok = (tp_candidate >= min_tp) if direction == "long" else (tp_candidate <= min_tp)
-        if not ok:
-            levels = str(data.get("levels") or "")
-            has_confluence = False
-            if levels:
-                for chunk in levels.split(";"):
-                    parts = [p.strip() for p in chunk.split("|")]
-                    if not parts:
-                        continue
-                    try:
-                        price = float(parts[0])
-                    except Exception:
-                        continue
-                    if len(parts) >= 2 and abs(price - tp_candidate) <= max(1e-4, 0.01):
-                        has_confluence = True
-                        break
-            if not has_confluence:
-                raise HTTPException(status_code=422, detail={"error": "TP1 too close; fails ATR gate"})
+        if atr_f and atr_f > 0:
+            k = 0.3 if interval_norm in {"1m", "5m", "15m", "1h"} else 0.6
+            min_tp = entry_f + k * atr_f if direction_token == "long" else entry_f - k * atr_f
+            tp_candidate = tp1_snapped
+            ok = (tp_candidate >= min_tp) if direction_token == "long" else (tp_candidate <= min_tp)
+            if not ok:
+                levels = str(data.get("levels") or "")
+                has_confluence = False
+                if levels:
+                    for chunk in levels.split(";"):
+                        parts = [p.strip() for p in chunk.split("|")]
+                        if not parts:
+                            continue
+                        try:
+                            price = float(parts[0])
+                        except Exception:
+                            continue
+                        if len(parts) >= 2 and abs(price - tp_candidate) <= max(1e-4, 0.01):
+                            has_confluence = True
+                            break
+                if not has_confluence:
+                    raise HTTPException(status_code=422, detail={"error": "TP1 too close; fails ATR gate"})
+
+    direction = direction_token
 
     settings = get_settings()
     session_snapshot = _session_payload_from_request(request)
@@ -14999,10 +15004,24 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
     symbol_token = _normalize_chart_symbol(raw_symbol)
     data["symbol"] = symbol_token
     data["interval"] = interval_norm
-    data["direction"] = direction
-    data["entry"] = f"{entry_f:.2f}"
-    data["stop"] = f"{stop_f:.2f}"
-    data["tp"] = ",".join(f"{value:.2f}" for value in tp_values)
+    if direction:
+        data["direction"] = direction
+    else:
+        data.pop("direction", None)
+    if entry_f is not None:
+        data["entry"] = f"{entry_f:.2f}"
+    else:
+        data.pop("entry", None)
+    if stop_f is not None:
+        data["stop"] = f"{stop_f:.2f}"
+    else:
+        data.pop("stop", None)
+    if tp_values:
+        data["tp"] = ",".join(f"{value:.2f}" for value in tp_values)
+    else:
+        value = data.get("tp")
+        if value is None or not str(value).strip():
+            data.pop("tp", None)
 
     metric_count = _record_metric(
         "gpt_chart_url",
@@ -15014,16 +15033,15 @@ async def gpt_chart_url(payload: ChartParams, request: Request) -> ChartLinks:
         canonical_payload: Dict[str, object] = {
             "symbol": symbol_token,
             "interval": interval_norm,
-            "direction": direction,
-            "entry": entry_f,
-            "stop": stop_f,
         }
-
-        if tp_csv:
-            try:
-                canonical_payload["tp"] = [float(chunk) for chunk in str(tp_csv).split(",") if chunk]
-            except ValueError:
-                canonical_payload["tp"] = tp_csv
+        if direction:
+            canonical_payload["direction"] = direction
+        if entry_f is not None:
+            canonical_payload["entry"] = entry_f
+        if stop_f is not None:
+            canonical_payload["stop"] = stop_f
+        if tp_values:
+            canonical_payload["tp"] = tp_values
         ema_value = data.get("ema")
         if ema_value:
             if isinstance(ema_value, (list, tuple)):
