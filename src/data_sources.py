@@ -108,7 +108,7 @@ async def fetch_polygon_ohlcv(
         }
         if include_extended:
             params["include_extended"] = "true"
-        url = f"{_BASE_URL}/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{start_str}/{end_str}"
+        url = f"{_BASE_URL}/v3/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{start_str}/{end_str}"
         base_context = {
             "symbol": symbol.upper(),
             "timeframe": timeframe,

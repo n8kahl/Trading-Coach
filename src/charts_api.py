@@ -101,16 +101,16 @@ def _fetch_polygon_candles(symbol: str, interval: str, lookback: int) -> pd.Data
         return None
 
     multiplier, timespan, start, end = _polygon_range_params(interval, lookback)
-    url = f"https://api.massive.com/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{start.date()}/{end.date()}"
+    url = f"https://api.massive.com/v3/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{start.date()}/{end.date()}"
     params = {
         "adjusted": "true",
         "sort": "desc",
         "limit": max(lookback, 500),
-        "apiKey": api_key,
     }
+    headers = {"Authorization": f"Bearer {api_key}"}
     try:
         with httpx.Client(timeout=8.0) as client:
-            resp = client.get(url, params=params)
+            resp = client.get(url, params=params, headers=headers)
             resp.raise_for_status()
     except httpx.HTTPError:
         return None

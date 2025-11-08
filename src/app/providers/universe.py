@@ -106,14 +106,14 @@ async def _fetch_top_list(api_key: str) -> List[Dict[str, Any]]:
     cursor: Optional[str] = None
 
     timeout = httpx.Timeout(10.0, connect=4.0)
+    headers = {"Authorization": f"Bearer {api_key}"}
     async with httpx.AsyncClient(timeout=timeout) as client:
         while len(results) < _MAX_REFERENCE_RESULTS:
             req_params = dict(params)
             if cursor:
                 req_params["cursor"] = cursor
             try:
-                req_params["apiKey"] = api_key
-                resp = await client.get(url, params=req_params)
+                resp = await client.get(url, params=req_params, headers=headers)
                 resp.raise_for_status()
             except httpx.HTTPError:
                 break
@@ -130,10 +130,11 @@ async def _fetch_top_list(api_key: str) -> List[Dict[str, Any]]:
 
 
 async def _percent_change(api_key: str, client: httpx.AsyncClient, symbol: str) -> Optional[float]:
-    params = {"adjusted": "true", "apiKey": api_key}
-    url = f"{_BASE}/v2/aggs/ticker/{symbol.upper()}/prev"
+    params = {"adjusted": "true"}
+    url = f"{_BASE}/v3/aggs/ticker/{symbol.upper()}/prev"
+    headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        resp = await client.get(url, params=params)
+        resp = await client.get(url, params=params, headers=headers)
         resp.raise_for_status()
     except httpx.HTTPError:
         return None

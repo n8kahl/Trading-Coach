@@ -38,7 +38,7 @@ def _polygon_request(path: str, params: Dict[str, str], api_key: str) -> Optiona
 
 
 def _latest_vix(api_key: str) -> Optional[float]:
-    data = _polygon_request("/v2/aggs/ticker/CBOE:VIX/prev", {"adjusted": "true"}, api_key)
+    data = _polygon_request("/v3/aggs/ticker/CBOE:VIX/prev", {"adjusted": "true"}, api_key)
     results = (data or {}).get("results") or []
     if not results:
         return None

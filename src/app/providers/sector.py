@@ -47,11 +47,12 @@ def _daily_change(symbol: str) -> Optional[float]:
         return cached[1]
     end = date.today()
     start = end - timedelta(days=6)
-    url = f"{_BASE}/v2/aggs/ticker/{symbol.upper()}/range/1/day/{start}/{end}"
-    params = {"adjusted": "true", "sort": "desc", "limit": 2, "apiKey": api_key}
+    url = f"{_BASE}/v3/aggs/ticker/{symbol.upper()}/range/1/day/{start}/{end}"
+    params = {"adjusted": "true", "sort": "desc", "limit": 2}
+    headers = {"Authorization": f"Bearer {api_key}"}
     try:
         with httpx.Client(timeout=5.0) as client:
-            resp = client.get(url, params=params)
+            resp = client.get(url, params=params, headers=headers)
             resp.raise_for_status()
             results = resp.json().get("results") or []
     except httpx.HTTPError:
