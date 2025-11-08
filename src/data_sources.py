@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 
 import httpx
 import pandas as pd
+import logging
 
 from .config import get_settings, get_massive_api_key
 
@@ -18,6 +19,7 @@ _DEFAULT_TIMEOUT = httpx.Timeout(8.0, connect=4.0)
 _MASSIVE_BASE = os.getenv("MARKETDATA_BASE_URL", "https://api.massive.com").rstrip("/")
 _POLYGON_BASE = os.getenv("POLYGON_BASE_URL", "https://api.polygon.io").rstrip("/")
 _BASE_URL = _MASSIVE_BASE or _POLYGON_BASE
+logger = logging.getLogger(__name__)
 
 
 def _parse_polygon_timeframe(timeframe: str) -> Tuple[int, str, int]:
@@ -93,14 +95,41 @@ async def fetch_polygon_ohlcv(
         if include_extended:
             params["include_extended"] = "true"
         url = f"{_BASE_URL}/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{start_str}/{end_str}"
+        logger.debug(
+            "massive_ohlcv_request",
+            extra={
+                "symbol": symbol.upper(),
+                "timeframe": timeframe,
+                "url": url,
+                "start": start_str,
+                "end": end_str,
+            },
+        )
         try:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "massive_ohlcv_http_error",
+                extra={
+                    "symbol": symbol.upper(),
+                    "timeframe": timeframe,
+                    "error": str(exc),
+                },
+            )
             return None
         data = resp.json()
         results = data.get("results")
         if not results:
+            logger.info(
+                "massive_ohlcv_empty",
+                extra={
+                    "symbol": symbol.upper(),
+                    "timeframe": timeframe,
+                    "start": start_str,
+                    "end": end_str,
+                },
+            )
             return None
         frame = pd.DataFrame(results)
         if frame.empty:
@@ -119,15 +148,40 @@ async def fetch_polygon_ohlcv(
         for offset in range(1, 6):
             shifted_end = end_ts - pd.Timedelta(days=offset)
             shifted_start = shifted_end - window
+            logger.info(
+                "massive_ohlcv_backfill_attempt",
+                extra={
+                    "symbol": symbol.upper(),
+                    "timeframe": timeframe,
+                    "attempt": offset,
+                    "start": shifted_start.date().isoformat(),
+                    "end": shifted_end.date().isoformat(),
+                },
+            )
             fallback_frame = await _fetch_range(
                 shifted_start.date().isoformat(),
                 shifted_end.date().isoformat(),
             )
             if fallback_frame is not None and not fallback_frame.empty:
                 frame = fallback_frame
+                logger.info(
+                    "massive_ohlcv_backfill_success",
+                    extra={
+                        "symbol": symbol.upper(),
+                        "timeframe": timeframe,
+                        "attempt": offset,
+                    },
+                )
                 break
 
     if frame is None or frame.empty:
+        logger.error(
+            "massive_ohlcv_unavailable",
+            extra={
+                "symbol": symbol.upper(),
+                "timeframe": timeframe,
+            },
+        )
         return None
 
     column_map = {"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close"}

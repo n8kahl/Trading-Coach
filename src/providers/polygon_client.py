@@ -8,6 +8,7 @@ import random
 from typing import Any, Dict, Optional
 
 import httpx
+import logging
 
 from ..config import get_settings, get_massive_api_key
 
@@ -17,6 +18,7 @@ _BASE_URL = _MASSIVE_BASE or _POLYGON_BASE
 _MAX_ATTEMPTS = 3
 _BASE_DELAY = 0.35
 _TIMEOUT = httpx.Timeout(timeout=8.0, connect=3.0)
+logger = logging.getLogger(__name__)
 
 
 def _normalize_underlying(symbol: str) -> str:
@@ -56,6 +58,15 @@ async def fetch_option_snapshot(
             attempt = 0
             while attempt < _MAX_ATTEMPTS:
                 attempt += 1
+                logger.debug(
+                    "massive_option_snapshot_request",
+                    extra={
+                        "symbol": symbol,
+                        "normalized": _normalize_underlying(symbol),
+                        "url": next_url,
+                        "attempt": attempt,
+                    },
+                )
                 try:
                     response = await session.get(next_url, params=query, headers=headers)
                     response.raise_for_status()
@@ -64,6 +75,10 @@ async def fetch_option_snapshot(
                     await asyncio.sleep(_backoff(attempt))
                 except httpx.HTTPStatusError as exc:
                     status = exc.response.status_code
+                    logger.warning(
+                        "massive_option_snapshot_http_error",
+                        extra={"symbol": symbol, "status": status},
+                    )
                     if status in {400, 401, 403, 404}:
                         _log_status(symbol, status)
                         return None
@@ -81,6 +96,15 @@ async def fetch_option_snapshot(
 
             payload = response.json() or {}
             results.extend(payload.get("results") or [])
+            logger.debug(
+                "massive_option_snapshot_page",
+                extra={
+                    "symbol": symbol,
+                    "normalized": _normalize_underlying(symbol),
+                    "batch": len(payload.get("results") or []),
+                    "accumulated": len(results),
+                },
+            )
             raw_next = payload.get("next_url")
             if raw_next:
                 next_url = raw_next if str(raw_next).startswith("http") else f"{_BASE_URL}{raw_next}"
